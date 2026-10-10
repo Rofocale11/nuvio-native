@@ -58,6 +58,15 @@ fn manifest_from_cache(addon: &Value) -> Option<Manifest> {
         for k in ["baseUrl", "displayName", "rawTypes"] {
             o.remove(k);
         }
+        // The mapped form always writes `showInHome` as a boolean; it only means anything when
+        // `hasExplicitShowInHome` (the manifest declared it).
+        if let Some(Value::Array(cats)) = o.get_mut("catalogs") {
+            for c in cats.iter_mut().filter_map(Value::as_object_mut) {
+                if c.get("hasExplicitShowInHome").and_then(Value::as_bool) != Some(true) {
+                    c.remove("showInHome");
+                }
+            }
+        }
     }
     let m: Manifest = lenient::decode(v)?;
     (!m.id.trim().is_empty()).then_some(m)
@@ -219,7 +228,9 @@ mod tests {
                               "pageSize": null, "showInHome": true, "hasExplicitShowInHome": true,
                               "extraSupported": [], "extraRequired": []},
                              {"id": "hidden", "name": "Hidden", "apiType": "movie", "extra": [],
-                              "showInHome": false, "hasExplicitShowInHome": true}],
+                              "showInHome": false, "hasExplicitShowInHome": true},
+                             {"id": "implicit", "name": "Implicit", "apiType": "series", "extra": [],
+                              "showInHome": false, "hasExplicitShowInHome": false}],
                 "resources": [{"name": "catalog", "types": ["movie", "series"], "idPrefixes": null},
                               {"name": "meta", "types": ["movie", "series"], "idPrefixes": ["tt", "tmdb:"]}]}},
             "https://aio.example/stremio/u/cfg": {"cachedAtMs": 1, "addon": {
@@ -237,7 +248,7 @@ mod tests {
         assert!(set.needs_manifests());
         // showInHome is honoured
         let home: Vec<String> = set.home_catalogs().iter().map(|c| c.decl.id.clone()).collect();
-        assert_eq!(home, vec!["trending"]);
+        assert_eq!(home, vec!["trending", "implicit"]);
         // meta for tmdb ids goes to the catalog addon; streams for tmdb ids to AIOStreams
         assert_eq!(set.meta_candidates("movie", "tmdb:603"), vec![(0, "movie".to_string())]);
         assert_eq!(set.stream_addons("movie", "tmdb:603"), vec![(2, "movie".to_string())]);
