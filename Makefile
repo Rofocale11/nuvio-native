@@ -730,6 +730,13 @@ PLX_POSTHOG_KEY ?=
 # cargo (make passes its environment through), which is the same blank a bare `cargo` in that
 # shell sees. `make -s print-cargo-env` prints what a cargo recipe receives.
 TELEMETRY_ENV = $(foreach v,PLX_SENTRY_DSN PLX_POSTHOG_KEY PLX_SENTRY_DSN_DEV PLX_POSTHOG_KEY_DEV,$(if $($(v)),$(v)='$($(v))',))
+# NuvioNative: the Nuvio account backend's public endpoint values (plx_stremio::nuvio reads them with
+# `option_env!`). They live in the gitignored rust-modules/stremio/nuvio.local.env; absent, the build
+# simply has no account sign-in. Spliced into TELEMETRY_ENV because that is the one variable every
+# cargo invocation in this file already carries.
+-include rust-modules/stremio/nuvio.local.env
+NUVIO_ENV_VARS = NUVIO_SUPABASE_URL NUVIO_SUPABASE_ANON_KEY NUVIO_SUPABASE_FALLBACK_URL DEVICE_LOGIN_WEB_BASE_URL TV_LOGIN_WEB_BASE_URL
+TELEMETRY_ENV += $(foreach v,$(NUVIO_ENV_VARS),$(if $($(v)),$(v)='$($(v))',))
 
 # In the stamp, and it has to be: switching a build from unconfigured to configured changes what
 # the binary CAN DO and nothing about the sources, so without this the configuration would be
