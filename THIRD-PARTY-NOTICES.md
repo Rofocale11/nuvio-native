@@ -619,3 +619,12 @@ then-current MIT grant. That original grant and Gleb Linnik notice are preserved
 `licenses/PlxNative-historical-MIT.txt`; no ownership transfer is claimed.
 
 The repository carries no copy of the SDL2, GLES2 or KHR headers; `include/` holds only the project's own `ass.h` facade.
+Source bundles also contain SDL2 Zlib headers, embedded Mesa/Khronos MIT and SGI-B-2.0
+header blocks, Khronos GLES2 MIT/Apache-2.0 headers, and the MIT-licensed jsmpeg tool
+(Copyright (c) 2017 Dominic Szablewski). Preserve their original embedded notices. Exact per-file
+license assignments are in the inventory; the SGI text is in `licenses/SGI-B-2.0.txt`; none of `include/` is claimed as original LG ABI work.
+
+**Mozilla CA certificate list** — `public-roots.pem` (NuvioNative). The root certificates of
+Mozilla's CA program as extracted by the curl project (https://curl.se/docs/caextract.html),
+used only as the roots-mode fallback trust store for public hosts whose issuer a 2020 television
+firmware lacks. Distributed under the Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/).
