@@ -21,6 +21,7 @@ members = [
     "appkit",
     "screens",
     "storage",
+    "stremio",
 ]
 resolver = "2"
 
