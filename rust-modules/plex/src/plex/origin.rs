@@ -79,13 +79,31 @@ impl CredentialPolicy {
     /// May a credential ride `origin` under this policy? TLS always; plaintext only under
     /// [`CredentialPolicy::AllowPlaintext`].
     pub fn may_carry_credential(self, origin: &Origin) -> bool {
-        origin.is_tls() || self == CredentialPolicy::AllowPlaintext
+        origin.is_tls() || self == CredentialPolicy::AllowPlaintext || is_loopback(origin)
     }
+}
+
+/// NuvioNative: the in-process PMS shim answers on loopback, which never leaves the device, so a
+/// credential on a plaintext loopback origin is no exposure. Only literal loopback addresses —
+/// never a NAME (`localhost` can be re-pointed by a resolver) and never a LAN address.
+pub fn is_loopback(origin: &Origin) -> bool {
+    let h = origin.host();
+    h == "::1" || h.parse::<std::net::Ipv4Addr>().is_ok_and(|a| a.is_loopback())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_literal_loopback_address_carries_a_credential_in_plaintext() {
+        let store = CredentialPolicy::HttpsOnly;
+        assert!(store.may_carry_credential(&Origin::http("127.0.0.1", 32400)));
+        assert!(store.may_carry_credential(&Origin::http("::1", 32400)));
+        for host in ["localhost", "10.0.0.73", "192.168.1.2", "127.0.0.1.evil.example"] {
+            assert!(!store.may_carry_credential(&Origin::http(host, 32400)), "{host}");
+        }
+    }
 
     /// T1: the store-policy trigger makes a developer build `HttpsOnly`, and nothing can loosen a
     /// store build.
