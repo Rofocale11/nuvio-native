@@ -1,0 +1,803 @@
+//! The detail mailbox: landing, alt-source resolution, the Related shelf, and spawn/settle
+//! races on the detail fetch pipeline.
+
+use super::*;
+#[allow(unused_imports)]
+use super::test_support::*;
+use std::sync::atomic::Ordering;
+
+/// **The cross-source projection, on the real measured shape.** A `/library/all?guid=…` answer
+/// is the OTHER server's own row: its own `ratingKey`, its own library, and — measured against
+/// this household's two servers on 2026-08-14 — its own localized title for the same film.
+/// Everything a row needs must come off that answer, because nothing about the page we are on
+/// describes the copy over there.
+///
+/// Pure: no statics, no socket, so no serial lock. It grades `resolve_alt_sources`'s projection
+/// by feeding the container directly, which is the half that decides whether the panel offers
+/// the right film.
+#[test]
+fn a_guid_answer_projects_the_other_servers_own_key_library_and_class() {
+    let body = r#"{"MediaContainer":{"size":1,"Metadata":[{
+        "ratingKey":"5274","type":"movie","title":"another title entirely",
+        "guid":"plex://movie/6856893830a4aaafd5c4291d","librarySectionTitle":"Film Club",
+        "duration":7020000,"Media":[{"videoResolution":"1080","width":1920,"height":1080}]}]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body)
+        .expect("parses")
+        .media_container;
+
+    let m = mc.metadata.first().expect("one row");
+    assert_eq!(
+        m.guid, "plex://movie/6856893830a4aaafd5c4291d",
+        "the portable identity is read"
+    );
+    assert_eq!(m.rating_key, "5274", "…and the key is THEIRS, not ours");
+    assert_eq!(
+        m.library_section_title, "Film Club",
+        "the library names the row, not the machine"
+    );
+    assert_eq!(m.duration, 7_020_000);
+    assert_eq!(
+        m.media.first().map(|x| x.video_resolution.as_str()),
+        Some("1080")
+    );
+}
+
+/// **The Related shelf's rows carry the watch state that was on the wire all along.**
+///
+/// The reported bug — a long press on a Related tile doing nothing — was explained by "a Related
+/// row has no `(ratingKey, watched)` pair to build menu rows from", and that was true of the
+/// old three-field struct while being false of the response. This is the test that keeps the two
+/// from drifting apart again: it feeds `/related`'s REAL shape and asserts the fields the shelf's
+/// tick, its resume bar and its context menu are each built from.
+///
+/// Three details are deliberately in the fixture rather than idealised away:
+/// * `viewOffset`/`duration` arrive as JSON **strings**, which PMS really does (see
+///   `plex/CLAUDE.md` — a non-lenient adapter fails the WHOLE container, not one field);
+/// * `viewCount` is **absent** on an unwatched row rather than `0`;
+/// * the show is **part-watched** (`viewedLeafCount < leafCount`), the state that is neither
+///   watched nor unwatched and the one a `viewCount > 0` shortcut gets wrong.
+#[test]
+fn related_rows_carry_the_watch_state_the_wire_already_had() {
+    let body = r#"{"MediaContainer":{"Hub":[{"title":"Similar Movies","Metadata":[
+        {"ratingKey":"11","type":"movie","title":"finished","duration":"7020000","viewCount":2,
+         "Media":[{"Part":[{"key":"/library/parts/11/file.mkv"}]}]},
+        {"ratingKey":"12","type":"movie","title":"halfway","duration":"7020000","viewOffset":"3510000"},
+        {"ratingKey":"13","type":"movie","title":"never started","duration":7020000},
+        {"ratingKey":"14","type":"show","title":"three in","leafCount":10,"viewedLeafCount":3}
+    ]}]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body)
+        .expect("parses")
+        .media_container;
+    let rows = related_rows(&mc, SRV_B, "page").related;
+    assert_eq!(rows.len(), 4, "every hub row with a key becomes a tile");
+
+    // …and every row is stamped with the server it was FETCHED from. A related item is a key on
+    // the page's own server, and both servers number from 1, so this is the field that keeps the
+    // art request, the menu's SID and the scrobble off the wrong machine.
+    assert!(
+        rows.iter().all(|m| m.sid == SRV_B),
+        "the row's server is the one that answered"
+    );
+
+    // finished: the tick, and no bar (`resume_frac` is None with no viewOffset)
+    assert!(rows[0].watched && !rows[0].unwatched);
+    assert_eq!(rows[0].resume_frac(), None);
+    assert_eq!(
+        rows[0].part, "/library/parts/11/file.mkv",
+        "Play from Start needs the part id"
+    );
+
+    // halfway: the bar, at the fraction the wire's STRING-encoded numbers give
+    assert!(
+        !rows[1].watched && rows[1].unwatched,
+        "a resume point is not a view count"
+    );
+    assert_eq!(
+        rows[1].resume_frac(),
+        Some(0.5),
+        "the amber bar's fraction, off duration + viewOffset"
+    );
+
+    // never started: neither mark — and `viewCount` was absent, not zero
+    assert!(!rows[2].watched && rows[2].unwatched);
+    assert_eq!(rows[2].resume_frac(), None);
+
+    // the part-watched SHOW: NEITHER flag, which is the state the menu turns into both verbs
+    assert_eq!(
+        rows[3].kind, 1,
+        "the item KIND decides the menu's leaf/container rule"
+    );
+    assert!(!rows[3].watched, "3 of 10 leaves is not done");
+    assert!(!rows[3].unwatched, "…and it is not untouched either");
+}
+
+#[test]
+fn related_rows_do_not_emit_collections_as_movie_cards() {
+    let body = r#"{"MediaContainer":{"Hub":[{"Metadata":[
+        {"ratingKey":"50001","type":"collection","title":"A Collection","thumb":"/c"},
+        {"ratingKey":"11","type":"movie","title":"A Film","thumb":"/m"}
+    ]}]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body).expect("parses").media_container;
+    let rows = related_rows(&mc, SRV_A, "page").related;
+    assert_eq!(rows.len(), 1, "the collection row must be filtered out");
+    assert_eq!(rows[0].rk, "11");
+}
+
+/// A member movie's `collection.related` hub (measured shape: the whole collection, the item
+/// itself included, in the collection's order, keyed by the section's `tagId` filter) becomes the
+/// collection shelf and leaves the Related row: no member is ever also a Related tile, whichever
+/// order the hubs arrive in.
+#[test]
+fn the_collection_hub_is_split_out_of_related_and_never_duplicated() {
+    let body = r#"{"MediaContainer":{"Hub":[
+        {"hubIdentifier":"movie.similar.1","title":"Similar Movies","Metadata":[
+            {"ratingKey":"31","type":"movie","title":"a sequel"},
+            {"ratingKey":"40","type":"movie","title":"a stranger"}]},
+        {"hubIdentifier":"collection.related.1.1","title":"Example Trilogy",
+         "key":"/library/sections/1/all?type=1&tagId=812&sort=originallyAvailableAt,year:nullsLast",
+         "Metadata":[
+            {"ratingKey":"30","type":"movie","title":"the first","librarySectionID":1},
+            {"ratingKey":"31","type":"movie","title":"a sequel","librarySectionID":1},
+            {"ratingKey":"32","type":"movie","title":"the last","librarySectionID":1}]},
+        {"hubIdentifier":"movie.by.actor.or.director.1.5","title":"More with someone","Metadata":[
+            {"ratingKey":"32","type":"movie","title":"the last"},
+            {"ratingKey":"41","type":"movie","title":"another stranger"}]}
+    ]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body).expect("parses").media_container;
+    let rows = related_rows(&mc, SRV_A, "30");
+    let shelf = rows.collection.expect("a member with company gets its collection shelf");
+    assert_eq!((shelf.title.as_str(), shelf.section, shelf.tag), ("Example Trilogy", 1, 812));
+    let members: Vec<&str> = shelf.members.iter().map(|m| m.rk.as_str()).collect();
+    assert_eq!(members, ["30", "31", "32"], "server order, the page's own film included");
+    assert!(shelf.members.iter().all(|m| m.sid == SRV_A));
+    let related: Vec<&str> = rows.related.iter().map(|m| m.rk.as_str()).collect();
+    assert_eq!(related, ["40", "41"], "no collection member is repeated in Related");
+    assert_eq!(shelf.count, 3, "no total from the server: the listed members");
+}
+
+/// The collection heading's "· N" is the collection's own size: a hub that embeds a page of its
+/// members names the whole listing in `totalSize` (else `size`).
+#[test]
+fn the_collection_shelf_counts_the_hubs_total_not_its_page() {
+    let body = r#"{"MediaContainer":{"Hub":[
+        {"hubIdentifier":"collection.related.1.1","title":"Starfall Saga Collection",
+         "key":"/library/sections/1/all?type=1&tagId=812","size":2,"totalSize":"12","Metadata":[
+            {"ratingKey":"30","type":"movie","title":"one"},
+            {"ratingKey":"31","type":"movie","title":"two"}]}
+    ]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body).expect("parses").media_container;
+    assert_eq!(related_rows(&mc, SRV_A, "30").collection.expect("a shelf").count, 12);
+    let body = body.replace(r#","totalSize":"12""#, "").replace(r#""size":2"#, r#""size":7"#);
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(&body).expect("parses").media_container;
+    assert_eq!(related_rows(&mc, SRV_A, "30").collection.expect("a shelf").count, 7);
+}
+
+/// A collection whose only listed member is the page's own film is no shelf — and its hub still
+/// adds nothing to Related. The shelf is capped like Related.
+#[test]
+fn a_lone_member_gets_no_collection_shelf_and_a_large_one_is_capped() {
+    let body = r#"{"MediaContainer":{"Hub":[
+        {"hubIdentifier":"collection.related.1.1","title":"Just Me",
+         "key":"/library/sections/1/all?type=1&tagId=9","Metadata":[
+            {"ratingKey":"30","type":"movie","title":"alone"}]},
+        {"hubIdentifier":"movie.similar.1","title":"Similar","Metadata":[
+            {"ratingKey":"40","type":"movie","title":"a stranger"}]}
+    ]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body).expect("parses").media_container;
+    let rows = related_rows(&mc, SRV_A, "30");
+    assert!(rows.collection.is_none());
+    assert_eq!(rows.related.iter().map(|m| m.rk.as_str()).collect::<Vec<_>>(), ["40"]);
+
+    let many: Vec<String> = (100..130)
+        .map(|k| format!(r#"{{"ratingKey":"{k}","type":"movie","title":"t{k}"}}"#))
+        .collect();
+    let body = format!(
+        r#"{{"MediaContainer":{{"Hub":[{{"hubIdentifier":"collection.related.1.1","title":"Big",
+            "key":"/library/sections/1/all?tagId=7","Metadata":[{}]}}]}}}}"#,
+        many.join(",")
+    );
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(&body).expect("parses").media_container;
+    let rows = related_rows(&mc, SRV_A, "100");
+    let big = rows.collection.expect("a shelf");
+    assert_eq!(big.members.len(), COLLECTION_MAX);
+    assert_eq!(big.count, 30, "the heading counts every listed member, not the capped shelf");
+    assert!(rows.related.is_empty(), "the members past the cap do not spill into Related");
+}
+
+/// The two bounds on the shelf, which are one function's job and were easy to lose in the move
+/// to the shared row mapping.
+///
+/// **De-duplication is across the whole response, not per hub** — PMS's related hubs overlap
+/// heavily, so the same film is routinely in two of them and a flattened strip would draw it
+/// twice side by side. **The cap counts kept rows**, so a response padded with duplicates cannot
+/// spend the budget on tiles that were never added.
+#[test]
+fn related_rows_dedupe_across_hubs_and_cap_the_shelf() {
+    let hub = |keys: &[i32]| {
+        let rows: Vec<String> = keys
+            .iter()
+            .map(|k| format!(r#"{{"ratingKey":"{k}","type":"movie","title":"t{k}"}}"#))
+            .collect();
+        format!(r#"{{"Metadata":[{}]}}"#, rows.join(","))
+    };
+    // the same three keys in two hubs, plus one the second hub alone has
+    let body = format!(
+        r#"{{"MediaContainer":{{"Hub":[{},{}]}}}}"#,
+        hub(&[1, 2, 3]),
+        hub(&[2, 3, 4])
+    );
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(&body)
+        .expect("parses")
+        .media_container;
+    let rows = related_rows(&mc, SRV_A, "page").related;
+    let keys: Vec<&str> = rows.iter().map(|m| m.rk.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["1", "2", "3", "4"],
+        "one tile per title, in first-seen order"
+    );
+
+    // a row PMS sent no key for is not a tile — it addresses nothing
+    let body =
+        r#"{"MediaContainer":{"Hub":[{"Metadata":[{"type":"movie","title":"keyless"}]}]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body)
+        .expect("parses")
+        .media_container;
+    assert!(related_rows(&mc, SRV_A, "page").related.is_empty(), "no ratingKey, no tile");
+
+    // the cap, counted in KEPT rows: 30 distinct keys, each repeated twice
+    let many: Vec<i32> = (0..30).collect();
+    let body = format!(
+        r#"{{"MediaContainer":{{"Hub":[{},{}]}}}}"#,
+        hub(&many),
+        hub(&many)
+    );
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(&body)
+        .expect("parses")
+        .media_container;
+    let rows = related_rows(&mc, SRV_A, "page").related;
+    assert_eq!(rows.len(), RELATED_MAX, "the shelf is capped");
+    assert_eq!(
+        rows.last().map(|m| m.rk.as_str()),
+        Some("19"),
+        "…at the 20th DISTINCT title"
+    );
+}
+
+/// A server that answers "I do not have it" contributes no row — and is not confused with one
+/// that did not answer. Both yield nothing here; only the client keeps them apart (see
+/// `find_by_guid`), which is what lets a later revision say "not reachable" in the panel.
+#[test]
+fn a_server_without_the_film_contributes_no_row() {
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(r#"{"MediaContainer":{"size":0}}"#)
+        .expect("parses")
+        .media_container;
+    assert!(
+        mc.metadata.is_empty(),
+        "size=0 is an answer, and it is an empty one"
+    );
+}
+
+/// **The cross-source resolve carries its SERVER through the mailbox, and the pump hands both
+/// halves to the panel.** The generation guard beside it cannot stand in for this: `test_adapter().alt_gen`
+/// only moves when a DETAIL lands, so a page opened while a resolve is out — the whole reason
+/// this is asynchronous, since one dead share costs a `connect(2)` timeout — is a page whose
+/// own detail is still in flight, and the landing sails through the generation test. The rk
+/// then matched too, because both servers number their items from 1: the panel listed the
+/// other machine's copies and OK on one opened a different film.
+///
+/// Drives the real `pump_alt_sources` (the mailbox is filled directly, as the detail test does
+/// for its failure case — there is no `land_alt` for a test to reach) and grades the GATE the
+/// Detail page asks, which is the thing a user would see appear or not appear.
+///
+/// **The store is ADDRESSED since restructure phase 10, so this reads as a refusal on the way
+/// OUT rather than on the way in** — the landing is filed under the pair it was resolved for,
+/// and the page that is mounted asks about its own. The assertion is unchanged and is the one
+/// that matters: our copies are not news about the share's film 4.
+#[test]
+fn an_alt_sources_landing_for_another_servers_copy_with_the_same_key_is_refused() {
+    let _serial = plx_base::testlock::serial();
+    alt_clear(test_state());
+    // two copies on two sources — enough for the gate, which counts distinct SOURCES
+    let copies = || {
+        vec![
+            AltCopy {
+                sid: SRV_A,
+                rk: "4".into(),
+                ..Default::default()
+            },
+            AltCopy {
+                sid: SRV_B,
+                rk: "318".into(),
+                ..Default::default()
+            },
+        ]
+    };
+    let land = |gen: u32, sid: plx_plex::plex::ServerId, rk: &str| {
+        test_adapter().alt_roster_gen.store(plx_plex::plex::server_roster_gen(), Ordering::SeqCst);
+        *test_adapter().alt_slot.lock().unwrap() = Some(AltResult {
+            gen,
+            roster_gen: plx_plex::plex::server_roster_gen(),
+            sid,
+            rk: rk.to_string(),
+            list: copies(),
+        });
+    };
+
+    // our film 4 is the mounted page and its resolve is out…
+    let gen = test_adapter().alt_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    // …and while it is out the user lands on the SHARE's film 4
+    land(gen, SRV_A, "4");
+    pump_alt_sources(test_state(), test_adapter());
+    assert!(
+        !alt_available(test_state(), SRV_B, "4"),
+        "our copies are not news about the share's film"
+    );
+
+    // the control: the very same landing DOES reach the page that asked for it
+    assert!(alt_available(test_state(), SRV_A, "4"), "the awaited landing installs");
+
+    // …and a SUPERSEDED landing is dropped one layer earlier, by the generation
+    alt_clear(test_state());
+    let stale = test_adapter().alt_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    test_adapter().alt_gen.fetch_add(1, Ordering::SeqCst);
+    land(stale, SRV_A, "4");
+    pump_alt_sources(test_state(), test_adapter());
+    assert!(
+        !alt_available(test_state(), SRV_A, "4"),
+        "a landing from a superseded resolve is dropped"
+    );
+
+    alt_clear(test_state());
+}
+
+#[test]
+fn an_alt_source_from_a_revoked_slot_is_pruned_and_its_inflight_result_is_discarded() {
+    let _serial = plx_base::testlock::serial();
+    plx_plex::plex::reset_servers_for_test();
+    let a = plx_plex::plex::register_for_test("alt-a", "127.0.0.1", 1, "a", "cid");
+    let b = plx_plex::plex::register_for_test("alt-b", "127.0.0.1", 2, "b", "cid");
+    let copies = vec![
+        AltCopy {
+            sid: a,
+            rk: "4".into(),
+            ..Default::default()
+        },
+        AltCopy {
+            sid: b,
+            rk: "9".into(),
+            ..Default::default()
+        },
+    ];
+    alt_clear(test_state());
+    alt_install(test_state(), a, "4", copies.clone());
+    assert!(alt_available(test_state(), a, "4"));
+
+    let old_roster = plx_plex::plex::server_roster_gen();
+    test_adapter().alt_roster_gen.store(old_roster, Ordering::SeqCst);
+    let gen = test_adapter().alt_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    *test_adapter().alt_slot.lock().unwrap() = Some(AltResult {
+        gen,
+        roster_gen: old_roster,
+        sid: a,
+        rk: "4".into(),
+        list: copies,
+    });
+    plx_plex::plex::revoke_for_profile_switch();
+    plx_plex::plex::register_for_test("alt-c", "127.0.0.1", 3, "c", "cid");
+
+    pump_alt_sources(test_state(), test_adapter());
+    assert!(
+        !alt_available(test_state(), a, "4"),
+        "the removed source neither stays cached nor re-lands"
+    );
+
+    alt_clear(test_state());
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// The whole detail mailbox in one serial test — the statics are global, so splitting this
+/// into parallel #[test]s would have them racing each other rather than the code.
+#[test]
+fn a_detail_landing_only_installs_while_it_is_still_the_one_being_awaited() {
+    let _serial = plx_base::testlock::serial();
+    // Other serialized tests may leave a request pending; serialization is not a reset.
+    // Reproduce that predecessor deterministically rather than depend on suite ordering.
+    let previous = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "previous-test-request");
+    clear(test_state(), test_adapter());
+    // This synthetic worker is now finished; cancellation alone cannot release it.
+    land_detail(test_adapter(), plx_plex::plex::ServerId::UNSET, "previous-test-request", previous, None);
+    // idle: nothing requested, nothing loading, nothing to pump
+    assert!(!detail_loading(test_adapter()), "the isolated fixture is not loading anything");
+    assert!(!pump_detail(test_state(), test_adapter()), "an empty mailbox pumps nothing");
+
+    // a request is in flight until its landing is pumped
+    let gen = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "movie-1");
+    assert!(
+        detail_loading(test_adapter()),
+        "a bumped generation with DONE behind it reads as in flight"
+    );
+    landing(gen, "movie-1");
+    assert!(pump_detail(test_state(), test_adapter()), "the awaited landing installs");
+    assert_eq!(cur_rk().as_deref(), Some("movie-1"));
+    assert!(!detail_loading(test_adapter()), "pumping the landing settles the spinner");
+
+    // SUPERSEDED: a second request means the first one's landing is stale and must be dropped
+    let old = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "stale-show");
+    let new = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "fresh-show");
+    landing(old, "stale-show");
+    assert!(
+        !pump_detail(test_state(), test_adapter()),
+        "a landing from a superseded generation is discarded"
+    );
+    assert_eq!(
+        cur_rk().as_deref(),
+        Some("movie-1"),
+        "and it must not touch CURRENT"
+    );
+    assert!(detail_loading(test_adapter()), "the NEWER request is still in flight");
+
+    // MONOTONE mailbox: with the newer result already sitting unconsumed, the OLDER fetch
+    // finally returns — it must not overwrite it. (This is the case that wedged the season
+    // mailbox before its guard existed: losing the newest result stalled the spinner on.)
+    landing(new, "fresh-show");
+    landing(old, "stale-show");
+    assert!(pump_detail(test_state(), test_adapter()), "the late older landing is refused by its generation");
+    assert_eq!(cur_rk().as_deref(), Some("fresh-show"));
+
+    // a FAILED fetch (None) settles the spinner but keeps the previously loaded item
+    let g = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "fresh-show");
+    land_detail(test_adapter(), plx_plex::plex::ServerId::UNSET, "fresh-show", g, None);
+    assert!(!pump_detail(test_state(), test_adapter()), "a failed fetch reports no fresh item");
+    assert_eq!(
+        cur_rk().as_deref(),
+        Some("fresh-show"),
+        "and leaves the page as it was"
+    );
+    assert!(!detail_loading(test_adapter()), "but it does settle the spinner");
+
+    // CLOSING THE PAGE supersedes: a load requested on the way in must not repopulate
+    // CURRENT behind whatever screen is mounted now.
+    let inflight = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "arrived-after-close");
+    clear(test_state(), test_adapter());
+    assert!(!detail_loading(test_adapter()), "clear(test_state(), test_adapter()) settles the in-flight fetch");
+    landing(inflight, "arrived-after-close");
+    assert!(!pump_detail(test_state(), test_adapter()), "a landing after close is dropped");
+    assert_eq!(cur_rk(), None, "the page stays closed");
+}
+
+/// Spec §5.2 / `docs/stores-as-machines.md` §2.5: the landing is keyed on `(server, rk)`.
+/// The page awaits server A's item 7; server B's item 7 landing under the same generation is
+/// skipped and counted, and A's own installs. Until phase 4 the mailbox carried no server at
+/// all, which is the gap the spec's evidence line names.
+#[test]
+fn a_detail_landing_for_another_servers_item_of_the_same_key_is_skipped() {
+    let _serial = plx_base::testlock::serial();
+    clear(test_state(), test_adapter());
+    let a = plx_plex::plex::ServerId::from_raw(0);
+    let b = plx_plex::plex::ServerId::from_raw(1);
+    let gen = begin_detail_for_test(test_adapter(), a, "7");
+    let addr = detail_addr(gen);
+    assert!(detail_loading(test_adapter()));
+    let before = test_adapter().detail_landing.dropped_for(addr.to);
+    land_detail(test_adapter(), 
+        b,
+        "7",
+        gen,
+        Some(Detail {
+            rk: "7".into(),
+            title: "theirs".into(),
+            ..Default::default()
+        }),
+    );
+    assert!(!pump_detail(test_state(), test_adapter()), "the other server's copy is not the awaited item");
+    assert_eq!(cur_rk(), None);
+    assert!(detail_loading(test_adapter()), "…and the page is still waiting for its own");
+    assert_eq!(test_adapter().detail_landing.dropped_for(addr.to), before + 1, "counted");
+    assert_eq!(test_adapter().detail_landing.inflight(addr.to), 0, "wrong key is a discarded terminal");
+    let gen = begin_detail_for_test(test_adapter(), a, "7");
+    land_detail(test_adapter(), 
+        a,
+        "7",
+        gen,
+        Some(Detail {
+            rk: "7".into(),
+            title: "ours".into(),
+            ..Default::default()
+        }),
+    );
+    assert!(pump_detail(test_state(), test_adapter()));
+    assert_eq!(current(test_state()).map(|d| d.title.clone()).as_deref(), Some("ours"));
+    assert!(!detail_loading(test_adapter()));
+    clear(test_state(), test_adapter());
+}
+
+/// **A page closing must not cancel the request of the page that took the slot back.**
+///
+/// The reported "empty page on previous server return": Detail A (server A) presents server B's
+/// copy of the same film as a surface, then BACK dismisses it. The container hands A its
+/// `Uncover` + `Enter(Restored)` the instant the dismissal starts, while B's surface is still
+/// fading out and B's detail is still `current()` — so A asks for its own metadata. B's body is
+/// unmounted a few frames LATER, and its teardown `Clear` superseded whatever was in flight, A's
+/// fresh request included: the generation moved, the landing was dropped as stale, and A sat on
+/// its hero art with no synopsis, cast or rows, with nothing left to ask again. B's teardown now
+/// closes only B's own item.
+#[test]
+fn closing_one_servers_page_leaves_the_other_servers_pending_request_alone() {
+    let _serial = plx_base::testlock::serial();
+    clear(test_state(), test_adapter());
+    let a = plx_plex::plex::ServerId::from_raw(0);
+    let b = plx_plex::plex::ServerId::from_raw(1);
+    let item = |sid, title: &str| Detail { sid, rk: "42".into(), title: title.into(), ..Default::default() };
+
+    // B's copy is the loaded item, as it is while B's surface is on screen.
+    let gen_b = begin_detail_for_test(test_adapter(), b, "42");
+    land_detail(test_adapter(), b, "42", gen_b, Some(item(b, "on B")));
+    assert!(pump_detail(test_state(), test_adapter()));
+
+    // A is uncovered and asks for its own; B's body is only now torn down.
+    let gen_a = begin_detail_for_test(test_adapter(), a, "42");
+    clear_item(test_state(), test_adapter(), b, "42");
+    assert_eq!(current(test_state()).map(|d| d.sid), None, "B's item is gone with B's page");
+    assert_eq!(detail_request_status(test_adapter(), a, "42"), Some(true),
+        "A's request is still the one awaited");
+    assert_eq!(detail_generation(test_adapter()), gen_a, "closing B did not supersede A's request");
+
+    land_detail(test_adapter(), a, "42", gen_a, Some(item(a, "on A")));
+    assert!(pump_detail(test_state(), test_adapter()), "A's landing installs");
+    assert_eq!(current(test_state()).map(|d| (d.sid, d.title.clone())), Some((a, "on A".to_string())));
+    assert_eq!(detail_request_status(test_adapter(), a, "42"), Some(false));
+
+    // …and closing a page whose item IS the awaited one still supersedes, as `clear` always did.
+    let gen = begin_detail_for_test(test_adapter(), a, "42");
+    clear_item(test_state(), test_adapter(), a, "42");
+    assert!(!detail_loading(test_adapter()), "the page's own in-flight fetch is superseded");
+    land_detail(test_adapter(), a, "42", gen, Some(item(a, "late")));
+    assert!(!pump_detail(test_state(), test_adapter()), "a landing after its own page closed is dropped");
+    assert_eq!(current(test_state()).map(|d| d.sid), None);
+}
+
+/// **A page that closes before its own fetch lands must not disturb the page under it.**
+///
+/// The residual hole behind the "empty page on previous server return": Detail A (server A) is
+/// `current`, B's copy is presented over it, and BACK is pressed BEFORE B's metadata lands. B was
+/// never `current`, so its teardown used to send nothing, and B's in-flight fetch then replaced
+/// A's item in the single slot — A's identity-filtered view went empty with nothing left to ask
+/// again. B's teardown now sends its addressed `ClearItem` whether or not its item arrived: it
+/// supersedes B's own request (the late landing is dropped) and leaves A's item in `current`.
+#[test]
+fn closing_a_page_before_its_fetch_lands_drops_that_landing_and_keeps_the_page_under_it() {
+    let _serial = plx_base::testlock::serial();
+    clear(test_state(), test_adapter());
+    let a = plx_plex::plex::ServerId::from_raw(0);
+    let b = plx_plex::plex::ServerId::from_raw(1);
+    let item = |sid, title: &str| Detail { sid, rk: "42".into(), title: title.into(), ..Default::default() };
+
+    // A's copy is the loaded item; B's fresh open then asks for its own.
+    let gen_a = begin_detail_for_test(test_adapter(), a, "42");
+    land_detail(test_adapter(), a, "42", gen_a, Some(item(a, "on A")));
+    assert!(pump_detail(test_state(), test_adapter()));
+    let gen_b = begin_detail_for_test(test_adapter(), b, "42");
+    assert_eq!(detail_request_status(test_adapter(), b, "42"), Some(true));
+
+    // BACK before B lands: B's teardown closes B's item.
+    clear_item(test_state(), test_adapter(), b, "42");
+    assert_eq!(current(test_state()).map(|d| (d.sid, d.title.clone())), Some((a, "on A".to_string())),
+        "closing B leaves A's item in the slot");
+    assert!(!detail_loading(test_adapter()), "B's own in-flight fetch is superseded");
+    assert_ne!(detail_generation(test_adapter()), gen_b, "the generation moved past B's request");
+
+    // B's fetch lands late: it is dropped, A's item stays.
+    land_detail(test_adapter(), b, "42", gen_b, Some(item(b, "on B")));
+    assert!(!pump_detail(test_state(), test_adapter()), "B's late landing is dropped");
+    assert_eq!(current(test_state()).map(|d| (d.sid, d.title.clone())), Some((a, "on A".to_string())));
+    clear(test_state(), test_adapter());
+}
+
+/// **A dismissed page stops asking at once, and keeps what it draws.**
+///
+/// A presented copy (B, on another server) is dismissed over the page it came from (A): the
+/// container enters A again immediately, but B's body fades for ~0.5 s before its teardown. B's
+/// `Withdraw` at dismissal retires B's own request so nothing of B can land into the slot A has
+/// just found its item in; it removes nothing from `current` (B's body is still drawing it), and
+/// it leaves any OTHER page's request alone.
+#[test]
+fn withdrawing_a_dismissed_page_retires_only_its_own_request_and_keeps_the_loaded_item() {
+    let _serial = plx_base::testlock::serial();
+    clear(test_state(), test_adapter());
+    let a = plx_plex::plex::ServerId::from_raw(0);
+    let b = plx_plex::plex::ServerId::from_raw(1);
+    let item = |sid, title: &str| Detail { sid, rk: "42".into(), title: title.into(), ..Default::default() };
+
+    // A is loaded; B's request is in flight when B is dismissed.
+    let gen_a = begin_detail_for_test(test_adapter(), a, "42");
+    land_detail(test_adapter(), a, "42", gen_a, Some(item(a, "on A")));
+    assert!(pump_detail(test_state(), test_adapter()));
+    let gen_b = begin_detail_for_test(test_adapter(), b, "42");
+    assert!(withdraw(test_adapter(), b, "42"), "B's own request is retired");
+    assert_eq!(detail_request_status(test_adapter(), b, "42"), None, "nothing awaits B any more");
+    assert!(!detail_loading(test_adapter()));
+    land_detail(test_adapter(), b, "42", gen_b, Some(item(b, "on B")));
+    assert!(!pump_detail(test_state(), test_adapter()), "B's landing inside its fade is dropped");
+    assert_eq!(current(test_state()).map(|d| (d.sid, d.title.clone())), Some((a, "on A".to_string())));
+
+    // B had landed before it was dismissed: its item stays for the fade, and B no longer awaits.
+    let gen_b = begin_detail_for_test(test_adapter(), b, "42");
+    land_detail(test_adapter(), b, "42", gen_b, Some(item(b, "on B")));
+    assert!(pump_detail(test_state(), test_adapter()));
+    assert!(withdraw(test_adapter(), b, "42"));
+    assert_eq!(current(test_state()).map(|d| d.sid), Some(b), "the closing body keeps drawing B");
+    assert_eq!(detail_request_status(test_adapter(), b, "42"), None);
+
+    // Another page's request is not B's to retire.
+    let gen_a = begin_detail_for_test(test_adapter(), a, "42");
+    assert!(!withdraw(test_adapter(), b, "42"));
+    assert_eq!(detail_request_status(test_adapter(), a, "42"), Some(true), "A's request is untouched");
+    assert_eq!(detail_generation(test_adapter()), gen_a);
+    clear(test_state(), test_adapter());
+}
+
+/// Spec §15.1 `a_refused_spawn_lands_a_refusal_event`, on the real store: a request whose
+/// worker the OS refused is answered by a `Refused` record, and the pump settles the spinner
+/// off it — exactly one event for the request, nothing latched.
+#[test]
+fn a_refused_detail_spawn_settles_the_spinner_through_the_landing() {
+    let _serial = plx_base::testlock::serial();
+    clear(test_state(), test_adapter());
+    let a = plx_plex::plex::ServerId::from_raw(0);
+    request_detail_with_spawn(test_adapter(), a, "9", |_| false);
+    let addr = detail_addr(test_adapter().detail_gen.load(Ordering::SeqCst));
+    assert!(detail_loading(test_adapter()));
+    assert_eq!(test_adapter().detail_landing.inflight(addr.to), 1, "OS refusal reserves its queued terminal");
+    assert!(!pump_detail(test_state(), test_adapter()), "no item arrived");
+    assert!(!detail_loading(test_adapter()), "but the refusal settled the wait");
+    assert_eq!(test_adapter().detail_landing.inflight(addr.to), 0);
+    clear(test_state(), test_adapter());
+}
+
+#[test]
+fn rapid_detail_supersedes_bound_spawns_and_settle_capacity_refusal() {
+    let _serial = plx_base::testlock::serial();
+    clear(test_state(), test_adapter());
+    let sid = plx_plex::plex::ServerId::UNSET;
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        request_detail_with_spawn(test_adapter(), sid, "old", |gen| { workers.push(gen); true });
+        assert!(detail_loading(test_adapter()));
+    }
+    assert_eq!(workers.len(), 4);
+    request_detail_with_spawn(test_adapter(), sid, "latest-refused", |_| panic!("refused admission must not spawn"));
+    assert!(!detail_loading(test_adapter()), "capacity refusal settles synchronously");
+    assert_eq!(detail_request_status(test_adapter(), sid, "latest-refused"), Some(false));
+    assert_eq!(test_adapter().detail_landing.inflight(detail_addr(0).to), 4);
+    assert!(test_adapter().detail_landing.is_empty(), "no queued capacity refusal");
+    for gen in workers {
+        landing(gen, "old");
+        assert!(!pump_detail(test_state(), test_adapter()));
+        assert!(current(test_state()).is_none(), "old completion must not install");
+        assert!(!detail_loading(test_adapter()));
+    }
+    assert_eq!(test_adapter().detail_landing.inflight(detail_addr(0).to), 0);
+    let mut next = None;
+    request_detail_with_spawn(test_adapter(), sid, "fresh", |gen| { next = Some(gen); true });
+    assert!(detail_loading(test_adapter()));
+    landing(next.unwrap(), "fresh");
+    assert!(pump_detail(test_state(), test_adapter()));
+    assert_eq!(cur_rk().as_deref(), Some("fresh"));
+    assert!(!detail_loading(test_adapter()));
+    clear(test_state(), test_adapter());
+}
+
+#[test]
+fn a_panicking_detail_fetch_acknowledges_and_settles_its_request() {
+    let _serial = plx_base::testlock::serial();
+    clear(test_state(), test_adapter());
+    let sid = plx_plex::plex::ServerId::UNSET;
+    request_detail_with_spawn(test_adapter(), sid, "panic", |gen| {
+        finish_detail_fetch(test_adapter(), sid, "panic", gen, || panic!("synthetic fetch panic"));
+        true
+    });
+    assert!(detail_loading(test_adapter()), "terminal waits for pump");
+    assert!(!pump_detail(test_state(), test_adapter()));
+    assert!(!detail_loading(test_adapter()));
+    assert_eq!(test_adapter().detail_landing.inflight(detail_addr(0).to), 0);
+    clear(test_state(), test_adapter());
+}
+
+#[test]
+fn controlled_cancelled_detail_ack_is_recorded_and_recovers_capacity() {
+    let _serial = plx_base::testlock::serial();
+    // The controlled content boot's tape input (`app::bootstrap::Initial::person_credits` of the
+    // validated filmography boot, whose `personcredits` is 9); this test needs no more of it.
+    const CONTENT_CREDITS: Option<u32> = Some(9);
+    crate::stores::tape::init(CONTENT_CREDITS, false);
+    plx_machine::landgate::arm_recording();
+    // Arms this test's own thread-confined adapter's Tracker so cancel_all/admit/land_detail
+    // below actually record into crate::stores::tape -- each per-owner MetadataAdapter
+    // now starts with its Tracker disabled (there is no more single crate-global TRACKER static
+    // for some earlier test to have left armed).
+    crate::metadata::record::reset_tracker_for_test(test_adapter(), true);
+    test_adapter().detail_gen.store(0, Ordering::SeqCst);
+    test_adapter().detail_done.store(0, Ordering::SeqCst);
+    clear(test_state(), test_adapter());
+
+    let mut recorded = Vec::new();
+    for n in 0..6 {
+        crate::stores::tape::begin(Default::default(), Default::default());
+        let gen = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, &format!("old-{n}"));
+        clear(test_state(), test_adapter());
+        land_detail(test_adapter(), plx_plex::plex::ServerId::UNSET, &format!("old-{n}"), gen, None);
+        assert!(!pump_detail(test_state(), test_adapter()));
+        let results = crate::stores::tape::take_results();
+        assert_eq!(results.len(), 1,
+            "the cancelled completion remains a recorded capacity-retiring observation");
+        recorded.push(results[0].clone());
+        assert_eq!(plx_machine::landgate::take_frame_lands(),
+            vec![(crate::stores::StoreId::Metadata.ord(), 1)],
+            "a filtered ACK retains its original observed landing frame");
+        assert_eq!(crate::stores::tape::finish().1, None);
+        assert_eq!(test_adapter().detail_landing.inflight(detail_addr(gen).to), 0);
+    }
+
+    crate::stores::tape::begin(Default::default(), Default::default());
+    let wrong = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::from_raw(0), "same-key");
+    land_detail(test_adapter(), plx_plex::plex::ServerId::from_raw(1), "same-key", wrong, None);
+    assert!(!pump_detail(test_state(), test_adapter()), "a wrong-server answer stays filtered");
+    let wrong_result = crate::stores::tape::take_results().pop().unwrap();
+    assert_eq!(test_adapter().detail_landing.inflight(detail_addr(wrong).to), 0);
+    assert_eq!(plx_machine::landgate::take_frame_lands(),
+        vec![(crate::stores::StoreId::Metadata.ord(), 1)]);
+    assert_eq!(crate::stores::tape::finish().1, None);
+
+    crate::stores::tape::begin(Default::default(), Default::default());
+    let fresh = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "fresh-after-cancel");
+    land_detail(test_adapter(), plx_plex::plex::ServerId::UNSET, "fresh-after-cancel", fresh,
+        Some(Detail { sid:plx_plex::plex::ServerId::UNSET, rk:"fresh-after-cancel".into(),
+            ..Default::default() }));
+    assert!(pump_detail(test_state(), test_adapter()), "more than the four-slot cap can run after cancelled ACKs retire");
+    let fresh_result = crate::stores::tape::take_results().pop().unwrap();
+    assert_eq!(plx_machine::landgate::take_frame_lands(),
+        vec![(crate::stores::StoreId::Metadata.ord(), 1)]);
+    assert_eq!(crate::stores::tape::finish().1, None);
+    clear(test_state(), test_adapter());
+    plx_machine::landgate::disarm();
+
+    crate::stores::tape::init(CONTENT_CREDITS, true);
+    // The replay run must start from a ZEROED Tracker, exactly as the recording run did: the
+    // recorded batches carry `seq` 1..=8 and `publish_replies` refuses any reply whose seq is not
+    // `tracker.seq + 1`. Before Stage B this reset came for free -- `stores::init` ended with
+    // `crate::metadata::record::reset(initial.content.is_some())` (see `stores.rs` at d067a796),
+    // so re-entering the controlled domain rewound the one crate-global TRACKER. Stage B deleted
+    // that line with the static (0d466527); `init` cannot reach a per-owner adapter, so the
+    // rewind is the fixture's to do now. Without it the replay phase inherits the recording
+    // phase's seq=8, the very first supplied batch (seq=1) is rejected as "incoherent detail
+    // reply sequence", and `take_results()` answers `[]`.
+    crate::metadata::record::reset_tracker_for_test(test_adapter(), true);
+    test_adapter().detail_gen.store(0, Ordering::SeqCst);
+    test_adapter().detail_done.store(0, Ordering::SeqCst);
+    clear(test_state(), test_adapter());
+    for (n, result) in recorded.into_iter().enumerate() {
+        crate::stores::tape::begin(Default::default(), [result.clone()].into());
+        let gen = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, &format!("old-{n}"));
+        clear(test_state(), test_adapter());
+        assert!(!pump_detail(test_state(), test_adapter()));
+        assert_eq!(crate::stores::tape::take_results(), vec![result],
+            "replay grades the ACK it actually applied");
+        assert_eq!(crate::stores::tape::finish().1, None);
+        assert_eq!(test_adapter().detail_landing.inflight(detail_addr(gen).to), 0,
+            "the replayed cancelled ACK retires its reservation");
+    }
+    crate::stores::tape::begin(Default::default(), [wrong_result.clone()].into());
+    let wrong = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::from_raw(0), "same-key");
+    assert!(!pump_detail(test_state(), test_adapter()), "replay preserves the wrong-server filter");
+    assert_eq!(crate::stores::tape::take_results(), vec![wrong_result]);
+    assert_eq!(test_adapter().detail_landing.inflight(detail_addr(wrong).to), 0);
+    assert_eq!(crate::stores::tape::finish().1, None);
+    crate::stores::tape::begin(Default::default(), [fresh_result].into());
+    let fresh = begin_detail_for_test(test_adapter(), plx_plex::plex::ServerId::UNSET, "fresh-after-cancel");
+    assert!(pump_detail(test_state(), test_adapter()), "replay also admits beyond the recovered four-slot cap");
+    assert_eq!(test_adapter().detail_landing.inflight(detail_addr(fresh).to), 0);
+    assert_eq!(crate::stores::tape::finish().1, None);
+    clear(test_state(), test_adapter());
+    crate::stores::tape::reset_for_test();
+}

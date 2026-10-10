@@ -1,0 +1,378 @@
+---
+name: fleet-plan
+description: >
+  Plan and launch parallel agent work in this repo — several agents, several git worktrees, one
+  physical television. Use when the ask is "fan this out", "run these in parallel", "use several
+  agents", "spin up a fleet", "split this across worktrees", "can multiple agents work on this at
+  once", and equally when nobody said any of that but you are about to launch a second worker
+  yourself. Covers who gets the TV (at most one lane), the shared stash stack that hands one lane
+  another lane's work, what a second build tree costs on disk, cutting a worktree from the right
+  base, which gitignored files a lane has to be seeded with, and the block to paste into every
+  worker prompt. Holding the television is the `tv-lock` skill's job; this one decides which lane
+  is allowed to ask for it. Workflow agents are unreachable mid-run, so everything a lane needs
+  must be in its prompt at launch — which is exactly what gets forgotten at the moment somebody
+  decides to parallelise.
+---
+
+# fleet-plan — N agents, N worktrees, ONE television
+
+Four things go wrong here, all four have gone wrong here, and all four are decided **before the
+first worker starts** — after that you cannot reach a workflow agent to correct it. The single
+most useful thing in this file is [the worker-prompt block](#the-worker-prompt-block): paste it
+into every lane, with its three blanks filled in.
+
+**This file does not document the lock.** `tools/tv-lock.sh`'s subcommands, its lease semantics,
+when a lease may be broken and what the `PreToolUse` hook refuses are the **`tv-lock`** skill, and
+keeping a second copy of them here is how both copies rot. This one answers the question the lock
+cannot: *which lane is allowed to want the television at all.*
+
+## First: should this be a fleet at all?
+
+Fan out only when **every** line is yes. Otherwise do it yourself — a fleet on the wrong shape of
+work is slower *and* riskier, because it adds worktree setup, disk, an integration merge, and four
+hazards, to buy parallelism that isn't there.
+
+| | fan out | do it yourself |
+|---|---|---|
+| files touched | lanes touch **disjoint files** | one file, or one module everyone edits |
+| dependencies | lanes compile independently | B needs a symbol A is writing (see [base](#3-cut-each-worktree-from-a-named-base)) |
+| verification | host — `make check`, the simulator | **all of it needs the television** |
+| shape known | the partition is obvious now | still exploring; you'd be guessing the split |
+
+That third row is the one people talk themselves past. The TV is a mutex, so N lanes that all need
+it finish **no faster than one** — they queue on `tools/tv-lock.sh` — while each still pays a
+worktree, a build tree and a merge. `make check` is now ALSO a bounded resource, machine-wide
+(`tools/check-lock.py`, TWO slots): N lanes each running it finish no faster than two `make check`s
+at a time (a pair takes 0.67-0.76 of the back-to-back time, not half), they just queue on a different
+lock than the TV's, and each lane's wait is announced (every holder's pid/worktree/start time)
+rather than silent. "Host-verifiable" still means no TV contention; it no
+longer means no contention at all. Three lanes of genuinely independent, host-verifiable work is
+where this starts paying.
+
+## 1. Give the television to AT MOST ONE lane
+
+**Telling two prompts "you own the television exclusively" is not a mutex.** Each sentence is true
+when it is written and false the moment the second lane starts. That exact mistake was made on
+**2026-08-21** — a blur measurement and a Dolby capture running at once — and it was caught by luck
+rather than by anything failing loudly. `tools/tv-lock.sh` came out of a second collision on
+**2026-08-22** and turns the second lane into a refusal instead of a corrupt measurement. But **the
+lock schedules; it does not plan.** Two lanes that both want the set still run in series, and that
+queue is invisible in the plan you wrote.
+
+- **A LANE IS A CHECKOUT** — `tools/tv-lock.sh:62`, `LANE="${PLX_TV_LOCK_LANE:-$REPO}"`. What that
+  means for planning: **a second worktree on the same Mac is a second lane**, however the prompt
+  describes it. Do not set `PLX_TV_LOCK_LANE` to make two worktrees share one lease — that is
+  spelling "we are one lane" at the mechanism whose entire job is to disagree.
+- **`FLAVOR` does not buy you a second lane.** Two installs live on one set, but
+  `docs/two-installs.md` §3.2: *"One hardware video plane and one decoder… Two installs cannot play
+  at once."* The lease is one directory on the television, with no flavour in it — deliberately.
+- **Everyone else goes to the simulator** — the **`ui-sim`** skill. N instances run at once, and it
+  answers layout, focus, navigation, every screen and the whole Plex data layer. Give each lane
+  **its own `SIM_DIR`**: it defaults to `/tmp/plxnative-sim` (`Makefile:845`) and is passed straight
+  through as that instance's `PLXNATIVE_RUNTIME_DIR`, so two lanes on the default share one token
+  file, one remote FIFO and one event log.
+- Say the assignment **out loud in every prompt**, including the lanes that don't get it. "No
+  device access" is information a worker acts on; silence is a worker that tries `make deploy`,
+  gets refused by `.claude/hooks/tv-lock-guard.py`, and reaches for a raw `ssh root@…`.
+
+## 2. Never let a lane `git stash`
+
+**The stash stack is shared across worktrees, and a pop takes whatever is on top — including
+another lane's work.** `refs/stash` is a plain repo-wide ref; it is not one of git's per-worktree
+refs, so both lanes see one list. Reproduced end to end on **git 2.50.1, 2026-08-23**, in two
+throwaway worktrees:
+
+```
+lane A: git stash push -m lane-a     # stash@{0} = lane-a
+lane B: git stash push -m lane-b     # stash@{0} = lane-b, lane-a is now @{1}
+lane A: git stash pop                # -> lane A's tree now contains lane B's change, and THAT
+                                     #    entry is dropped. A's own work is still on the stack;
+                                     #    B's next pop takes it.
+```
+
+**Prevention — commit, don't stash.** A commit on the lane branch is private to the lane, survives
+a crash, and is what the integrator is looking for anyway:
+
+```sh
+git add -A && git commit -m "wip"    # -A, because `git stash create` below captures TRACKED files only
+```
+
+**Recovery, if a lane stashed anyway** — pin the entry to a ref of its own and get it off the
+shared stack, before another lane pops it:
+
+```sh
+git update-ref refs/rescue/lane-a "$(git rev-parse stash@{0})" && git stash drop
+git stash apply refs/rescue/lane-a         # restores, from any worktree in the family
+```
+
+To stash *safely* in the first place, skip the stack entirely — `git stash create` returns a commit
+object it stores nowhere:
+
+```sh
+git update-ref refs/rescue/lane-a "$(git stash create 'lane-a wip')"
+```
+
+Both forms verified the same day: `git stash list` stays empty throughout, and `apply` restores the
+right tree in a *different* worktree from the one that made it. What `git stash create` does not
+capture is **untracked files** — a new module or a new test file is not in that commit — which is
+why `git add -A && git commit` is the default advice and this is the fallback.
+
+**`refs/rescue/*` is a shared namespace too, and nothing prunes it.** Name every pin after the lane
+that made it, and delete pins **by name**. Do not sweep the namespace: on **2026-08-23** a
+`for-each-ref refs/rescue | update-ref -d` cleanup written to remove two refs from the current
+session removed five older ones with it (`unit-b-wip`, `unit-c-wip`, `unit-e-wip`,
+`pre-dv-scrub`, `main-wip-2026-08-22`), and a rescue ref is the *only* thing holding its commit —
+delete it and the object is unreachable, recoverable only by matching `git fsck --unreachable`
+output against commit subjects, and gone for good once `git gc` prunes it (two weeks after the
+object was written, by default).
+
+## 3. Cut each worktree from a named base
+
+Recorded **2026-08-21**: a lane was branched from an unrelated `backdrop-blur` commit instead of the
+integration branch, so the symbol its task depended on did not exist.
+
+```sh
+MAIN=/Users/gleblinnik/Developer/plex/plex-native-poc
+git -C "$MAIN" fetch origin                              # `git log --all` reads only refs you HOLD
+BASE=$(git -C "$MAIN" rev-parse origin/main)             # or the integration branch
+git -C "$MAIN" worktree add -b fleet/<lane> "$MAIN/.claude/worktrees/<lane>" "$BASE"
+```
+
+`.claude/worktrees/` is gitignored (`.gitignore:31`) and is where this project's agent worktrees
+already live — three of them on 2026-08-23, beside the main checkout. Verify **from inside the
+lane**, before any work; the worker prompt makes this the first command:
+
+```sh
+git log --oneline -1                                     # must be the base the prompt names
+git merge-base --is-ancestor <BASE> HEAD && echo "base ok"
+```
+
+**The symptom of a wrong base is a compile error naming something the prompt promised exists** —
+`cannot find function … in this scope`, an unresolved import, a `make check` failure in tests the
+lane never touched. The expensive reaction is the natural one: the agent writes the missing symbol
+itself, and the integrator gets two definitions of it. Hence "refuse to start", not "work around
+it".
+
+## 4. `make check` only — a full build fills the disk
+
+Every worktree gets its own cargo target dir per feature set — `RUST_TDIR` = `target` /
+`target-release`, `SIM_TDIR` = `target-sim`, `MACAPP_TDIR` = `target-macapp`, all under
+`rust-modules/` — and its own `vendor/ffmpeg-prefix` (the expensive FFmpeg build tree is shared;
+see below). **`make disk` is the current number for every checkout at once; read it there.** Two
+things about that number are counter-intuitive. A lane under `.claude/worktrees/` sits *inside* the
+main checkout, so `du -sh .` at the root bills you for every other lane too. And the largest single
+item is the cargo **incremental cache**, not FFmpeg: it grows without bound and outweighs the object
+code beside it. A lane without one costs a few gigabytes.
+
+What keeps that in check:
+
+- **`make disk`** (`tools/build-gc.sh`) reports every checkout's derived trees, the external lane
+  trees under `$PLX_FLEET_DIR`, and the free space, in one table; `tools/build-gc.sh
+  --orphans | --incremental | --lanes | --worktrees | --all` reclaims. Nothing it deletes is
+  anything but `make` output or a lane worktree already fully on `main`. Run it when a lane starts
+  failing for space, before launching a fleet, and `--worktrees` followed by `--orphans` after
+  tearing one down (see "Collecting the work" below).
+- **`tools/build-gc.sh --auto` runs the same reclaim on its own**, staged by free space on the
+  volume and, for `--lanes`, by an idle guard that spares a lane touched inside the last hour —
+  from a `SessionEnd` hook and an optional hourly `make disk-watch` launchd agent. You do not have
+  to remember `make disk` for an ordinary fleet; it stays the report to read when deciding whether
+  to intervene by hand, or when a lane needs reclaiming faster than the automatic pressure trigger.
+- **A linked worktree does not write an incremental cache.** The Makefile sets
+  `CARGO_INCREMENTAL=0` when `.git` is a file rather than a directory, which covers the cargo runs
+  `make` launches; `tools/build-gc.sh` also installs `.claude/worktrees/.cargo/config.toml` with
+  `incremental = false`, which covers a direct `cargo test`/`cargo check` too and stops above the
+  main checkout, so a lane pays object code and nothing
+  else and the main checkout keeps its cache. `CARGO_INCREMENTAL=1` in the environment still
+  overrides both — the right call only for a lane genuinely doing long iterative work, and for the
+  host unit loop that opt-in is `make test-fast` (own `rust-modules/target-fast`, ~2.7 GB, reclaimed
+  by `tools/build-gc.sh --incremental` or `--lanes`) rather than exporting it everywhere.
+- **A fresh lane's first build is seeded with an APFS clone of the third-party output**
+  (`tools/cargo-seed.py`, called from the Makefile in linked worktrees only). The registry crates and
+  the build-std sysroot are the same bytes in every lane — cargo's hash for them does not depend on
+  the checkout's path — and are about 40% of a lane's target bytes (0.9 GB for a `make check`-only
+  lane, 1.3 GB with the ARM release tree as well; the storage helper's tree and `make sim`'s are not
+  seeded: the helper's absolute linker path is part of every unit's fingerprint, and the simulator
+  has not been proven). The seed lives under `$PLX_BUILD_CACHE/cargo-seed/`, is filled at the end of
+  a green `make check` or an ARM build, and is cloned into a target dir only when that dir does not exist yet. The app
+  crate is never in it (cargo judges a path package by mtime alone, so a cloned app artifact could
+  be linked silently), and it clones or does nothing: on another volume, off APFS, with
+  `PLX_CARGO_SEED=off`, or when the toolchain, `Cargo.lock` or a cargo config differ from the
+  seed's, the lane builds cold exactly as before. Builds are still per-checkout. **`du` counts a
+  clone's blocks in full**, in the seed and in every lane cloned from it, so `make disk` overstates
+  what is on the volume once lanes are seeded: `df` is the truth. `tools/build-gc.sh --cache` prunes
+  a seed nothing has used for 30 days, and `--auto` runs `--seed` (7 days) as its last stage when
+  free space is below the threshold, so a seed whose donor lanes are gone does not hold ~1.3 GB
+  for a month.
+- **The FFmpeg build tree is machine-wide and keyed by its configure flags**, under
+  `$PLX_BUILD_CACHE` (default `~/.cache/plxnative`); see the vendor bullet below.
+
+**The rule: workers run `make check` and nothing that cross-compiles. ONE integrator does the
+cross-build, once, at the end.** Because `make check` is bounded to two slots machine-wide, several lanes
+running it "at once" actually run at most two at a time; that is fine (it is the same total CPU
+time whether it overlaps or queues, and queued is faster in aggregate — see the check-lock comment
+in the Makefile) but do not expect N lanes' `make check` calls to finish in parallel. A
+`make build-bench*` takes every slot and so waits for them all.
+`make check` is `make lint` (three named clippy lints) plus
+`cargo test --lib`, `ci/flavor.py --selftest` and `tests/test_harness.py` — all four invoke their
+tool directly, so none of them enters `ci/build-ffmpeg.sh`. The FFmpeg build is reached down exactly
+one chain — `pkg/plxnative` → the Rust staticlib → `pkg/.ffabi-ok` → the header rule at
+`Makefile:416` — which means a bare `make`, `make all`, `make deploy`, `make ipk` and `make test`
+all build it and `make check` cannot. (`make macapp` does **not**: `ci/mkmacapp.py` never mentions
+FFmpeg. It costs a fourth cargo target dir, 125 MB, and nothing else.)
+
+Keep each lane's build trees **outside** the worktree:
+
+```sh
+export CARGO_TARGET_DIR=$HOME/plx-fleet/<lane>/target       # governs `make check` — it passes no --target-dir
+export SIM_TDIR=$HOME/plx-fleet/<lane>/target-sim           # `make sim` DOES pass --target-dir, which wins
+```
+
+Give each lane its **own** path: one shared dir makes concurrent cargo runs block on the target
+lock and re-fingerprint each other's sources.
+
+**Moving the dir does not save disk by itself** — the bytes move, they do not vanish (the seed above
+is what saves some, and it follows an exported `CARGO_TARGET_DIR` for `make check` when it is on the
+same volume). What moving buys is that **`git worktree remove` stays meaningful.**
+
+**And moving them is how they become permanent, which is the failure this advice caused.** A tree
+under `$HOME/plx-fleet/<lane>` outlives its worktree by construction: remove the lane and the
+gigabytes stay, owned by nobody, named for a branch that no longer exists, and invisible to a `du`
+at the repo root. So: **`tools/build-gc.sh --orphans` after every fleet**, which deletes exactly the
+external trees whose worktree is gone and touches no live lane. `make disk` lists them with an
+ORPHAN marker. Build output is
+untracked, so a lane with a target dir inside it always needs `--force` — and `--force` deletes
+uncommitted *source* changes just as happily (verified 2026-08-23: a plain `remove` refuses with
+`contains modified or untracked files`; `--force` took the tree, modified tracked file and all).
+With the build trees elsewhere, a bare `git worktree remove` is a free assertion that the lane
+committed everything. `Makefile:850` has a second reason: a checkout on a network or external
+volume cannot be a cargo target dir at all, because those filesystems have no `flock`.
+
+## Seed each lane with the gitignored files it needs
+
+Only two are worth copying, and the list is shorter than it looks because the tooling already
+reaches back to the main checkout:
+
+```sh
+WT=$MAIN/.claude/worktrees/<lane>
+cp "$MAIN/src/config.local.h"        "$WT/src/"          # PMS host + token
+cp "$MAIN/tests/manifest.local.json" "$WT/tests/"        # only for ./tests/run.py --server
+```
+
+- **`src/config.local.h`** is the one a host-only lane still needs. `make sim-run` and
+  `make sim-shot` read `PMS_HOST` out of it (`Makefile:843`) and die `no PMS host` without it —
+  `make sim` alone only builds, so the failure arrives one command later than you expect;
+  `make sim-token`, `tools/tv-session.sh` and `tests/run.py` read `PMS_TOKEN` from it. **So every
+  lane carries its own copy of a real X-Plex-Token**, which is exactly why `.gitignore` names it in
+  the *tracked* file — read the comment there: it used to be held out by `.git/info/exclude`, which
+  is local-only and *"does not apply in a fresh worktree"*, i.e. one `git add -A` from a live
+  credential in a public repo's history. `git worktree remove` the lanes when the fleet is done and
+  the copies go with them.
+- **`tests/manifest.local.json`** only for `--server`. The default (synthetic) tier of
+  `tests/run.py` runs with no overlay at all.
+- **Nothing to seed for the TV address or MAC — do NOT copy `.tv-host` / `.tv-mac`.** Every reader
+  (the Makefile's `TV`, `tools/tv-ssh`, `tools/tv-lock.sh`, `tests/run.py`, `stream-screen.py`,
+  `wake-tv.sh`) goes through `tools/tv-config.sh`: this checkout's file, the main checkout's, then the
+  per-USER `~/.config/plxnative/tv-host` / `tv-mac` (`$PLX_TV_CONFIG_DIR` / `$XDG_CONFIG_HOME`
+  respected). Set those once per machine and every lane has them; `wake-tv.sh` also caches a MAC it
+  learns there, so a lane waking a sleeping set no longer re-learns it. A copy in each worktree would
+  go stale the first time the address changed in one place, which is why there is no seeding step and
+  no worktree hook.
+- **Do NOT `cp -R "$MAIN/vendor" "$WT/vendor"`.** The destination exists, so that writes
+  `vendor/vendor/` — and doing it while seeding a fleet once put **30,247 build-artefact files
+  (280 MB, plus the builder's MAC addresses and home path in FFmpeg's configure logs) into a branch
+  bound for a public repository**. The `.gitignore` entry that now catches it says so. **You no
+  longer need to do anything at all**: since 2026-09-03 `ci/build-ffmpeg.sh` puts the 122 MB source
+  and object tree in a machine-wide cache under `$PLX_BUILD_CACHE` (default `~/.cache/plxnative`),
+  keyed by the configure flags, so a lane that cross-builds compiles nothing and copies out a
+  3.8 MB prefix. Measured the day it landed: a cold worktree's `make pkg/.ffabi-ok` went from
+  ~2 minutes and 122 MB to **3 seconds and 3.8 MB**.
+
+  The `ln -s "$MAIN/vendor/ffmpeg-prefix" "$WT/vendor/ffmpeg-prefix"` recipe this skill used to
+  give is therefore obsolete — and it is worth knowing WHY it was never quite safe, because the
+  cache is keyed precisely to fix it. A symlinked prefix is shared across configurations, and
+  `RELEASE=1` drops swscale and the mpeg1/mpegts pair: a release lane rebuilding through the link
+  silently replaced a dev lane's libraries, and the Makefile's configuration stamp — which deletes
+  a header *inside* the prefix to force a rebuild — reached through the link into the other lane's
+  tree to do it. Different flags now hash to different cache keys, and each checkout keeps its own
+  real prefix directory, so neither half can happen.
+
+## The worker-prompt block
+
+Fill in `<BASE>`, `<lane>` and the device line, paste verbatim into **every** lane. Workflow agents
+cannot be reached once they are running — a hazard you meant to mention is a hazard that ships.
+
+```markdown
+## Fleet rules for this lane — before your first command
+
+1. BASE. Run `git log --oneline -1`. If it is not `<BASE>`, STOP and say so; do not start, and do
+   not write a missing symbol yourself — the worktree was cut wrong.
+2. THE TELEVISION: <this lane has NO device access | this lane owns the TV>. With no access: no
+   ssh/scp/sshpass, no `make deploy|run|test|kill|install`, no `tests/run.py`, no
+   `tools/tv-session.sh`, no `tools/capture-screen.sh` (a PreToolUse hook refuses them). Verify on
+   the simulator — the `ui-sim` skill — with your own root: `make sim-shot SIM_DIR=/tmp/sim-<lane>`.
+3. DISK. `make check` ONLY. Never bare `make`, `make all`, `make deploy`, `make ipk` — each
+   cross-builds FFmpeg into this worktree (a built lane here measures 1.2–4.8 GB). First:
+   `export CARGO_TARGET_DIR=$HOME/plx-fleet/<lane>/target SIM_TDIR=$HOME/plx-fleet/<lane>/target-sim`
+4. NEVER `git stash` — the stack is SHARED across worktrees and another lane's pop takes your work.
+   Use `git add -A && git commit -m wip`. If you already stashed, pin it and drop it:
+   `git update-ref refs/rescue/<lane> "$(git rev-parse stash@{0})" && git stash drop`
+5. COMMIT ON THE LANE BRANCH, not a detached HEAD. Touch only the files this prompt names — other
+   lanes are editing the rest right now. End your final message with `git log --oneline -3` and
+   `git status --short`.
+6. You cannot be reached mid-run. If this prompt is wrong or blocked, stop and report it; do not
+   improvise around it.
+```
+
+## If two lanes collide anyway
+
+1. **Stop ONE job** (`TaskStop`) and let the other finish. Do not stop both, and do not salvage the
+   stopped one's half-collected numbers.
+2. **Re-run the stopped lane from scratch.**
+3. **Treat everything measured during the overlap as contaminated** — the other lane's, too —
+   whether or not it looks fine. That is the whole point: it looks fine.
+4. Clean the set, holding the lock (the **`tv-lock`** skill):
+
+   ```sh
+   tools/tv-lock.sh acquire --why "clean up after a collision"
+   tools/tv-session.sh down                # closes the app, clears every plxnative-* trigger, relaunches
+   tools/tv-lock.sh release
+   ```
+
+   `down` resolves ONE install's runtime root, so if the two lanes were on different flavours run it
+   for each (`tools/tv-session.sh --flavor stable down`). Then check for stray ssh clients:
+   `pgrep -fl "ssh .*$(make -s print-tv)"` — **`make -s print-tv`, not `cat .tv-host`**, because a
+   lane is a worktree and a worktree has no `.tv-host` (`print-tv` goes through `tools/tv-config.sh`). Read those pids' argv; do not just count
+   them. A count explained away as "my own grep pipeline" is precisely how the 2026-08-22 collision
+   happened.
+
+## Collecting the work
+
+Merging the lane branch tips is **not sufficient**. A review agent's commit has twice ended up
+orphaned on a detached HEAD instead of on its lane branch (`e0ade211`, `65d4d847`, one session on
+2026-08-21; both eventually reached `main` through `review/auth-pin` and `review/menu-watch-pair`).
+Before removing any worktree, ask each one's HEAD whether it already landed:
+
+```sh
+git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} /^HEAD /{print $2, w}' |
+while read -r sha wt; do
+  git merge-base --is-ancestor "$sha" <integration> || echo "UNMERGED: $sha  $wt"
+done
+git worktree remove "$WT" && git worktree prune   # NO --force: see §4 on what --force also deletes
+```
+
+(`substr($0,10)` rather than `$2` because a worktree path may contain spaces; the sha is printed
+first so `read -r sha wt` still puts the whole tail in `wt`. Verified 2026-08-23, including that
+the `UNMERGED:` branch actually fires.)
+
+**This whole check-then-remove sequence is what `tools/build-gc.sh --worktrees` automates** — run
+it once `<integration>` has landed on `main`, then `--orphans`. It never deletes a branch, only the
+worktree (reporting a left branch by name so you decide by hand). A squash-merged lane whose lines
+`main` has since changed again reads `unmerged` and needs the manual check above.
+
+Then the integrator — and only the integrator — does the one cross-build, and takes the television
+for whatever the fleet could not verify on the host.
+
+**And what reaches `main` is ONE squash commit**, never the integration branch's history
+(`AGENTS.md`, Working rules): on the main checkout, `git merge --squash <integration>` and a single
+commit whose message is the fleet's own account. Lane merges into the integration branch are the
+fleet's business; a trunk of lane commits and merge commits is not.

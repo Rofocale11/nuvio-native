@@ -1,0 +1,541 @@
+name: CI
+
+# WHAT A GREEN RUN HERE MEANS: the code compiles for ARMv7-A soft-float with the right ABI and no
+# CP15 barriers, the pure logic is unbroken, no shadowed `else if` shipped, and the artifact is
+# well-formed. WHAT IT DOES NOT MEAN: that the app boots, binds the video plane, decodes a frame,
+# renders correctly, or holds 60 fps. There is no host runtime — the drawing, decoding and
+# platform-binding surface is all `extern "C"` into libraries only the TV has. `./tests/run.py`
+# against the real television remains the only evidence for any of that.
+
+on:
+  push:
+    # A maintenance line (`release/vX.Y`, cut from a tag for a patch release) is a trunk of its own
+    # for `release.yml`'s `line` input, so it gets the same push gate `main` does — otherwise the
+    # first time a hotfix's changes are compiled in a clean checkout is the release run itself.
+    branches: [main, 'release/v*']
+    # This gate is host checks (lint + unit suite) and an ARM cross-build — expensive (#261 spent
+    # ~20 runner-minutes on a README-only PR, #513 the same on issue templates and docs), and
+    # neither stage reads prose, images or repository metadata. The policy: start from `'**'`,
+    # EXCLUDE every class of tracked file that no gate reads, and RE-INCLUDE (in order, after the
+    # exclude that would otherwise drop them) the few files a gate does read. `paths` patterns are
+    # evaluated in the order they appear, so a later positive pattern re-includes what an earlier
+    # negative one dropped. `ci/test_ci_workflows.py` (`CiPathFilter`) evaluates this list with
+    # GitHub's rules against a set of paths that must and must not trigger, and against every
+    # `include_str!`/`include_bytes!` target in `rust-modules/`, so a read-but-excluded file or an
+    # excluded-but-unlisted class fails `make check` instead of silently skipping a run.
+    #
+    # What IS read (so stays a trigger, via the leading `'**'` or a re-include below):
+    #   * every code, test, tool, locale, asset, `include/`, `pkg/`, `ipkroot/`, `vendor/`, `ci/`
+    #     file, the Makefile and `.gitignore` (ci/test_test_fast.py greps it), `.github/workflows/`
+    #     and `.github/actions/` (ci/test_ci_*.py read every workflow and action file), and
+    #     `.claude/hooks/` and `.agents/skills/wake-tv/` (their `*-test.py` and ci/test_tv_config.py
+    #     are `make check` steps);
+    #   * `PRIVACY.md` (`include_str!`ed by three rust-modules/telemetry tests and read by
+    #     telemetry/src/diag/schema.rs), `LICENSE` (`include_str!`ed by screens/src/legal.rs and
+    #     packaged), and `LICENSING.md`, `TRADEMARKS.md`, `THIRD-PARTY-NOTICES.md` (ci/check-package.py
+    #     grades the packaged payload against them; the Makefile ships them in the .ipk);
+    #   * `docs/screenshots/CREDITS.md` and `site/credits.html` (tests/test_demo_library.py
+    #     cross-checks the two), `site/index.html` (same file, footer link) and `site/ci/**`
+    #     (tools/test_ci_history.py reads the CI page), and `docs/measurements/*-logs/*.log` (the tools/test_abr_*.py and
+    #     tools/test_scrub_logs.py suites replay them).
+    # What is NOT read, and is excluded below, with the evidence on each line.
+    #
+    # One thing every excluded file does touch: ci/test_source_bundle.py's `RepositoryTreeScan`
+    # runs the release source bundle's credential-pattern scan over every tracked file the bundle
+    # carries, docs and `.github/` included. That scan reads bytes for token shapes, not content, it
+    # re-runs over the whole tree on the next push that does trigger this workflow, and again on
+    # the release source bundle (ci/make-source-bundle.py) before anything ships; excluding prose
+    # from this trigger defers it, it does not remove it. (This has always been true of the
+    # `docs/**/*.md` and `site/**` excludes; it is written down here so the comment stays honest.)
+    # Likewise `docs/release-notes/v*.md` and `docs/release-audits/v*.md` are linted by
+    # ci/check-package.py only for the STABLE flavour (release.yml and rc.yml); this workflow
+    # builds `FLAVOR=debug` (see the cross-build job), so they stay excluded.
+    # There are no required status checks on `main` (branch protection allows merging without a
+    # green run), so a run this filter skips can never wedge a PR waiting on it.
+    paths: &ci_paths
+      - '**'
+      - '!README.md'
+      # repository prose: source-bundle allowlist membership (ci/source_bundle.py ROOT_FILES) and
+      # the credential scan above are the only readers; no gate parses their content
+      - '!CONTRIBUTING.md'
+      - '!SECURITY.md'
+      - '!AGENTS.md'
+      - '!CLAUDE.md'
+      # docs: nothing under docs/ is read by a gate except the two re-includes below
+      # (docs/macos-app-readme.md is only copied into the macOS bundle by `make macapp`, which
+      # this workflow does not run; docs/plex-openapi.json and the images are referenced by prose)
+      - '!docs/**'
+      # graded by tests/test_demo_library.py (make check): must stay a trigger
+      - 'docs/screenshots/CREDITS.md'
+      # replayed by tools/test_abr_calibrate_plant.py, test_abr_transfer_bound.py and
+      # test_scrub_logs.py (make check): must stay a trigger
+      - 'docs/measurements/*-logs/*.log'
+      - '!site/**'
+      # graded by tests/test_demo_library.py (make check): must stay a trigger
+      - 'site/credits.html'
+      # tests/test_demo_library.py:744 greps the landing page's footer link to the credits page
+      - 'site/index.html'
+      # tools/test_ci_history.py (make check) reads the CI page's index.html and asserts that
+      # milestones.json stays gone, so the whole directory is a trigger
+      - 'site/ci/**'
+      # Site-build tooling: run only by pages.yml, which exercises it on every deploy. No gate
+      # here (make check, ci/, tests/) reads or imports these. NOT .github/workflows/pages.yml:
+      # ci/test_ci_timeouts.py reads every workflow file, so that one must stay a trigger.
+      - '!tools/render-doc-page.py'
+      - '!tools/subset-site-fonts.py'
+      - '!tools/render-site-glows.py'
+      - '!tools/requirements-docs.txt'
+      - '!.agents/**/*.md'
+      - '!rust-modules/**/*.md'
+      # Agent/editor configuration: the hooks are gates (.claude/hooks stays a trigger), the rest
+      # is read by the harness that loads it and by no test, ci/ script or Makefile target
+      - '!.claude/settings.json'
+      - '!.claude/agents/**'
+      - '!.claude/workflows/**'
+      - '!.codex/**'
+      # GitHub repository metadata: the sponsor button, issue forms, the pull request template and
+      # CODEOWNERS/dependabot are read by github.com only. (ci/test_host_threads.py and
+      # ci/test_arm_profile.py used to rglob every .github/*.yml; they now read workflows/ and
+      # actions/ only, which is what their "no workflow names it" claim is about.)
+      - '!.github/FUNDING.yml'
+      - '!.github/ISSUE_TEMPLATE/**'
+      - '!.github/PULL_REQUEST_TEMPLATE/**'
+      - '!.github/*.md'
+      - '!.github/CODEOWNERS'
+      - '!.github/dependabot.yml'
+  pull_request:
+    paths: *ci_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The host gates are FOUR parallel jobs plus one aggregator, all deliberately SEPARATE from
+  # cross-build rather than a prerequisite of it: the Makefile documents that `make check` is not a
+  # prerequisite of `all` so the cross-build never depends on a host toolchain run. Running them in
+  # parallel preserves that literally — a red clippy cannot mask a broken ARM link, and vice versa.
+  #
+  # They used to be one job running `make check` (~13-15 min, the PR critical path by ten minutes).
+  # `make check` is still exactly these gates, in the same targets (the Python ones are the lines of
+  # ci/check-python-steps.txt): the Makefile's `check-cargo` is
+  # the serial union of `check-cargo-lint`, `check-cargo-unit-default` and `check-cargo-unit-hostsim`,
+  # and `check-python` (itself `check-python-rest` plus `check-python-harness`) is the fourth and
+  # fifth. Each job below runs ONE of them. `ci/test_ci_split.py` (part of
+  # `make check-python`) fails if a cargo gate ends up in two of them or none, or if a job here stops
+  # calling its target, which is how a gate would otherwise get dropped without anyone noticing.
+  # What CI gives up against `make check` is only the machine-wide `check` queue lock (a CI runner
+  # is not contended) and the final cargo-seed harvest, which is a no-op outside a linked worktree.
+
+  host-lint:
+    name: host lint + type-checks
+    runs-on: ubuntu-latest
+    # Measured max 3.8 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 10
+    env:
+      RUST_NIGHTLY: nightly
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # FULL history, and it is a correctness requirement rather than a convenience: see the
+          # same comment on host-python. Kept on the Rust jobs too so every host job checks out the
+          # tree the single job did.
+          fetch-depth: 0
+
+      # No SDL/GL packages here: clippy and `cargo check` never link a test binary.
+      - uses: ./.github/actions/host-rust
+
+      - name: make check-cargo-lint (clippy + the lab-diagnostics type-check)
+        run: make check-cargo-lint
+
+      - name: Type-check the RELEASE feature set
+        # **`make check` cannot see a break in this configuration, and neither could this gate
+        # until now.** Both build the DEFAULT feature set, and `--no-default-features` — what every
+        # shipped binary is — was first compiled during a release cut, i.e. after the change had
+        # been merged. The hazard is specific: hand-written `#[cfg(feature = "devtriggers")]` PAIRS,
+        # where a spliced-in function swallows its neighbour's attribute and takes a call site out
+        # of the release build with it.
+        #
+        # A `PostToolUse` hook does this locally after every edit to `rust-modules/src/**.rs`, and a
+        # local hook is a backstop, not a gate: it runs in one person's checkout and not on a fork's
+        # pull request. Cheap here for the same reason it is cheap there — cargo keys fingerprints
+        # by feature set, so the two configurations coexist in one `target/` and this is a warm
+        # incremental check rather than a second build.
+        run: cd rust-modules && cargo "+$RUST_NIGHTLY" check --lib --no-default-features
+
+      - name: Build budgets (dependency graph and source size)
+        # Deterministic, so a red result is always a change to the tree: third-party package count
+        # and duplicate crate versions for the ARM target, with and without default features
+        # (`cargo metadata` resolves; it compiles nothing), plus an informational line count.
+        # The binary-size budget runs in cross-build, where the binary exists. Limits and how to
+        # raise one deliberately: ci/build-budgets.json, docs/agent-reference.md.
+        run: python3 ci/check-build-budgets.py --graph --src rust-modules/src --src rust-modules/base/src --src rust-modules/machine/src --src rust-modules/net/src --src rust-modules/platform/src --src rust-modules/gfx/src --src rust-modules/ui/src --src rust-modules/plex/src --src rust-modules/telemetry/src --src rust-modules/data/src --src rust-modules/session/src --src rust-modules/media/src --src rust-modules/appkit/src --src rust-modules/screens/src
+
+      - name: Type-check the simulator feature set
+        # The host simulator is a real build configuration with real users (the `ui-sim` skill, and
+        # `make macapp`, which ships `--release --no-default-features --features hostsim` to
+        # somebody who has none of this installed). Nothing else in CI compiles it, so a change that
+        # only breaks the Mac side merges green and is found by a person trying to demo the app.
+        run: |
+          cd rust-modules
+          cargo "+$RUST_NIGHTLY" check --lib --features hostsim
+          cargo "+$RUST_NIGHTLY" check --lib --no-default-features --features hostsim
+
+  host-unit-default:
+    name: host unit tests (default features)
+    runs-on: ubuntu-latest
+    # Measured max 10.6 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 25
+    env:
+      RUST_NIGHTLY: nightly
+    outputs:
+      passed: ${{ steps.size.outputs.passed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # This job LINKS the default `cargo test --lib` binary, so it needs the real desktop SDL/GL
+      # libraries (build.rs links them for every host test binary, not only the hostsim one).
+      - uses: ./.github/actions/host-rust
+        with:
+          sdl: "true"
+
+      - name: Compile the test binary with cargo --timings
+        # Build-health evidence, not a gate: `cargo-timing.html` shows which crate sat on the
+        # critical path and for how long, so a build that got slower is a number to read rather
+        # than a feeling. It is the SAME unit `make check-cargo-unit-default` runs next (same
+        # package, profile, features and rustflags; `--timings` is a cargo flag and is not part of
+        # the fingerprint, verified 2026-10-02 by building with and without it and getting `Fresh`
+        # for plxnative-modules both ways), so the `cargo test --lib` below finds everything built
+        # and this step is where the compile happens, not an extra one. The upload below carries it.
+        shell: bash
+        run: cd rust-modules && cargo "+$RUST_NIGHTLY" test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens --no-run --timings
+
+      - name: make check-cargo-unit-default
+        # Teed to a file so the size step below can read the `test result:` lines this run already
+        # printed instead of compiling and listing the suite a second time. `pipefail` is explicit:
+        # without it the exit status would be tee's, not make's.
+        shell: bash
+        run: |
+          set -o pipefail
+          make check-cargo-unit-default 2>&1 | tee "$RUNNER_TEMP/make-check.log"
+
+      - id: size
+        name: Count the tests this job ran
+        run: |
+          grep -E '^test result:' "$RUNNER_TEMP/make-check.log"   # in the job log too, for the record
+          { echo '```'; grep -E '^test result:' "$RUNNER_TEMP/make-check.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "passed=$(grep -E '^test result:' "$RUNNER_TEMP/make-check.log" \
+            | sed -E 's/.* ([0-9]+) passed;.*/\1/' | awk '{n += $1} END {print n+0}')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the cargo build timings
+        # Where to read it: the run page, "Artifacts", `cargo-timings-host-unit-default`. `always()`
+        # so a red test run still leaves the timings of the build that preceded it; a missing file
+        # (the timings step itself failed) is a warning, not a second failure on top of that one.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cargo-timings-host-unit-default
+          path: rust-modules/target/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+          retention-days: 14
+
+  host-unit-hostsim:
+    name: host unit tests (hostsim)
+    runs-on: ubuntu-latest
+    # Measured max 12.6 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 30
+    env:
+      RUST_NIGHTLY: nightly
+    outputs:
+      passed: ${{ steps.size.outputs.passed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # `--features hostsim` is the configuration `player/ffi_host.rs` exists in — the
+      # prime-livelock regression lives there and cannot fail the default pass. The test binary
+      # LINKS, so it needs the real desktop libraries.
+      - uses: ./.github/actions/host-rust
+        with:
+          sdl: "true"
+
+      - name: make check-cargo-unit-hostsim
+        shell: bash
+        run: |
+          set -o pipefail
+          make check-cargo-unit-hostsim 2>&1 | tee "$RUNNER_TEMP/make-check.log"
+
+      - id: size
+        name: Count the tests this job ran
+        run: |
+          grep -E '^test result:' "$RUNNER_TEMP/make-check.log"
+          { echo '```'; grep -E '^test result:' "$RUNNER_TEMP/make-check.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "passed=$(grep -E '^test result:' "$RUNNER_TEMP/make-check.log" \
+            | sed -E 's/.* ([0-9]+) passed;.*/\1/' | awk '{n += $1} END {print n+0}')" >> "$GITHUB_OUTPUT"
+
+  host-python:
+    name: host python/shell/C gates
+    runs-on: ubuntu-latest
+    # Measured max 4.6 min over the last 40 successful runs of the old serial recipe (it runs its steps
+    # concurrently now, so it is much shorter); limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # FULL history, and it is a correctness requirement rather than a convenience.
+          # `tools/abr-calibrate-plant.py` derives each measurement capture's chronology from
+          # `git log --diff-filter=A`, because the directory names mix phase and increment
+          # numbering and do not sort chronologically. Under the default `fetch-depth: 1` that
+          # command answers nothing for every capture, they all tie as "uncommitted, therefore
+          # newest", and the census silently picks the wrong log per rung — 10 failures in
+          # `test_abr_calibrate_plant.py` claiming sim.rs disagrees with logs it does agree with.
+          # The tool now refuses a shallow clone outright; this is what stops it having to.
+          fetch-depth: 0
+
+      # Neither a Rust toolchain nor SDL: `check-python` never invokes cargo (its self-tests that
+      # mention one use fakes) and links nothing. The ~70 gates are ci/check-python-steps.txt, run
+      # concurrently by tools/check-parallel.py: as many at once as the runner has cores (4 here, cap 4).
+      - name: make check-python-rest
+        run: make check-python-rest
+
+  # tests/test_harness.py alone: about 190 s of what used to be a 360 s `check-python` job. Most of
+  # it is its `DepGates` class running ci/check-deps.sh over private copies of the tree on every
+  # core of the runner, so it gains nothing from sharing a runner with the other gates.
+  # `make check-python` is still the two halves, run side by side locally.
+  host-python-harness:
+    name: host harness tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history, for the same reason as host-python.
+          fetch-depth: 0
+
+      - name: make check-python-harness
+        run: make check-python-harness
+
+  # The one name anything outside this file may refer to: it is what the single job was called, and
+  # it is RED unless every host job above is green. `if: always()` because a job that needs a failed
+  # job is otherwise SKIPPED, and a skipped check reads as "not required" to merge gating rather
+  # than as a failure; each result is compared with `success` explicitly, so cancelled and skipped
+  # count as failures too. (No status check is required on `main` today; this keeps one if that
+  # changes.)
+  host-checks:
+    name: host checks (NOT a device gate)
+    runs-on: ubuntu-latest
+    # Measured max under 1 (the 31.6 in the raw data predates the job split, when this name was the whole suite) min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 10
+    needs: [host-lint, host-unit-default, host-unit-hostsim, host-python, host-python-harness]
+    if: always()
+    steps:
+      - name: Every host job must have succeeded
+        env:
+          RESULTS: |
+            host-lint=${{ needs.host-lint.result }}
+            host-unit-default=${{ needs.host-unit-default.result }}
+            host-unit-hostsim=${{ needs.host-unit-hostsim.result }}
+            host-python=${{ needs.host-python.result }}
+            host-python-harness=${{ needs.host-python-harness.result }}
+        run: |
+          printf '%s\n' "$RESULTS"
+          if printf '%s\n' "$RESULTS" | grep -v '=success$' | grep -q .; then
+            echo '::error::a host job did not succeed (see the results above)'
+            exit 1
+          fi
+
+      - name: Report suite size
+        # CLAUDE.md's stated test count has gone stale twice. Print the real number rather than
+        # trusting a doc: the count is a fact the suite can produce about itself. Each unit job
+        # counted the `test result:` lines its own `make` target printed; this adds them up.
+        if: always()
+        env:
+          DEFAULT_PASSED: ${{ needs.host-unit-default.outputs.passed }}
+          HOSTSIM_PASSED: ${{ needs.host-unit-hostsim.outputs.passed }}
+        run: |
+          {
+            echo '### host unit tests (counted from each unit job'"'"'s make log)'
+            echo "default features: ${DEFAULT_PASSED:-not run}"
+            echo "hostsim: ${HOSTSIM_PASSED:-not run}"
+            echo "host unit tests passed, all passes summed: $(( ${DEFAULT_PASSED:-0} + ${HOSTSIM_PASSED:-0} ))"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  cross-build:
+    name: cross-build (armv7) + artifact assertions
+    # MUST be arm64 Linux. webosbrew/native-toolchain publishes darwin-arm64, darwin-x86_64 and
+    # linux-aarch64 for this release — there is NO linux-x86_64 build, so ubuntu-latest cannot
+    # obtain the toolchain at all. See the Makefile's NDK bootstrap block.
+    runs-on: ubuntu-24.04-arm
+    # Measured max 5.0 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup toolchain install "$RUST_NIGHTLY" --profile minimal --component rust-src
+        env:
+          RUST_NIGHTLY: nightly
+
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: rust-modules
+          # -Z build-std recompiles std from source and rust-cache cannot see those crates
+          # (Swatinem/rust-cache#161: cargo metadata never mentions them, so they are pruned).
+          # The crate's own deps still cache; std is rebuilt each run and that is expected.
+          key: armv7-build-std
+
+      - id: ndk
+        uses: ./.github/actions/webos-ndk
+
+      - name: Cache the bundled FFmpeg
+        # The cache that works is the SCRIPT's own: `ci/build-ffmpeg.sh` keeps its build tree (the
+        # extracted source plus every object) under `$PLX_BUILD_CACHE/ffmpeg/<arch>-<version>-<key>`,
+        # default `~/.cache/plxnative`, and a hit there skips configure and compile and only
+        # re-installs the prefix. The step used to cache `vendor/ffmpeg-prefix` instead, which hit
+        # and did nothing: the restored files are OLDER than the fresh checkout's
+        # `ci/build-ffmpeg.sh`/`ci/arm-cc.py`, so make re-ran the script, the script found no tree
+        # of its own and rebuilt FFmpeg (77 s) every run.
+        #
+        # The script keys the tree on the version, the SHA-256 pin, the NDK/sysroot stamp, the
+        # configure flags and the hashes of `arm-cc.py` and `check-link-evidence.py`, and it re-derives
+        # that key itself on every run, so a stale restore can only ever fail to match and rebuild;
+        # it can never hand back wrong objects. This cache key therefore only has to change when
+        # those inputs can: the script, the two files it hashes, the evidence stager it runs after
+        # install, and the NDK pin (read from the NDK action, which owns the literal).
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/plxnative/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/build-ffmpeg.sh', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', '.github/actions/webos-ndk/action.yml') }}
+
+      - name: Build
+        run: make WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}' -j"$(nproc)"
+
+      - name: Package
+        # DELIBERATELY the developer id. This artifact is a DEV build — the whole point of a PR
+        # package is that you can sideload it with the `/tmp` trigger surface on — and
+        # `release-guard` refuses a dev build on the id users install, correctly. So the artifact
+        # below is `com.beb.plxnative.debug_*.ipk` and installs BESIDE anyone's real one rather
+        # than over it. The release job is the only place `FLAVOR=stable` belongs (release.yml).
+        # Named explicitly rather than inherited, so this is a decision on the page instead of a
+        # default that moves if the Makefile's does.
+        run: make ipk FLAVOR=debug WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}'
+
+      - name: Binary size budget
+        # The STRIPPED binary `make ipk` just staged (the one inside the .ipk), not the unstripped
+        # pkg/plxnative that deploys. `ls` of a glob rather than a literal appid so the flavour
+        # can change without this step quietly measuring nothing: it fails on zero or several matches.
+        run: |
+          set -euo pipefail
+          staged=$(ls ipkroot/data/usr/palm/applications/*/plxnative)
+          [ "$(printf '%s\n' "$staged" | wc -l)" -eq 1 ]
+          python3 ci/check-build-budgets.py --binary "$staged"
+
+      - name: ELF assertions
+        run: ./ci/check-elf.sh
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+
+      - name: Packaging assertions
+        # After the build above, so a missing package is a failure rather than a skip.
+        env:
+          REQUIRE_PACKAGE: "1"
+        run: python3 ci/check-package.py
+
+      - name: Font hinting audit
+        # CLAUDE.md's rasterization contract says to re-verify the size ladder after a font swap.
+        # That rule is currently enforced by memory alone; this makes it a step.
+        run: |
+          # --break-system-packages: ubuntu-24.04's system python is PEP 668 externally-managed,
+          # and a bare `pip install` there fails the whole cross-build job for a reason that has
+          # nothing to do with the code. A throwaway runner is exactly where overriding that
+          # marker is correct; the alternative (actions/setup-python) pulls a second interpreter
+          # in for one script. Kept quiet, and tolerant of images that predate the marker.
+          pip install --quiet --break-system-packages freetype-py || pip install --quiet freetype-py
+          ./tools/font-hint-audit.py
+
+      - name: webosbrew compatibility check
+        # Step-level bound: the curl downloads and the apt install of the local .debs (which pulls
+        # their dependencies from the network) are the only network phases of this step.
+        timeout-minutes: 15
+        # THE gate that matters for distribution: resolves the ELF's DT_NEEDED and symbols against
+        # 14 real firmware databases — the exact check webosbrew/apps-repo runs on a submission PR,
+        # and the error class that is otherwise invisible until a television refuses to start the
+        # process. Fully offline (the fw-symbols package carries the databases).
+        #
+        # Scoped to the range the CATALOGUE advertises, which is now a FLOOR with no ceiling: the
+        # binary starts on every release from 4.4.2 to 11.2.0 since the SONAMEs moved to runtime
+        # resolution and FFmpeg is bundled. Playback above 4.10.0 is still unobserved, and that
+        # caveat lives in the package description rather than in a bound that would hide the app
+        # from the only people who can settle it.
+        run: |
+          set -euo pipefail
+          TAG=v20260731-e1bb0c0
+          declare -A SHA256=(
+            [fw-symbols]=639721a0c2248b13e5984930b53729cc201f022725954086aca35e2ccae515b5
+            [ipk-verify]=2868b4b2efc097939ab11117c9266d796f0326ee48c90f80070766814fb174d9
+          )
+          for p in fw-symbols ipk-verify; do
+            file="webosbrew-toolbox-${p}_0.4.0-1_arm64.deb"
+            curl -fsSL --connect-timeout 20 --max-time 120 --retry 3 --retry-delay 5 -o "$file" "https://github.com/webosbrew/dev-toolbox-cli/releases/download/${TAG}/$file"
+            echo "${SHA256[$p]}  $file" | sha256sum -c -
+          done
+          sudo apt-get install -y ./webosbrew-toolbox-*.deb
+          webosbrew-ipk-verify --details --format markdown \
+            --fw-releases '>=4.0' pkg/*.ipk | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: firmware load matrix
+        # The same databases the step above just installed, read by our own tool, across ALL 14
+        # releases — and this one GATES. A one-line #[link] or a new FFI call is all it takes to
+        # put the binary back inside webOS 4.x, and that regression is invisible in every other
+        # check: it links fine, the tests pass, and the failure only appears as a television that
+        # will not start the process.
+        #
+        # --min-release 4.4.2 is the floor because the five oldest releases fail permanently and
+        # for reasons nobody intends to fix (they predate the C++11 std::string ABI, so
+        # StarfishMediaAPIs::Feed carries a different mangling). They are still printed.
+        #
+        # It grades whether the app STARTS. It says nothing about playback, which above 4.10.0 has
+        # never been observed on hardware — see docs/webos5-port.md §4.
+        #
+        # pkg/plxnative-storage ships alongside the main binary as of 0.7.0 (the LS2 storage
+        # helper) and gets graded the same way — a helper that fails to exec is as invisible to
+        # every other check as the main binary would be.
+        run: |
+          set -euo pipefail
+          {
+            echo '### Firmware load matrix'
+            echo '_Does the process start and do all symbols resolve? Says nothing about playback._'
+            echo '```'
+            ./tools/fwcompat.py --db /usr/share/webosbrew/compat-checker/data \
+              --min-release 4.4.2 pkg/plxnative
+            ./tools/fwcompat.py --db /usr/share/webosbrew/compat-checker/data \
+              --min-release 4.4.2 pkg/plxnative-storage
+            # The dlopen'd bundled FFmpeg: nothing above resolves its own DT_NEEDED (#235's
+            # libz.so.1). Its sibling libraries ship in pkg/, so --shipped takes them off the list.
+            for lib in pkg/lib*-plx.so.*; do
+              case "$lib" in *.link.*) continue ;; esac   # the link-evidence sidecars
+              ./tools/fwcompat.py --db /usr/share/webosbrew/compat-checker/data \
+                --min-release 4.4.2 --shipped pkg "$lib"
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plxnative-${{ github.sha }}
+          # NB no `pkg/ipk.sha256` here: `make ipk` writes that file only for the stable flavour,
+          # because it is a published RELEASE ASSET NAME quoted verbatim in every release note's
+          # verification command. This job packages the developer id, so listing it would be a dead
+          # path on a clean runner — `upload-artifact` warns and moves on, which is how it would
+          # have stayed dead unnoticed. (A `#` line inside the `path: |` block below would NOT be a
+          # comment — that is a literal block scalar, and every line in it is a path.)
+          path: |
+            pkg/*.ipk

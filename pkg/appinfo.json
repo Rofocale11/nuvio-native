@@ -1,0 +1,21 @@
+{
+  "id": "com.beb.plxnative",
+  "version": "0.8.0",
+  "vendor": "beb",
+  "type": "native",
+  "main": "plxnative",
+  "title": "PlxNative",
+  "appDescription": "Unofficial native Plex client - not affiliated with Plex",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "iconColor": "#060606",
+  "splashBackground": "splash.png",
+  "nativeLifeCycleInterfaceVersion": 2,
+  "handlesRelaunch": false,
+  "transparent": true,
+  "requiredMemory": 160,
+  "requiredPermissions": [
+    "database.operation",
+    "securitykey.operation"
+  ]
+}

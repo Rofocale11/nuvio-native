@@ -1,0 +1,1031 @@
+# The frame budget — what this television will actually give you
+
+**Who this is for:** whoever is designing screens for this app. It is written so you can decide,
+without asking an engineer, whether an idea fits. Everything in it was measured on the real set
+(LG 49SM9000PLA, webOS 4.5, Mali-T820 MP2) on 2026-08-19, in one session, with the legs interleaved.
+
+The engineering companion is `docs/backdrop-blur-profiling.md`, which prices things in GPU cycles.
+This note prices them in **frames and milliseconds**, which is the currency you spend.
+
+---
+
+## 1. The one-page answer
+
+**You have 16.7 milliseconds per frame at 60 fps. The Home page with its grid moving already
+spends 8.9 of them. About 7.8 ms are left, and that is the whole budget.**
+
+**Ordinary drawing is charged by the screen area it covers**, at a price per pixel set by what kind
+of thing it is. These add up, so you can plan with them:
+
+| what you draw | price per screen pixel | 7.8 ms buys you |
+|---|---|---|
+| a flat photograph (the hero image) | **~4 ns** | most of the screen |
+| a poster card (art + rim + shadow) | **~15 ns** | ~4 poster tiles, or ¼ of the screen |
+
+**Backdrop glass is charged differently, and this is the single thing to take away.** Its visible
+slab is about 16 ns/px, dearer than anything else the app draws — but that is the small half of the
+bill. The large half is the blur *behind* it, and what that costs is set by **the rectangle the
+renderer has to blur**, in whole 16.7 ms steps.
+
+Four consequences you can act on immediately:
+
+* **What glass is charged for is the RECTANGLE THAT HAS TO BE BLURRED — your surface grown by 88
+  pixels on every side, and unioned across every glass surface in the frame.** Not the surface. Keep
+  that rectangle **under about 300,000 pixels and you stay at 60 fps**; past it you drop to 45, and
+  it steps down from there. **The shipped Account panel sits just inside that line and is free**
+  (measured, §3.4).
+* **Glass steps your frame rate rather than sliding it: 60 → 45 → 36 → 30.** The blur refreshes on
+  one frame in three, and that frame either fits in one 16.7 ms slot or takes two, or three. You are
+  buying whole slots, so there is no partial credit — see §3.2, where the model reproduces every
+  glass measurement in this document exactly.
+* **A full-screen glass blur costs 60 → 24 fps.** 32.8 ms of work against a 7.8 ms budget — four
+  times over — and no refresh setting changes it: refreshed every third frame or captured once and
+  frozen, it measured 24 fps either way (§5).
+* **How MANY glass surfaces you draw is free. WHERE you put them is not.** One, two or four surfaces
+  inside the same footprint all measured 45 fps. But two identical surfaces moved to opposite corners
+  — the same glass, the same pixels — went 45 → 36, because the one shared blur then has to cover
+  the whole screen and everything between them. **Keep glass together.**
+
+**Nothing broke.** Pushed to four large panels with a full-screen blur refreshed every frame, the
+set ran at 19 fps and kept running: no crash, no stutter cliff, no thermal collapse. There is no
+edge to fall off — there is a **slope, and it starts at the first glass surface you add**.
+
+---
+
+## 2. How to read the numbers
+
+`fps` is frames actually put on the panel, from the app's once-per-second heartbeat. The panel is
+60 Hz, so **60 fps means "it fits" and tells you nothing about how much room is left**; that is why
+§3's table also gives milliseconds.
+
+Milliseconds are `1000 / fps` — the true average time one frame took. **A "cost" throughout this
+document is the work a thing adds to the frame: its frame time minus the 8.9 ms base.** So a cost
+under 7.8 ms fits inside 60 fps and a cost above it does not, which is why every 60 fps row reads
+"fits (≤7.8 ms)" rather than "free". The base frame (8.9 ms) is not measured directly; it is the
+intercept of the poster-card ramp in §3.3, whose straight line fits its four loaded points to within
+0.5 ms and then predicts the fifth — the last card count that still holds 60 fps — to within 0.1 ms.
+Treat it as good to about ±1 ms.
+
+**Everything here was measured on Home with the grid scrolling continuously and the app's
+repaint-skipping turned off**, i.e. the worst honest case for a browsing screen. A settled screen
+that has stopped repainting costs nothing at all.
+
+---
+
+## 3. The budget
+
+### 3.1 Backdrop glass
+
+**Index everything on the blurred REGION, not on the surface.** The renderer has to snapshot and
+blur your surface grown by **88 pixels on every side** — the glass rim bends in pixels from outside
+itself — and where a frame holds several glass surfaces it blurs **one rectangle containing all of
+them**. That rectangle is what you are charged for. You do not set it directly; you set it by how
+big your surfaces are and how far apart you put them.
+
+`every 3rd frame` is the cadence the app ships. `never` means captured once and reused — a static
+backdrop under a still page.
+
+| glass in the frame | surface px | **blurred region** | refresh | fps | cost |
+|---|---|---|---|---|---|
+| — none — | 0 | — | — | **60** | — |
+| 300 x 200 panel | 60,000 | 179,000 | every 3rd | **60** | fits (≤7.8 ms) |
+| 295 x 295 panel | 87,000 | 222,000 | every 3rd | **60** | fits |
+| one 300 x 300 panel | 90,000 | 230,000 | every 3rd | **60** | fits |
+| **the shipped Account popover** (440 x 220) | 97,000 | **241,000** | every 3rd | **60** | **fits** |
+| 450 x 300 panel | 135,000 | 298,000 | every 3rd | **60** | fits, only just |
+| 1148 x 76 (the tab bar) | 87,000 | 334,000 | every 3rd | **45** | +13.4 ms |
+| two 300 x 300 panels, adjacent | 180,000 | 384,000 | every 3rd | **45** | +13.4 ms |
+| 608 x 396 panel | 241,000 | 452,000 | every 3rd | **45** | +13.4 ms |
+| 960 x 540 panel | 518,000 | 813,000 | every 3rd | **36** | +18.9 ms |
+| 1324 x 456 panel | 604,000 | 948,000 | every 3rd | **36** | +18.9 ms |
+| **two 300 x 300 panels, opposite corners** | 180,000 | **2,074,000** | every 3rd | **36** | +18.9 ms |
+| 1920 x 1080 panel | 2,074,000 | 2,074,000 | every 3rd | **24** | +32.8 ms |
+| 1920 x 1080 panel | 2,074,000 | 2,074,000 | every frame | **19** | +43.8 ms |
+
+Every region figure above is the one the renderer *logged for that leg*, not one computed from the
+layout — the dial prints `blur_config` on every run, and the numbers here are read off it.
+
+**The 60 fps line is at about 300,000 region pixels.** 298,000 held 60 (marginally — its worst
+second was 56); 334,000 did not. Everything design can put on this screen sits on one side of that
+number or the other.
+
+**READ §11 BEFORE PRICING ANYTHING NEW OFF THIS TABLE.** Every row above was measured on the
+**capture** path — a full-resolution `glCopyTexSubImage2D` of the region plus its reductions — and
+the **direct source** path has been the default since. It renders the page again into a
+quarter-scale target, which makes the region term **about 4x cheaper**, not free: read the chain out
+of `gfx.rs` and the capture path writes `region × 1.75` (a full-resolution copy, one reduction, two
+taps at half res) where the direct path writes `region × 7/16` (a scene render at `region/16`, two
+taps there, then an up pass at `region/4`). That 4x is the same figure `blur_direct_scale`'s own note
+gives — "4.5x cheaper gross, 5.8x net". A 2026-08-21 surface at 579,840 px² (§11) — nearly twice the
+budget, which this table calls 45 fps at best — measured **58**.
+
+**And the term this table never isolates is the one left binding.** Every row here varies the
+region; the SURFACE's own composite (`fs_glass` at full resolution over the surface, every presented
+frame, discounted by nothing) is measured only in §8, and only at ~87,000 px, where it is free. Once
+the region term is 4x cheaper the composite is what you have left, so on the direct path **index a
+new surface on its area first and its region second** — the reverse of the order this section was
+written in. §11 works one real surface through both terms.
+
+**Count is free; distance is not.** One 608x396 panel, two 292x396 and four 140x396 — same
+footprint, same region — all measured **45 fps exactly**. But the two-surface rows above are the
+sharper lesson: two *identical* 300x300 panels cost **45 fps adjacent and 36 fps in opposite
+corners**. Same glass, same 180,000 pixels of it, and the region went from 384,000 to the entire
+panel because the one shared snapshot had to span them. **A row of glass controls is cheap. A glass
+control at the top and another at the bottom is a full-screen blur.**
+
+**Small is not automatically cheap.** The tab bar covers only 87,000 pixels — a third of the 608x396
+panel — and costs the same, because a 1148-pixel-wide bar grown by 88 a side is a 334,000-pixel
+region. §8 shows the surface's *shape* costs nothing on its own; it is the margin that gets you.
+
+### 3.2 The blur's refresh rate is a weak and badly-behaved lever
+
+One surface, one region, only the cadence moving (a 608x396 panel, region 452,000 px):
+
+| refresh | fps | cost |
+|---|---|---|
+| never (captured once, then reused) | **60** | fits (≤7.8 ms) |
+| every 6th frame | **52** | 10.4 ms |
+| every 3rd frame (historical experiment) | **45** | 13.4 ms |
+| every 2nd frame | **40** | 16.1 ms |
+| every frame | **47** | 12.4 ms |
+
+* **Not refreshing at all is nearly free.** A glass surface over a page that is not moving costs
+  only its own composite, and at 608x396 that fits inside the budget. So does the tab bar (§8).
+* **The first refresh is most of the price.** Not refreshing costs under 7.8 ms; refreshing every
+  sixth frame costs 10.4; every third 13.4; every second 16.1; every frame 12.4. Almost the whole
+  bill arrives with the first refresh you allow, and the rate barely moves it after that.
+* **It is not monotone.** Every-second-frame is the *worst* setting measured, worse than refreshing
+  every single frame.
+
+**Why, and it is the most useful mental model in this document.** The panel hands out a slot every
+16.7 ms. A frame either fits in one slot or takes two, or three. Your frame rate is 60 divided by the
+average number of slots a frame needs — and **a slot is charged whole**, so a refresh that overruns
+by a little costs the same as one that overruns by a lot.
+
+At the measured every-third-frame cadence that gives an exact law: two light frames of one slot each
+plus one refresh frame of **N** slots, so `fps = 60 x 3 / (2 + N)`. **Every glass measurement in this
+document lands on an integer N**, with no exceptions and nothing in between:
+
+| blurred region | slots the refresh frame needs | fps |
+|---|---|---|
+| up to ~300,000 px | 1 | **60** |
+| ~330,000 – 450,000 px | 2 | **45** |
+| ~800,000 – 2,074,000 px | 3 | **36** |
+| (extrapolating) | 4 | **30** |
+
+Thirteen measured glass configurations, four distinct region sizes, and the slot count came out as
+exactly 3.00, 4.00 and 5.00 slots per three frames. That is why glass **steps** your frame rate
+instead of sliding it, and it is the practical form of the budget: you are not buying milliseconds
+of blur, you are buying whether the refresh frame fits in one slot.
+
+(The model accounts for the shape of the cadence table above but not for the every-second-frame
+inversion, which reproduced in two runs and stays unexplained — see §10. It is another reason not to
+plan around a particular cadence.)
+
+So: **do not design around "we'll refresh it slowly to save money."** Spreading the same work over
+fewer, heavier frames does not help, because the overrun is rounded up every time it happens. Decide
+instead whether the backdrop needs to be live at all — *that* is worth 10 ms.
+
+### 3.3 Poster cards and photographs
+
+| what | area drawn | fps | frame | cost |
+|---|---|---|---|---|
+| 4 poster tiles (300x450) | 540,000 | **60** | 16.7 ms | 7.9 ms — the last one that fits |
+| 5 poster tiles | 675,000 | **53** | 18.9 ms | 10.0 ms |
+| 6 poster tiles | 810,000 | **48** | 20.8 ms | 12.0 ms |
+| 7 poster tiles | 945,000 | **45** | 22.2 ms | 13.4 ms |
+| 8 poster tiles | 1,080,000 | **40** | 25.0 ms | 16.1 ms |
+| 12 poster tiles | 1,620,000 | **35** | 28.6 ms | 19.7 ms |
+| 12 poster tiles, all focused | 1,620,000 | **34** | 29.4 ms | 20.5 ms |
+| one full-screen card | 2,074,000 | **35** | 28.6 ms | 19.7 ms |
+| one full-screen flat photograph | 2,074,000 | **57** | 17.5 ms | 8.7 ms |
+
+**Cards are linear in area and the line is clean**: `frame = 8.87 ms + 14.7 ns x (card pixels)`,
+which fits every loaded point above to within 0.5 ms and correctly predicts, to within 0.1 ms, that
+four tiles is the last count that still holds 60. So:
+
+* **Each poster tile of 300x450 costs about 2 ms.** You can have four before the frame slips.
+* **Focus does not change the price.** Twelve focused tiles cost 0.8 ms more than twelve resting
+  ones — the focus glow and the grown shadow are within measurement noise of free.
+* **A photograph is less than half the price of the same area in cards** — a full-screen one costs
+  8.7 ms against a full-screen card's 19.7. Big art is not what costs; *card treatment* is.
+* **A poster wall the size of the panel costs about 20 ms** and lands the app at 35 fps.
+
+**How many cards can this hardware carry, and what happens at the limit?** Directly: **four
+poster tiles is the last count that holds 60 fps**, and every tile after that costs about 2 ms, so
+five is 53, six is 48, seven is 45, eight is 40 and twelve is 35. The relationship is a straight
+line with no knee in it — the panel's whole area in cards is 2 million pixels, which lands at 35 fps
+and 96% arithmetic-pipe occupancy. **Nothing "happens" at the limit**: there is no stall, no dropped
+input, no thermal event, no visible tearing. The frame rate just keeps falling in proportion to the
+area you cover. The prediction that filling the panel with cards "would roughly double the app's
+arithmetic and be the first thing capable of missing vsync" turns out to be right about the
+arithmetic — a full panel of cards adds **12.7 million instruction words** to a frame that already
+issues 15.5 million, so +82%, close to a doubling — and right that it is the first thing design
+controls that can miss vsync. What it gets wrong is the shape of the failure: not a cliff, a slope.
+
+### 3.4 The reconciliation — and a correction to an earlier draft of this note
+
+Two other agents measured the **shipped Account glass panel** at **60 fps** against a glass-absent
+control. An earlier draft of this document had a row reading "608x396 glass, 45 fps", labelled *"the
+Account panel's size"*. Both were careful, both had their profilers disarmed, and 45 against 60 on
+one nominal configuration is a factor that would change every row here.
+
+**They were measuring different surfaces, and the mislabelling was mine.** `608x396` is the Account
+popover's **blurred region**; the popover itself is **440 x 220**. The old row drew a *panel* of
+608x396 — two and a half times the area, and a region of 784x576, nearly twice as large.
+
+Settled in one launch, one scene, all legs interleaved, both profilers disarmed:
+
+| leg | route | logged region | measured refreshes/s | fps |
+|---|---|---|---|---|
+| control, no glass | home | — | 0 | **60** |
+| **the real shipped Account popover** | account | **608 x 396** | 18 | **60** |
+| a dial panel at the popover's own geometry (440x220) | home | 616 x 400 | 20 | **60** |
+| the old "608x396" row | home | 784 x 576 | 15 | **45** |
+
+Three things this establishes, beyond the correction itself:
+
+* **The shipped Account glass is free** — 60 fps, in my own instrument, interleaved with the control
+  in the same launch. The other agents' number is the one that generalises.
+* **The instrument is not the problem.** A synthetic panel at the shipped panel's geometry measures
+  the same 60 fps as the shipped panel. The dial does nothing the real path does not, so the area
+  law holds and its constant is right — it just has to be indexed on the region.
+* **The cadence was verified, not assumed.** Every leg now reports the blur refreshes it actually
+  took: 20/s where 60 frames present at every-third (60/3), 15/s where 45 present (45/3), and 18/s
+  for the shipped panel, whose policy additionally skips refreshes when the page underneath has not
+  changed. No leg silently refreshed at a rate other than the one it claimed.
+
+**And one more correction to the record, on the same theme.** The archive carries a pair of GPU-cycle
+figures — a first glass panel costing **+11.4%** of frame cycles and a second, larger one only
+**+3.4%** — which has been read as *"the first surface pays for the machinery and extra ones are
+nearly free"*. **Do not use that pair to reason about frames.** Two things are wrong with the
+reading. First, the geometry: those two legs were the Account popover (region 241,000 px) and then
+the Account popover **plus the tab bar**, whose union is 1324x456 = **604,000 px**. The second
+surface did not slot into the first one's rectangle — it is at the top of the screen while the panel
+is in the middle, so the union grew by 363,000 px, slightly *more* than the tab bar's own region
+would have been alone. In frames, §3.1's curve puts a 604,000-px region at 45 fps or below, so that
+"nearly free" second surface is in fact the expensive one. Second, those cycle figures come from
+profiled runs, and §7 shows what a profiler does to this measurement: it drops the control leg from
+60 fps to 45 and compresses the legs together. **Cycles are for saying where work sits; frames are
+for saying what it costs.** The frames version of the rule is §3.1's: extra surfaces are free when
+they fit inside the rectangle you were already blurring, and expensive when they enlarge it.
+
+**A logging trap worth recording**, because it nearly became a second theory: the profiler's
+`blur_config` line prints `quarter=480x270` on **every** capture-path leg regardless of surface size,
+which reads as "the capture path blurs the whole screen no matter what". It does not. `480x270` is
+the *allocation* of the blur chain's small targets, which are made full-screen-sized once at boot and
+never resized; the blurred area is the `aligned=` field on the same line, and it tracked the region
+exactly in all thirteen legs. Read `aligned=`, never `quarter=`.
+
+### 3.5 Everything on one scale
+
+Per screen pixel covered, on this hardware, measured:
+
+For everything that is **just drawn** — art, photographs, fills — the price is per pixel covered and
+you can add it up:
+
+```
+flat photograph          4 ns/px    ▏
+poster card (large)     10 ns/px    ▍
+poster card (300x450)   15 ns/px    ▋      <- the penumbra ring costs more on small tiles
+glass composite         16 ns/px    ▋      <- the visible slab, WITHOUT its blur
+```
+
+You have **7.8 ms**. Multiply and see if it fits.
+
+**Glass does not work that way and must not be added up like this.** Its composite is only the small
+half of the bill; the large half is the blur behind it, which is charged in whole 16.7 ms slots
+according to how big the shared blurred rectangle is (§3.1, §3.2). The planning rule for glass is a
+single number:
+
+> **Keep the union of every glass surface in the frame, grown by 88 pixels a side, under about
+> 300,000 pixels. Inside that you keep 60 fps. Outside it you get 45, then 36.**
+
+---
+
+## 4. Things the hardware simply will not do
+
+These are not budget items. They are unavailable at any frame rate.
+
+1. **Two pages cannot be on screen at once.** Every screen's draw begins by clearing the frame, and
+   the app holds no picture of the page it is leaving. A route transition can dissolve *through*
+   something (grey today, blur if you want — §5), but it can never cross-dissolve page A into page
+   B. Designing a transition that shows both is designing something that cannot be built without
+   rebuilding the renderer.
+2. **There is exactly one blur cache.** Every glass surface in a frame samples the *same* blurred
+   snapshot, taken once, of one rectangle that is the union of what all of them asked for. Two
+   glass surfaces far apart therefore drag that rectangle out toward the whole screen and get
+   charged for the space between them. **Measured:** two identical 300x300 panels cost **45 fps
+   side by side and 36 fps in opposite corners** — the same glass, and a blurred region that grew
+   from 384,000 pixels to all 2,074,000 of them. Adjacent glass is nearly free; scattered glass is a
+   full-screen blur wearing a disguise.
+3. **Glass on top of glass shows nothing new.** Because of (2), a glass surface sitting over an
+   area that is already blurred samples the identical pixels: you get its tint, its rim and its
+   edge refraction, but no additional blur. Giving the upper surface its own backdrop needs a
+   second cache, which was built and measured: **60 → 16 fps** (§5). It is not affordable.
+4. **The blur cannot see video.** Over the player, the app's own frame is transparent where the
+   hardware video plane shows through, so a backdrop blur there would smear transparency, not
+   picture. Glass is unavailable on the player's panels, permanently.
+5. **No new render targets per frame, and no GLES3.** The renderer allocates its buffers once at
+   boot; anything that would need a fresh full-screen buffer while running is out. The GPU is
+   OpenGL ES 2 only — no compute, no multiple render targets, no fancy filtering.
+6. **A settled screen stops repainting.** This is why the app idles at ~2% of a CPU core. Anything
+   that animates forever — a shimmer, a drifting gradient, a breathing glow — turns that off and
+   costs the whole frame, continuously, for as long as it is on screen.
+
+---
+
+## 5. The blurred route transition, answered
+
+**The idea:** today a route change (Home → a library) dips the outgoing page to the app's grey
+background, flips at the bottom, and fades the new page up. Could that grey trough be a **blur** of
+the outgoing page instead, with the tab bar's glass sitting on top of it?
+
+**It was built and measured.** `/tmp/plxnative-navblur` holds the page at full brightness and
+cross-fades a full-bleed blur slab over it, with a tab-track-shaped glass capsule composited above.
+
+**The answer is yes, at a real and quantified cost.**
+
+| | fps | frame |
+|---|---|---|
+| the composition held at full strength | **27** | 37.0 ms |
+| the same, with a private second blur cache for the capsule | **16** | 62.5 ms |
+| a real route bounce every 1.4 s (the transition is ~210 ms of it) | **49–60**, mean 52 | — |
+
+* **During the transition the app runs at 27 fps.** A 210 ms transition therefore plays in about
+  **6 frames instead of 13**. Whether that reads as a soft blur bloom or as a stutter is a
+  judgement to make on the panel, not from this table — but it is half frame rate, and you should
+  expect to *see* it in the ramp.
+* **Averaged over normal navigation it costs about 8 fps** — bouncing between two routes every
+  1.4 s, the once-a-second frame rate ran 49–56 with a mean of 52, against a flat 60 with nothing
+  happening. Navigation is not continuous in real use, so this is a transient, not a standing cost.
+* **The tab bar's glass must ride the same cache.** Mode 2, which gives the capsule its own
+  backdrop, costs 60 → 16 fps. Do not design around it.
+* **What that means visually:** with one cache the capsule over the blur reads as a *tinted, rimmed
+  capsule*, not as a second layer of glass, because everything under it is already blurred to the
+  same degree. The capture below, taken off the television's own panel output, shows this working:
+  the rim light, the lens bending at the capsule's edge and the darker scrim all read clearly, and
+  the composition looks deliberate. It just is not "glass over blur" in the sense of two different
+  amounts of blur — that is unavailable.
+
+![the blurred route transition, held still, photographed off the panel](screenshots/navblur-transition.jpg)
+
+*The prototype on the television: the whole page blurred, with the tab-track capsule composited over
+it. The capsule's rim light, its edge refraction and its darker scrim are all doing their job; what
+it has no room to do is blur, because what is under it is already blurred.*
+
+**If you want it, here is how to make it cheaper**, in the order of how much it buys:
+
+1. **Blur less than the whole screen — this is the only large lever.** Cost is close to linear in
+   area, and the measured points are: a quarter of the panel (960x540) costs 13.9 ms and runs at
+   **44 fps**; the whole panel costs 32.8 ms and runs at 24–27. Half the panel interpolates to about
+   20 ms and **34 fps**. Note what that means: a "content band" spanning the full width with only the
+   top chrome left sharp is still about two thirds of the panel, so it buys you almost nothing —
+   the saving has to come from blurring a *region*, not a *band*.
+2. **Shorten it.** The cost is per frame, so a 140 ms transition pays it for four frames instead of
+   six. Given the frame rate during it, a shorter, more decisive move is also the safer look.
+3. **Keep the frost sheet off the slab.** The prototype already does; it is worth roughly 4–5 ms at
+   full screen. A transition slab is not a popover and does not need a frosted sheet over it.
+4. **Freezing the blur during the fade saves nothing at full screen** — and this is worth saying,
+   because it is the obvious economy and it does not work here. Captured-once and
+   refreshed-every-third-frame both measured 24 fps at full screen: once the surface is that big the
+   per-frame composite is the whole bill and the refresh disappears into it. Freezing *does* pay at
+   panel sizes (worth ~5 ms at 960x540 and ~5.5 ms at 608x396), so it is a lever for a partial-screen
+   transition, not for a full-bleed one.
+
+None of these change the fact that a full-screen blur is over budget while it is up. **The honest
+recommendation: yes, if you accept ~27 fps for the length of it.** There is no arrangement of
+cadence, caching or frost that makes a full-bleed blur cheap; only shrinking it does, and shrinking
+it enough to matter (down to a quarter of the panel, 44 fps) stops it being the effect you asked
+for. So the real choice is between a **short full-bleed blur at 27 fps** and **no blur**. Six frames
+of a low-frequency image ramping is not obviously a bad six frames — a blur is exactly the kind of
+picture that hides temporal steps — but that is a judgement to make in front of the set, not in this
+table.
+
+---
+
+## 6. Where the cliff is, and what is actually binding
+
+**There is no cliff.** Load was escalated from nothing to four large glass panels over a
+full-screen blur refreshed every single frame. The frame rate fell continuously — 60, 45, 36, 24,
+19 — and nothing else changed: no crash, no freeze, no thermal event, no discontinuity anywhere on
+the curve. The set simply runs slower.
+
+The only edge that matters is the **60 fps boundary**, and it sits at about **7.8 ms of extra
+work** — roughly a quarter of the screen in poster cards. For glass the same boundary is better
+stated in its own terms: **a blurred region of about 300,000 pixels**, which is a panel of roughly
+450x300 or anything smaller, kept together with any other glass in the frame.
+
+**What binds is shader arithmetic — not memory, not the CPU, not the display.** Four independent
+measurements say so:
+
+* Frame time tracks the GPU's **arithmetic instruction count**, exactly: every leg's extra GPU
+  cycles equal its extra arithmetic words divided by two (there are two shader cores, each retiring
+  one word per cycle). The relationship holds within 10% across a 5x range of load.
+* The arithmetic pipe is already **89.6% occupied on a plain Home frame**, and glass pushes it to
+  **92.8%** (a quarter-screen panel) and **95.8%** (full screen). There is almost nothing left.
+* **External memory traffic does not rise with glass at all** — a full-screen glass panel *reduces*
+  external reads slightly while adding 157% to GPU cycles. Bandwidth is not the wall.
+* When the frame overruns, the time is spent **inside the app's own drawing calls** (the driver
+  blocking on a busy GPU), not waiting at the display hand-off, which stays at 0.2–0.4 ms
+  throughout. The CPU-side work — input, data, layout — never appears.
+
+Per-pixel arithmetic, measured directly:
+
+| | arithmetic words per pixel | GPU cycles per pixel |
+|---|---|---|
+| a gradient or scrim | ~0.004 | 0.025 |
+| flat photograph | 1.94 | 1.12 |
+| poster card | 6.12 | 3.35 |
+| **backdrop glass** (its composite plus its frost sheet) | **14.77** | **7.41** |
+
+(The card and photograph figures were arrived at independently, by a different person on a different
+scene with a different instrument, as 5.86 and 1.99 words per pixel. Two methods agreeing to 5% is
+why these are worth quoting. The gradient row is that other measurement's.)
+
+**The design reading:** the price of an effect on this television is the number of *maths
+operations per pixel* its shader performs, multiplied by the pixels it covers. Blur-and-refract is
+the most arithmetic-heavy thing in the app. Gradients, scrims and flat fills are, by comparison,
+free — the app's existing washes and ramps cost 0.025 cycles per pixel, three orders of magnitude
+below glass. **If an effect can be expressed as a gradient, it is free. If it has to sample its
+background and bend it, it is not.**
+
+---
+
+## 7. Was the 50 fps thermal? No — and the earlier reading was an instrument artefact
+
+The record carried a worrying claim: the same scene had been seen at 60 fps early in a session and
+50 fps late in it, with no workload change, which would mean the frame budget design gets to spend
+is set by the enclosure rather than by the renderer.
+
+**That is not what this set does.**
+
+* The control leg — Home with the grid scrolling, repaint-skipping off — measured **60 fps, with a
+  minimum of 60 and a maximum of 60**, in every run, across a session in which the set had already
+  been up **1 h 42 m** when the first measurement ran and **2 h 15 m** when the last one did, under
+  continuous load from five agents throughout.
+* Within each 2-minute run the drift (last third minus first third) was **0.00 to 0.50 fps** on
+  every configuration, loaded and unloaded alike. Nothing decays.
+* The same configurations reproduce across runs taken 40 minutes apart: 608x396 glass at the
+  then-shipped period-3 cadence measured 45 fps in five separate legs, and the control read 60 in six.
+
+**Where the 50 came from.** Turning on the GPU counter profiler drops the *control* leg from 60 fps
+to 45 and compresses every leg toward the middle — it inserts a full pipeline drain at each frame
+boundary, which costs a cheap frame ~5 ms and an expensive one nothing. The archived "50 fps in all
+three legs" numbers came from profiled runs. **Frame rates read off a profiled run are not frame
+rates**; they belong to the instrument. This note's fps figures were all taken with both profilers
+disarmed.
+
+**Confidence, stated honestly.** I could not take a genuinely cold measurement — the set had been
+running for hours and other agents were using it continuously, and it exposes **no temperature
+sensor and no GPU clock at all** (there is no thermal zone and no frequency node anywhere in its
+`/sys`; this was checked, read-only, at the start and end of every batch). So I cannot say what a
+set that has been off overnight does. What I can say is that **a set this warm shows no decay and
+holds a clean 60**, which removes the reason to design against a 50 fps ceiling.
+
+---
+
+## 8. Does the shape of a glass surface change its price?
+
+The tab bar (87,000 px) costs what a 241,000 px panel costs, while a 135,000 px panel is free. Area
+alone does not explain that, so it was tested directly: three glass surfaces of the **same area**
+(~87,000 px) and different shapes, with the refresh turned off entirely so only the per-frame
+composite is being measured.
+
+| surface | area | region blurred | refresh | fps |
+|---|---|---|---|---|
+| — none — | 0 | — | — | **60** |
+| 1148 x 76 (a bar) | 87,248 | 334,000 | never | **60** |
+| 295 x 295 (a square) | 87,025 | 222,000 | never | **60** |
+| 600 x 145 (in between) | 87,000 | 249,000 | never | **60** |
+| 1148 x 76 (a bar) | 87,248 | 334,000 | every 3rd | **46** |
+| 295 x 295 (a square) | 87,025 | 222,000 | every 3rd | **60** |
+
+**Shape costs nothing.** All three shapes are free when the backdrop is not refreshing — the glass
+material charges by pixels covered and does not care what outline they form.
+
+**The blurred region is everything.** The same two surfaces, once the backdrop starts refreshing:
+the square (222,000 px of region) stays at 60, the bar (334,000 px) falls to 46. A wide thin control
+pays for a rectangle far larger than itself, because the renderer must blur 88 pixels beyond every
+edge for the glass rim to have something to bend.
+
+**Two rules fall out of this, and they are the ones most likely to change a layout:**
+
+1. **Compact glass is cheap glass.** Prefer a chunky panel to a long thin strip. A strip's cost is
+   set by its *length* — 1148 + 176 = 1324 pixels of region across — not by its area. This is the
+   same rule as "keep glass together" (§3.1) seen from inside one surface instead of between two.
+   **This rule was written on the capture path and the direct path WEAKENS it** — the region term is
+   now about 4x cheaper (§3.1's banner), so "not by its area" stops holding once the area is large.
+   The three rows above are all ~87,000 px of surface, which is the only area this section ever
+   measured; §11 measures one at 410,880 and the area is what binds there. Read this rule as "a long
+   thin strip pays for a region it does not cover", which is still true, and not as "area is free".
+2. **The shipped tab-bar glass is affordable exactly when the page under it is still.** Over a
+   settled screen it is free; over a scrolling grid it costs 60 → 46 fps. That is a real design
+   choice, not a bug: the bar is glass while you are reading, and expensive only while you scroll.
+
+---
+
+## 8b. Where this material may be used — decided by looking, 2026-08-19
+
+Everything above prices glass. This section is the one thing in the note that is not a
+measurement: it is a design decision, taken in front of the television, and it overrides any
+number here.
+
+**The tab-track glass was looked at and rejected, twice, and the second time settles it.** It was
+never a cost problem — the track's blurred region is 728x200, comfortably inside the 60 fps budget.
+
+### The first rejection was made on a broken picture
+
+Read this part before quoting anything from the version of this section that stood between
+2026-08-19 morning and evening. It described the glass track over a poster grid as *mottled, with a
+warm rim and a halo around the selection capsule*, and reported that a density sweep only cleared
+the mottling at 0.70 — "at the density this content needs, the glass has stopped being glass."
+Every one of those observations was real. All of them were artefacts of two bugs in what the
+material was being handed, not properties of the material:
+
+1. **The source pass drew the wrong page.** `app.rs` reached the direct-blur hook only from the
+   Home arm of the route dispatch, and the closure it handed over called `home_draw` whatever the
+   route actually was. So on the Library and on Search the tab track blurred **Home** — a hero from
+   a screen the user had left. Measured in the simulator on the Library: page ground `(44,44,46)`,
+   "glass" track `(72,77,59)`. A band whose entire job is to DARKEN came out 1.6x brighter than its
+   own ground, and green, on a screen with nothing green on it. That is the mottling and the warm
+   rim.
+2. **The track drew itself into its own backdrop.** The direct path renders the page again into a
+   small FBO, the page includes the tab row, and the row was drawing its FLAT capsule
+   (`scrim_black(0.72..0.82)`) plus the pill labels into the very snapshot the glass row was about
+   to sample. So the material darkened twice. Measured on Home over a UNIFORM hero (220,255,163
+   across the whole span, above and below the bar): flat track `(52,60,38)`, glass track
+   `(33,38,26)`. The lighter material came out darker than the thing it replaced — and the
+   selection capsule, a translucent white plate tuned against near-black, was floating in a patch
+   of that doubled scrim, which is the halo. **The density sweep that "cleared at 0.70" was paying
+   for the doubling twice.**
+
+Only the DIRECT path could have bug 2, which is why it appeared when that path became the default:
+the capture path grabs framebuffer 0 from inside the glass surface, i.e. after the page and BEFORE
+the bar, so the track was never in its own snapshot there.
+
+Both are fixed. The route dispatch draws the route's own page in both passes, and `draw_tab_row`
+returns without drawing whenever it is a blur source AND would have worn glass. Over a uniform
+hero the track now measures `(129,150,96)` — exactly `0.58 x 220`, which is what the arithmetic
+says a black scrim at .42 over that ground should be.
+
+### The second rejection was arithmetic about a CONSTANT, and the constant was the mistake
+
+With an honest picture the question can be asked properly: **what density do the track's idle labels
+need?** They are `TEXT_TERTIARY` over whatever a hero happens to be. Against the worst case a
+photograph can be — white — the ground under them is `1 - a`:
+
+| a | tertiary contrast | | a | tertiary contrast |
+|---|---|---|---|---|
+| .34 (the design's value) | 1.21 | | .62 | 2.17 |
+| .50 | 1.39 | | .67 | 2.64 |
+| .56 | 1.73 | | **.72** | **3.23** |
+
+The bar is **3:1** — the same one `widgets`' ambient-ground test holds a wash to, and the same
+arithmetic that put `SCRIM_TEXT_A` and `TAB_TRACK_A_TOP` at .72 in the first place. So a single
+number that has to work everywhere is the flat track's own, and the reason is the fact this note
+keeps arriving at: **a blur removes DETAIL, not brightness.** A quarter-res Kawase of a white poster
+is still white. At .72 the two materials are the same picture but for a rim, and the glass one
+spends most of the frame's budget on a bar that stands on three screens. That verdict stood for a
+day and it is correct — **for a constant**.
+
+**A hero is one picture at a time, not every picture at once.** The density does not have to survive
+the worst backdrop the library contains; it has to survive the one on the panel. Solved per frame
+(`widgets::track_alpha_for`) it sits at the design's floor on a dark hero, walks up only as far as
+the ground makes it, and the ink never moves — which matters, because the ink is what the row's
+hierarchy is made of. Brightening the idle label instead was the alternative and it is priced: one
+step (tertiary → secondary) buys 11 points of transparency and costs **36% of the idle:selected
+separation**, two steps buys 17 and costs half of it.
+
+The ground has to be the PIXELS. Five taps under the bar, every thirtieth drawn frame, from
+framebuffer 0 before the bar draws — a readback stalls a tiler, which is exactly why the rate is
+low: a hero holds for eight seconds and a scrim density has no business changing faster than the
+picture does. Measured on the panel with `homeosc` running, the frame rate is unchanged.
+
+**The cheap sources are the wrong colour, and this cost an iteration.** Plex's `UltraBlurColors` are
+a derived muted palette for an ambient wash: for the hero whose top edge measures (0.00, 0.68, 0.91)
+on the panel they report **(0.30, 0.23, 0.18)**, so the bar stayed at its floor and nothing changed.
+The wash's own corners lean only 26% toward the art and have the same problem.
+
+Photographed proof rather than only sums: over six real heroes in the simulator and three on the
+set, the bar is transparent on the dark ones and takes .562 on the bright cyan that used to drown
+its labels.
+
+**What ships:** the glass track, with `/tmp/plxnative-flattabs` for the comparison,
+`/tmp/plxnative-tabglassdim` to pin the weight by hand and `/tmp/plxnative-groundlog` to print what
+it read and what it chose. The Account popover uses a cached backdrop and a one-copy full host
+`FrameCache`; its menu animation no longer redraws or dynamically resamples Home underneath.
+
+**Profile chip correction (2026-09-01) — SUPERSEDED 2026-09-02.** The chip is glass again (`widgets::chip_capsule`, a round surround at rest), the band is priced as the union of both surfaces, and the regression this paragraph blames on the second surface was `fs_ambient.frag`'s dither hash; the record is `docs/backdrop-blur-profiling.md`'s 2026-09-02 section, and the numbers below describe a since-retired configuration. Making the always-visible 76px account surround a second
+backdrop owner looked local but was not local in the renderer: the shared capture is a rectangle.
+On the device the track's `728×220` snapshot became `1316×220` once the far-left chip joined its
+union. In uninstrumented interleaved `home-grid` runs, removing only that request raised median
+presented FPS from 34–35 to 42; the HWCNT trace confirmed the live region returned to `728×220`.
+The chip now reproduces the track's solved frost and rim with one local rounded-rect pass. The
+centred track is the band's only backdrop owner; the visual surround remains at rest and unfurls
+with the profile name exactly as before.
+
+### What the material costs, in counters (2026-08-19, the shipped default)
+
+An A/B on `fps:home-grid`'s own scene (`homeosc`, the busiest UI scene the suite has), both legs
+with `/tmp/plxnative-hwcnt=frame.ui` armed so the profiler's own overhead cancels. ~1,160 frames a
+leg, 20 discarded.
+
+| counter | flat track | glass track | delta |
+|---|---|---|---|
+| **GPU_ACTIVE** | 9,692,137 | 10,561,071 | **+868,934 (+9.0%)** |
+| JS0_ACTIVE (fragment) | 9,614,472 | 10,337,421 | +722,949 (+7.5%) |
+| JS1_ACTIVE (vertex) | 159,644 | 212,571 | +52,926 (+33.2%) |
+| FRAG_ACTIVE | 19,200,288 | 20,597,971 | +1,397,683 (+7.3%) |
+| **FRAG_NUM_TILES** | 4,069 | 4,859 | **+790 (+19.4%)** |
+| FRAG_QUADS_RAST | 1,877,341 | 1,909,764 | +32,423 (+1.7%) |
+| ARITH_WORDS | 17,353,808 | 18,158,805 | +804,997 (+4.6%) |
+| TEX_WORDS | 4,566,131 | 4,840,835 | +274,704 (+6.0%) |
+| SHADER_AXI_BEATS_READ | 684,440 | 818,272 | +133,832 (+19.6%) |
+
+Read it this way. **The extra 790 tiles are the chain's own passes** — the quarter-res target, not
+the bar — which is why the quad count barely moves (+1.7%) while the tile count jumps a fifth. The
+work is fragment-side and the memory traffic is the snapshot being written and read back (external
+read beats +19.6%); nothing about the visible bar got more expensive.
+
+Against the frame budget — **(646M, 693M] GPU_ACTIVE cycles/second**, i.e. 10.77M–11.55M at 60 fps:
+
+| | cycles/frame | of the 60 fps budget |
+|---|---|---|
+| flat | 9,692,137 | 84–90% |
+| glass | 10,561,071 | **91–98%** |
+
+**It fits, and the headroom is thin.** This is the worst UI scene in the suite, and the material
+leaves between 2% and 9% of the frame. That is the number to quote at anyone proposing a second
+glass surface anywhere on Home, the Library or Search — the answer is arithmetic, not taste, and it
+is no.
+
+Pacing from a separate UNARMED run: `./tests/run.py --fps` is **14 of 14** with glass as the
+default, `home-grid` at a median 57 fps and `home-idle` still stopping at a ceiling of 1 — the
+material does not defeat the present gate, because the ground sampler only runs when the bar draws.
+
+### What this means for a screen you are designing
+
+Backdrop glass is not a universal material here, and the dividing line is not "photographic vs
+not" — it is **how much ink you need on top of it**. A panel carries a page of copy at
+`TEXT_PRIMARY` and holds it at 72% frost. A 76px band whose labels are the dimmest ink in the app
+has no room to be transparent at all. If a surface needs glass, give it ink that can survive its
+own ground, or accept a scrim so heavy that the material stops being visible — those are the two
+honest ends, and the tab track is the case that proves there is nothing useful in between.
+
+One option is NOT ruled out by any of this, and it is the one worth designing rather than arguing:
+a track whose scrim alpha is chosen **from its own snapshot's luminance**, so the composite lands
+on the legibility floor whatever is behind it — dark artwork gets a transparent bar, a white sunset
+gets an opaque one, and the ink never moves. The app already thinks this way about grounds
+(`AmbientWash::keyed` caps corners under 0.42 luminance). It is a new mechanism, not a retune, so
+it is written down here rather than built.
+
+## 9. How this was measured
+
+**The instrument.** A load dial (`rust-modules/ui/src/glassload.rs`, `/tmp/plxnative-glassload`)
+draws N surfaces of a chosen size and kind — backdrop glass, poster card, or flat photograph — over
+the real Home screen, at a chosen blur-refresh cadence. It **cycles its own configurations on a
+timer inside one launch**, six seconds each, repeating for the length of the run. That is not a
+convenience: the correct way to compare legs on a television that may drift is to interleave them,
+and a dial that has to be re-armed between legs makes that a deploy per leg. Every heartbeat and
+every counter sample is stamped with which configuration was live, and
+`tools/analyze-loadsweep.py` splits one log into per-configuration distributions after the fact.
+
+**The runs.** Six locked device batches on 2026-08-19 (the television is shared, so each batch was
+a deploy plus its measurements inside one lock — a deploy in one lock and a measurement in another
+would be measuring somebody else's binary). Fifteen measurement legs across eleven distinct sweeps,
+6-second steps, 2–4 full cycles each, 8–16 usable heartbeat samples per configuration after
+discarding the two seconds around every step change. Scene throughout: Home, focus sweeping the grid
+continuously (`plxnative-homeosc`), repaint-skipping disabled (`plxnative-noidle`), so every
+configuration saw the same moving underlay and presented continuously.
+
+> **The `/tmp/plxnative-…` paths in the recipe below predate the two-install split: they are the
+> STABLE install's runtime root.** A flavoured install puts the same names under `$(make -s
+> print-rundir FLAVOR=<f>)` — `/tmp/com.beb.plxnative.debug` at the tracked `FLAVOR ?= debug`
+> default — so armed as bare `/tmp/…` the sweep never reaches the install `make run` launches, and
+> the row reproduces as its own unloaded control. See `docs/two-installs.md`.
+
+**To reproduce any row.** Arm `/tmp/plxnative-token`, `/tmp/plxnative-noidle`,
+`/tmp/plxnative-homeosc`, and put a sweep in `/tmp/plxnative-glassload` — for example
+`hold=6;off,1x608x396@3,1x1920x1080@3` — then `make run RUN_SECS=128` and read the log with
+`tools/analyze-loadsweep.py`. The transition prototype is `/tmp/plxnative-navblur` (`1p:3` pins it
+for a capture, `1:3` rides a real route change, `2:3` gives the upper surface its own cache). Both
+triggers are absent from a `RELEASE=1` build.
+
+**Reproducibility.** The control read 60 fps in six independent legs. 608x396 glass at the measured
+cadence read 45 fps in five. The area curve reproduced identically — 60/45/36/24/19/19 — in two
+separate runs eight minutes apart, one of them additionally instrumented with the frame-drop
+detector. Within-leg spread was 0–1 fps on almost every configuration, and per-leg drift (last third
+minus first third) was 0.00–0.50 fps.
+
+**Attribution.** One counter run (Mali hardware counters, whole-frame, ~600–900 samples per
+configuration) supplied §6's per-pixel arithmetic and the cycles-equal-arithmetic-halved
+relationship. Counter runs were never used for frame rates, for the reason §7 gives.
+
+**Two things every leg now reports, and both were added because a claim about them turned out to be
+wrong.** Each run logs the region it actually blurred (`blur_config … aligned=`), because the region
+is the thing that cannot be recovered afterwards and it is what this whole note is indexed on; and
+each heartbeat carries `snap=`, the blur refreshes actually taken that second, because "it refreshes
+every third frame" is a claim about code until it is a number in a log. The measured refresh rates
+came out at exactly presents ÷ 3 in every synthetic leg.
+
+**Corrections made along the way.** The dial's own layout is unit-tested so a configuration that
+does not fit on screen reports what it actually drew rather than what was asked for; the log line
+names the drawn count and drawn area for every step. A first attempt at the surface-count question
+grew the blurred region along with the count and would have blamed area on count — the sweep was
+rebuilt to hold the footprint constant. And the largest correction of all is §3.4: a row of this
+table was named after the Account panel's *blurred region* and drawn as a *panel*, which made the
+shipped surface look 15 fps more expensive than it is. It was caught by two other agents measuring
+the real thing and disagreeing, and settled by putting the real thing and the synthetic one on the
+same dial in the same launch.
+
+---
+
+## 10. What I could not measure — treat as unknown, not as free
+
+* **A cold television.** No temperature sensor and no clock are exposed, and the set was warm and
+  busy throughout. §7 shows no decay over hours of continuous load, which is strong, but a
+  from-standby comparison was not possible.
+* **How much room is left inside the 8.9 ms base frame.** That figure is an inference from the card
+  ramp, good to about ±1 ms. It is not a direct measurement, and it is specific to Home with the
+  grid moving; other screens will differ, probably downward (Home's hero photograph is the single
+  most expensive object in the app).
+* **Whether 27 fps for 210 ms looks acceptable.** That is a judgement about motion on a panel, and
+  no number in this document settles it. It needs a person in front of the television.
+* **The quality of a cheaper blur.** A coarser blur source is available and costs less to refresh,
+  but its appearance next to the current one has never been graded on the panel, so "make it cheaper
+  by blurring more crudely" is not yet a supported option. It would in any case only help the
+  refresh, and §3.2 shows the refresh is the smaller half of the bill.
+* **Why refreshing every second frame is worse than refreshing every frame.** The slot model in §3.2
+  accounts for the shape of the cadence curve but not for that specific inversion, which reproduced
+  in two runs. It is a real effect and it is unexplained; do not build a plan on any cadence's exact
+  number without re-measuring it.
+* **How a cycle count relates to a frame rate.** §3.4 shows a pair of archived cycle figures reading
+  as "a second glass surface is nearly free" while the frames say it is the expensive one. Both were
+  measured honestly; they are different currencies, and no conversion between them has been
+  established on this hardware. Take costs from frame-rate measurements and use cycles only to say
+  where inside a frame the work sits.
+* **Any configuration below the 60 fps line.** Six rows in this document read "60 fps", which means
+  only "it fits". Their true cost could be anything from nothing up to the full 7.8 ms, and the
+  headroom they consume is invisible until something else is added. If a design stacks two such
+  things, measure the pair; do not assume two free things are free together.
+* **The capture path against the direct path, on one surface.** §11 shows §3.1's region law badly
+  over-charging a real surface and attributes it to the direct source path's quarter-scale
+  re-render. Nothing forces the capture path at runtime, so the two could not be run as legs of one
+  A/B; the attribution is arithmetic over the chain in `gfx.rs` (`region × 1.75` against
+  `region × 7/16`), and only the refutation itself is measured. **The size of the discount is the
+  part to distrust** — this said "about sevenfold" while the chain says about four, because the
+  first reading counted the scene render and forgot the up pass. Count all three passes, or measure.
+* **The composite term at any size worth worrying about.** §8 measures it once, at ~87,000 px, where
+  it is free; §11 reasons about it at 410,880 and never isolates it. Nothing in this document
+  measures a large glass SURFACE with its backdrop refresh switched off, which is the one leg that
+  would settle it — and on the direct path that is now the term most likely to be binding.
+* **Anything about the player.** Every measurement here is on browsing screens. The player draws
+  almost nothing, has no glass, and cannot have any (§4.4).
+* **Screens other than Home.** The library grid, the detail page and Search were not swept. The
+  per-pixel prices in §3.4 should carry across, since they are properties of the shaders rather
+  than of a screen, but the base frame each screen starts from was not measured.
+* **The real tab bar in its real position.** The transition prototype's capsule stands in for it at
+  the true height and place but a fixed width, and it is composited *over* the page where the real
+  strip is drawn *inside* it. The costs are representative; the exact pixels are not.
+
+---
+
+## 11. The scroll band as glass — built, measured, refused (2026-08-21)
+
+> **The element this section is about no longer exists, and cannot be re-armed.** `nav_scrim`, the
+> `nav_glass_*` family and the `/tmp/plxnative-navglass` trigger were all DELETED on 2026-09-05,
+> when Search became one scrolling document and left the band with no caller at all (the Library had
+> stopped drawing one the same day). `git log -S nav_scrim` and the retirement note in
+> `rust-modules/ui/src/widgets.rs` are the recipe; reproducing any of this needs the band REBUILT on
+> a screen with fixed top chrome, and no route has one today. **What survives is the verdict and its
+> numbers, which is the durable half — read on for those, and read every "arm the trigger"
+> instruction below as history.**
+
+**The idea.** `widgets::nav_scrim` was the one grey fade in the app on a scrolling surface: an opaque
+`SURFACE_APP` floor from y=0 to the bottom of the top chrome, then a two-stop ramp out to where the
+caller's content began. Two screens drew it — the Library grid (chrome to 186, content at 214) and
+Search (208 and 248). The obvious improvement was to make it a **frosted material** instead, so a
+poster scrolling under the bar blurred rather than dissolving into flat grey.
+
+It was built (`/tmp/plxnative-navglass`, `widgets::nav_scrim`'s glass path — the same three bands at
+`NAV_GLASS_FROST` 0.62 of their weight, over one `Glass::DYNAMIC_BACKDROP` surface), it worked, and
+it did not ship. **The trigger stayed off, and is now gone with the element.**
+
+### What the arithmetic predicted, and why that prediction is WRONG
+
+Indexed on §3's region law this looked hopeless before it was built. The band is the full width of
+the panel, so grown `BLUR_MARGIN` 88 a side and clamped it prices at **1,920 x 302 = 579,840 px²**
+on the Library and **1,920 x 336 = 645,120** on Search, against a `GLASS_REGION_BUDGET` of 300,000
+— roughly twice over, which §3.2's table puts at **45 fps at best and more likely 36**. (Both
+figures were a host test, `widgets`' `the_scroll_band_is_twice_the_glass_region_budget_on_both_screens`,
+until it was deleted with the element it graded on 2026-09-05.)
+
+**Measured, it is 58 fps, not 45.** The region law over-charges this surface badly, and the reason
+matters more than the row: **§3's whole table was measured on the CAPTURE path** —
+`glCopyTexSubImage2D` of the region at full resolution, then its reductions — and the **direct
+source path** has been the default since. That path renders the page a second time into a
+quarter-scale target. Treat §3.1's px²→fps table as **specific to the capture path**; it is still
+the right instrument for the shape of the question and the wrong one for the number.
+
+**But not by a factor of sixteen, and the difference decides the next design.** An earlier draft of
+this section said the region term "is charged at `region / 16` and very nearly falls out", reasoning
+from the scene render alone. Read the whole chain out of `gfx.rs` and that is one pass of three:
+
+| | capture path | direct path |
+|---|---|---|
+| origin | full-res copy of the region — `region` | scene render at 1/4 per axis — `region / 16` |
+| reduction | one, to half res — `region / 4` | none |
+| two Kawase taps | at half res — `2 × region / 4` | at quarter res — `2 × region / 16` |
+| up pass | none (`BLUR_UP_PASS` is `REDUCTIONS >= 2`) | always, to half res — `region / 4` |
+| **total** | **`region × 1.75`** | **`region × 7/16`** |
+
+**About 4x, not 16x** — the up pass alone is `region / 4` and is the largest thing the direct path
+writes. Four is also the number `blur_direct_scale`'s own note gives from the television ("4.5x
+cheaper gross and 5.8x cheaper net"), arrived at independently, which is the only corroboration
+available. (The path comparison is still INFERRED rather than A/B'd: no trigger forces the capture
+path, so the two could not be run as legs. What is measured is that §3.1's prediction does not hold.)
+
+### What to index on instead
+
+Discounting the region 4x does not make a surface free, and the term left standing is the one §3.1
+never varies: **the composite** — `fs_glass` over the surface itself, at full resolution, on every
+presented frame, discounted by nothing on either path. §8 is the only measurement of it, at ~87,000
+px, where it is free. This band is **410,880 px** on the Library (1920 x 214 on the panel), 4.7x the
+largest area §8 ever measured, and that is where the two frames went. Worked through, per frame:
+
+| term | control (tab track alone) | with the band | delta |
+|---|---|---|---|
+| direct source chain (`region × 7/16`) | 334,000 → 146,000 px | 579,840 → 254,000 px | +108,000 |
+| composite (surface, 1:1) | 87,000 px | 87,000 + 410,880 px | **+411,000** |
+
+**Four fifths of the added fragment work is the composite**, and it is the heavier shader of the two.
+So the pricing rule for a new surface on the direct path is **area first, region second** — the
+reverse of §3.1's order and of §8's rule 1, both of which were written when the region was 4x dearer
+and no surface bigger than 87,000 px had been tried. This is arithmetic over the shipped chain plus
+§8's own composite row, not a fresh measurement; what is measured is the 58 fps and the distribution
+below, and they are consistent with it.
+
+### What it actually costs
+
+Scene: the real screens, `plxnative-noidle` armed so the app presents continuously (the fps scenes'
+oscillators settle between steps, so their `fps=` is a duty cycle and not a fill rate), both
+profilers disarmed, 30 s per leg, first 5 samples dropped. **Two independent runs of every leg**,
+which reproduced to within 0.1 fps of mean.
+
+| screen, moving | leg | fps median | fps mean | fps min | loop median |
+|---|---|---|---|---|---|
+| Library grid, `libosc` | control | **60**, 60 | 60.1, 60.1 | 60, 60 | 60, 60 |
+| Library grid, `libosc` | **glass** | **58**, 58 | 57.1, 57.0 | **54**, 54 | 58, 57.5 |
+| Search, `searchosc`, query `th` | control | **60**, 60 | 60.0, 60.1 | 60, 60 | 60, 60 |
+| Search, `searchosc`, query `th` | **glass** | **59**, 59 | 58.3, 58.2 | **55**, 55 | 58.5, 58 |
+
+**The control is a flawless 60.0 with a minimum of 60 in every leg**, which is what makes two frames
+per second a signal rather than noise: there is no spread on the other side of the comparison to
+hide in.
+
+**Where the two frames go — the frame-time distribution.** `/tmp/plxnative-framedrop=17` logs every
+frame over 17 ms with its phase breakdown, and takes no `glFinish`, so unlike `plxnative-profile` it
+does not move the pacing: its own legs reproduced the unarmed fps figures above exactly (60.0 / 58.0
+median). Library grid, 24 s a leg:
+
+| frames over 17 ms | control | glass |
+|---|---|---|
+| count | 272 (11.3/s) | 367 (15.3/s) |
+| median | 17.4 ms | **22.6 ms** |
+| p90 | 19.3 ms | **25.6 ms** |
+| **≥ 20 ms** | **13** | **206** |
+| **≥ 25 ms** | **3** | **120** |
+| ≥ 32 ms (a doubled vsync) | 2 | 5 |
+| mean `draw=` of those frames | 17.3 ms | **21.1 ms** |
+| heartbeat `worstframe=`, per second | 18.8 – 20.6 ms | **24.7 – 33.4 ms** |
+
+**That is the answer, and it is not the median.** The material adds about **3.8 ms to a heavy
+frame**, which the median frame absorbs and the heavy ones do not: frames past 20 ms go from 13 to
+206 in the same 24 seconds, past 25 ms from 3 to 120 — five a second — and **every single second's
+worst frame moves from ~19 ms to ~26 ms, with two seconds hitting 33 ms**, a whole dropped vsync.
+On a screen whose one job is a smooth scroll, and which today holds a hard 60 with nothing over
+20.6 ms, that is judder you have bought.
+
+### The existing fps scenes PASS, and quoting them would have been the mistake
+
+Run both ways (whole UI tier, 14 scenes, `plxnative-navglass` added to the two scroll scenes):
+
+| scene | control | glass | its gates |
+|---|---|---|---|
+| `fps:library-scroll` | fps median **56** (min 24, max 61), loop robust_min 60 | fps median **50** (min 24, max 57), loop robust_min 56 | `fps_floor` 25, `loop_floor` 50 |
+| `fps:search-type` | fps median **40** (min 18, max 61), loop robust_min 60 | fps median **35** (min 17, max 60), loop robust_min 57 | `fps_floor` 20, `loop_floor` 45 |
+
+**14 of 14 passed in both legs.** Nothing in the suite fails with the material on — and that is a
+statement about the suite, not about the material. Those floors were chosen as frozen-versus-running
+discriminators (the manifest notes say so: "a FROZEN animator reads ~0.5/s… 25 separates them by a
+wide margin"), and they sit at 45% of the healthy median precisely so a duty-cycled oscillator
+cannot flap them. **A gate with that much slack cannot answer "does this lag."** The instrument that
+can is the one above: continuous presents, and the frame-time distribution rather than a rate.
+
+### Two more things the build settled, both by looking
+
+* **On Search the material has almost nothing to show.** The opaque chrome floor is the scope
+  line's bottom at about 262 px — the tab strip, bare query run and scope — and the result shelves
+  were scissored at `CHROME_BOTTOM`, so the only live content behind the band was the 38 px ramp
+  between that floor and `CONTENT_TOP` 300. (Neither the scissor nor that constant exists now:
+  Search unpinned its head on 2026-09-05, the cut went with the band, and `CHROME_BOTTOM` was
+  renamed `HEAD_BOTTOM` for what is left of it.)
+  Photographed on the panel: the Library band frosts real posters, and the Search band is flat grey
+  with a veiled shelf heading at its bottom edge. Search would be paying the full bill for a blur of
+  the app's own ground.
+* **A blur cannot ramp, so it needs an edge somebody drew.** The grey treatment fades out over 28 px
+  (Library) or 40 (Search); the material cannot, because the surface has one blur radius and the
+  scrim over it is the only thing that can gradate. The prototype ends the blur at `content_top`
+  with `GlassRim::Standing`'s chamfer and lens. It reads acceptably, but it is a hard line across the
+  middle of a moving grid where today there is a fade, and it is a *second* design question that
+  would have to be answered before anything like this could ship.
+
+### If somebody proposes this again
+
+> **The `/tmp/plxnative-…` paths below are the STABLE install's runtime root**, as in the section
+> above: a flavoured install puts the same names under `$(make -s print-rundir FLAVOR=<f>)` —
+> `/tmp/com.beb.plxnative.debug` at the tracked `FLAVOR ?= debug` default — so armed as bare
+> `/tmp/…` not one of them reaches the install `make run` launches. See `docs/two-installs.md`.
+
+**This is the recipe as it stood, and it can no longer be run.** `/tmp/plxnative-navglass` was
+deleted with `nav_scrim` on 2026-09-05: the Library's one-scroll rewrite took that screen's fixed
+toolbar and the band with it, Search followed the same day, and an element with no caller was
+retired rather than kept warm. Arming the trigger today does nothing, which reads as a broken
+trigger and is not one — there is no trigger. The measurement above stands on its own; only its
+reproduction is gone, and getting it back means rebuilding the band on a screen with fixed top
+chrome.
+
+It was: `plxnative-noidle` + `plxnative-search=<a query the library matches>` +
+`plxnative-searchosc` (+ `plxnative-navglass`), `make run RUN_SECS=30`, and separately
+`printf 17 > /tmp/plxnative-framedrop` for the distribution.
+
+**Take both numbers, and know which one each answers.** `worstframe=` is the EXPLANATION — it is
+where the two frames went, and it is what a median hides. `fps=`, and specifically its **minimum**,
+is what says a present was actually dropped. A draft of this line said worstframe alone decides,
+and the control leg in the table above refutes it: **worstframe reaches 20.6 ms there while `fps`
+never leaves 60**, because the swap chain is deep enough to absorb an occasional long iteration
+without missing a present. Deciding on worstframe alone would refuse changes that cost nothing.
+What made the case here is that BOTH moved together — the distribution shifted (13 frames past
+20 ms became 206) *and* fps fell 60 → 58 with its minimum 60 → 54.
+
+**The verdict is the owner's rule applied to a measurement: it lags, so it does not go in.** Not
+because it is unaffordable — it is far cheaper than this document predicted, and that correction is
+the durable half of this section — but because the two screens it would live on currently hold a
+perfect 60 with no frame over 20.6 ms, and it spends that.
+
+(Everything above was measured against the tree of 2026-09-02, when `nav_scrim` had two callers.
+By the end of 2026-09-05 it had none — the Library became a single document with no fixed bar, then
+Search did — so the element and its trigger were deleted, and the photograph of it frosting real
+posters belongs to a screen nobody can boot. The verdict is unchanged and Search's half of it was
+already the decisive one: it paid the full bill for a blur of the app's own flat ground. If a route
+ever grows fixed top chrome again, this section is the reason to price the band before drawing it.)
+
+---
+
+## 12. The episode tile's label band as glass — measured, and the cheaper idea it points at (2026-09-05)
+
+**The idea.** The reference client draws a still's label on a blurred strip across the bottom of the
+card rather than on a black gradient, so the artwork under the label is dimmed rather than hidden
+and the label can sit lower. The owner asked what it would cost, with a photograph of Apple TV's
+Continue Watching row. `/tmp/plxnative-tileglass` is that build — the same band height, the same two
+lines, the same bar; only the GROUND changes, so an A/B between two runs is the material and not a
+second layout.
+
+**Measured on the dev set, TV Shows library, `plxnative-libosc` sweeping the document, 44 s a leg.**
+Eight stills on screen across two shelves, which is what the screen actually holds.
+
+| leg | min | median | max |
+|---|---|---|---|
+| control — the black scrim | 59 | **60** | 61 |
+| `plxnative-tileglass` | **42** | **56** | 61 |
+
+**It is what §8 predicts, for once, and the shape is the whole reason.** A per-tile band is a wide
+thin strip, the worst shape this hardware has (§8: a single 1148x76 bar falls to 46 once its
+backdrop refreshes), and a ROW of them spread across the panel unions into one full-width band —
+"how many glass surfaces you draw is free, WHERE you put them is not". Two shelves' worth of bands
+unions vertically as well, so the blurred region is most of the content area. And unlike every
+other glass surface in the app this one cannot be cached at all: its backdrop is artwork that moves
+with the shelf, so the blur refreshes on every changed present by construction.
+
+The spread is the tell. It is not a steady 56 — it is 60 while the oscillator is between steps and
+42 while it moves, which is the same "affordable exactly when the page under it is still" §8 records
+for the tab-bar glass, at a much larger region.
+
+**The cheaper idea, and the one to try next.** The owner's own follow-up: *"I thought of a fading
+blur that can be added for image during its rendering in one pass."* That is a different cost class
+entirely — not a backdrop surface at all, so no framebuffer grab, no blur chain, no region union
+and no cadence. The tile's own fragment shader already composites artwork + rim + shadow in one
+pass (`fs_img.frag`), and `fs_hero.frag` is the precedent for folding a scrim field into that same
+pass. A band whose sampling blurs on a vertical ramp would be charged as ORDINARY FILL over the
+band's own pixels — §1's ~4 ns/px, times however many taps it needs — which is the term this
+document says you can plan with.
+
+**Price the taps before writing it.** Eight tiles' bands are ~376,000 fragments; at ~4 ns/px each
+extra tap costs ~1.5 ms of the 7.8 ms budget, so a 9-tap box (~12 ms) is already over and a 4-tap
+one spends more than half of it. The construction worth trying is **one tap at a mip bias** —
+`texture2D(sampler, uv, bias)` is available to a GLES2 fragment shader, the hardware's own trilinear
+does the blur, and a lower mip samples with better cache locality than the base tap it replaces. It
+needs `glGenerateMipmap` and a trilinear min filter on the still textures (`gfx.rs` sets
+`GL_LINEAR` with no mips today) and costs ~33% more texture memory on those slots. Nothing in this
+document measures that path yet; it is the experiment, not the answer.

@@ -1,0 +1,2195 @@
+#!/usr/bin/env python3
+"""The host half of the site demo video: turn a finished master into the deliverables, grade them,
+and adopt them into `site/media/`.
+
+    python3 tools/site_video.py ffmpeg-fetch                   # the pinned static GPL ffmpeg; prints its path
+    python3 tools/site_video.py render --out DIR [--storyboard | --frames 180]    # needs `make site-video-sim`
+    python3 tools/site_video.py encode MASTER.mkv frames.tsv --out DIR [--render render.json]
+    python3 tools/site_video.py gates DIR --master MASTER.mkv --frames-b second-run/frames.tsv
+    python3 tools/site_video.py scan-sentinel --size 1920x1080 [--tee] [FILE|-]   # RGB24 stream scanner
+    python3 tools/site_video.py contact-sheet MASTER.mkv --out sheet.jpg [-n 12]
+    python3 tools/site_video.py manifest DIR [--zip artifact.zip]   # feel.manifest.json (after `gates`)
+    python3 tools/site_video.py verify DIR|feel.manifest.json
+    python3 tools/site_video.py adopt artifact.zip|DIR [--write] [--expect-rev REV] [--derive]   # dry run unless --write
+    python3 tools/site_video.py release-ref REF                      # prints the tag; fails for an rc, a nightly, a branch
+    python3 tools/site_video.py needs-render [--rev REV] [--force]   # needs_render=true|false against the committed manifest
+
+THE FILM REFRESHES ITSELF after a stable release (docs/agent-reference.md, "The site demo video"): `release.yml`
+dispatches `site-video.yml` ON the new `vX.Y.Z` tag, whose `decide` job asks `release-ref` and `needs-render`, whose
+`render` job runs everything above on its own checkout, and whose `publish` job (main's tools, the artifact as data)
+runs `adopt --write --derive --expect-rev` and commits what changed (the film, its glows, the credits and the
+`codecs=` strings of site/index.html) to main as the bot. The gates prove determinism and quality; a human still decides taste, and the remedy
+is `git revert` of the bot commit. By hand, the same adoption: `adopt artifact.zip --write --derive`.
+
+Plan: the demo-video pipeline's stages S4 (the sentinel), S5b (the writer, `framedump.rs`, which produces the INPUT
+contract below) and S6/S7 (this file). `render` is the launcher: it boots the mock catalog, runs the
+dump simulator (`rust-modules/src/dev/framedump.rs`, built by `make site-video-sim`) and writes the
+master, `frames.tsv`, `dump.json` and `render.json`. Every other subcommand consumes a master and
+runs no simulator.
+
+THE INPUT CONTRACT (what the dump writer (`framedump.rs`) produces)
+
+* `master.mkv`: FFV1 (`-level 3 -g 1`), RGB, 1920x1080, 60 fps, one packet per WRITTEN frame, no audio.
+* `frames.tsv`: UTF-8, LF, a header line exactly `n<TAB>t_ms<TAB>xxh3<TAB>debt<TAB>holds`, then one
+  row per written frame: `n` the written-frame index (0, 1, 2, ... with no gap), `t_ms` the output
+  time T(n) = round(n * 1000 / 60) in integer ms (`gate_frames_tsv` fails any row that is not exactly that), `xxh3` the 16-hex-digit XXH3-64 of the frame's RGB24 bytes, `debt` the
+  draw-site placeholder count at that frame (must be 0), `holds` how many held repeats preceded it
+  (informational: it is timing, so the run-twice gate compares the other four columns). The row count equals the master's frame count.
+* `render.json`, the render record: see `RENDER_RECORD_FIELDS` and `validate_render_record`.
+
+THE OUTPUTS: the four encodes and two posters named in `site/index.html` and `site/styles.css`
+(`VIDEOS`, `POSTERS`), `frames.tsv`, `render.json`, `gates.json`, a contact sheet, and
+`feel.manifest.json`. Only the six media files and the manifest are ever copied into the site.
+
+THE TOOL FFMPEG is a pinned static GPL build (`PINS`), fetched by URL with a pinned sha256, failing
+closed on a mismatch. It is a build tool and is not shipped in the app: the app's own FFmpeg is
+LGPL and cannot encode (`ci/build-ffmpeg.sh` has `--disable-everything`). Nothing falls back to
+libaom or to a system ffmpeg: `--ffmpeg PATH` is an explicit, loudly non-canonical override.
+"""
+import argparse
+import collections
+import hashlib
+import json
+import operator
+import os
+import pathlib
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import zipfile
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SITE_MEDIA = ROOT / "site" / "media"
+CATALOG = ROOT / "tests" / "demo_library" / "catalog.json"
+STORYBOARD = ROOT / "tests" / "video" / "feel.json"
+UA = "PlxNativeSiteVideo/1.0 (+https://github.com/GLinnik21/plex-native-poc)"
+SCHEMA = 1
+
+
+class Failure(Exception):
+    """A refusal with a message fit to print as the whole error."""
+
+
+# ------------------------------------------------------------------ what the site uses ----------
+
+Video = collections.namedtuple("Video", "name codec width height")
+Poster = collections.namedtuple("Poster", "name width height")
+
+FPS = 60
+# The dump driver's default preroll (`framedump::DEFAULT_PREROLL`): unwritten virtual frames that cover
+# the still-Home boot, so the first paint and a hero's reveal finish before the first written frame.
+# 60 is that boot with room to spare, not a threshold.
+DEFAULT_PREROLL = 60
+# Mirrors the four <source> elements of `#feel` in site/index.html, in their order there (a test reads
+# the HTML and compares): phones (max-width 759px) take a 720p encode, everything else 1080p, and the
+# browser takes the first source whose `codecs` it can decode.
+VIDEOS = (
+    Video("feel-720p60.av1.mp4", "av1", 1280, 720),
+    Video("feel-720p60.h264.mp4", "h264", 1280, 720),
+    Video("feel-1080p60.av1.mp4", "av1", 1920, 1080),
+    Video("feel-1080p60.h264.mp4", "h264", 1920, 1080),
+)
+# `feel-poster.jpg` is the CSS background of the frame (site/styles.css), the narrow one the phone
+# variant. Both are frame 0 of the master.
+POSTERS = (Poster("feel-poster.jpg", 1920, 1080), Poster("feel-poster-narrow.jpg", 960, 540))
+MEDIA_NAMES = tuple(v.name for v in VIDEOS) + tuple(p.name for p in POSTERS)
+MANIFEST_NAME = "feel.manifest.json"
+MASTER_SIZE = (1920, 1080)
+FRAME_W, FRAME_H = MASTER_SIZE
+
+# ------------------------------------------------------------------ thresholds ------------------
+# One table. CALIBRATED ON THE FIRST RENDER, THEN FROZEN: the numbers marked "spec" come from the plan
+# (docs: S6); the ones marked "provisional" have no number in the plan, were picked here, and are to be
+# set from the first real render's measurements and then not touched.
+THRESHOLDS = {
+    "ssim_min": 0.97,            # spec: per-frame minimum, each deliverable against the master
+    "ssim_mean": 0.985,          # spec: mean over frames
+    "size_ratio": 1.25,          # spec: each file <= 1.25x today's file of the same name
+    "seam_ssim": 0.995,          # spec: SSIM(first frame, last frame)
+    "vmaf_mean": 93.0,           # provisional (only checked where libvmaf is present)
+    "vmaf_min": 80.0,            # provisional
+    "banding_excess": 0.10,      # provisional: flat-pair fraction of the encode minus the master's
+    # provisional: the scrim's dark region as fractions (x, y, w, h) of the frame; to be set to the real
+    # box on the first render.
+    "banding_roi": (0.0, 0.62, 0.35, 0.30),
+    "banding_every": 30,         # probe every Nth frame
+    "poster_ssim_min": 0.97,     # the poster is frame 0 and passes the same bar
+}
+
+# ------------------------------------------------------------------ the pinned tool ffmpeg -------
+Pin = collections.namedtuple("Pin", "key urls sha256 kind member version licence source")
+
+# Each build was DOWNLOADED and hashed by the author of this table on 2026-10-08, and the hash
+# agrees with the publisher's own (GitHub's asset digest; the build server's .sha256 file).
+#  * linux-x86_64 is the canonical build (CI). BtbN/FFmpeg-Builds, GPLv3 (`--enable-gpl
+#    --enable-version3`), static libs, with libsvtav1, libx264, libaom and libvmaf; the build
+#    scripts are public at github.com/BtbN/FFmpeg-Builds. Its URL is a dated `autobuild-*` release,
+#    and BtbN prunes old autobuilds: when it 404s, mirror THIS exact tarball (same sha256) as a release
+#    asset of this repository, add that URL to `urls`, and nothing else changes.
+#  * darwin-arm64 is for local previews only (`adopt` refuses anything not rendered on linux-ci).
+#    Martin Riedl's build server, GPLv3, ffmpeg 9.0.2, with libsvtav1 4.2.0, libx264 and libvmaf;
+#    build script github.com/ffmpeg-build-tools. Permanent timestamped URL; I ran this binary.
+#  * Rejected: johnvansickle.com's amd64 static 7.0.2 (GPLv3, durable) has libaom but NO libsvtav1.
+PINS = {
+    "linux-x86_64": Pin(
+        "linux-x86_64",
+        ("https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-07-13-07/"
+         "ffmpeg-n9.0.2-22-g46d8f462ee-linux64-gpl-9.0.tar.xz",),
+        "c03023a986dec781a5ab6bb8821d6544b40eb86e96f34283880a0fae8105da67",
+        "tar.xz", "/bin/ffmpeg", "n9.0.2-22-g46d8f462ee", "GPL-3.0-or-later (--enable-gpl --enable-version3)",
+        "BtbN/FFmpeg-Builds autobuild-2026-10-07-13-07"),
+    "darwin-arm64": Pin(
+        "darwin-arm64",
+        ("https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip",),
+        "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924",
+        "zip", "ffmpeg", "9.0.2", "GPL-3.0-or-later (--enable-gpl --enable-version3)",
+        "ffmpeg.martin-riedl.de macOS arm64 release 9.0.2 (1789931890)"),
+}
+REQUIRED_ENCODERS = ("libsvtav1", "libx264")
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def cache_dir():
+    env = os.environ.get("PLXNATIVE_DEMO_CACHE")
+    return pathlib.Path(env) if env else pathlib.Path.home() / ".cache" / "plxnative-demo"
+
+
+def host_pin_key():
+    system, machine = platform.system(), platform.machine().lower()
+    if system == "Linux" and machine in ("x86_64", "amd64"):
+        return "linux-x86_64"
+    if system == "Darwin" and machine in ("arm64", "aarch64"):
+        return "darwin-arm64"
+    raise Failure(f"no pinned ffmpeg build for {system}/{machine}: pass --ffmpeg PATH (non-canonical)")
+
+
+def parse_encoders(text):
+    """The encoder names `ffmpeg -encoders` lists (video/audio/subtitle flag column first)."""
+    return {m.group(1) for m in re.finditer(r"^\s*[VAS][A-Z.]{5}\s+(\S+)\s", text, re.M)}
+
+
+def assert_encoders(ffmpeg, run=subprocess.run):
+    out = run([str(ffmpeg), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=60)
+    have = parse_encoders(out.stdout)
+    missing = [e for e in REQUIRED_ENCODERS if e not in have]
+    if missing:
+        raise Failure(f"{ffmpeg}: `-encoders` lacks {', '.join(missing)}"
+                      + ("; libaom-av1 is present but this tool never falls back to it" if "libaom-av1" in have else ""))
+    return have
+
+
+def _download(pin, dest, opener=urllib.request.urlopen, sleep=time.sleep):
+    """Stream the first URL that answers into `dest` and return the sha256 it hashes to. A hash that
+    differs is returned, not retried: the caller fails closed. 429/5xx back off and retry (not a mismatch)."""
+    last = None
+    for url in pin.urls:
+        for attempt in range(4):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                h = hashlib.sha256()
+                with opener(req, timeout=120) as r, open(dest, "wb") as f:
+                    for block in iter(lambda: r.read(1 << 20), b""):
+                        h.update(block)
+                        f.write(block)
+                return h.hexdigest()
+            except urllib.error.HTTPError as e:
+                last = f"{url}: HTTP {e.code}"
+                if e.code == 429 or e.code >= 500:
+                    sleep(2 ** attempt)
+                    continue
+                break  # 404 and friends: the next URL
+            except (urllib.error.URLError, OSError) as e:
+                last = f"{url}: {e}"
+                sleep(2 ** attempt)
+    raise Failure(f"ffmpeg-fetch: no pinned URL answered (last: {last}). A dated BtbN autobuild is pruned "
+                  f"eventually: mirror the pinned tarball ({pin.sha256}) and add its URL to PINS.")
+
+
+def _extract_member(pin, archive, dest):
+    want = pin.member
+    if pin.kind == "zip":
+        with zipfile.ZipFile(archive) as z:
+            for info in z.infolist():
+                if info.filename == want:
+                    with z.open(info) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    return
+    else:
+        with tarfile.open(archive, "r:xz") as t:
+            for m in t:
+                if m.isfile() and m.name.endswith(want):
+                    src = t.extractfile(m)
+                    with open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    return
+    raise Failure(f"ffmpeg-fetch: no `{want}` in the downloaded archive")
+
+
+def fetch_ffmpeg(pin=None, cache=None, opener=urllib.request.urlopen, run=subprocess.run, sleep=time.sleep):
+    """The pinned tool ffmpeg: a cached, re-verified binary, or a download checked against the pinned
+    sha256 (fail closed) whose `-encoders` must list libsvtav1 and libx264. Returns its path."""
+    pin = pin or PINS[host_pin_key()]
+    root = pathlib.Path(cache) if cache else cache_dir()
+    dest_dir = root / "tools" / f"ffmpeg-{pin.sha256[:12]}"
+    binary, record = dest_dir / "ffmpeg", dest_dir / "verified.json"
+    if binary.is_file() and record.is_file():
+        try:
+            ok = json.loads(record.read_text())
+            if ok.get("archive_sha256") == pin.sha256 and ok.get("binary_sha256") == sha256_file(binary):
+                assert_encoders(binary, run)
+                return binary
+        except (ValueError, Failure):
+            pass
+        shutil.rmtree(dest_dir, ignore_errors=True)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=dest_dir) as tmp:
+        archive = pathlib.Path(tmp) / "archive"
+        got = _download(pin, archive, opener, sleep)
+        if got != pin.sha256:
+            raise Failure(f"ffmpeg-fetch: sha256 {got} != pinned {pin.sha256} ({pin.source}); refusing")
+        part = pathlib.Path(tmp) / "ffmpeg"
+        _extract_member(pin, archive, part)
+        part.chmod(0o755)
+        try:
+            assert_encoders(part, run)
+        except Failure:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            raise
+        record.write_text(json.dumps({"archive_sha256": pin.sha256, "binary_sha256": sha256_file(part),
+                                      "source": pin.source, "licence": pin.licence}, indent=1))
+        os.replace(part, binary)
+    return binary
+
+
+def resolve_ffmpeg(explicit=None, cache=None, run=subprocess.run):
+    """(path, canonical). An explicit path is allowed and loudly non-canonical; otherwise ONLY the
+    already-fetched pinned build is used, never a system ffmpeg."""
+    if explicit:
+        path = pathlib.Path(explicit)
+        if not path.is_file():
+            raise Failure(f"--ffmpeg {explicit}: no such file")
+        assert_encoders(path, run)
+        print(f"site_video: WARNING: {path} is NOT the pinned tool ffmpeg; its output is a preview and "
+              f"`adopt` will refuse it", file=sys.stderr)
+        return path, False
+    pin = PINS[host_pin_key()]
+    root = pathlib.Path(cache) if cache else cache_dir()
+    binary = root / "tools" / f"ffmpeg-{pin.sha256[:12]}" / "ffmpeg"
+    if not binary.is_file():
+        raise Failure("no pinned ffmpeg fetched yet: run `python3 tools/site_video.py ffmpeg-fetch` "
+                      "(or pass --ffmpeg PATH for a non-canonical preview). A system ffmpeg is never used silently.")
+    return fetch_ffmpeg(pin, cache, run=run), True
+
+
+def ffmpeg_version_line(ffmpeg, run=subprocess.run):
+    out = run([str(ffmpeg), "-hide_banner", "-version"], capture_output=True, text=True, timeout=60).stdout
+    return out.splitlines()[0] if out else "unknown"
+
+
+# ------------------------------------------------------------------ encode ----------------------
+SCALE_FLAGS = "lanczos+accurate_rnd+full_chroma_int+error_diffusion"  # error_diffusion: the RGB->YUV dither
+COLOR_TAGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+
+
+def video_filter(width, height):
+    """RGB master -> 8-bit yuv420p, BT.709, TV range, with dither. This chain is also the reference the
+    gates compare against, so they measure the codec's loss and not the colour conversion's."""
+    return (f"scale={width}:{height}:flags={SCALE_FLAGS}:in_range=full:out_range=tv:out_color_matrix=bt709,"
+            f"format=yuv420p")
+
+
+def poster_filter(width, height):
+    """JPEG is BT.601 full range for every browser (today's posters are bt470bg/pc)."""
+    return (f"scale={width}:{height}:flags={SCALE_FLAGS}:in_range=full:out_range=pc:out_color_matrix=bt601,"
+            f"format=yuvj420p")
+
+
+AV1_CODEC = ["-c:v", "libsvtav1", "-preset", "4", "-crf", "22", "-g", "480",
+             "-svtav1-params", "tune=0:film-grain=0", "-pix_fmt", "yuv420p"]
+H264_CODEC = ["-c:v", "libx264", "-preset", "veryslow", "-crf", "18", "-tune", "animation",
+              "-profile:v", "high", "-pix_fmt", "yuv420p", "-x264-params", "aq-mode=3:deblock=-1,-1"]
+POSTER_QUALITY = ["-q:v", "3"]  # provisional: the size gate bounds it against the poster in site/media
+
+# THE H.264 FILES DECLARE THE LOWEST LEVEL THEIR SIZE AND RATE NEED, so a phone that falls back to H.264 (no AV1
+# decoder) can play them. x264's veryslow preset uses 16 reference frames, which only a level 5.x decoder
+# accepts: left alone, the 720p60 file came out High@5.0 and the 1080p60 one High@5.1, which several mobile
+# decoders refuse (the site's earlier files were High@3.2 and High@4.2, `avc1.640020` and `avc1.64002A`). The
+# level is the minimum for the picture at 60 fps: 1280x720 is 3,600 macroblocks, 216,000 per second = exactly
+# level 3.2's MaxMBPS, and its decoded-picture buffer holds floor(20,480 / 3,600) = 5 frames; 1920x1080 is 8,160
+# macroblocks, 489,600 per second against level 4.2's 522,240, and floor(34,816 / 8,160) = 4 frames. `-refs` is
+# set to what the level's DPB holds (x264 would otherwise lower it with a warning), and `-level` is the field the
+# `avcC` box and the site's `codecs=` string carry. The bitrates (about 1 and 2 Mbit/s) are far under both
+# levels' VBV limits, so no `-maxrate` is needed.
+H264_LEVELS = {720: ("3.2", "5"), 1080: ("4.2", "4")}  # height -> (level, refs)
+
+
+# The AV1 encodes' CRF and GOP were re-tuned for HEADROOM, not to pass: the first Linux (llvmpipe) render of the
+# 27 s film failed `vmaf/feel-1080p60.av1.mp4` at min 79.69 against the 80.0 floor while macOS read 80.10, and the
+# 720p one read SSIM min 0.9709 against 0.97. The floors are untouched. The film's three full-frame backdrops
+# make a keyframe most of the bytes of a short-GOP AV1 file, so a longer GOP buys the size budget a finer CRF
+# spends (measured on the macOS preview of this film: CRF 28 / GOP 120, the old 1080p setting, 9,012,205 bytes = 1.16x
+# of today's file, VMAF min 80.10, SSIM min 0.9726; CRF 22 / GOP 480, 8,052,122 bytes = 1.04x, VMAF min 84.52,
+# SSIM min 0.9796). The phone-sized file keeps a still longer GOP (12 s, one keyframe near the loop point and
+# one mid-film) because 1280x720 at CRF 22 / GOP 480 is 1.23x, 0.02 under the 1.25x limit: CRF 22 / GOP 720 is
+# 1.15x, VMAF min 85.25, SSIM min 0.9746 (CRF 25 / GOP 240, the old 720p setting: 1.15x, VMAF min 83.68, SSIM min
+# 0.9709). Seeking is not a feature of a muted looping hero clip. Both limits stay.
+AV1_720_GOP = "720"
+AV1_720_CRF = "22"
+
+
+def video_argv(ffmpeg, master, out, video):
+    codec = AV1_CODEC if video.codec == "av1" else H264_CODEC
+    if video.codec == "av1" and video.height == 720:
+        override = {"-g": AV1_720_GOP, "-crf": AV1_720_CRF}
+        codec = [override.get(codec[i - 1], arg) if i else arg for i, arg in enumerate(codec)]
+    if video.codec == "h264":
+        level, refs = H264_LEVELS[video.height]
+        codec = codec + ["-level", level, "-refs", refs]
+    return ([str(ffmpeg), "-hide_banner", "-nostdin", "-loglevel", "warning", "-stats", "-y", "-i", str(master),
+             "-map", "0:v:0", "-an", "-fps_mode", "passthrough", "-vf", video_filter(video.width, video.height)]
+            + codec + COLOR_TAGS + ["-movflags", "+faststart", str(out)])
+
+
+def poster_argv(ffmpeg, master, out, poster):
+    return ([str(ffmpeg), "-hide_banner", "-nostdin", "-loglevel", "warning", "-y", "-i", str(master),
+             "-map", "0:v:0", "-an", "-frames:v", "1", "-update", "1", "-vf", poster_filter(poster.width, poster.height)]
+            + POSTER_QUALITY + [str(out)])
+
+
+def encode_plan(ffmpeg, master, out_dir):
+    """[(output name, argv)] for the four videos and two posters; pure, so a test asserts the argv."""
+    out_dir = pathlib.Path(out_dir)
+    plan = [(v.name, video_argv(ffmpeg, master, out_dir / v.name, v)) for v in VIDEOS]
+    plan += [(p.name, poster_argv(ffmpeg, master, out_dir / p.name, p)) for p in POSTERS]
+    return plan
+
+
+def run_encode(ffmpeg, master, frames_tsv, out_dir, render=None, run=subprocess.run):
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = parse_frames_tsv(pathlib.Path(frames_tsv).read_text())
+    assert_encoders(ffmpeg, run)
+    for name, argv in encode_plan(ffmpeg, master, out_dir):
+        print(f"site_video: encode {name}", flush=True)
+        done = run(argv)
+        if done.returncode != 0:
+            (out_dir / name).unlink(missing_ok=True)
+            raise Failure(f"encode {name}: ffmpeg exited {done.returncode}")
+    shutil.copyfile(frames_tsv, out_dir / "frames.tsv")
+    if render:
+        shutil.copyfile(render, out_dir / "render.json")
+    return len(rows)
+
+
+# ------------------------------------------------------------------ frames.tsv and the render record
+TSV_HEADER = "n\tt_ms\txxh3\tdebt\tholds"
+
+
+def parse_frames_tsv(text):
+    """[(n, t_ms, xxh3, debt, holds)], validated: the header, a gapless n from 0, 16 hex digits."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    if not lines or lines[0] != TSV_HEADER:
+        raise Failure(f"frames.tsv: the first line must be exactly {TSV_HEADER!r}")
+    rows = []
+    for i, line in enumerate(lines[1:]):
+        cols = line.split("\t")
+        if len(cols) != 5:
+            raise Failure(f"frames.tsv row {i}: {len(cols)} columns, want 5")
+        try:
+            n, t_ms, debt, holds = int(cols[0]), int(cols[1]), int(cols[3]), int(cols[4])
+        except ValueError:
+            raise Failure(f"frames.tsv row {i}: n, t_ms, debt and holds are integers: {line!r}")
+        if n != i:
+            raise Failure(f"frames.tsv row {i}: n is {n}; the written-frame index runs 0, 1, 2 ... with no gap")
+        if not re.fullmatch(r"[0-9a-f]{16}", cols[2]):
+            raise Failure(f"frames.tsv row {i}: xxh3 is 16 lowercase hex digits, got {cols[2]!r}")
+        if debt < 0 or holds < 0:
+            raise Failure(f"frames.tsv row {i}: debt and holds are not negative")
+        rows.append((n, t_ms, cols[2], debt, holds))
+    if not rows:
+        raise Failure("frames.tsv has a header and no frames")
+    return rows
+
+
+# What `render` writes next to the master (from the app's dump.json), as JSON. `dotted path -> (type, what)`.
+RENDER_RECORD_FIELDS = {
+    "schema": (int, f"{SCHEMA}"),
+    "storyboard_sha256": (str, "sha256 of the storyboard JSON the run played"),
+    "frames.count": (int, "written frames; equals the frames.tsv rows and the master's frames"),
+    "frames.fps": (int, "60"),
+    "frames.width": (int, "1920"),
+    "frames.height": (int, "1080"),
+    "placeholder_debt.frames_with_debt": (int, "written frames whose draw-site count was above 0; must be 0"),
+    "sentinel.scanned_frames": (int, "frames the inline scanner saw; must equal frames.count"),
+    "sentinel.hits": (int, "frames with a connected run of >= 64 px of #FF00FE; must be 0"),
+    "hero_pool.logged": (list, "ratingKeys (strings) of every hero page the film showed, in order of first showing"),
+    "hero_pool.eligible": (list, "ratingKeys (strings) whose art passes `demo_library.py hero-report` and are not not_in_video"),
+    "opened_rating_keys": (list, "ratingKeys (strings) the storyboard really opened"),
+}
+
+
+def _dig(rec, dotted):
+    cur = rec
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None, False
+        cur = cur[part]
+    return cur, True
+
+
+def validate_render_record(rec):
+    """Problems with the render record's shape; [] when it is well formed."""
+    problems = []
+    if not isinstance(rec, dict):
+        return ["the render record is not a JSON object"]
+    for dotted, (typ, _) in RENDER_RECORD_FIELDS.items():
+        val, present = _dig(rec, dotted)
+        if not present:
+            problems.append(f"missing {dotted}")
+        elif not isinstance(val, typ) or isinstance(val, bool):
+            problems.append(f"{dotted} must be {typ.__name__}")
+    if _dig(rec, "schema")[0] not in (None, SCHEMA):
+        problems.append(f"schema must be {SCHEMA}")
+    for dotted in ("hero_pool.logged", "hero_pool.eligible", "opened_rating_keys"):
+        val, present = _dig(rec, dotted)
+        if present and isinstance(val, list) and not all(isinstance(x, str) and x for x in val):
+            problems.append(f"{dotted} holds ratingKeys as non-empty strings")
+    return problems
+
+
+# ------------------------------------------------------------------ gates -----------------------
+Result = collections.namedtuple("Result", "name status detail")
+PASS, FAIL, SKIP = "pass", "fail", "skip"
+
+
+def frame_ms(n):
+    """T(n) = round(n * 1000 / 60) in whole ms, the driver's `framedump::virtual_ms` exactly: integer
+    round-half-up, `(n * 1000 + 30) // 60`. (No tie exists: `1000 n mod 60` is never 30.)"""
+    return (n * 1000 + FPS // 2) // FPS
+
+
+def gate_frames_tsv(rows, record, master_frames):
+    """The tsv matches the master and the record, no written frame carries placeholder debt, and every
+    row's `t_ms` is T(n): a render with a skipped stretch of virtual time (a cut) fails here."""
+    out = []
+    n = len(rows)
+    skewed = [(r[0], r[1]) for r in rows if r[1] != frame_ms(r[0])]
+    if skewed:
+        out.append(Result("frames/t_ms", FAIL,
+                          f"{len(skewed)} rows are not T(n) = round(n*1000/60) ms (first: frame {skewed[0][0]} has "
+                          f"{skewed[0][1]}, want {frame_ms(skewed[0][0])}): virtual time was skipped, a cut"))
+    else:
+        out.append(Result("frames/t_ms", PASS, f"all {n} rows are T(n) = round(n*1000/60) ms"))
+    counts = {"the master": master_frames, "render.json frames.count": _dig(record, "frames.count")[0]}
+    bad = [f"{k} has {v}" for k, v in counts.items() if v != n]
+    out.append(Result("frames/count", FAIL if bad else PASS,
+                      f"frames.tsv has {n} rows but " + "; ".join(bad) if bad else f"{n} frames agree"))
+    debt = [(r[0], r[3]) for r in rows if r[3] != 0]
+    rec_debt = _dig(record, "placeholder_debt.frames_with_debt")[0]
+    if debt or rec_debt != 0:
+        out.append(Result("placeholder-debt", FAIL,
+                          f"{len(debt)} written frames carry debt (first: frame {debt[0][0]} has {debt[0][1]}); "
+                          f"render.json says {rec_debt}" if debt else f"render.json says {rec_debt} frames carry debt"))
+    else:
+        out.append(Result("placeholder-debt", PASS, f"0 of {n} written frames carry placeholder debt"))
+    return out
+
+
+def gate_sentinel_record(record):
+    hits, scanned = _dig(record, "sentinel.hits")[0], _dig(record, "sentinel.scanned_frames")[0]
+    count = _dig(record, "frames.count")[0]
+    if scanned != count:
+        return Result("sentinel/inline", FAIL, f"the inline scanner saw {scanned} frames of {count}: it did not cover the run")
+    if hits != 0:
+        return Result("sentinel/inline", FAIL, f"the inline scanner flagged {hits} frames")
+    return Result("sentinel/inline", PASS, f"{scanned} frames scanned inline, 0 flagged")
+
+
+def _comparable(rows):
+    """What two renders must agree on: everything but `holds`, which counts held repeats and so depends
+    on how fast a worker answered. The frame's content (`xxh3`), its time and its debt must not."""
+    return [r[:4] for r in rows]
+
+
+def gate_run_twice(tsv_a, tsv_b):
+    """Run-twice equality: the rows of the two frames.tsv agree on n, t_ms, xxh3 and debt. The informational
+    `holds` column is timing and is left out of the comparison (the stage S5b measurement: the same 180
+    frames hashed identically across two renders while one frame's `holds` read 306 and 347)."""
+    if tsv_b is None:
+        return Result("run-twice", FAIL, "no second frames.tsv supplied (--frames-b): the run-twice check is mandatory")
+    ra, rb = parse_frames_tsv(pathlib.Path(tsv_a).read_text()), parse_frames_tsv(pathlib.Path(tsv_b).read_text())
+    ca, cb = _comparable(ra), _comparable(rb)
+    if ca != cb:
+        first = next((i for i, (x, y) in enumerate(zip(ca, cb)) if x != y), None)
+        where = f"first differing frame {first}" if first is not None else f"{len(ra)} vs {len(rb)} frames"
+        return Result("run-twice", FAIL, f"the two renders differ ({where})")
+    digest = hashlib.sha256(repr(ca).encode()).hexdigest()
+    return Result("run-twice", PASS, f"both renders agree on {len(ra)} frames (n, t_ms, xxh3, debt: {digest[:12]})")
+
+
+def compare_hold_injection(rows_base, rows_injected):
+    """The hold-injection gate's comparison: a render with extra held repeats on every clean frame must
+    write exactly the frames of the render with none. Columns 1-4 (n, t_ms, xxh3, debt) must be equal
+    row for row; `holds` is the thing being varied and is left out. Returns a Result."""
+    ca, cb = _comparable(rows_base), _comparable(rows_injected)
+    if not ca or not cb:
+        return Result("hold-injection", FAIL, "a render wrote no frames: nothing was compared")
+    if len(ca) != len(cb):
+        return Result("hold-injection", FAIL, f"the renders wrote {len(ca)} and {len(cb)} frames")
+    bad = [i for i, (x, y) in enumerate(zip(ca, cb)) if x != y]
+    if bad:
+        i = bad[0]
+        what = "hash" if ca[i][2] != cb[i][2] else "t_ms" if ca[i][1] != cb[i][1] else "debt" if ca[i][3] != cb[i][3] else "n"
+        return Result("hold-injection", FAIL,
+                      f"{len(bad)} of {len(ca)} frames differ under extra holds (first: frame {ca[i][0]}, its {what}: "
+                      f"{ca[i]} vs {cb[i]})")
+    extra = sum(r[4] for r in rows_injected) - sum(r[4] for r in rows_base)
+    if extra <= 0:
+        return Result("hold-injection", FAIL, "the injected render took no more holds than the base: the injection did not run")
+    return Result("hold-injection", PASS,
+                  f"{len(ca)} frames identical in n, t_ms, xxh3 and debt with {extra} extra held repeats injected")
+
+
+def gate_hero_pool(record):
+    """Every hero page the film SHOWED passes the hero check and is not `not_in_video`. `logged` is the
+    pages the app showed, in order (the pinned one, then each page turn it logged: `film_facts`);
+    `eligible` is the titles whose art passes `demo_library.py hero-report` and are not flagged. Fails
+    closed: no page logged, or a page outside `eligible` or inside `not_in_video`, is a failure."""
+    logged = _dig(record, "hero_pool.logged")[0] or []
+    eligible = set(_dig(record, "hero_pool.eligible")[0] or [])
+    flagged = {str(k) for k in record.get("not_in_video", ())}
+    if not logged:
+        return Result("hero-pool", FAIL, "no hero was logged: nothing proves the pool")
+    flagged_shown = sorted(set(logged) & flagged)
+    if flagged_shown:
+        return Result("hero-pool", FAIL, f"hero pages flagged not_in_video were shown: {', '.join(flagged_shown)}")
+    extra = sorted(set(logged) - eligible)
+    if extra:
+        return Result("hero-pool", FAIL, f"hero pages outside the hero-report pass set were shown: {', '.join(extra)}")
+    turns = _dig(record, "hero_pool.turns")[0]
+    tail = f"; {len(turns)} page turn(s)" if isinstance(turns, list) else ""
+    return Result("hero-pool", PASS, f"{len(set(logged))} hero page(s) shown ({', '.join(logged)}), each passes "
+                  f"hero-report and none is not_in_video{tail}")
+
+
+def gate_sizes(out_dir, site_media):
+    """Each file no larger than `ratio` times the file of the same name in site/media, read now."""
+    ratio = THRESHOLDS["size_ratio"]
+    out = []
+    for name in MEDIA_NAMES:
+        new, old = pathlib.Path(out_dir) / name, pathlib.Path(site_media) / name
+        if not new.is_file():
+            out.append(Result(f"size/{name}", FAIL, "not encoded"))
+        elif not old.is_file():
+            out.append(Result(f"size/{name}", SKIP, "no file of this name in site/media to compare with"))
+        else:
+            a, b = new.stat().st_size, old.stat().st_size
+            ok = a <= ratio * b
+            out.append(Result(f"size/{name}", PASS if ok else FAIL,
+                              f"{a:,} bytes is {a / b:.2f}x today's {b:,} (limit {ratio}x)"))
+    return out
+
+
+# --- ffmpeg-backed measurements -------------------------------------------------------------------
+_SSIM_LINE = re.compile(r"n:(\d+).*?All:([0-9.]+)")
+_STREAM = re.compile(r"Stream #0:\d+\S*: Video: (\w+)(?: \(([^)]*)\))?.*?, (yuvj?\d+p\d*|gbrp|rgb\w+|bgr\w+|gray\w*)"
+                     r"(?:\(([^)]*)\))?.*?, (\d+)x(\d+)")
+
+
+def parse_ssim_stats(text):
+    return [float(m.group(2)) for m in _SSIM_LINE.finditer(text)]
+
+
+def probe(ffmpeg, path, run=subprocess.run):
+    """codec, profile, pix_fmt, colour words, size, fps, frame count and whether there is audio,
+    from `ffmpeg -i` (so the tool needs no ffprobe)."""
+    done = run([str(ffmpeg), "-hide_banner", "-nostdin", "-i", str(path), "-map", "0", "-c", "copy", "-f", "null", "-"],
+               capture_output=True, text=True, timeout=1800)
+    return parse_probe(done.stderr)
+
+
+def parse_probe(stderr):
+    info = {"audio": bool(re.search(r"Stream #0:\d+.*: Audio:", stderr))}
+    m = _STREAM.search(stderr)
+    if not m:
+        raise Failure("could not read a video stream line from ffmpeg's output")
+    info.update(codec=m.group(1), profile=m.group(2), pix_fmt=m.group(3), color=m.group(4) or "",
+                width=int(m.group(5)), height=int(m.group(6)))
+    fps = re.search(r"([\d.]+) fps", stderr[m.start():].split("\n", 1)[0])
+    info["fps"] = float(fps.group(1)) if fps else None
+    frames = re.findall(r"frame=\s*(\d+)", stderr)
+    info["frames"] = int(frames[-1]) if frames else None
+    return info
+
+
+def gate_format(info, name, expect, frames):
+    """The container carries what the site's `codecs` strings promise: size, 8-bit 4:2:0, BT.709 TV range
+    (video), 60 fps, no audio, and exactly the master's frame count."""
+    problems = []
+    if isinstance(expect, Video):
+        want_codec = expect.codec
+        if info["codec"] != want_codec:
+            problems.append(f"codec {info['codec']}, want {want_codec}")
+        if info["pix_fmt"] != "yuv420p":
+            problems.append(f"pix_fmt {info['pix_fmt']}, want yuv420p")
+        for word in ("tv", "bt709"):
+            if word not in info["color"]:
+                problems.append(f"colour tags {info['color']!r} lack {word}")
+        if info["fps"] is not None and abs(info["fps"] - FPS) > 0.01:
+            problems.append(f"{info['fps']} fps, want {FPS}")
+        if info["frames"] != frames:
+            problems.append(f"{info['frames']} frames, want {frames}")
+        if info["audio"]:
+            problems.append("has an audio stream (the video is muted: -an)")
+    else:
+        if info["codec"] != "mjpeg":
+            problems.append(f"codec {info['codec']}, want mjpeg")
+        if info["pix_fmt"] != "yuvj420p":
+            problems.append(f"pix_fmt {info['pix_fmt']}, want yuvj420p")
+    if (info["width"], info["height"]) != (expect.width, expect.height):
+        problems.append(f"{info['width']}x{info['height']}, want {expect.width}x{expect.height}")
+    return Result(f"format/{name}", FAIL if problems else PASS, "; ".join(problems) or "format as the site expects")
+
+
+# Frames are paired by INDEX, not by timestamp. The master is Matroska (millisecond timestamps, so frame
+# n sits at round(n*1000/60) ms) and an encode is MP4 (exact 1/60 s): two inputs of the same frames whose
+# timestamps differ by up to half a millisecond still make the pairing filters (`ssim`, `libvmaf`) pair
+# one frame twice and skip another once the rounding crosses a boundary (frame 799 of a 24 s film), which
+# reads as a 0.6 SSIM frame and an extra compared frame. `setpts=N/60/TB` is NOT enough: it rounds to an
+# integer in EACH stream's own time base (1/1000 against 1/15360), so the two still differ and the 27 s
+# film lost frames 984 and 999 to it (SSIM 0.66 and 0.82 on frames whose pixels differ by a mean of 1.2
+# levels; VMAF 0). Both streams go to ONE time base, 1/60, where frame n is exactly pts n. The frame COUNT
+# is still compared.
+BY_INDEX = f"settb=1/{FPS},setpts=N,"
+
+
+def ssim_against_master(ffmpeg, dist, master, ref_chain, dist_format, run=subprocess.run, frames=None):
+    """Per-frame SSIM of `dist` against the master put through `ref_chain` (the encoder's own input)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cut = f"trim=end_frame={frames}," if frames else ""  # a poster is ONE frame: frame 0
+        lavfi = (f"[0:v]{BY_INDEX}{cut}format={dist_format}[d];[1:v]{BY_INDEX}{cut}{ref_chain}[r];"
+                 f"[d][r]ssim=stats_file=ssim.log")
+        argv = [str(ffmpeg), "-hide_banner", "-nostdin", "-i", str(dist), "-i", str(master), "-lavfi", lavfi,
+                "-f", "null", "-"]
+        done = run(argv, cwd=tmp, capture_output=True, text=True, timeout=7200)
+        log = pathlib.Path(tmp) / "ssim.log"
+        if done.returncode != 0 or not log.is_file():
+            raise Failure(f"ssim of {pathlib.Path(dist).name} failed: {done.stderr.strip()[-300:]}")
+        values = parse_ssim_stats(log.read_text())
+    if not values:
+        raise Failure(f"ssim of {pathlib.Path(dist).name} produced no frames")
+    return values
+
+
+def gate_ssim(name, values, min_floor, mean_floor, frames=None):
+    mn, mean = min(values), sum(values) / len(values)
+    problems = []
+    if frames is not None and len(values) != frames:
+        problems.append(f"{len(values)} frames compared, master has {frames}")
+    if mn < min_floor:
+        problems.append(f"worst frame {values.index(mn)} has SSIM {mn:.4f} < {min_floor}")
+    if mean < mean_floor:
+        problems.append(f"mean SSIM {mean:.4f} < {mean_floor}")
+    return Result(f"ssim/{name}", FAIL if problems else PASS,
+                  "; ".join(problems) or f"min {mn:.4f} (floor {min_floor}), mean {mean:.4f} (floor {mean_floor})")
+
+
+def have_filter(ffmpeg, name, run=subprocess.run):
+    out = run([str(ffmpeg), "-hide_banner", "-filters"], capture_output=True, text=True, timeout=60).stdout
+    return re.search(rf"^\s*\S+\s+{re.escape(name)}\s", out, re.M) is not None
+
+
+def vmaf_against_master(ffmpeg, dist, master, ref_chain, run=subprocess.run):
+    with tempfile.TemporaryDirectory() as tmp:
+        lavfi = (f"[0:v]{BY_INDEX}format=yuv420p[d];[1:v]{BY_INDEX}{ref_chain}[r];"
+                 f"[d][r]libvmaf=log_fmt=json:log_path=vmaf.json:n_threads={os.cpu_count() or 2}")
+        done = run([str(ffmpeg), "-hide_banner", "-nostdin", "-i", str(dist), "-i", str(master), "-lavfi", lavfi,
+                    "-f", "null", "-"], cwd=tmp, capture_output=True, text=True, timeout=7200)
+        log = pathlib.Path(tmp) / "vmaf.json"
+        if done.returncode != 0 or not log.is_file():
+            raise Failure(f"vmaf of {pathlib.Path(dist).name} failed: {done.stderr.strip()[-300:]}")
+        metrics = json.loads(log.read_text())["pooled_metrics"]["vmaf"]
+    return metrics["mean"], metrics["min"]
+
+
+def gate_vmaf(name, mean, mn):
+    problems = []
+    if mean < THRESHOLDS["vmaf_mean"]:
+        problems.append(f"mean VMAF {mean:.2f} < {THRESHOLDS['vmaf_mean']}")
+    if mn < THRESHOLDS["vmaf_min"]:
+        problems.append(f"min VMAF {mn:.2f} < {THRESHOLDS['vmaf_min']}")
+    return Result(f"vmaf/{name}", FAIL if problems else PASS,
+                  "; ".join(problems) or f"mean {mean:.2f}, min {mn:.2f} (provisional floors)")
+
+
+def roi_box(width, height):
+    x, y, w, h = THRESHOLDS["banding_roi"]
+    return (int(width * x) // 2 * 2, int(height * y) // 2 * 2, max(2, int(width * w) // 2 * 2), max(2, int(height * h) // 2 * 2))
+
+
+def flat_fraction(gray, width, height):
+    """The share of horizontally and vertically adjacent pixel pairs, in one `width x height` 8-bit luma
+    frame, whose values are equal. A smooth dark gradient quantised into long flat steps (banding)
+    raises it."""
+    same = total = 0
+    rows = [gray[y * width:(y + 1) * width] for y in range(height)]
+    for y, row in enumerate(rows):
+        same += sum(map(operator.eq, row, row[1:]))
+        total += width - 1
+        if y + 1 < height:
+            same += sum(map(operator.eq, row, rows[y + 1]))
+            total += width
+    return same / total
+
+
+def roi_frames(ffmpeg, path, box, every, chain=None, run=subprocess.run):
+    x, y, w, h = box
+    vf = ",".join(filter(None, [chain, f"select='not(mod(n\\,{every}))'", f"crop={w}:{h}:{x}:{y}", "format=gray"]))
+    done = run([str(ffmpeg), "-hide_banner", "-nostdin", "-i", str(path), "-vf", vf, "-fps_mode", "passthrough",
+                "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, timeout=3600)
+    if done.returncode != 0:
+        raise Failure(f"banding probe of {pathlib.Path(path).name} failed: {done.stderr.decode(errors='replace')[-300:]}")
+    size = w * h
+    return [done.stdout[i:i + size] for i in range(0, len(done.stdout) - size + 1, size)]
+
+
+def gate_banding(name, dist_frames, ref_frames, box):
+    if not dist_frames or len(dist_frames) != len(ref_frames):
+        return Result(f"banding/{name}", FAIL, f"probed {len(dist_frames)} frames against {len(ref_frames)} of the master")
+    w, h = box[2], box[3]
+    d = sum(flat_fraction(f, w, h) for f in dist_frames) / len(dist_frames)
+    r = sum(flat_fraction(f, w, h) for f in ref_frames) / len(ref_frames)
+    excess = d - r
+    ok = excess <= THRESHOLDS["banding_excess"]
+    return Result(f"banding/{name}", PASS if ok else FAIL,
+                  f"flat-pair fraction {d:.3f} vs master {r:.3f}: excess {excess:+.3f} "
+                  f"(limit {THRESHOLDS['banding_excess']}, provisional ROI {box})")
+
+
+def seam_ssim(ffmpeg, path, frames, chain, run=subprocess.run):
+    """SSIM of the first and the last frame of `path` (the loop's join)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pre = f"{chain}," if chain else ""
+        lavfi = (f"[0:v]{pre}select='eq(n\\,0)',setpts=PTS-STARTPTS[a];"
+                 f"[1:v]{pre}select='eq(n\\,{frames - 1})',setpts=PTS-STARTPTS[b];[a][b]ssim=stats_file=seam.log")
+        done = run([str(ffmpeg), "-hide_banner", "-nostdin", "-i", str(path), "-i", str(path), "-lavfi", lavfi,
+                    "-f", "null", "-"], cwd=tmp, capture_output=True, text=True, timeout=3600)
+        log = pathlib.Path(tmp) / "seam.log"
+        if done.returncode != 0 or not log.is_file():
+            raise Failure(f"seam ssim of {pathlib.Path(path).name} failed: {done.stderr.strip()[-300:]}")
+        values = parse_ssim_stats(log.read_text())
+    if not values:
+        raise Failure(f"seam ssim of {pathlib.Path(path).name} compared no frames")
+    return values[0]
+
+
+def gate_seam(name, value):
+    floor = THRESHOLDS["seam_ssim"]
+    return Result(f"seam/{name}", PASS if value >= floor else FAIL,
+                  f"SSIM(first, last) {value:.4f} {'>=' if value >= floor else '<'} {floor}")
+
+
+def gate_sentinel_master(ffmpeg, master, size, run=subprocess.run):
+    """An independent rescan: decode the master to RGB24 and scan every frame."""
+    w, h = size
+    proc = subprocess.Popen([str(ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-i", str(master), "-map", "0:v:0",
+                             "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+    try:
+        scanned, hit = scan_stream(proc.stdout, w, h)
+    finally:
+        proc.stdout.close()
+        proc.wait()
+    if hit:
+        return Result("sentinel/master", FAIL, hit.message())
+    if proc.returncode != 0:
+        return Result("sentinel/master", FAIL, f"decoding the master failed (ffmpeg exit {proc.returncode})")
+    return Result("sentinel/master", PASS, f"{scanned} master frames rescanned, none holds a connected "
+                                           f"{SENTINEL_MIN_RUN}-pixel run of #FF00FE")
+
+
+def run_gates(out_dir, master, frames_b=None, ffmpeg=None, site_media=SITE_MEDIA, run=subprocess.run, progress=None):
+    """Every gate of the plan's S6, each a named Result. `ffmpeg` is a path; the pure gates need none."""
+    out_dir = pathlib.Path(out_dir)
+    say = progress or (lambda msg: None)
+    results = []
+    try:
+        tsv_path = out_dir / "frames.tsv"
+        rec_path = out_dir / "render.json"
+        rows = parse_frames_tsv(tsv_path.read_text())
+        record = json.loads(rec_path.read_text())
+    except (Failure, OSError, ValueError) as e:
+        return [Result("inputs", FAIL, str(e))]
+    problems = validate_render_record(record)
+    if problems:
+        return [Result("render.json", FAIL, "; ".join(problems))]
+    frames = len(rows)
+    master_info = probe(ffmpeg, master, run)
+    results.append(Result("master/format", PASS if (master_info["width"], master_info["height"]) == MASTER_SIZE
+                          and master_info["codec"] == "ffv1" else FAIL,
+                          f"{master_info['codec']} {master_info['width']}x{master_info['height']} {master_info['pix_fmt']}, "
+                          f"{master_info['frames']} frames (want ffv1 {MASTER_SIZE[0]}x{MASTER_SIZE[1]})"))
+    results += gate_frames_tsv(rows, record, master_info["frames"])
+    results.append(gate_sentinel_record(record))
+    say("rescanning the master for the sentinel")
+    results.append(gate_sentinel_master(ffmpeg, master, MASTER_SIZE, run))
+    results.append(gate_run_twice(tsv_path, frames_b))
+    results.append(gate_hero_pool(record))
+    results += gate_storyboard_record(record)
+    results += gate_sizes(out_dir, site_media)
+    vmaf = have_filter(ffmpeg, "libvmaf", run)
+    for v in VIDEOS:
+        path = out_dir / v.name
+        if not path.is_file():
+            results.append(Result(f"format/{v.name}", FAIL, "not encoded"))
+            continue
+        say(f"grading {v.name}")
+        results.append(gate_format(probe(ffmpeg, path, run), v.name, v, frames))
+        chain = video_filter(v.width, v.height)
+        results.append(gate_ssim(v.name, ssim_against_master(ffmpeg, path, master, chain, "yuv420p", run),
+                                 THRESHOLDS["ssim_min"], THRESHOLDS["ssim_mean"], frames))
+        if vmaf:
+            results.append(gate_vmaf(v.name, *vmaf_against_master(ffmpeg, path, master, chain, run)))
+        else:
+            results.append(Result(f"vmaf/{v.name}", SKIP, "libvmaf is not in this ffmpeg; VMAF NOT measured"))
+        box = roi_box(v.width, v.height)
+        results.append(gate_banding(v.name, roi_frames(ffmpeg, path, box, THRESHOLDS["banding_every"], None, run),
+                                    roi_frames(ffmpeg, master, box, THRESHOLDS["banding_every"], chain, run), box))
+        results.append(gate_seam(v.name, seam_ssim(ffmpeg, path, frames, None, run)))
+    for p in POSTERS:
+        path = out_dir / p.name
+        if not path.is_file():
+            results.append(Result(f"format/{p.name}", FAIL, "not encoded"))
+            continue
+        results.append(gate_format(probe(ffmpeg, path, run), p.name, p, frames))
+        values = ssim_against_master(ffmpeg, path, master, poster_filter(p.width, p.height), "yuvj420p", run, frames=1)
+        results.append(gate_ssim(p.name, values, THRESHOLDS["poster_ssim_min"], THRESHOLDS["poster_ssim_min"], 1))
+    say("master loop seam")
+    results.append(gate_seam("master", seam_ssim(ffmpeg, master, frames, video_filter(*MASTER_SIZE), run)))
+    return results
+
+
+def write_gates_json(out_dir, results):
+    passed = all(r.status != FAIL for r in results)
+    (pathlib.Path(out_dir) / "gates.json").write_text(json.dumps(
+        {"schema": SCHEMA, "passed": passed, "thresholds": {k: list(v) if isinstance(v, tuple) else v
+                                                            for k, v in THRESHOLDS.items()},
+         "results": [r._asdict() for r in results]}, indent=1) + "\n")
+    return passed
+
+
+def format_results(results):
+    width = max(len(r.name) for r in results)
+    return "\n".join(f"{r.status.upper():4}  {r.name:<{width}}  {r.detail}" for r in results)
+
+
+# ------------------------------------------------------------------ the sentinel scanner --------
+SENTINEL = b"\xff\x00\xfe"  # #FF00FE in RGB24 byte order
+SENTINEL_MIN_RUN = 64
+_RUN = re.compile(rb"(?:\xff\x00\xfe)+")
+
+
+class Hit(collections.namedtuple("Hit", "frame pixels bbox")):
+    def message(self):
+        x0, y0, x1, y1 = self.bbox
+        return (f"frame {self.frame}: a connected run of {self.pixels} pixels of exactly #FF00FE "
+                f"(bbox x {x0}-{x1}, y {y0}-{y1})")
+
+
+def scan_frame(frame, width, height, min_run=SENTINEL_MIN_RUN):
+    """(pixels, bbox) of the largest 4-connected region of exactly #FF00FE if it has at least `min_run`
+    pixels, else None. `frame` is RGB24 bytes. One C-speed `in` rejects every clean frame; a frame that
+    holds the three bytes anywhere then gets a per-row run scan and a union-find across rows.
+    Connectivity is 4-way: a diagonal chain of single pixels is NOT a run, and neither is a scatter."""
+    if len(frame) != width * height * 3:
+        raise ValueError(f"frame is {len(frame)} bytes, want {width}x{height}x3")
+    if SENTINEL not in frame:
+        return None
+    stride = width * 3
+    parent, size, box = [], [], []
+    prev = []  # [(x0, x1_exclusive, id)] of the previous row
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for y in range(height):
+        row = frame[y * stride:(y + 1) * stride]
+        cur = []
+        if SENTINEL in row:
+            for m in _RUN.finditer(row):
+                if m.start() % 3:  # a straddle of two pixels, never a pixel: it cannot overlap a true run
+                    continue
+                x0, x1 = m.start() // 3, m.end() // 3
+                i = len(parent)
+                parent.append(i)
+                size.append(x1 - x0)
+                box.append([x0, y, x1 - 1, y])
+                for px0, px1, j in prev:
+                    if px0 < x1 and x0 < px1:  # shares a column with a run above
+                        a, b = find(i), find(j)
+                        if a != b:
+                            parent[b] = a
+                            size[a] += size[b]
+                            ba, bb = box[a], box[b]
+                            box[a] = [min(ba[0], bb[0]), min(ba[1], bb[1]), max(ba[2], bb[2]), max(ba[3], bb[3])]
+                cur.append((x0, x1, i))
+        prev = cur
+    best = None
+    for i in range(len(parent)):
+        if find(i) == i and size[i] >= min_run and (best is None or size[i] > size[best]):
+            best = i
+    return None if best is None else (size[best], tuple(box[best]))
+
+
+def scan_stream(stream, width, height, tee=None, min_run=SENTINEL_MIN_RUN):
+    """Scan RGB24 frames from a binary stream until the first hit. Returns (frames scanned, Hit or None).
+    `tee` (a binary file) receives every frame that passed, so this can sit between a writer and ffmpeg."""
+    size = width * height * 3
+    n = 0
+    while True:
+        frame = stream.read(size)
+        while frame and len(frame) < size:  # a pipe returns short reads
+            more = stream.read(size - len(frame))
+            if not more:
+                raise Failure(f"the stream ended inside frame {n}: {len(frame)} of {size} bytes")
+            frame += more
+        if not frame:
+            return n, None
+        found = scan_frame(frame, width, height, min_run)
+        if found:
+            return n, Hit(n, found[0], found[1])
+        if tee is not None:
+            tee.write(frame)
+        n += 1
+
+
+# ------------------------------------------------------------------ the manifest ----------------
+# Everything that can change a pixel of the film, as git trees at HEAD: every crate (the renderer
+# and type tokens in `gfx`, the springs and the landing gate in `machine`, the dump driver in
+# `src/dev/framedump.rs`, ... all live under `rust-modules`, so no crate list can fall behind a
+# new dependency), the assets and locale strings the app embeds, the C shims (`src/svg.c`) and the
+# storyboard. The demo catalog is covered by `catalog_sha256`, the pinned tools by `tools`.
+TREE_PATHS = ("rust-modules", "assets", "locales", "src", "tests/video")
+
+
+def current_platform(env=None, system=None):
+    """`linux-ci` only on a GitHub Actions Linux runner; anything else is a labelled local preview."""
+    env = os.environ if env is None else env
+    system = system or platform.system()
+    if system == "Linux" and env.get("GITHUB_ACTIONS") == "true":
+        return "linux-ci"
+    return f"{system.lower()}-local"
+
+
+# What the render is a function of besides the tree: "the canonical video is what this pinned software
+# stack renders". Recorded, never gated on: a new runner image is a new fingerprint, not a failure.
+ENV_KEYS = ("LC_ALL", "TZ", "LIBGL_ALWAYS_SOFTWARE", "GALLIUM_DRIVER", "LP_NATIVE_VECTOR_WIDTH", "SDL_VIDEODRIVER")
+ENV_PACKAGES = ("libgl1-mesa-dri", "libglx-mesa0", "libllvm*", "libsdl2-2.0-0", "xvfb", "ffmpeg", "python3-pil")
+
+
+def parse_glx_info(text):
+    """The renderer, the GL version string (which carries the Mesa version) and LLVM's version out of
+    `glxinfo -B`; every field None when the line is absent."""
+    def line(key):
+        m = re.search(rf"^{re.escape(key)}:\s*(.+?)\s*$", text, re.M)
+        return m.group(1) if m else None
+    renderer = line("OpenGL renderer string")
+    version = line("OpenGL version string")
+    llvm = re.search(r"LLVM (\d+(?:\.\d+)*)", renderer or "")
+    mesa = re.search(r"Mesa (\S+)", version or "")
+    return {"renderer": renderer, "version": version, "mesa": mesa.group(1) if mesa else None,
+            "llvm": llvm.group(1) if llvm else None}
+
+
+def collect_environment(env=None, run=subprocess.run, root="/"):
+    """The machine half of the manifest: runner image, OS, CPU, the GL stack, the packages behind it and
+    the variables that steer it. Best effort: a field this host cannot answer is None."""
+    env = os.environ if env is None else env
+    root = pathlib.Path(root)
+
+    def out(argv):
+        try:
+            done = run(argv, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return done.stdout if done.returncode == 0 else ""
+
+    def read(rel):
+        try:
+            return (root / rel).read_text(errors="replace")
+        except OSError:
+            return ""
+
+    def first(text):
+        return text.splitlines()[0] if text.strip() else None
+
+    os_name = re.search(r'^PRETTY_NAME="?(.*?)"?$', read("etc/os-release"), re.M)
+    cpu = re.search(r"^model name\s*:\s*(.+?)\s*$", read("proc/cpuinfo"), re.M)
+    glx = out(["glxinfo", "-B"]) if shutil.which("glxinfo") and env.get("DISPLAY") else ""
+    packages = {}
+    if shutil.which("dpkg-query"):
+        for row in out(["dpkg-query", "-W", "-f", "${Package} ${Version}\\n", *ENV_PACKAGES]).splitlines():
+            name, _, version = row.partition(" ")
+            if name and version:  # `libllvm*` also lists the versions that are known but not installed
+                packages[name] = version
+    try:
+        import PIL
+        pillow = PIL.__version__
+    except ImportError:
+        pillow = None
+    return {
+        "runner_image": {"os": env.get("ImageOS"), "version": env.get("ImageVersion")},
+        "os": os_name.group(1) if os_name else None,
+        "kernel": first(out(["uname", "-sr"])),
+        "cpu": {"model": cpu.group(1) if cpu else None, "logical": os.cpu_count()},
+        "gl": parse_glx_info(glx),
+        "glxinfo": glx.strip() or None,
+        "packages": packages,
+        "derive_ffmpeg": first(out(["ffmpeg", "-hide_banner", "-version"])) if shutil.which("ffmpeg") else None,
+        "pillow": pillow,
+        "env": {k: env.get(k) for k in ENV_KEYS},
+    }
+
+
+def git_tree_hashes(paths, run, root, rev):
+    """{path: git object id at `rev`} for every path, plus `combined` (a sha256 over the ids in order). Shared with
+    `site_stills.py`, whose inputs are a different path list hashed the same way."""
+    out = {}
+    for p in paths:
+        done = run(["git", "-C", str(root), "rev-parse", f"{rev}:{p}"], capture_output=True, text=True)
+        if done.returncode != 0:
+            raise Failure(f"cannot read the git object of {p} at {rev}: {done.stderr.strip()}")
+        out[p] = done.stdout.strip()
+    out["combined"] = hashlib.sha256("".join(out[p] for p in paths).encode()).hexdigest()
+    return out
+
+
+def tree_hashes(run=subprocess.run, root=ROOT, rev="HEAD"):
+    """Git tree ids of every path in `TREE_PATHS` at `rev` (HEAD by default), and whether the working tree
+    differs from HEAD there (always False for any other `rev`: a revision has no working tree)."""
+    out = git_tree_hashes(TREE_PATHS, run, root, rev)
+    if rev != "HEAD":
+        return out, False
+    dirty = run(["git", "-C", str(root), "status", "--porcelain", "--"] + list(TREE_PATHS),
+                capture_output=True, text=True)
+    return out, bool(dirty.stdout.strip())
+
+
+# ------------------------------------------------------------------ the release hook -------------
+# The site's film refreshes after a STABLE release and never for anything else (docs/agent-reference.md,
+# "The site demo video"). These pure functions answer when; the workflow only asks them.
+STABLE_TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def stable_release_tag(ref):
+    """The bare tag when `ref` names a STABLE release (`vX.Y.Z`, as a tag or as `refs/tags/vX.Y.Z`), else None.
+    Release candidates (`rc/vX.Y.Z-rc.N`, `canary/...`), nightlies (`nightly/vX.Y.Z-nightly-YYYYMMDD`), a bare
+    `vX.Y.Z-rc.1`, a branch and a commit are all refused: only `release.yml`'s own publish makes a `vX.Y.Z` tag."""
+    tag = ref[len("refs/tags/"):] if ref.startswith("refs/tags/") else ref
+    return tag if STABLE_TAG.fullmatch(tag) else None
+
+
+def inputs_verdict(what, rev, force, manifest_path, hash_at):
+    """(render?, why) for one set of inputs: yes when forced, when the committed manifest at `manifest_path` has no
+    readable `tree_hash.combined`, or when that differs from `hash_at()`, the combined hash at `rev`. No otherwise:
+    the same inputs render the same files, so the committed ones stand. `what` names them in the reason
+    ("the film", "the stills"); `hash_at` is called only when the manifest is readable and the run is not forced."""
+    if force:
+        return True, "forced"
+    path = pathlib.Path(manifest_path)
+    try:
+        recorded = json.loads(path.read_text())["tree_hash"]["combined"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return True, f"no readable tree hash in {path.name}"
+    here = hash_at()
+    if here == recorded:
+        return False, f"{what}'s inputs at {rev} are the committed ones' (tree hash {here[:12]})"
+    return True, f"{what}'s inputs changed: committed {recorded[:12]}, {rev} {here[:12]}"
+
+
+def needs_render(rev="HEAD", force=False, manifest_path=None, run=subprocess.run, root=ROOT):
+    """(render?, why): does the film have to be rendered again for `rev`? `TREE_PATHS` are its inputs; two renders
+    and the hold gate prove the same inputs render the same film (`inputs_verdict`)."""
+    return inputs_verdict("the film", rev, force, manifest_path or SITE_MEDIA / MANIFEST_NAME,
+                          lambda: tree_hashes(run, root, rev)[0]["combined"])
+
+
+def film_paragraph(manifest, tag, source_sha):
+    """The film's paragraph of the bot commit (`site_stills.commit_message` writes the rest): which render it is and
+    the gates' summary. The gates prove determinism and quality, never taste."""
+    results = manifest.get("gates", {}).get("results", [])
+    counts = collections.Counter(r.get("status") for r in results)
+    summary = ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "no results"
+    tree = (manifest.get("tree_hash") or {}).get("combined", "?")[:12]
+    return (f"Rendered by the site-video workflow from {tag} ({source_sha}), film inputs tree hash {tree}, on the\n"
+            f"pinned Linux/llvmpipe stack: two renders agreed frame for frame, the hold-injection gate and the\n"
+            f"sentinel scan passed, and every quality gate passed ({len(results)} gates: {summary}).")
+
+
+# ------------------------------------------------------------------ the page's codec strings --------
+# site/index.html declares each <source>'s `codecs=` so a browser can skip a file it cannot decode without
+# fetching it. The string is a fact about the FILE (its profile and level), so it is read from the file's own
+# sample-description box and rewritten whenever the film is adopted: a re-encode that moves a level must not
+# leave the page declaring the old one.
+SOURCE_CODECS = re.compile(r"""(src="media/(?P<name>[^"]+)"\s+type='video/mp4; codecs=")(?P<codecs>[^"]*)(")""")
+
+
+def mp4_box_payload(data, fourcc, size):
+    i = data.find(fourcc)
+    if i < 0:
+        raise Failure(f"no {fourcc.decode()} box in the file")
+    return data[i + 4:i + 4 + size]
+
+
+def mp4_codec_string(path, codec):
+    """The RFC 6381 string for an mp4 of `codec` ("h264" or "av1"), from its avcC / av1C box."""
+    data = pathlib.Path(path).read_bytes()
+    if codec == "h264":
+        _, profile, compat, level = mp4_box_payload(data, b"avcC", 4)
+        return f"avc1.{profile:02X}{compat:02X}{level:02X}"
+    b1, b2 = mp4_box_payload(data, b"av1C", 4)[1:3]
+    profile, level = b1 >> 5, b1 & 31
+    tier = "H" if b2 & 0x80 else "M"
+    depth = 12 if b2 & 0x20 else 10 if b2 & 0x40 else 8
+    return f"av01.{profile}.{level:02d}{tier}.{depth:02d}"
+
+
+def film_codec_strings(media_dir):
+    """{video file name: codec string} for the four videos in `media_dir`."""
+    return {v.name: mp4_codec_string(pathlib.Path(media_dir) / v.name, v.codec) for v in VIDEOS}
+
+
+def rewrite_codecs(html, strings):
+    """(html with every video's `codecs=` set to strings[name], [names that changed]). A video the page does not
+    declare exactly once is a Failure: the page and the film must stay in step."""
+    changed = []
+    for name, want in strings.items():
+        found = [m for m in SOURCE_CODECS.finditer(html) if m.group("name") == name]
+        if len(found) != 1:
+            raise Failure(f"index.html declares {name} {len(found)} times; expected exactly one <source>")
+        if found[0].group("codecs") != want:
+            changed.append(name)
+    def swap(m):
+        want = strings.get(m.group("name"))
+        return m.group(0) if want is None else f"{m.group(1)}{want}{m.group(4)}"
+    return SOURCE_CODECS.sub(swap, html), changed
+
+
+def file_entry(path):
+    return {"sha256": sha256_file(path), "bytes": os.path.getsize(path)}
+
+
+def build_manifest(out_dir, record, gates, ffmpeg_info, trees, dirty, catalog_sha, platform_label):
+    out_dir = pathlib.Path(out_dir)
+    missing = [n for n in MEDIA_NAMES if not (out_dir / n).is_file()]
+    if missing:
+        raise Failure(f"cannot write a manifest: missing {', '.join(missing)}")
+    extras = sorted(p.name for p in out_dir.iterdir()
+                    if p.is_file() and p.name not in MEDIA_NAMES and p.name != MANIFEST_NAME)
+    if not gates.get("passed"):
+        raise Failure("cannot write a manifest over a failed gates.json: fix the render and re-run `gates`")
+    return {
+        "schema": SCHEMA,
+        "platform": platform_label,
+        "outputs": {n: file_entry(out_dir / n) for n in MEDIA_NAMES},
+        "artifacts": {n: file_entry(out_dir / n) for n in extras},
+        "tools": ffmpeg_info,
+        "storyboard_sha256": record["storyboard_sha256"],
+        "catalog_sha256": catalog_sha,
+        "tree_hash": trees,
+        "tree_dirty": dirty,
+        "opened_rating_keys": record["opened_rating_keys"],
+        "hero_pool": record["hero_pool"],
+        "render": record,
+        "gates": {"passed": gates["passed"], "results": gates["results"]},
+    }
+
+
+def verify_manifest(manifest, directory, sections=("outputs", "artifacts")):
+    """Problems (a list of strings) with a manifest against the files beside it; [] when it verifies.
+    `sections=("outputs",)` is the committed copy beside site/media, which holds only the six media files."""
+    problems = []
+    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
+        return [f"not a schema-{SCHEMA} manifest"]
+    directory = pathlib.Path(directory)
+    for section in sections:
+        for name, entry in sorted((manifest.get(section) or {}).items()):
+            if name != os.path.basename(name) or name in ("", ".", ".."):
+                problems.append(f"{section}: {name!r} is not a plain file name")
+                continue
+            path = directory / name
+            if not path.is_file():
+                problems.append(f"{name}: listed but absent")
+            elif os.path.getsize(path) != entry.get("bytes"):
+                problems.append(f"{name}: {os.path.getsize(path)} bytes, manifest says {entry.get('bytes')}")
+            elif sha256_file(path) != entry.get("sha256"):
+                problems.append(f"{name}: sha256 differs from the manifest")
+    if sorted(manifest.get("outputs") or {}) != sorted(MEDIA_NAMES):
+        problems.append(f"outputs must be exactly the six media files, got {sorted(manifest.get('outputs') or {})}")
+    return problems
+
+
+def make_artifact_zip(out_dir, manifest, zip_path):
+    out_dir = pathlib.Path(out_dir)
+    names = sorted(list(manifest["outputs"]) + list(manifest["artifacts"]))
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
+        for name in names + [MANIFEST_NAME]:
+            info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))  # fixed date: the zip is a function of its files
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = 0o644 << 16
+            z.writestr(info, (out_dir / name).read_bytes())
+
+
+def safe_extract(zip_path, dest, limit=1 << 30):
+    dest = pathlib.Path(dest)
+    with zipfile.ZipFile(zip_path) as z:
+        total = 0
+        for info in z.infolist():
+            name = info.filename
+            if (name.startswith("/") or "\\" in name or ".." in pathlib.PurePosixPath(name).parts
+                    or (info.external_attr >> 16) & 0o170000 == 0o120000):
+                raise Failure(f"the artifact holds an unsafe entry {name!r}")
+            total += info.file_size
+            if total > limit:
+                raise Failure("the artifact is larger than 1 GiB uncompressed")
+        z.extractall(dest)
+
+
+def plan_adopt(zip_path, site_media, tmp):
+    """Verify an artifact and return [(src, dst)] to copy. Refuses anything not rendered on linux-ci, a
+    failed or missing gates record, a dirty tree, or a file whose sha256 differs."""
+    extracted = pathlib.Path(tmp)
+    if pathlib.Path(zip_path).is_dir():
+        # What `actions/download-artifact` hands a job: the artifact already unpacked. Every check below
+        # reads this directory exactly as it reads an extracted zip (the manifest's sha256s and sizes pin it).
+        extracted = pathlib.Path(zip_path)
+    else:
+        safe_extract(zip_path, extracted)
+    mpath = extracted / MANIFEST_NAME
+    if not mpath.is_file():
+        raise Failure(f"the artifact has no {MANIFEST_NAME}")
+    manifest = json.loads(mpath.read_text())
+    problems = verify_manifest(manifest, extracted)
+    if problems:
+        raise Failure("manifest does not verify:\n  " + "\n  ".join(problems))
+    if manifest.get("platform") != "linux-ci":
+        raise Failure(f"refusing: the manifest's platform is {manifest.get('platform')!r}, not 'linux-ci'. "
+                      f"Only the Linux CI render is canonical; a local render is a preview.")
+    if not manifest.get("gates", {}).get("passed"):
+        raise Failure("refusing: the manifest records failed or missing gates")
+    if manifest.get("tree_dirty"):
+        raise Failure("refusing: the render was made from a dirty tree")
+    site_media = pathlib.Path(site_media)
+    plan = [(extracted / n, site_media / n) for n in MEDIA_NAMES] + [(mpath, site_media / MANIFEST_NAME)]
+    return plan, manifest
+
+
+class Adopted(list):
+    """The (src, dst) copy plan, plus `changed`: the media files whose bytes differ from what is in the site now,
+    and `codecs_rewritten`: the videos whose `codecs=` string in index.html the adoption changed."""
+    changed = ()
+    codecs_rewritten = ()
+
+
+def changed_media(plan):
+    """Names of the six media files (never the manifest) whose destination is absent or differs from the source."""
+    return [dst.name for src, dst in plan if dst.name in MEDIA_NAMES
+            and not (dst.is_file() and sha256_file(dst) == sha256_file(src))]
+
+
+# What `adopt --derive` regenerates from a film that changed: the glows behind the TV (read from the poster) and the
+# credits page (read from the demo catalog). Both are deterministic; the close-up glows are not the film's.
+FILM_GLOWS = ("feel-glow.png", "feel-glow-narrow.png")
+
+
+def derive_argvs(py=None):
+    py = py or sys.executable
+    tools = ROOT / "tools"
+    return [[py, str(tools / "render-site-glows.py"), "--only", *FILM_GLOWS],
+            [py, str(tools / "demo_library.py"), "site-credits"]]
+
+
+def adopt(zip_path, site_media=SITE_MEDIA, write=False, say=print, run=subprocess.run, expect_rev=None, derive=False,
+          site_index=None):
+    """Verify an artifact (a zip, or the directory `download-artifact` unpacked) and copy it into the site.
+    `expect_rev` refuses an artifact whose film-input tree hash is not the one at that revision (the film
+    must be of the tree it is adopted for). When the six media files are byte-identical to the site's, nothing is
+    written, the manifest included: the committed manifest keeps naming the tree the film was last rendered for.
+    `derive` then regenerates what derives from a film that changed (`derive_argvs`). A film that changed also has its
+    `codecs=` strings rewritten in `site_index` (default: index.html beside `site_media`; absent = skipped), read from
+    the adopted files' own boxes, so a re-encode that moves a profile or level never leaves the page declaring the old."""
+    with tempfile.TemporaryDirectory() as tmp:
+        plan, manifest = plan_adopt(zip_path, site_media, tmp=tmp)
+        plan = Adopted(plan)
+        if expect_rev:
+            want = tree_hashes(run, rev=expect_rev)[0]["combined"]
+            got = manifest["tree_hash"]["combined"]
+            if got != want:
+                raise Failure(f"refusing: the artifact was rendered from film inputs {got[:12]}, "
+                              f"but {expect_rev} has {want[:12]}")
+            say(f"tree hash: matches {expect_rev}")
+        else:
+            try:
+                here, _ = tree_hashes(run)
+                same = here["combined"] == manifest["tree_hash"]["combined"]
+                say("tree hash: " + ("matches HEAD" if same else "DIFFERS from HEAD (" + ", ".join(TREE_PATHS) +
+                                                               " changed since the render): regenerate before release"))
+            except Failure as e:
+                say(f"tree hash: not compared ({e})")
+        plan.changed = changed_media(plan)
+        unchanged = not plan.changed and (pathlib.Path(site_media) / MANIFEST_NAME).is_file()
+        for src, dst in plan:
+            say(f"{'copy' if write and not unchanged else 'would copy'} {dst.name}  ({src.stat().st_size:,} bytes)")
+        say("film: " + ("byte-identical to the committed one" if unchanged else f"{len(plan.changed)} of {len(MEDIA_NAMES)} media files differ"))
+        if not write:
+            say("dry run: nothing was written; pass --write to copy")
+            return plan
+        if unchanged:
+            say("nothing written: the committed film and manifest stand")
+            return plan
+        for src, dst in plan:
+            tmp_dst = dst.with_name(dst.name + ".adopt-tmp")
+            shutil.copyfile(src, tmp_dst)
+            os.replace(tmp_dst, dst)
+        index = pathlib.Path(site_index) if site_index else pathlib.Path(site_media).parent / "index.html"
+        if index.is_file():
+            strings = film_codec_strings(site_media)
+            html, moved = rewrite_codecs(index.read_text(), strings)
+            if moved:
+                index.write_text(html)
+            plan.codecs_rewritten = moved
+            say(f"{index.name}: codecs= " + (", ".join(f"{n} -> {strings[n]}" for n in moved)
+                                              if moved else "already as the files carry them"))
+        else:
+            say(f"no {index.name} beside the media: codec strings not rewritten")
+        if derive:
+            for argv in derive_argvs():
+                say("derive: " + " ".join(os.path.basename(a) if i < 2 else a for i, a in enumerate(argv)))
+                done = run(argv, cwd=str(ROOT))
+                if done.returncode != 0:
+                    raise Failure(f"derive step failed ({done.returncode}): {' '.join(argv)}")
+        return plan
+
+
+# ------------------------------------------------------------------ contact sheet ---------------
+def evenly_spaced(frames, count):
+    """`count` frame indices spread over `frames`, first and last included."""
+    if frames < 1 or count < 1:
+        raise Failure("nothing to sample")
+    if count == 1 or frames == 1:
+        return [0]
+    count = min(count, frames)
+    return [round(i * (frames - 1) / (count - 1)) for i in range(count)]
+
+
+def contact_sheet(ffmpeg, master, out, count=12, columns=4, tile_width=480, run=subprocess.run):
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        raise Failure("contact-sheet needs Pillow: python3 -m pip install Pillow")
+    info = probe(ffmpeg, master, run)
+    picks = evenly_spaced(info["frames"], count)
+    with tempfile.TemporaryDirectory() as tmp:
+        select = "+".join(f"eq(n\\,{n})" for n in picks)
+        done = run([str(ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-i", str(master), "-vf",
+                    f"select='{select}',scale={tile_width}:-2:flags=lanczos", "-fps_mode", "passthrough",
+                    "-frames:v", str(len(picks)), str(pathlib.Path(tmp) / "t%03d.png")],
+                   capture_output=True, text=True, timeout=3600)
+        tiles = sorted(pathlib.Path(tmp).glob("t*.png"))
+        if done.returncode != 0 or len(tiles) != len(picks):
+            raise Failure(f"contact sheet: extracted {len(tiles)} of {len(picks)} frames: {done.stderr.strip()[-300:]}")
+        images = [Image.open(t).convert("RGB") for t in tiles]
+        tw, th = images[0].size
+        rows = -(-len(images) // columns)
+        label_h, pad = 22, 6
+        sheet = Image.new("RGB", (columns * (tw + pad) + pad, rows * (th + label_h + pad) + pad), (16, 16, 18))
+        draw = ImageDraw.Draw(sheet)
+        font = ImageFont.load_default()
+        for i, (img, n) in enumerate(zip(images, picks)):
+            x = pad + (i % columns) * (tw + pad)
+            y = pad + (i // columns) * (th + label_h + pad)
+            sheet.paste(img, (x, y + label_h))
+            draw.text((x + 2, y + 5), f"frame {n}   t = {n / (info['fps'] or FPS):.2f} s", fill=(235, 235, 235), font=font)
+        sheet.save(out, "JPEG", quality=88)
+    return picks
+
+
+# ------------------------------------------------------------------ render (the dump launcher) ---
+SIM_BIN = ROOT / "rust-modules" / "target-sim-video" / "release" / "plxnative-sim"
+DEMO_TOKEN = "demo-library-token"  # the mock accepts any token; `tools/screenshots.py` uses the same
+
+def ffv1_argv(ffmpeg, master, fps=FPS, width=FRAME_W, height=FRAME_H):
+    """RGB24 on stdin to the master: FFV1 level 3, every frame an intra frame, no audio."""
+    # `+bitexact` on the muxer and the encoder: without it Matroska writes a random segment UID (and
+    # the encoder its version) so two renders of identical frames are different files.
+    return [str(ffmpeg), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
+            "-framerate", str(fps), "-i", "-", "-an", "-c:v", "ffv1", "-level", "3", "-g", "1",
+            "-pix_fmt", "bgr0", "-fflags", "+bitexact", "-flags:v", "+bitexact", str(master)]
+
+
+# The locale and time zone a render runs in, whatever the host's: dates and number formats on the
+# Detail page come from them, so a CI container and a laptop must not differ.
+PINNED_ENV = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+
+
+def sim_env(runtime, out_dir, fifo, frames, preroll, allow_absent, max_hold_ms, base=None, no_hold=False,
+            keys=None, extra_holds=None):
+    """The simulator's environment: this machine's minus every PLXNATIVE_* variable (a developer's own
+    session settings must not leak into a render) and with the locale and time zone pinned
+    (`PINNED_ENV`), plus the dump's."""
+    env = {k: v for k, v in (os.environ if base is None else base).items()
+           if not k.startswith("PLXNATIVE_") and not k.startswith("LC_") and k not in ("LANG", "LANGUAGE", "TZ")}
+    env.update(PINNED_ENV)
+    env.update({
+        "PLXNATIVE_RUNTIME_DIR": str(runtime),
+        "PLXNATIVE_APP_DIR": str(ROOT / "pkg"),
+        "PLXNATIVE_WIN": f"{FRAME_W}x{FRAME_H}",
+        "PLXNATIVE_DUMP": str(out_dir),
+        "PLXNATIVE_DUMP_OUT": str(fifo),
+        "PLXNATIVE_DUMP_FRAMES": str(frames),
+        "PLXNATIVE_DUMP_PREROLL": str(preroll),
+        "PLXNATIVE_DUMP_MAX_HOLD_MS": str(max_hold_ms),
+    })
+    if allow_absent:
+        env["PLXNATIVE_DUMP_ALLOW_ABSENT"] = "1"
+    if no_hold:
+        env["PLXNATIVE_DUMP_NO_HOLD"] = "1"
+    if keys:
+        env["PLXNATIVE_DUMP_KEYS"] = keys
+    if extra_holds is not None:
+        env["PLXNATIVE_DUMP_EXTRA_HOLDS"] = str(extra_holds)
+    return env
+
+
+SIGN_IN_DONE = "hubs: landed"  # the log line after which the sign-in's session is on disk
+
+
+def sign_in_demo_profile(sim_bin, runtime, port, say=print, timeout=90, base=None):
+    """Sign the simulator in to the mock's Demo account BEFORE the film boots, through the app's own QR
+    sign-in (the mock links its demo code on the second poll). The film boots on `plxnative-token`,
+    which beats the stored session for traffic but not for the profile chip: `Session::account` reads
+    the STORED session, so a mock session with none made the chip read "Sign in" whenever focus passed
+    it (and `up` from the hero always does). The sign-in leaves `state/session.json` in the instance
+    root: the stored Demo account, and the chip reads "Demo". Harness side only: no app change.
+    The prep boot's own event log is removed so the film's log starts clean."""
+    runtime = pathlib.Path(runtime)
+    (runtime / "plxnative-login").write_text("")
+    env = sim_env(runtime, runtime / "prep-dump", runtime / "prep.rgb", 0, 0, False, 1000, base=base)
+    for k in [k for k in env if k.startswith("PLXNATIVE_DUMP")]:
+        del env[k]
+    log = open(runtime / "prep.out", "w")
+    sim = subprocess.Popen([str(sim_bin), "127.0.0.1", str(port)], stdout=log, stderr=subprocess.STDOUT, env=env)
+    events = runtime / "plxnative-events.log"
+    try:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if sim.poll() is not None:
+                raise Failure(f"the sign-in boot exited {sim.returncode} before it signed in")
+            if events.exists() and SIGN_IN_DONE in events.read_text(errors="replace"):
+                break
+            time.sleep(0.5)
+        else:
+            raise Failure(f"the demo sign-in did not finish within {timeout}s (see {runtime / 'prep.out'})")
+        time.sleep(1.5)  # the session's last revision is written a moment after the hubs land
+    finally:
+        sim.kill()
+        sim.wait()
+        log.close()
+    if not (runtime / "state" / "session.json").is_file():
+        raise Failure("the demo sign-in left no state/session.json")
+    for name in ("plxnative-login", "plxnative-events.log", "plxnative-diag.log", "plxnative-remote"):
+        (runtime / name).unlink(missing_ok=True)
+    say("site_video: the simulator is signed in to the mock's Demo account (the profile chip reads Demo)")
+
+
+HERO_LOG_LINE = "home: hero pinned at slot 0"
+# One line per page turn (`HomeScreen::flip`): the slot the carousel landed on and that page's ratingKey.
+HERO_PAGE_LINE = re.compile(r"home: hero page slot (\d+) rk=(\d+)")
+METADATA_PATH = re.compile(r"^/library/metadata/(\d+)$")
+# What a film must never ask the mock for: a stream, a transcode, a timeline or scrobble write, a queue.
+PLAYBACK_PATHS = ("/library/parts/", "/video/:/transcode", "/:/timeline", "/:/scrobble", "/:/unscrobble",
+                  "/:/progress", "/playQueues")
+
+
+def film_facts(pms, hero_slug, catalog, event_log, hero_ok=None):
+    """What the film showed and opened, from the two witnesses that need no screen-side bookkeeping: the
+    app's own event log (the hero pages it showed) and the mock's request log (a title's page is opened by
+    exactly one `GET /library/metadata/<ratingKey>`; a playback request is anything in `PLAYBACK_PATHS`).
+    `hero_logged` is every hero page shown, in order of first showing: the pinned one (its `hero pinned`
+    line) and each page the app turned to (`HERO_PAGE_LINE`); `hero_turns` is every turn, repeats kept.
+    `hero_eligible` is the titles in `hero_ok` (slugs whose art passes `demo_library.py hero-report`; `None`
+    means the pinned film alone) that are not flagged; `not_in_video` is every ratingKey the catalog flags.
+    What a card is FOCUSED on at rest leaves no request and no log line, so focus is judged by the
+    storyboard's positions, not recorded."""
+    by_slug = pms.lib.by_slug
+    films = [f for key in ("movies", "shows") for f in catalog.get(key, ())]
+    flagged = sorted(str(by_slug[f["id"]]) for f in films if f.get("not_in_video") and f.get("id") in by_slug)
+    pinned = by_slug.get(hero_slug or catalog.get("hero"))
+    with pms.lock:
+        paths = [e["path"] for e in pms.request_log if e["method"] == "GET"]
+        every = [e["path"] for e in pms.request_log]
+    opened = []
+    for path in paths:
+        m = METADATA_PATH.match(path)
+        if m and m.group(1) not in opened:
+            opened.append(m.group(1))
+    turns = [m.group(2) for m in HERO_PAGE_LINE.finditer(event_log)]
+    shown = ([str(pinned)] if pinned is not None and HERO_LOG_LINE in event_log else []) + turns
+    ok_slugs = [hero_slug or catalog.get("hero")] if hero_ok is None else list(hero_ok)
+    eligible = [str(by_slug[slug]) for slug in ok_slugs if slug in by_slug and str(by_slug[slug]) not in flagged]
+    return {"hero_logged": list(dict.fromkeys(shown)), "hero_eligible": eligible, "hero_turns": turns,
+            "opened": opened, "not_in_video": flagged,
+            "playback": [path for path in every if path.startswith(PLAYBACK_PATHS)]}
+
+
+def hero_report_passes():
+    """The slugs whose hero art passes `tools/demo_library.py hero-report` (a hero-eligible title whose
+    declared subject clears the hero's text and control zones): the pages a film may SHOW."""
+    # By path: `tests/` is on `sys.path` for the mock, and its `demo_library/` directory would shadow the module.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("plx_demo_library", ROOT / "tools" / "demo_library.py")
+    demo_library = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(demo_library)
+    assets, catalog = demo_library.load()
+    films = {t["id"]: t for t in catalog["movies"] + catalog.get("shows", [])}
+    return [key for key in demo_library.hero_eligible(catalog)
+            if demo_library.hero_geometry(assets, films[key])["verdict"] == "pass"]
+
+
+def build_render_record(storyboard, dump, scanned, frames_rows, platform_label, facts):
+    """render.json (schema 1) from what the app reported (`dump.json`) and what this side counted."""
+    sb = json.dumps(storyboard, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "schema": SCHEMA,
+        "storyboard_sha256": hashlib.sha256(sb).hexdigest(),
+        "storyboard": storyboard,
+        "frames": {"count": frames_rows, "fps": FPS, "width": dump.get("width", FRAME_W), "height": dump.get("height", FRAME_H)},
+        "placeholder_debt": {"frames_with_debt": dump["frames_with_debt"]},
+        "sentinel": {"scanned_frames": scanned, "hits": 0},
+        # What the launcher read back: the app's own hero line and the mock's request log (`film_facts`).
+        "hero_pool": {"logged": facts["hero_logged"], "eligible": facts["hero_eligible"],
+                      "turns": facts.get("hero_turns", [])},
+        "opened_rating_keys": facts["opened"],
+        "playback_requests": facts.get("playback", []),
+        "hold_hint": storyboard.get("hold_hint", "default"),
+        "not_in_video": facts["not_in_video"],
+        "dump": {k: dump.get(k) for k in ("preroll", "iterations", "holds", "hold_reasons", "unconverted_takes",
+                                           "clock_origin_ms", "wall_ms")},
+        "platform": platform_label,
+    }
+
+
+PARTIAL = (("master.mkv", "master.partial.mkv"), ("frames.tsv", "frames.partial.tsv"))
+
+
+def quarantine(out_dir):
+    """A run that did not finish clean leaves no `master.mkv`/`frames.tsv` for `encode` or `gates` to
+    adopt: they are renamed `*.partial.*` (and a stale `render.json` is gone already)."""
+    out_dir = pathlib.Path(out_dir)
+    for name, partial in PARTIAL:
+        if (out_dir / name).exists():
+            os.replace(out_dir / name, out_dir / partial)
+
+
+# The film is shot with the hold hint taught (`plxnative-hintoff`, `hold_hint::teach_all_for_dev`, read once at
+# boot, dev builds only): the capsule is a one-time teaching overlay, and a film has no viewer to teach. The
+# record says so (`hold_hint`), so a reader of render.json never has to guess whether the capsule was off.
+HINT_OFF = {"hintoff": ""}
+
+STORYBOARD_SCHEMA = 1
+KEY_NAMES = ("up", "down", "left", "right", "ok", "back")
+KEY_DOWN_FRAMES = 6  # `framedump::KEY_UP_AFTER`: a tap is down for six frames
+
+
+def _frames(ms, fps=FPS):
+    return int(round(ms * fps / 1000.0))
+
+
+def load_storyboard(path=STORYBOARD):
+    """Read and validate `tests/video/feel.json`; returns (dict, sha256 of the file's bytes)."""
+    raw = pathlib.Path(path).read_bytes()
+    sb = json.loads(raw)
+    if sb.get("schema") != STORYBOARD_SCHEMA:
+        raise Failure(f"{path}: schema {sb.get('schema')!r}, this tool reads {STORYBOARD_SCHEMA}")
+    if sb.get("fps") != FPS:
+        raise Failure(f"{path}: fps must be {FPS}")
+    for beat in sb.get("beats", ()):
+        for key in beat.get("keys", ()):
+            if key not in KEY_NAMES:
+                raise Failure(f"{path}: beat {beat.get('name')!r}: {key!r} is not one of {KEY_NAMES}")
+        if not beat.get("keys") and not beat.get("hold_ms"):
+            raise Failure(f"{path}: beat {beat.get('name')!r} neither presses a key nor holds")
+    return sb, hashlib.sha256(raw).hexdigest()
+
+
+def compile_storyboard(sb):
+    """The storyboard as the driver's schedule: {preroll, frames, keys: 'v:key,...', beats: [...], loop}.
+
+    Times are written frames from the start of the film (written frame n is virtual frame preroll+n).
+    A key beat presses its keys `gap_ms` apart and then rests `rest_ms`; a hold beat is `hold_ms` of
+    nothing. Each beat records `start` and `end` (the frame its successor starts on). `loop` is the file's
+    `end.match_first_frame`: the film must end on its first frame's picture (`gate_storyboard_record`)."""
+    fps = sb["fps"]
+    preroll = _frames(sb["boot"]["preroll_ms"], fps)
+    t = 0
+    keys, beats = [], []
+    for beat in sb["beats"]:
+        start = t
+        for i, key in enumerate(beat.get("keys", ())):
+            keys.append((preroll + t, key))
+            t += KEY_DOWN_FRAMES + (_frames(beat.get("gap_ms", 0), fps) if i + 1 < len(beat["keys"]) else 0)
+        t += _frames(beat.get("rest_ms", 0) + beat.get("hold_ms", 0), fps)
+        beats.append({"name": beat["name"], "start": start, "end": t, "keys": list(beat.get("keys", ()))})
+    return {"preroll": preroll, "frames": t, "keys": ",".join(f"{v}:{k}" for v, k in keys), "beats": beats,
+            "loop": bool((sb.get("end") or {}).get("match_first_frame"))}
+
+
+REST_WINDOW_FRAMES = 12   # a beat is judged on how far the picture moved over its last 0.2 s
+REST_TOLERANCE = 3        # a channel that moved by more than this many /255 has moved; <= is the spring's tail
+REST_MAX_MOVED = 0.0001   # fraction of the frame that may have moved: 0.01 % (about 200 px, less than one tab pill)
+
+
+def rest_verdict(max_delta, moved_fraction):
+    """The beat is at rest: nothing but a spring's last 1-3/255 changed over the window."""
+    return max_delta <= REST_TOLERANCE or moved_fraction <= REST_MAX_MOVED
+
+
+def rest_metrics(ffmpeg, master, beats, window=REST_WINDOW_FRAMES, run=subprocess.run):
+    """Per beat, on DECODED frames: the largest channel delta and the fraction of pixels that moved by more
+    than `REST_TOLERANCE`, between the beat's last frame and the one `window` frames before it. Byte
+    identity cannot be the test: a critically damped spring's tail changes the picture by 1-3/255 for
+    seconds after it is visibly still. Returns [{beat, frames: (a, b), max_delta, moved}]."""
+    from PIL import Image, ImageChops
+    wanted = {}
+    for beat in beats:
+        last = beat["end"] - 1
+        first = max(beat["start"], last - window)
+        if last > first:
+            wanted[beat["name"]] = (first, last)
+    numbers = sorted({n for pair in wanted.values() for n in pair})
+    if not numbers:
+        return []
+    with tempfile.TemporaryDirectory() as d:
+        select = "+".join(f"eq(n\\,{n})" for n in numbers)
+        run([str(ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-i", str(master), "-vf", f"select='{select}'",
+             "-fps_mode", "passthrough", f"{d}/%06d.png"], check=True)
+        pngs = sorted(pathlib.Path(d).glob("*.png"))
+        if len(pngs) != len(numbers):
+            raise Failure(f"rest probe decoded {len(pngs)} frames, wanted {len(numbers)}")
+        images = {n: Image.open(p).convert("RGB") for n, p in zip(numbers, pngs)}
+        out = []
+        for beat in beats:
+            if beat["name"] not in wanted:
+                continue
+            a, b = wanted[beat["name"]]
+            diff = ImageChops.difference(images[a], images[b])
+            peak = max(hi for _, hi in diff.getextrema())
+            moved = diff.convert("L").point(lambda v: 255 if v > REST_TOLERANCE else 0)
+            count = moved.histogram()[255]
+            out.append({"beat": beat["name"], "frames": [a, b], "max_delta": peak,
+                        "moved": count / float(diff.size[0] * diff.size[1])})
+        return out
+
+
+LOOP_TOLERANCE = 1  # the last frame may differ from the first by this many /255 on a channel: a spring's last tail
+
+
+def loop_metrics(ffmpeg, master, frames, run=subprocess.run):
+    """How far the film's last frame is from its first, on DECODED frames: the largest channel delta and
+    the number of pixels that differ at all. Returns {frames: [0, last], max_delta, differing}."""
+    from PIL import Image, ImageChops
+    last = frames - 1
+    with tempfile.TemporaryDirectory() as d:
+        run([str(ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-i", str(master), "-vf",
+             f"select='eq(n\\,0)+eq(n\\,{last})'", "-fps_mode", "passthrough", f"{d}/%06d.png"], check=True)
+        pngs = sorted(pathlib.Path(d).glob("*.png"))
+        if len(pngs) != 2:
+            raise Failure(f"loop probe decoded {len(pngs)} frames, wanted 2")
+        diff = ImageChops.difference(*(Image.open(p).convert("RGB") for p in pngs))
+        return {"frames": [0, last], "max_delta": max(hi for _, hi in diff.getextrema()),
+                "differing": sum(1 for px in diff.getdata() if px != (0, 0, 0))}
+
+
+def gate_beats_at_rest(metrics):
+    """Every beat ends at rest (`rest_verdict`): a beat still moving when the next beat's first key goes
+    down is a storyboard that presses too soon. Takes `rest_metrics`; returns the names that moved."""
+    return [f"{m['beat']} (frames {m['frames'][0]}..{m['frames'][1]}: max delta {m['max_delta']}/255, "
+            f"{m['moved'] * 100:.2f}% of pixels moved)"
+            for m in metrics if not rest_verdict(m["max_delta"], m["moved"])]
+
+
+def gate_storyboard_record(record):
+    """The storyboard's own promises about what was filmed, from the record: no title flagged
+    `not_in_video` was opened, nothing played, and every beat ended at rest. Returns [Result]."""
+    flagged = {str(k) for k in record.get("not_in_video", ())}
+    opened = [str(k) for k in record.get("opened_rating_keys", ())]
+    hit = sorted(set(opened) & flagged)
+    out = [Result("storyboard/opened", FAIL if hit else PASS,
+                  f"a title flagged not_in_video was opened: {hit}" if hit else
+                  f"{len(opened)} titles opened ({', '.join(opened) or 'none'}), none flagged not_in_video "
+                  f"(of {len(flagged)} flagged); focus at rest is judged by position, not recorded")]
+    beats = _dig(record, "storyboard.rest")[0]
+    if beats is None:
+        out.append(Result("storyboard/rest", SKIP, "the record carries no rest measurement (not a storyboard render)"))
+    else:
+        bad = gate_beats_at_rest(beats)
+        out.append(Result("storyboard/rest", FAIL if bad else PASS,
+                          "still moving when the next key went down: " + "; ".join(bad) if bad else
+                          f"{len(beats)} beats at rest (<= {REST_TOLERANCE}/255, or <= {REST_MAX_MOVED * 100:g}% of "
+                          f"pixels moved, over the last {REST_WINDOW_FRAMES} frames)"))
+    playback = record.get("playback_requests")
+    if playback is None:
+        out.append(Result("storyboard/no-playback", SKIP, "the record carries no request audit"))
+    else:
+        out.append(Result("storyboard/no-playback", FAIL if playback else PASS,
+                          f"the film asked the mock for playback: {playback[:3]}" if playback else
+                          "no stream, transcode, timeline, scrobble or play-queue request reached the mock"))
+    loop = _dig(record, "storyboard.loop")[0]
+    if loop is None:
+        out.append(Result("storyboard/loop", SKIP, "the storyboard does not ask to end on its first frame (`end.match_first_frame`)"))
+    else:
+        out.append(Result("storyboard/loop", PASS if loop["max_delta"] <= LOOP_TOLERANCE else FAIL,
+                          f"the last frame ({loop['frames'][1]}) is {loop['differing']} px from the first, by at most "
+                          f"{loop['max_delta']}/255 on a channel (limit {LOOP_TOLERANCE}/255): "
+                          + ("the film loops without a visible seam" if loop["max_delta"] <= LOOP_TOLERANCE else
+                             "the film does not end on its first frame's picture")))
+    return out
+
+
+def parse_triggers(specs):
+    """`NAME=VALUE` strings -> {name: value}: the boot triggers (`plxnative-<name>` files in the
+    simulator's instance root, e.g. `detail=102` opens that rating key's page at boot)."""
+    out = {}
+    for spec in specs or ():
+        name, sep, value = spec.partition("=")
+        if not sep or not re.fullmatch(r"[a-z0-9]+", name):
+            raise Failure(f"--trigger {spec!r}: want NAME=VALUE with NAME lower-case letters and digits")
+        out[name] = value
+    return out
+
+
+def run_render(sim_bin, out_dir, ffmpeg, frames, preroll=DEFAULT_PREROLL, hero=None, allow_absent=False, max_hold_ms=60000,
+               timeout=3600, keep=False, say=print, no_hold=False, keys=None, extra_holds=None, triggers=None,
+               plan=None, storyboard_sha=None):
+    """Boot the mock catalog PMS on a free port, run the dump build against it headless, pipe its RGB24
+    frames through the sentinel scan into ffmpeg, and leave `master.mkv`, `frames.tsv`, `dump.json` and
+    `render.json` in `out_dir`. Returns the render record. Raises Failure on anything not clean."""
+    import threading
+    sim_bin = pathlib.Path(sim_bin)
+    if not sim_bin.is_file():
+        raise Failure(f"{sim_bin}: not built; run `make site-video-sim`")
+    sys.path.insert(0, str(ROOT / "tests"))
+    import mock_pms
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in ("master.mkv", "frames.tsv", "dump.json", "render.json", "master.partial.mkv", "frames.partial.tsv"):
+        (out_dir / stale).unlink(missing_ok=True)
+    runtime = pathlib.Path(tempfile.mkdtemp(prefix="plxnative-render-"))
+    fifo = runtime / "frames.rgb"
+    os.mkfifo(fifo)
+    srv, pms = mock_pms.serve(0, catalog=CATALOG, hero=hero, authorize_after=2)
+    port = srv.server_address[1]
+    sim = enc = None
+    result = {}
+    finished = False
+    try:
+        (runtime / "plxnative-plextv").write_text(f"http://127.0.0.1:{port}")
+        sign_in_demo_profile(sim_bin, runtime, port, say)
+        with pms.lock:
+            pms.request_log.clear()  # the log below is the film's alone
+        for name, value in {"token": DEMO_TOKEN, "heropin": "0", **(HINT_OFF if plan else {}), **(triggers or {})}.items():
+            (runtime / f"plxnative-{name}").write_text(value)
+        enc = subprocess.Popen(ffv1_argv(ffmpeg, out_dir / "master.mkv"), stdin=subprocess.PIPE)
+        log = open(runtime / "sim.out", "w")
+        sim = subprocess.Popen([str(sim_bin), "127.0.0.1", str(port)], stdout=log, stderr=subprocess.STDOUT,
+                               env=sim_env(runtime, out_dir, fifo, frames, preroll, allow_absent, max_hold_ms,
+                                           no_hold=no_hold, keys=keys, extra_holds=extra_holds))
+
+        def pump():
+            try:
+                with open(fifo, "rb") as src:
+                    result["scan"] = scan_stream(src, FRAME_W, FRAME_H, tee=enc.stdin)
+            except BaseException as e:  # noqa: BLE001 - reported by the caller thread
+                result["error"] = e
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        t0 = time.monotonic()
+        try:
+            rc = sim.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            sim.kill()
+            rc = None
+        if reader.is_alive():
+            if rc is not None and "scan" not in result:
+                try:  # the simulator never opened the FIFO: let the reader's open() return
+                    os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                except OSError:
+                    pass
+            reader.join(30)
+        secs = time.monotonic() - t0
+        log.close()
+        try:
+            enc.stdin.close()
+        except BrokenPipeError:
+            pass
+        enc_rc = enc.wait()
+        tail = "\n    ".join((runtime / "sim.out").read_text(errors="replace").splitlines()[-12:])
+        dump_path = out_dir / "dump.json"
+        dump = json.loads(dump_path.read_text()) if dump_path.exists() else None
+        scanned, hit = result.get("scan", (0, None))
+        problems = []
+        if rc is None:
+            problems.append(f"the simulator did not finish within {timeout}s")
+        elif rc != 0:
+            problems.append(f"the simulator exited {rc}" + (f": {dump['failed']}" if dump and dump.get("failed") else ""))
+        if "error" in result:
+            problems.append(f"the frame stream failed: {result['error']}")
+        if hit:
+            problems.append(f"SENTINEL: {hit.message()}")
+        if enc_rc != 0:
+            problems.append(f"ffmpeg exited {enc_rc}")
+        if pms.unknown:
+            problems.append(f"the mock could not answer: {sorted(set(pms.unknown))[:5]}")
+        rows = []
+        if not problems:
+            rows = parse_frames_tsv((out_dir / "frames.tsv").read_text())
+            if len(rows) != frames or scanned != frames:
+                problems.append(f"frames.tsv has {len(rows)} rows and the scanner saw {scanned}, want {frames}")
+        if problems:
+            raise Failure("render failed: " + "; ".join(problems) + f"\n  instance root: {runtime}\n  sim log tail:\n    {tail}")
+        trig = {k: v for k, v in (triggers or {}).items()}
+        storyboard = {"scene": "detail" if "detail" in trig else "home", "pin_hero": True, "frames": frames,
+                      "preroll": preroll, "script": "storyboard" if plan else ("keys" if keys else "hold"),
+                      "extra_holds": None if extra_holds is None else str(extra_holds), "triggers": trig,
+                      "hold_hint": "suppressed" if plan else "default"}
+        if keys:
+            storyboard["keys"] = keys
+        if plan:
+            storyboard["file_sha256"] = storyboard_sha
+            storyboard["beats"] = plan["beats"]
+            # Informational here, a gate in `gates`: how far each beat's picture moved over its last 0.2 s.
+            storyboard["rest"] = rest_metrics(ffmpeg, out_dir / "master.mkv", plan["beats"])
+            if plan["loop"]:
+                storyboard["loop"] = loop_metrics(ffmpeg, out_dir / "master.mkv", frames)
+        events = runtime / "plxnative-events.log"
+        facts = film_facts(pms, hero, json.loads(pathlib.Path(CATALOG).read_text()),
+                           events.read_text(errors="replace") if events.exists() else "",
+                           hero_ok=hero_report_passes())
+        record = build_render_record(storyboard, dump, scanned, len(rows), current_platform(), facts)
+        bad = validate_render_record(record)
+        if bad:
+            raise Failure("render.json is malformed: " + "; ".join(bad))
+        (out_dir / "render.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        say(f"site_video: rendered {frames} frames in {secs:.1f}s ({dump['holds']} held repeats over "
+            f"{dump['iterations']} iterations) into {out_dir}")
+        finished = True
+        return record
+    finally:
+        if not finished:
+            quarantine(out_dir)
+        for proc in (sim, enc):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+        srv.shutdown()
+        srv.server_close()
+        if not keep:
+            shutil.rmtree(runtime, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ command line ----------------
+def _ffmpeg_from(args, run=subprocess.run):
+    return resolve_ffmpeg(args.ffmpeg, args.cache, run)
+
+
+def storyboard_args(args):
+    """(frames, preroll, keys, plan, sha) for a render: the storyboard's compiled schedule with
+    `--storyboard`, else the plain `--frames/--preroll/--keys`."""
+    if not getattr(args, "storyboard", None):
+        return args.frames, args.preroll, args.keys, None, None
+    sb, sha = load_storyboard(args.storyboard)
+    plan = compile_storyboard(sb)
+    return plan["frames"], plan["preroll"], plan["keys"], plan, sha
+
+
+def cmd_render(args):
+    ffmpeg, _ = _ffmpeg_from(args)
+    frames, preroll, keys, plan, sha = storyboard_args(args)
+    run_render(args.bin, args.out, ffmpeg, frames, preroll, args.hero, args.allow_absent,
+               args.max_hold_ms, args.timeout, args.keep_runtime, no_hold=args.no_hold, keys=keys,
+               extra_holds=args.extra_holds, triggers=parse_triggers(args.trigger), plan=plan, storyboard_sha=sha)
+
+
+def cmd_hold_gate(args):
+    """Render the same scene with no extra holds and with seeded extra holds on every frame; fail unless
+    every written frame agrees (columns 1-4 of frames.tsv)."""
+    ffmpeg, _ = _ffmpeg_from(args)
+    out = pathlib.Path(args.out)
+    rows = {}
+    for label, extra in (("k0", 0), (f"r{args.seed}", f"r{args.seed}")):
+        d = out / label
+        frames, preroll, keys, plan, sha = storyboard_args(args)
+        run_render(args.bin, d, ffmpeg, frames, preroll, args.hero, args.allow_absent,
+                   args.max_hold_ms, args.timeout, args.keep_runtime, keys=keys, extra_holds=extra,
+                   triggers=parse_triggers(args.trigger), plan=plan, storyboard_sha=sha)
+        rows[label] = parse_frames_tsv((d / "frames.tsv").read_text())
+    result = compare_hold_injection(rows["k0"], rows[f"r{args.seed}"])
+    print(format_results([result]))
+    return 0 if result.status == PASS else 1
+
+
+def cmd_ffmpeg_fetch(args):
+    pin = PINS[args.pin] if args.pin else PINS[host_pin_key()]
+    path = fetch_ffmpeg(pin, args.cache)
+    print(f"site_video: {pin.source}: GPL static build, sha256 {pin.sha256}", file=sys.stderr)
+    print(path)
+
+
+def cmd_encode(args):
+    ffmpeg, _ = _ffmpeg_from(args)
+    frames = run_encode(ffmpeg, args.master, args.frames, args.out, args.render)
+    print(f"site_video: {len(MEDIA_NAMES)} files and frames.tsv ({frames} frames) in {args.out}")
+
+
+def cmd_gates(args):
+    ffmpeg, _ = _ffmpeg_from(args)
+    # Absolute: the SSIM and banding probes run ffmpeg from a scratch directory, where a relative path is gone.
+    absolute = lambda p: str(pathlib.Path(p).resolve()) if p else p  # noqa: E731
+    results = run_gates(absolute(args.dir), absolute(args.master), absolute(args.frames_b), ffmpeg, args.site_media,
+                        progress=lambda m: print(f"site_video: {m}", file=sys.stderr, flush=True))
+    passed = write_gates_json(absolute(args.dir), results)
+    print(format_results(results))
+    skipped = [r.name for r in results if r.status == SKIP]
+    if skipped:
+        print(f"site_video: {len(skipped)} gate(s) SKIPPED: {', '.join(skipped)}", file=sys.stderr)
+    return 0 if passed else 1
+
+
+def cmd_scan(args):
+    try:
+        w, h = (int(x) for x in args.size.lower().split("x"))
+    except ValueError:
+        raise Failure("--size is WIDTHxHEIGHT, e.g. 1920x1080")
+    src = sys.stdin.buffer if args.input in (None, "-") else open(args.input, "rb")
+    tee = sys.stdout.buffer if args.tee else None
+    try:
+        n, hit = scan_stream(src, w, h, tee, args.min_run)
+    finally:
+        if tee is not None:
+            tee.flush()
+    if hit:
+        print(f"site_video: SENTINEL: {hit.message()}", file=sys.stderr)
+        return 1
+    print(f"site_video: {n} frames scanned, no sentinel run", file=sys.stderr)
+    return 0
+
+
+def cmd_contact_sheet(args):
+    ffmpeg, _ = _ffmpeg_from(args)
+    picks = contact_sheet(ffmpeg, args.master, args.out, args.n, args.columns)
+    print(f"site_video: {args.out}: frames {picks}")
+
+
+def storyboard_file_problem(record, path=STORYBOARD):
+    """A storyboard render says which file it played (`storyboard.file_sha256`, the sha256 of the bytes of
+    `tests/video/feel.json`); the manifest must be of the film the tree describes. `storyboard_sha256` is
+    the hash of the whole compiled record (beats included), a different thing, so it is not compared."""
+    played = _dig(record, "storyboard.file_sha256")[0]
+    if played is not None and pathlib.Path(path).is_file() and sha256_file(path) != played:
+        return f"render.json played a storyboard whose sha256 differs from {pathlib.Path(path).name}"
+    return None
+
+
+def cmd_manifest(args):
+    out_dir = pathlib.Path(args.dir)
+    ffmpeg, canonical = _ffmpeg_from(args)
+    record = json.loads((out_dir / "render.json").read_text())
+    problems = validate_render_record(record)
+    if problems:
+        raise Failure("render.json: " + "; ".join(problems))
+    gates_path = out_dir / "gates.json"
+    if not gates_path.is_file():
+        raise Failure("no gates.json: run `gates` first")
+    label = current_platform()
+    if record.get("platform") not in (None, label):
+        raise Failure(f"render.json says platform {record['platform']!r} but this host is {label!r}")
+    problem = storyboard_file_problem(record)
+    if problem:
+        raise Failure(problem)
+    trees, dirty = tree_hashes()
+    pin_hint = next((p.key for p in PINS.values() if ffmpeg.parent.name == f"ffmpeg-{p.sha256[:12]}"), None)
+    tools = {"ffmpeg": {"sha256": sha256_file(ffmpeg), "version": ffmpeg_version_line(ffmpeg),
+                        "canonical": canonical, "pin": pin_hint,
+                        "archive_sha256": PINS[pin_hint].sha256 if pin_hint else None},
+             "python": platform.python_version()}
+    manifest = build_manifest(out_dir, record, json.loads(gates_path.read_text()), tools, trees, dirty,
+                              sha256_file(CATALOG), label)
+    manifest["environment"] = collect_environment()
+    (out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+    print(f"site_video: wrote {out_dir / MANIFEST_NAME} (platform {label})")
+    if args.zip:
+        make_artifact_zip(out_dir, manifest, args.zip)
+        print(f"site_video: wrote {args.zip}")
+
+
+def cmd_verify(args):
+    target = pathlib.Path(args.target)
+    mpath = target / MANIFEST_NAME if target.is_dir() else target
+    sections = ("outputs",) if args.outputs_only else ("outputs", "artifacts")
+    problems = verify_manifest(json.loads(mpath.read_text()), mpath.parent, sections)
+    if problems:
+        raise Failure("manifest does not verify:\n  " + "\n  ".join(problems))
+    print(f"site_video: {mpath} verifies")
+
+
+def cmd_adopt(args):
+    adopt(args.zip, args.site_media, args.write, expect_rev=args.expect_rev, derive=args.derive,
+          site_index=args.site_index)
+
+
+def cmd_release_ref(args):
+    tag = stable_release_tag(args.ref)
+    if tag is None:
+        raise Failure(f"{args.ref!r} is not a stable release tag (vX.Y.Z): release candidates, nightlies, "
+                      f"branches and commits never refresh the site's film")
+    print(tag)
+
+
+def cmd_needs_render(args):
+    render, why = needs_render(args.rev, args.force, args.manifest)
+    print(f"needs_render={'true' if render else 'false'}")
+    print(f"reason={why}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    tool = argparse.ArgumentParser(add_help=False)
+    tool.add_argument("--cache", help="tool cache dir (default $PLXNATIVE_DEMO_CACHE or ~/.cache/plxnative-demo)")
+    tool.add_argument("--ffmpeg", help="use THIS ffmpeg (loudly non-canonical) instead of the pinned build")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("ffmpeg-fetch", help="fetch the pinned static GPL ffmpeg; print its path", parents=[tool])
+    p.add_argument("--pin", choices=sorted(PINS))
+    p.set_defaults(fn=cmd_ffmpeg_fetch)
+    p = sub.add_parser("render", help="run the dump simulator against the mock catalog -> master.mkv, frames.tsv, render.json",
+                       parents=[tool])
+    p.add_argument("--out", required=True, help="the output directory (created)")
+    p.add_argument("--bin", default=str(SIM_BIN), help="the dump build (`make site-video-sim`)")
+    p.add_argument("--frames", type=int, default=180, help="written frames (default 180, three seconds)")
+    p.add_argument("--preroll", type=int, default=DEFAULT_PREROLL,
+                   help=f"virtual frames run first and not written (default {DEFAULT_PREROLL}: it covers the still-Home "
+                        "boot; a boot that needs more, or a preroll of 0, fails closed in the driver)")
+    p.add_argument("--hero", help="the film the Home hero pins (default: the catalog's `hero`)")
+    p.add_argument("--allow-absent", action="store_true",
+                   help="PROOF ONLY: do not fail on a hero logo that settled as a miss or a card with no art key")
+    p.add_argument("--no-hold", action="store_true",
+                   help="NEGATIVE TEST ONLY: write every frame whatever its debt (the gates must then fail)")
+    p.add_argument("--max-hold-ms", type=int, default=60000, help="fail closed after this long without progress")
+    p.add_argument("--timeout", type=int, default=3600)
+    p.add_argument("--keep-runtime", action="store_true", help="keep the simulator's instance root for inspection")
+    p.add_argument("--storyboard", nargs="?", const=str(STORYBOARD), metavar="FEEL.JSON",
+                   help="play tests/video/feel.json (or FILE): its frames, preroll and keys replace --frames/--preroll/--keys")
+    p.add_argument("--trigger", action="append", metavar="NAME=VALUE",
+                   help="a boot trigger written into the instance root as plxnative-NAME (repeatable), e.g. detail=102")
+    p.add_argument("--keys", help="the scene's script: <virtual frame>:<key>,... (up/down/left/right/ok/back); "
+                                  "virtual frames count from the start of the preroll")
+    p.add_argument("--extra-holds", help="force k (or r<seed>: seeded 0..3) extra held repeats on every clean frame "
+                                         "(the hold-injection gate's switch; a render with it is not a deliverable)")
+    p.set_defaults(fn=cmd_render)
+    p = sub.add_parser("hold-gate", help="render a scene with k=0 and with seeded extra holds; fail unless every "
+                                         "written frame is identical", parents=[tool])
+    p.add_argument("--out", required=True, help="the output directory (k0/ and r<seed>/ are written under it)")
+    p.add_argument("--bin", default=str(SIM_BIN))
+    p.add_argument("--frames", type=int, default=180)
+    p.add_argument("--preroll", type=int, default=DEFAULT_PREROLL)
+    p.add_argument("--hero")
+    p.add_argument("--allow-absent", action="store_true")
+    p.add_argument("--max-hold-ms", type=int, default=60000)
+    p.add_argument("--timeout", type=int, default=3600)
+    p.add_argument("--keep-runtime", action="store_true")
+    p.add_argument("--keys")
+    p.add_argument("--storyboard", nargs="?", const=str(STORYBOARD), metavar="FEEL.JSON")
+    p.add_argument("--trigger", action="append", metavar="NAME=VALUE")
+    p.add_argument("--seed", type=int, default=1)
+    p.set_defaults(fn=cmd_hold_gate)
+    p = sub.add_parser("encode", help="master -> the four encodes and two posters", parents=[tool])
+    p.add_argument("master")
+    p.add_argument("frames")
+    p.add_argument("--out", required=True)
+    p.add_argument("--render", help="the render record (render.json) to carry into --out")
+    p.set_defaults(fn=cmd_encode)
+    p = sub.add_parser("gates", help="grade the deliverables in DIR against the master", parents=[tool])
+    p.add_argument("dir")
+    p.add_argument("--master", required=True)
+    p.add_argument("--frames-b", help="frames.tsv of the SECOND render (run-twice equality)")
+    p.add_argument("--site-media", default=str(SITE_MEDIA))
+    p.set_defaults(fn=cmd_gates)
+    p = sub.add_parser("scan-sentinel", help="fail on a connected >=64 px run of #FF00FE in an RGB24 stream")
+    p.add_argument("--size", required=True)
+    p.add_argument("--tee", action="store_true", help="copy clean frames to stdout (sit between writer and ffmpeg)")
+    p.add_argument("--min-run", type=int, default=SENTINEL_MIN_RUN)
+    p.add_argument("input", nargs="?")
+    p.set_defaults(fn=cmd_scan)
+    p = sub.add_parser("contact-sheet", help="N evenly spaced labelled frames in one JPEG", parents=[tool])
+    p.add_argument("master")
+    p.add_argument("--out", required=True)
+    p.add_argument("-n", type=int, default=12)
+    p.add_argument("--columns", type=int, default=4)
+    p.set_defaults(fn=cmd_contact_sheet)
+    p = sub.add_parser("manifest", help="write feel.manifest.json for DIR (needs gates.json)", parents=[tool])
+    p.add_argument("dir")
+    p.add_argument("--zip", help="also write the artifact zip")
+    p.set_defaults(fn=cmd_manifest)
+    p = sub.add_parser("verify", help="check a manifest's sha256s against the files beside it")
+    p.add_argument("target")
+    p.add_argument("--outputs-only", action="store_true", help="only the six media files (the copy in site/media)")
+    p.set_defaults(fn=cmd_verify)
+    p = sub.add_parser("adopt", help="verify an artifact (zip or unpacked directory) and copy it into site/media "
+                                     "(dry run by default)")
+    p.add_argument("zip", metavar="ARTIFACT")
+    p.add_argument("--write", action="store_true")
+    p.add_argument("--expect-rev", metavar="REV", help="refuse unless the artifact's film-input tree hash is REV's")
+    p.add_argument("--derive", action="store_true",
+                   help="after a changed film, regenerate the feel glows and the credits page")
+    p.add_argument("--site-media", default=str(SITE_MEDIA))
+    p.add_argument("--site-index", help="the page whose codecs= strings follow the film (default: index.html beside --site-media)")
+    p.set_defaults(fn=cmd_adopt)
+
+    p = sub.add_parser("release-ref", help="print the tag when REF is a stable release (vX.Y.Z); fail for an rc, "
+                                           "a nightly, a branch or a commit")
+    p.add_argument("ref")
+    p.set_defaults(fn=cmd_release_ref)
+
+    p = sub.add_parser("needs-render", help="print needs_render=true|false and reason=...: is the committed film "
+                                            "(site/media/feel.manifest.json) of different film inputs than REV?")
+    p.add_argument("--rev", default="HEAD")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--manifest", help="the committed manifest (default site/media/feel.manifest.json)")
+    p.set_defaults(fn=cmd_needs_render)
+    args = ap.parse_args(argv)
+    try:
+        return args.fn(args) or 0
+    except Failure as e:
+        print(f"site_video: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

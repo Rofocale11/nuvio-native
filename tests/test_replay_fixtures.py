@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Host checks for the strict result/accounting boundary of the real simulator replay gate."""
+import importlib.util
+import contextlib
+import io
+import json
+from pathlib import Path
+import re
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location('replay_fixtures', Path(__file__).with_name('replay_fixtures.py'))
+replay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(replay)
+
+
+class ReplayGateTests(unittest.TestCase):
+    def setUp(self):
+        self.summary = ('replay: done frames=7 graded=5 ' +
+                        ' '.join(field + '=0' for field in replay.DIFFS) + ' verdict=SAME')
+
+    def test_complete_clean_summary_and_successful_exit_are_required(self):
+        self.assertEqual(replay.verdict(self.summary, 0, (7, 5)), self.summary)
+        for log, code, counts in [('', 0, (7, 5)), (self.summary, 1, (7, 5)),
+                                  (self.summary, 0, (8, 5)), (self.summary, 0, (7, 6)),
+                                  (self.summary + '\n' + self.summary, 0, (7, 5)),
+                                  (self.summary + ' frames=7', 0, (7, 5)),
+                                  ('replay: REFUSED invalid\n' + self.summary, 0, (7, 5)),
+                                  (self.summary.replace('SAME', 'DIVERGED'), 0, (7, 5))]:
+            with self.subTest(log=log, code=code, counts=counts), self.assertRaises(ValueError):
+                replay.verdict(log, code, counts)
+
+    def test_every_difference_counter_is_mandatory_and_zero(self):
+        for field in replay.DIFFS:
+            for bad in (self.summary.replace(field + '=0', field + '=1'),
+                        self.summary.replace(field + '=0', '')):
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    replay.verdict(bad, 0, (7, 5))
+
+    def test_fixture_discovery_never_silently_skips_a_missing_manifest_or_segment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaises(ValueError):
+                replay.discover(root)
+            fixture = root / 'new-recording'
+            fixture.mkdir()
+            with self.assertRaisesRegex(ValueError, 'no manifest'):
+                replay.discover(root)
+            (fixture / 'manifest.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'no recording segments'):
+                replay.discover(root)
+            (fixture / 'rec-0000.jsonl').write_text('')
+            with self.assertRaisesRegex(ValueError, 'empty frame/grade'):
+                replay.discover(root)
+            rows = [{'f': 0, 't': 'tick'}, {'f': 0, 't': 'st', 'hash': 1},
+                    {'f': 1, 't': 'tick'}]
+            (fixture / 'rec-0000.jsonl').write_text('\n'.join(map(json.dumps, rows)))
+            self.assertEqual(replay.discover(root), [fixture])
+            self.assertEqual(replay.expected_counts(fixture), (2, 1))
+
+
+class ParallelRunTests(unittest.TestCase):
+    """The scheduler around `run_fixture`, against a fake replay instead of a simulator."""
+
+    def fixtures(self, root, names):
+        rows = [{'f': 0, 't': 'tick'}, {'f': 0, 't': 'st', 'hash': 1}]
+        made = []
+        for index, name in enumerate(names):
+            fixture = root / name
+            fixture.mkdir()
+            (fixture / 'manifest.json').write_text('{}')
+            ticks = [{'f': n, 't': 'tick'} for n in range(1, index + 1)]
+            (fixture / 'rec-0000.jsonl').write_text('\n'.join(map(json.dumps, rows + ticks)))
+            made.append(fixture)
+        return made
+
+    def run_all(self, fixtures, jobs, run):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            failures = replay.run_all(Path('sim'), Path('pkg'), fixtures, Path('out'), 5, jobs, run)
+        return failures, out.getvalue(), err.getvalue()
+
+    def test_jobs_flag_beats_environment_beats_cpu_default(self):
+        self.assertEqual(replay.resolve_jobs(None, {}, 3), 3)
+        self.assertEqual(replay.resolve_jobs(None, {}, 64), replay.MAX_DEFAULT_JOBS)
+        self.assertEqual(replay.resolve_jobs(None, {}, None), 1)
+        self.assertEqual(replay.resolve_jobs(None, {replay.JOBS_ENV: ''}, 8), replay.MAX_DEFAULT_JOBS)
+        self.assertEqual(replay.resolve_jobs(None, {replay.JOBS_ENV: '1'}, 8), 1)
+        self.assertEqual(replay.resolve_jobs(None, {replay.JOBS_ENV: '12'}, 2), 12)
+        self.assertEqual(replay.resolve_jobs(2, {replay.JOBS_ENV: '1'}, 8), 2)
+        for flag, env in [(0, {}), (-1, {}), (None, {replay.JOBS_ENV: '0'}),
+                          (None, {replay.JOBS_ENV: 'many'})]:
+            with self.subTest(flag=flag, env=env), self.assertRaises(ValueError):
+                replay.resolve_jobs(flag, env, 4)
+
+    def test_longest_recording_is_scheduled_first_and_every_mode_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            short, middle, long = self.fixtures(Path(temp), ['a-short', 'b-middle', 'c-long'])
+            order = replay.replay_order([short, middle, long])
+            self.assertEqual(len(order), 6)
+            self.assertEqual({mode for _, mode in order}, set(replay.MODES))
+            self.assertEqual([fixture for fixture, _ in order[:2]], [long, long])
+            self.assertEqual([fixture for fixture, _ in order[-2:]], [short, short])
+
+    def test_a_failing_replay_does_not_stop_the_others_and_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixtures = self.fixtures(Path(temp), ['one', 'two', 'three'])
+            ran = []
+
+            def fake(binary, assets, fixture, mode, output, timeout):
+                ran.append((fixture.name, mode))
+                if (fixture.name, mode) == ('two', 'resolve'):
+                    raise ValueError('two/resolve: replay summary is ambiguous or diverged')
+                if (fixture.name, mode) == ('three', 'targets'):
+                    raise OSError('disk went away')
+                if (fixture.name, mode) == ('one', 'targets'):
+                    raise RuntimeError('worker bug')
+                return f'{fixture.name}/{mode}: replay: done verdict=SAME'
+
+            for jobs in (1, 3):
+                ran.clear()
+                with self.subTest(jobs=jobs):
+                    failures, out, err = self.run_all(fixtures, jobs, fake)
+                    self.assertEqual(len(ran), 6)
+                    self.assertEqual(len(failures), 3)
+                    self.assertEqual(out.count('verdict=SAME'), 3)
+                    self.assertEqual(err.count('FAIL: '), 3)
+                    self.assertIn('RuntimeError: worker bug', err)
+
+    def test_workers_overlap_up_to_the_bound_and_never_beyond(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixtures = self.fixtures(Path(temp), ['a', 'b', 'c', 'd'])
+            lock, live, peak = threading.Lock(), [0], [0]
+
+            def fake(binary, assets, fixture, mode, output, timeout):
+                with lock:
+                    live[0] += 1
+                    peak[0] = max(peak[0], live[0])
+                time.sleep(0.05)
+                with lock:
+                    live[0] -= 1
+                return f'{fixture.name}/{mode}: ok'
+
+            for jobs, expected in ((1, 1), (3, 3)):
+                peak[0] = 0
+                with self.subTest(jobs=jobs):
+                    failures, _, _ = self.run_all(fixtures, jobs, fake)
+                    self.assertEqual((failures, peak[0]), ([], expected))
+
+    def test_each_report_is_one_whole_line(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixtures = self.fixtures(Path(temp), ['a', 'b'])
+            _, out, _ = self.run_all(fixtures, 4, lambda b, a, f, m, o, t: f'{f.name}/{m}: ok')
+            lines = out.splitlines()
+            self.assertEqual(len(lines), 4)
+            self.assertTrue(all(line.startswith(('a/', 'b/')) and ': ok [' in line for line in lines))
+
+    def test_run_fixture_gives_each_replay_its_own_runtime_dir_and_a_timeout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture = self.fixtures(root, ['solo'])[0]
+            (root / 'sim.sh').write_text('#!/bin/sh\nsleep 5\n')
+            (root / 'sim.sh').chmod(0o755)
+            outputs = root / 'out'
+            outputs.mkdir()
+            with mock.patch.object(replay.sys, 'platform', 'linux'):
+                with self.assertRaisesRegex(ValueError, 'solo/targets: timeout; evidence'):
+                    replay.run_fixture(root / 'sim.sh', root, fixture, 'targets', outputs, 0.2)
+                with self.assertRaisesRegex(ValueError, 'solo/resolve: timeout; evidence'):
+                    replay.run_fixture(root / 'sim.sh', root, fixture, 'resolve', outputs, 0.2)
+            runtimes = sorted(path.name.rsplit('-', 1)[0] for path in outputs.iterdir())
+            self.assertEqual(runtimes, ['solo-resolve', 'solo-targets'])
+            for path in outputs.iterdir():
+                self.assertIn(path.name.split('-')[1], (path / 'plxnative-recplay').read_text())
+
+
+class WindowTests(unittest.TestCase):
+    """The replay window: full size by default, chosen by the driver, strictly validated."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_the_default_is_the_full_canvas_and_flag_beats_environment(self):
+        self.assertEqual(replay.DEFAULT_WINDOW, '1920x1080')
+        self.assertEqual(replay.resolve_window(None, {}), '1920x1080')
+        self.assertEqual(replay.resolve_window(None, {replay.WINDOW_ENV: ''}), '1920x1080')
+        self.assertEqual(replay.resolve_window(None, {replay.WINDOW_ENV: '960x540'}), '960x540')
+        self.assertEqual(replay.resolve_window('480x270', {replay.WINDOW_ENV: '960x540'}), '480x270')
+
+    def test_malformed_or_off_canvas_windows_are_refused_with_the_source_named(self):
+        for bad in ('', '960', '960x', 'x540', '960X540', '960 x 540', ' 960x540', '960x540 ',
+                    '960,540', '0x0', '960x0', '-960x-540', '+960x540', '0960x540', '9.6e2x540',
+                    '960x540x2', 'wide', '1920x1081', '960x1080', '1000x540', '15360x8640'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    replay.parse_window(bad)
+                with self.assertRaisesRegex(ValueError, '^--window: '):
+                    replay.resolve_window(bad, {})
+                if bad:  # an empty variable means "unset", by design
+                    with self.assertRaisesRegex(ValueError, f'^{replay.WINDOW_ENV}: '):
+                        replay.resolve_window(None, {replay.WINDOW_ENV: bad})
+        for good in ('1920x1080', '960x540', '640x360', '480x270', '3840x2160'):
+            self.assertEqual(replay.parse_window(good), good)
+
+    def test_the_window_reaches_the_simulators_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'fixture').mkdir()
+            (root / 'sim.sh').write_text('#!/bin/sh\nprintf "%s" "$PLXNATIVE_WIN" > "$PLXNATIVE_RUNTIME_DIR/win"\n'
+                                         'exit 1\n')
+            (root / 'sim.sh').chmod(0o755)
+            fixture = root / 'fixture'
+            (fixture / 'manifest.json').write_text('{}')
+            (fixture / 'rec-0000.jsonl').write_text('\n'.join(map(json.dumps, [
+                {'f': 0, 't': 'tick'}, {'f': 0, 't': 'st', 'hash': 1}])))
+            seen = {}
+            for label, kwargs in (('default', {}), ('small', {'window': '960x540'})):
+                out = root / label
+                out.mkdir()
+                with mock.patch.object(replay.sys, 'platform', 'linux'):
+                    with self.assertRaises(ValueError):  # the fake simulator prints no summary
+                        replay.run_fixture(root / 'sim.sh', root, fixture, 'targets', out, 5, **kwargs)
+                (runtime,) = out.iterdir()
+                seen[label] = (runtime / 'win').read_text()
+            self.assertEqual(seen, {'default': '1920x1080', 'small': '960x540'})
+
+    def test_the_macos_replay_step_passes_a_window_the_driver_accepts(self):
+        text = (self.ROOT / '.github/workflows/simulators.yml').read_text()
+        job = re.search(r'(?m)^  macos:\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$)', text, re.S).group(1)
+        step = re.search(r'(?m)^      - name: Replay all committed product recordings\n(.*?)(?=^      - name: )',
+                         job, re.S).group(1)
+        command = ' '.join(line for line in step.splitlines() if not line.lstrip().startswith('#'))
+        windows = re.findall(r'--window\s+(\S+)', command)
+        self.assertEqual(len(windows), 1, command)
+        self.assertEqual(replay.parse_window(windows[0]), windows[0])
+        # The launch step keeps its own full-size window, so CI still opens a 1080p one.
+        self.assertIn('Launch and capture 1080p frame', job)
+        self.assertNotIn('--window', job.split('Launch and capture 1080p frame')[1])
+
+
+if __name__ == '__main__':
+    unittest.main()

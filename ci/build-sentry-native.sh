@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Build the pinned Sentry Native out-of-process crash handler for the webOS ARM target.
+#
+# The SDK's own HTTP transport is deliberately disabled. The crash daemon writes a self-contained
+# event envelope, relaunches plxnative in its tiny spool-only mode, and the existing consent-aware
+# Rust sender posts it on the next healthy boot. That keeps one TLS/libcurl implementation and one
+# retry queue in the application.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+VERSION=0.16.6
+ARCHIVE="$ROOT/vendor/sentry-native-$VERSION.tar.gz"
+SOURCE="$ROOT/vendor/sentry-native-src"
+BUILD="$ROOT/vendor/sentry-native-build"
+PREFIX="$ROOT/vendor/sentry-native-prefix"
+PATCH="$ROOT/vendor/sentry-native/webos-arm32.patch"
+# Both PRs this patch used to carry (pointer-width stack reads, getsentry/sentry-native#2052; the
+# ARM32 registers + both frame-record shapes, #2053) landed in 0.16.6, so the patch is down to what
+# upstream does not do at all: the glibc<2.15 process_vm_readv shim, the 30s ARM handler timeout,
+# the two webOS/ARM signal-handler escapes (recursive SIGSEGV through getenv), and the 32-frame cap
+# on non-crashed threads.
+URL="https://github.com/getsentry/sentry-native/archive/refs/tags/$VERSION.tar.gz"
+# Take this from the URL above and nothing else: GitHub's API tarball endpoint
+# (repos/<o>/<r>/tarball/<tag>) serves a DIFFERENT artifact for the same tag — its own top-level
+# directory name and its own gzip stream — so a checksum taken from it fails here on every clean
+# build while passing on the machine that cached the file.
+SHA256=a194ac434da1534723556c5628256752208b0b6989fee7bf5ed6c5b3c84773ab
+
+WEBOS_SDK=${WEBOS_SDK:-"$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot"}
+CC="$ROOT/ci/arm-cc.py"
+export WEBOS_SDK
+# sentry-native's top-level project() declares LANGUAGES C CXX, so CMake probes a C++ compiler
+# even though nothing here compiles a .cpp: SENTRY_BACKEND=native is pure C, CXX is only enabled
+# for compiler-ID/ABI detection. Left unset, CMake tries to *derive* a companion CXX compiler from
+# CMAKE_C_COMPILER's name/directory (its "gcc"->"g++"/"c++" toolchain-prefix heuristic), which
+# works when CMAKE_C_COMPILER is the real `arm-webos-linux-gnueabi-gcc` binary but fails silently
+# against this project's own `arm-cc.py` wrapper (no such heuristic matches a Python script), so
+# CMake falls back to the HOST `/usr/bin/c++`. That single wrong guess is enough to break the
+# build: CMake's global CMAKE_SIZEOF_VOID_P is last-writer-wins across enabled languages, CXX is
+# probed after C, and vendored libunwind's CMakeLists picks its arch (arm vs aarch64) off that one
+# global — so a host CXX compiler silently flips the whole cross-build to aarch64 and it fails deep
+# inside libunwind's AArch64 dwarf-config.h. Pointing CMAKE_CXX_COMPILER at the real cross g++
+# directly (not through the wrapper — nothing here ever links C++ objects, so there is no archive
+# exclusion or link evidence for it to produce) removes the guess entirely.
+CXX="$WEBOS_SDK/bin/arm-webos-linux-gnueabi-c++"
+AR="$WEBOS_SDK/bin/arm-webos-linux-gnueabi-ar"
+RANLIB="$WEBOS_SDK/bin/arm-webos-linux-gnueabi-ranlib"
+STRIP="$WEBOS_SDK/bin/arm-webos-linux-gnueabi-strip"
+SYSROOT="$WEBOS_SDK/arm-webos-linux-gnueabi/sysroot"
+CMAKE=${CMAKE:-cmake}
+
+fail() { echo "build-sentry-native: $*" >&2; exit 1; }
+command -v "$CMAKE" >/dev/null 2>&1 || fail "cmake is required (brew install cmake)"
+test -x "$CC" || fail "webOS NDK not found at $WEBOS_SDK (run make setup-env)"
+test -x "$CXX" || fail "webOS NDK C++ compiler not found at $CXX (run make setup-env)"
+test -f "$PATCH" || fail "missing $PATCH"
+
+if [[ ! -f "$ARCHIVE" ]]; then
+    curl -fL --retry 3 --retry-all-errors -o "$ARCHIVE.tmp" "$URL"
+    mv "$ARCHIVE.tmp" "$ARCHIVE"
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+    echo "$SHA256  $ARCHIVE" | sha256sum -c -
+else
+    echo "$SHA256  $ARCHIVE" | shasum -a 256 -c -
+fi
+
+# A failed or interrupted rebuild must not leave an old handler looking current.
+rm -rf "$SOURCE" "$BUILD" "$PREFIX"
+mkdir -p "$SOURCE" "$BUILD" "$PREFIX/bin" "$PREFIX/include" "$PREFIX/lib"
+tar xzf "$ARCHIVE" --strip-components=1 -C "$SOURCE"
+patch -d "$SOURCE" -p1 < "$PATCH"
+
+# CMAKE_ASM_COMPILER is set explicitly, and it is load-bearing rather than tidy. libunwind's ARM32
+# sources are `.S`, so CMake enables the ASM language for them; with no compiler named for that
+# language it falls back to a host default. On the aarch64 Linux runner CI builds on, that default
+# is the HOST assembler, and `vendor/libunwind/src/arm/getcontext.S` fails with "unknown pseudo-op
+# `.arm'" and "unknown mnemonic `stmfd'" — 22 errors, then exit 2. It happened to resolve to the
+# cross compiler on this Mac, so the entire cross-build was resting on an implicit default that
+# differs by host and CMake version, and CI was red for it while every local build was green.
+"$CMAKE" -S "$SOURCE" -B "$BUILD" \
+    -DCMAKE_SYSTEM_NAME=Linux \
+    -DCMAKE_SYSTEM_PROCESSOR=arm \
+    -DCMAKE_C_COMPILER="$CC" \
+    -DCMAKE_CXX_COMPILER="$CXX" \
+    -DCMAKE_ASM_COMPILER="$CC" \
+    -DCMAKE_AR="$AR" \
+    -DCMAKE_RANLIB="$RANLIB" \
+    -DCMAKE_SYSROOT="$SYSROOT" \
+    -DCMAKE_FIND_ROOT_PATH="$SYSROOT" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="-funwind-tables -fno-omit-frame-pointer" \
+    -DSENTRY_BACKEND=native \
+    -DSENTRY_TRANSPORT=none \
+    -DSENTRY_BUILD_SHARED_LIBS=OFF \
+    -DSENTRY_BUILD_TESTS=OFF \
+    -DSENTRY_BUILD_EXAMPLES=OFF \
+    -DSENTRY_SDK_NAME=plxnative
+"$CMAKE" --build "$BUILD" --parallel "${JOBS:-8}"
+
+cp "$SOURCE/include/sentry.h" "$PREFIX/include/sentry.h"
+cp "$BUILD/libsentry.a" "$PREFIX/lib/libsentry.a"
+cp "$BUILD/vendor/libunwind/libunwind.a" "$PREFIX/lib/libunwind.a"
+# The live developer sampler links the ptrace accessors as a standalone helper.  Keep this archive
+# beside the local unwinder rather than reaching into the disposable CMake build tree; neither one
+# is packaged unless an explicit package input names it (and only sentry-crash is such an input).
+cp "$BUILD/vendor/libunwind/libunwind_remote.a" "$PREFIX/lib/libunwind_remote.a"
+cp "$BUILD/sentry-crash" "$PREFIX/bin/sentry-crash"
+"$STRIP" --strip-unneeded "$PREFIX/bin/sentry-crash"
+chmod 755 "$PREFIX/bin/sentry-crash"
+python3 "$ROOT/ci/stage-link-evidence.py" "$BUILD/sentry-crash" "$PREFIX/bin/sentry-crash" --stripped
+
+test -s "$PREFIX/lib/libsentry.a"
+test -s "$PREFIX/lib/libunwind.a"
+test -s "$PREFIX/lib/libunwind_remote.a"
+test -x "$PREFIX/bin/sentry-crash"
+echo "sentry-native: $VERSION ARM handler ($("$STRIP" --version | head -1))"
+du -h "$PREFIX/bin/sentry-crash" "$PREFIX/lib/libsentry.a" "$PREFIX/lib/libunwind.a" \
+    "$PREFIX/lib/libunwind_remote.a"

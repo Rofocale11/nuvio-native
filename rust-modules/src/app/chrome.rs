@@ -1,0 +1,271 @@
+//! Application-owned data for the shared bar. Capture before stepping a frame; paint consumes
+//! borrowed strings and never opens the session file or polls the Browse vocabulary.
+
+use plx_ui::containers::tabs::StripMember;
+use plx_ui::dispatch::STRIP_BASE;
+use plx_machine::machine::{FocusKey, Measure};
+use plx_ui::widgets::{self, ChromeRead, ProfileChipRead, TabLabels, TopFocus};
+use plx_data::stores::browse::{DirectoryView, SecKind};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Pill {
+    Home,
+    Section(SecKind),
+    Search,
+}
+
+pub(crate) fn tab_count(directory: DirectoryView<'_>) -> usize {
+    1 + directory.tab_count() + 1
+}
+
+pub(crate) fn pill_at(directory: DirectoryView<'_>, i: usize) -> Pill {
+    pill_in(i, tab_count(directory) - 1, |tab| directory.tab_kind(tab))
+}
+
+fn pill_in(
+    i: usize,
+    search: usize,
+    kind_at: impl Fn(usize) -> Option<SecKind>,
+) -> Pill {
+    if i == search {
+        Pill::Search
+    } else if let Some(section) = i.checked_sub(1) {
+        kind_at(section).map(Pill::Section).unwrap_or(Pill::Home)
+    } else {
+        Pill::Home
+    }
+}
+
+pub(crate) fn pill_of(directory: DirectoryView<'_>, pill: Pill) -> Option<usize> {
+    let search = tab_count(directory) - 1;
+    pill_index(pill, search, |kind| directory.tab_of_kind(kind))
+}
+
+fn pill_index(
+    pill: Pill,
+    search: usize,
+    tab_of: impl Fn(SecKind) -> Option<usize>,
+) -> Option<usize> {
+    match pill {
+        Pill::Home => Some(0),
+        Pill::Section(kind) => tab_of(kind).map(|i| i + 1),
+        Pill::Search => Some(search),
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ChromeSnapshot {
+    tabs_generation: Option<u32>,
+    profile_generation: Option<u32>,
+    session_watch: plx_plex::plex::session::VisibleSessionWatch,
+    labels: Vec<String>,
+    keys: Vec<u32>,
+    widths: Vec<f32>,
+    thumb: String,
+    initial: std::ffi::CString,
+    name: std::ffi::CString,
+    name_w: f32,
+}
+
+impl ChromeSnapshot {
+    pub(crate) fn refresh(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>) {
+        self.refresh_with_profile(measure, directory, None);
+    }
+
+    pub(crate) fn refresh_with_profile(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>,
+        captured: Option<(&plx_plex::plex::session::CurrentProfile, &plx_plex::plex::session::Session)>) {
+        let generation = directory.tabs_gen();
+        if self.tabs_generation != Some(generation) {
+            self.labels.clear();
+            self.keys.clear();
+            self.labels.push(plx_platform::i18n::msg::browse_chrome_home().into());
+            self.keys.push(STRIP_BASE);
+            for i in 0..directory.tab_count() {
+                let Some(kind) = directory.tab_kind(i) else { continue };
+                self.labels.push(match kind { SecKind::Movie => plx_platform::i18n::msg::browse_kind_movies(), SecKind::Show => plx_platform::i18n::msg::browse_kind_tv_shows() }.into());
+                self.keys.push(STRIP_BASE + match kind {
+                    SecKind::Movie => 1,
+                    SecKind::Show => 2,
+                });
+            }
+            self.labels.push(String::new());
+            self.keys.push(STRIP_BASE + 3);
+            self.widths = widgets::tab_widths(&self.labels, measure);
+            self.tabs_generation = Some(generation);
+        }
+        let generation = captured.map_or_else(plx_plex::plex::session::current_gen, |(profile, _)| profile.generation);
+        let session_changed = captured.is_none() && self.session_watch.changed();
+        if self.profile_generation != Some(generation) || session_changed {
+            let current = captured.map_or_else(plx_plex::plex::session::current, |(profile, _)| profile.user.clone());
+            let account = if let Some((_, saved)) = captured { saved.account(current.as_ref()) }
+                else { plx_plex::plex::session::peek().account(current.as_ref()) };
+            self.thumb = current.map(|user| user.thumb).unwrap_or_default();
+            let label = plx_screens::account_menu::chip_label(&account);
+            let initial = account.name.as_deref().and_then(|name| name.chars().next())
+                .map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            (self.initial, self.name, self.name_w) =
+                widgets::profile_chip_text(&label, &initial, measure);
+            self.profile_generation = Some(generation);
+        }
+    }
+
+    pub(crate) fn labels(&self) -> TabLabels<'_> {
+        TabLabels { generation: self.tabs_generation.unwrap_or(0), labels: &self.labels }
+    }
+
+    pub(crate) fn library_selection(&self, kind: SecKind) -> u32 {
+        let elem = STRIP_BASE + match kind { SecKind::Movie => 1, SecKind::Show => 2 };
+        self.keys.iter().position(|key| *key == elem).unwrap_or(0) as u32
+    }
+
+    pub(crate) fn search_selection(&self) -> u32 {
+        self.keys.iter().position(|key| *key == STRIP_BASE + 3).unwrap_or(0) as u32
+    }
+
+    pub(crate) fn profile(&self) -> ProfileChipRead<'_> {
+        // The avatar is drawn against the BROWSED server, which is read where the chrome is
+        // published: the library does not ask which server is current.
+        ProfileChipRead { src: plx_plex::plex::current_server().raw(), thumb: &self.thumb,
+            initial: &self.initial, name: &self.name, name_w: self.name_w }
+    }
+
+    pub(crate) fn read(&self, chip_expand: f32) -> ChromeRead<'_> {
+        ChromeRead { profile: self.profile(), labels: self.labels(), chip_expand }
+    }
+
+    pub(crate) fn focus(&self, focus: Option<FocusKey<u32>>) -> TopFocus {
+        match focus.map(|focus| focus.elem) {
+            Some(key) if key == STRIP_BASE + 4 => TopFocus::Chip,
+            Some(key) => self.keys.iter().position(|&id| id == key).map(TopFocus::Pill).unwrap_or(TopFocus::Away),
+            None => TopFocus::Away,
+        }
+    }
+
+    /// `scroll` is the shared strip's current offset (`StripRender::scroll_pos`, owned by
+    /// `app::bridge::Bridge`) — a parameter because this snapshot holds no `StripRender` of its
+    /// own; the `Bridge` methods that call this are the one place both live.
+    pub(crate) fn members(&self, selected: i32, focus: Option<FocusKey<u32>>, scroll: f32, out: &mut Vec<StripMember<u32>>) {
+        out.clear();
+        out.push(StripMember::new(STRIP_BASE + 4, widgets::CHIP_FRAME));
+        widgets::tab_members(&self.widths, &self.keys, selected, self.focus(focus), scroll, out);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_for_test(&mut self, name: &str, initial: &str, labels: &[&str], measure: &dyn Measure) {
+        self.tabs_generation = Some(1);
+        self.labels = labels.iter().map(|s| (*s).to_owned()).collect();
+        self.keys = (0..self.labels.len()).map(|i| STRIP_BASE + i as u32).collect();
+        self.widths = widgets::tab_widths(&self.labels, measure);
+        self.profile_generation = Some(1);
+        self.thumb.clear();
+        (self.initial, self.name, self.name_w) =
+            widgets::profile_chip_text(name, initial, measure);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plx_data::stores::browse::{DirectorySnapshot, SectionView, SrcRow};
+    use plx_machine::machine::EntryId;
+
+    fn directory(kinds: &[SecKind]) -> DirectorySnapshot {
+        DirectorySnapshot::fixture(7, 0, kinds.iter().enumerate().map(|(i, &kind)| SectionView {
+            sid: Some(plx_plex::plex::ServerId::from_raw((i / 2) as u16)),
+            key: i as i64 + 1,
+            kind,
+            row: SrcRow { section: i, title: format!("Library {i}"), pinned: true,
+                ..Default::default() },
+        }).collect())
+    }
+
+    #[test]
+    fn session_refresh_rebuilds_the_profile_chip_without_a_profile_switch() {
+        let _serial = plx_base::testlock::serial();
+        let _session = plx_plex::plex::session::TempSession::new("chrome-session-refresh");
+        let mut snapshot = ChromeSnapshot::default();
+        let directory = directory(&[]);
+        plx_plex::plex::session::install_transient_for_test(true);
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view());
+        assert_eq!(snapshot.name.to_str().unwrap(), "Sign in");
+        plx_plex::plex::session::save(&plx_plex::plex::session::Session {
+            client_id: "synthetic-client".into(), account_token: "synthetic-token".into(),
+            home_users: vec![plx_plex::plex::session::HomeUserRef {
+                title: "Synthetic owner".into(), admin: true, ..Default::default()
+            }], ..Default::default()
+        });
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view());
+        assert_eq!(snapshot.name.to_str().unwrap(), "Synthetic owner");
+    }
+
+    #[test]
+    fn published_bar_focus_uses_destination_identity_not_position() {
+        let snapshot = ChromeSnapshot { labels: vec!["Home".into(), "TV Shows".into(), String::new()],
+            keys: vec![STRIP_BASE, STRIP_BASE + 2, STRIP_BASE + 3], ..Default::default() };
+        let at = |id| Some(FocusKey { entry: EntryId(1), elem: STRIP_BASE + id });
+        assert_eq!(snapshot.focus(at(2)), TopFocus::Pill(1));
+        assert_eq!(snapshot.focus(at(3)), TopFocus::Pill(2));
+        assert_eq!(snapshot.focus(at(1)), TopFocus::Away);
+        assert_eq!(snapshot.focus(at(4)), TopFocus::Chip);
+        for elem in [0, 1] {
+            assert_eq!(snapshot.focus(Some(FocusKey { entry: EntryId(1), elem })), TopFocus::Away);
+        }
+    }
+
+    #[test]
+    fn four_libraries_on_two_servers_publish_two_type_destinations() {
+        let directory = directory(&[SecKind::Movie, SecKind::Show, SecKind::Movie, SecKind::Show]);
+        let mut snapshot = ChromeSnapshot {
+            profile_generation: Some(plx_plex::plex::session::current_gen()), ..Default::default()
+        };
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view());
+        assert_eq!(snapshot.keys, vec![STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 2, STRIP_BASE + 3]);
+        assert_eq!(&snapshot.labels[..3], &["Home", "Movies", "TV Shows"]);
+        let mut members = Vec::new();
+        snapshot.members(0, None, 0.0, &mut members);
+        assert_eq!(members.iter().map(|member| member.elem).collect::<Vec<_>>(),
+            vec![STRIP_BASE + 4, STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 2, STRIP_BASE + 3]);
+    }
+
+    #[test]
+    fn every_projected_pill_round_trips_by_stable_section_identity() {
+        use plx_data::stores::browse::SecKind::{Movie, Show};
+        let kinds = [Movie, Show];
+        let at = |i| kinds.get(i).copied();
+        let search = kinds.len() + 1;
+        assert_eq!(pill_in(0, search, at), Pill::Home);
+        assert_eq!(pill_in(1, search, at), Pill::Section(Movie));
+        assert_eq!(pill_in(2, search, at), Pill::Section(Show));
+        assert_eq!(pill_in(search, search, at), Pill::Search);
+        assert_eq!(pill_in(search + 1, search, at), Pill::Home);
+        let pos = |kind| kinds.iter().position(|&candidate| candidate == kind);
+        for i in 0..=search {
+            assert_eq!(pill_index(pill_in(i, search, at), search, pos), Some(i));
+        }
+        assert_eq!(pill_index(Pill::Section(Show), search, |_| None), None,
+            "a type the captured strip no longer contains borrows no other position");
+        assert_eq!(pill_in(1, 3, |_| None), Pill::Home,
+            "an unfilled section slot falls back to the one fixed destination");
+    }
+
+    #[test]
+    fn chrome_production_reads_only_its_retained_directory() {
+        let src = include_str!("chrome.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("plx_data::browse::"),
+            "Chrome must read only its retained Browse directory");
+    }
+
+    #[test]
+    fn shared_widgets_read_no_live_application_vocabulary() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/src/widgets.rs"),
+        ).expect("read widgets.rs");
+        let live = src.lines().filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>().join("\n");
+        for forbidden in ["plx_data::browse::", "plx_plex::plex::session::", "plx_screens::"] {
+            assert!(!live.contains(forbidden),
+                "shared widgets must consume captured app projections, found {forbidden}");
+        }
+    }
+}

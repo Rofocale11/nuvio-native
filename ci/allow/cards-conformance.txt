@@ -1,0 +1,5 @@
+# count: 0
+# Card-screen conformance expected failures (shrink-only), one per line, tab-separated:
+#   <screen source file>	<screen> <case>	# <reason>
+# Read by rust-modules/screens/src/cards_conformance_tests.rs: a listed case that now passes, or an
+# unlisted failing case, fails the suite. Shrinks as the shared-card-sections PRs land.

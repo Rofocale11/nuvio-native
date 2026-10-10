@@ -1,0 +1,1138 @@
+//! **The allowlist of usage events that may be reported off this television, as a TYPE.**
+//!
+//! `PRIVACY.md` promises that titles, ratingKeys, search terms, subtitle text, server names and
+//! addresses are never sent. This file is what makes that a checkable statement rather than a
+//! good intention for usage telemetry: every usage event is a variant of [`DiagEvent`], every field of every
+//! variant is a number, a bool or a `&'static str` from a fixed table, and one exhaustive
+//! serializer turns them into a wire record. **There is no field a caller can put a runtime string
+//! into**, so a call site cannot leak one by accident the way `log(&format!(…))` could — which is
+//! not hypothetical here, it is the bug the previous commit in this area had to fix by hand across
+//! seven call sites.
+//!
+//! # Why an enum, and not the macro the plan first proposed
+//!
+//! The first design was `diag::event!(name, k = v, …)`, which stringifies an identifier at the
+//! call site. That gives the *appearance* of an allowlist and none of the substance: any call site
+//! could mint any event with any field, and "no free-text field exists in the type" was false
+//! because there was no type. A reviewer caught it. One enum in one file, exhaustively matched by
+//! one serializer, delivers the property the macro only claimed — and it is less code.
+//!
+//! # UNGATED, deliberately
+//!
+//! This module compiles in every build, including one with no telemetry feature at all, for the
+//! reason `eventlog::scrub` was moved out of `lab/`: **its tests are the guarantee, and tests behind a
+//! feature the default gate does not build are tests that never run.** That is not a hypothetical
+//! either — `scrub`'s 31 assertions sat unexecuted for as long as they existed. What IS gated is
+//! everything that would SEND one of these.
+//!
+//! # Adding a variant
+//!
+//! Three things move together and the tests fail if they do not: the variant, its arm in
+//! [`serialize`], and its row in `PRIVACY.md`'s schema table. That last one is
+//! [`the_privacy_document_carries_the_generated_table`], and it is the mechanism behind the promise that the
+//! document is written *before* the thing ships rather than after.
+//!
+//! **A variant may not carry a `String`.** [`no_variant_can_carry_a_runtime_string`] greps this
+//! file for one. If a new event genuinely needs text, it needs a bounded enum instead — that is
+//! the whole design, and the answer to "but this one is safe" is that every leak in this
+//! repository's history was written by somebody who had just finished thinking that.
+
+/// One reportable usage event. See the module doc before adding a variant.
+///
+/// Device facts are deliberately absent from the EVENT variant. Firmware, model, SoC and app
+/// version are session constants, so [`UsageContext`] captures them once into the vendor-neutral
+/// durable envelope instead of making every call site carry them. They are compatibility
+/// dimensions: webOS APIs and media behaviour genuinely differ across these classes, and LG Store
+/// distribution is segmented by the same hardware families. Unique device identifiers remain
+/// structurally absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagEvent {
+    /// The app reached its event loop. A marker with no fields — "how many launches" is the
+    /// question, and everything that would qualify it is a session constant.
+    AppLaunch,
+    /// A screen was entered. `screen` comes from `app.rs`'s own route-name table, the same
+    /// `&'static str` the heartbeat and the lab envelope print, so the three cannot disagree.
+    RouteEntered {
+        screen: &'static str,
+    },
+    /// plex.tv sign-in finished and the app reached Home or the profile picker. A user-initiated
+    /// flow is bracketed by `started` and exactly one completed/failed/cancelled event; failures
+    /// carry only the fixed coarse stage, never server text or an account value.
+    SignInCompleted,
+    SignInStarted,
+    SignInFailed {
+        kind: SignInFailure,
+    },
+    SignInCancelled,
+    FeatureUsed {
+        feature: Feature,
+    },
+    /// **The server refused, or silently ignored, a Plex Pass audio DSP request** (issue #266) —
+    /// distinct from [`Feature::AudioEnhancement`], which fires on the PRESS regardless of what
+    /// the server does with it. The two knobs asked for, never which track, which server, or the
+    /// server's own decision text. Fires where `route::plan`/`route::decision` grade
+    /// `EnhancementOutcome::Refused` (`plan::enhancement_fallback` returning `Retry`).
+    EnhancementRefused {
+        boost_dialog: bool,
+        normalize_loudness: bool,
+    },
+
+    // ---- playback -----------------------------------------------------------------------------
+    //
+    // Playback lifecycle events for one attempt, joined by `playback_id`. Without that join a funnel cannot
+    // connect a failure to the start it belongs to, and "how often does playback fail" becomes two
+    // unrelated counters.
+    //
+    // **`playback_id` is a random number minted per attempt, and it is not an identity.** It is
+    // reset every time and never stored, so it cannot link two playbacks on one television, let
+    // alone two televisions. It exists to make the events of ONE attempt joinable inside a
+    // session, which is exactly as much as a funnel needs.
+    //
+    // **Every descriptive field is a BUCKET, and that is a privacy decision rather than a
+    // simplification.** Exact duration + exact raster + exact frame rate + codec is enough to
+    // identify a specific file in a specific library; the same fields as classes answer every
+    // question this channel exists to answer ("does 4K HEVC fail more than 1080p h264") and
+    // identify nothing.
+    /// **A viewer pressed Play.** The denominator: `started / requested` is the success rate, and a
+    /// `requested` with no `started` after it is the failure this channel exists to see — the one
+    /// an owner reports as "it just sat there".
+    ///
+    /// It fires at the PRESS, not where the plan lands, and carries no `mode` as a consequence. The
+    /// first draft put it at the engine's `load:` seam, which a `/decision` refusal never reaches —
+    /// so the earliest and most certain failure there is would have produced a `failed` with no
+    /// `requested` before it, i.e. a funnel that silently under-counts exactly the case it was
+    /// built for. Direct-play-versus-transcode is not yet knowable at the press; both `started` and
+    /// `failed` carry it, which is where the question is actually asked.
+    PlaybackRequested {
+        playback_id: i64,
+    },
+    /// The first frame of this attempt reached the panel — the transition into `Playing`, once.
+    PlaybackStarted {
+        playback_id: i64,
+        mode: &'static str,
+        /// `sd` / `hd` / `fhd` / `uhd`, never the raster.
+        raster: &'static str,
+        /// A fixed rung, never the measured rate.
+        fps: &'static str,
+        video: &'static str,
+        audio: &'static str,
+        /// How long from `requested` to a picture, as a class.
+        startup: &'static str,
+    },
+    /// This attempt failed, once. `kind` is `telemetry::classes::FailureClass`'s stable code —
+    /// never the on-screen wording, which is prose and will be re-worded.
+    PlaybackFailed {
+        playback_id: i64,
+        mode: &'static str,
+        kind: &'static str,
+    },
+    /// A real teardown — the viewer stopped, or the item ran out. **Not** a seek, a reload or an
+    /// app-switch suspend, all of which end an ENGINE without ending a playback.
+    PlaybackEnded {
+        playback_id: i64,
+        mode: &'static str,
+        watched: &'static str,
+    },
+    PlaybackCancelled {
+        playback_id: i64,
+        mode: &'static str,
+    },
+    PlaybackAbandoned {
+        playback_id: i64,
+        mode: &'static str,
+    },
+    PlaybackQuality {
+        playback_id: i64,
+        rebuffers: &'static str,
+        buffering: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    Pause,
+    Seek,
+    AudioTrack,
+    SubtitleTrack,
+    SkipIntro,
+    SkipCredits,
+    /// **The viewer moved to another library of the tab they were on** — a pill in the Library's
+    /// head row, or a row of the Sources panel behind it.
+    ///
+    /// It exists because issue #68 could not be answered from this channel at all. A user with two
+    /// TV libraries reported the second one as missing; the switcher was drawn and was never found,
+    /// and nothing here could say whether that was one account or every account with the shape.
+    /// This is the numerator for that question — "does anybody ever leave the library a tab opens
+    /// on" — and it is deliberately the whole of it: the denominator is a topology fact about an
+    /// account, which this channel does not carry and is not the place to start carrying.
+    LibrarySwitch,
+    /// **A viewer flipped a Boost dialog / Normalize loudness row** (issue #266, Plex Pass only —
+    /// the row is absent without it, so this event cannot fire on an account this build never
+    /// showed the toggle to). Fires from the Audio tab's `on_ok`, one bit at a time, never which
+    /// way it went or which track — see [`DiagEvent::EnhancementRefused`] for the server's answer.
+    AudioEnhancement,
+    /// **A viewer set the Next episode preference** (Settings → Video & playback) to one of its
+    /// three modes. The mode is the whole payload: a closed set of three codes, fired once per
+    /// change, never per playback and never with anything about what was playing.
+    NextEpisode(plx_plex::plex::session::NextEpisodeMode),
+    /// **A viewer set the Skip interval preference** (Settings → Video & playback) to one of its
+    /// five lengths. The length is the whole payload: a closed set of five codes, fired once per
+    /// durable change, never per press and never with anything about what was playing.
+    SkipInterval(plx_plex::plex::session::SkipInterval),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInFailure {
+    PinCreate,
+    Authorization,
+    Discovery,
+    Other,
+}
+
+impl SignInFailure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::PinCreate => "pin_create",
+            Self::Authorization => "authorization",
+            Self::Discovery => "discovery",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl Feature {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Seek => "seek",
+            Self::AudioTrack => "audio_track",
+            Self::SubtitleTrack => "subtitle_track",
+            Self::SkipIntro => "skip_intro",
+            Self::SkipCredits => "skip_credits",
+            Self::LibrarySwitch => "library_switch",
+            Self::AudioEnhancement => "audio_enhancement",
+            Self::NextEpisode(mode) => match mode {
+                plx_plex::plex::session::NextEpisodeMode::Countdown => "next_episode_countdown",
+                plx_plex::plex::session::NextEpisodeMode::AfterCredits => "next_episode_after_credits",
+                plx_plex::plex::session::NextEpisodeMode::Off => "next_episode_off",
+            },
+            Self::SkipInterval(interval) => match interval {
+                plx_plex::plex::session::SkipInterval::Seconds5 => "skip_interval_5s",
+                plx_plex::plex::session::SkipInterval::Seconds10 => "skip_interval_10s",
+                plx_plex::plex::session::SkipInterval::Seconds15 => "skip_interval_15s",
+                plx_plex::plex::session::SkipInterval::Seconds30 => "skip_interval_30s",
+                plx_plex::plex::session::SkipInterval::Seconds60 => "skip_interval_60s",
+            },
+        }
+    }
+}
+
+/// A serialised field value. The set is the whole vocabulary, and the important thing about it is
+/// what is ABSENT: there is no `String` arm, which is what makes "a runtime string cannot reach
+/// the wire" a property of the type rather than a rule people remember to follow.
+///
+/// **`Int` arrived with the playback events, exactly as this doc predicted it would** — and it
+/// carries only `playback_id`, which is a random number minted per attempt. `Bool` is still not
+/// here: nothing declared today is a flag, and an arm no variant produces is a vocabulary that
+/// describes nothing, which is how an allowlist stops being one.
+///
+/// Note what `Int` did NOT bring with it. The raster and the frame rate `playback.started` reports
+/// are `Str` buckets, not numbers, for the reason that event's own comment gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Value {
+    /// From a fixed table in this crate — never a runtime-built string. The guarantee is not the
+    /// `'static` lifetime, which a leaked allocation would satisfy; it is that every producer in
+    /// [`serialize`] is a literal or a `match` over an enum.
+    Str(&'static str),
+    /// A number. The only producer today is `playback_id` — see [`DiagEvent`]'s playback block for
+    /// why a random per-attempt integer is not an identifier.
+    Int(i64),
+}
+
+/// Versioned, vendor-neutral usage record stored in the durable telemetry spool.
+///
+/// The spool owns the fact that an event happened; a sender owns how that fact is represented for
+/// a particular service. Keeping those sides apart also preserves the original occurrence time
+/// while a television is offline instead of letting an ingest service mistake the next boot for
+/// the moment every queued action happened.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageEnvelope {
+    pub version: u8,
+    pub occurred_at_ms: u64,
+    pub session_id: String,
+    #[serde(default)]
+    pub context: UsageContext,
+    pub name: String,
+    pub fields: Vec<(String, UsageValue)>,
+}
+
+/// Compatibility dimensions shared by every usage event in one process.
+///
+/// These values come from the app build, nyx's platform-owned inventory files, and the coarse
+/// classification of the winning Plex connection. They are intentionally the fields needed to
+/// correlate playback failures with a shipped webOS/API/SoC class and connection path. There is no
+/// serial, MAC-derived LGUDID, network address, account value or Plex identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageContext {
+    pub app_version: String,
+    pub webos_release: String,
+    pub webos_api: String,
+    pub webos_codename: String,
+    pub device_model: String,
+    pub soc: String,
+    pub hardware_revision: String,
+    /// `local` / `remote` / `relay` / `unknown`. **Absent, not `unknown`, on an event with no one
+    /// server** — `app.launch`, `route.entered`, `signin.*` — since an account with N servers has
+    /// no single connection to report for those. Present (possibly `unknown`, when the winning
+    /// client hasn't classified its link yet) on every event captured through
+    /// [`UsageEnvelope::capture_for_snapshot`]. `#[serde(default)]` keeps an older spooled envelope,
+    /// captured before this field could be omitted, decoding as `None` rather than refusing to
+    /// parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_connection: Option<String>,
+    /// `v4` / `v6` / `unknown`. Same absence rule as `server_connection`, from the same cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_version: Option<String>,
+    /// issue #74: the k5lp/k3lp `/dev/rtkmem` sandbox pre-flight — `ok` / `missing` / `n/a` — the
+    /// SAME closed enum [`plx_platform::tv::sandbox::context`] reports, never a free-text probe result.
+    /// Present on every event so a chassis's crash-at-start rate is queryable by sandbox rather
+    /// than only discoverable from a single reported issue.
+    #[serde(default = "rtkmem_default")]
+    pub rtkmem: String,
+    /// issue #74: which of the two webOS install prefixes this process runs from — `devmode` /
+    /// `homebrew` / `unknown` — from [`plx_base::paths::install_kind`]. Never the path itself.
+    #[serde(default = "install_default")]
+    pub install: String,
+}
+
+fn rtkmem_default() -> String {
+    "n/a".into()
+}
+
+fn install_default() -> String {
+    "unknown".into()
+}
+
+impl Default for UsageContext {
+    fn default() -> Self {
+        Self {
+            app_version: "unknown".into(),
+            webos_release: "unknown".into(),
+            webos_api: "unknown".into(),
+            webos_codename: "unknown".into(),
+            device_model: "unknown".into(),
+            soc: "unknown".into(),
+            hardware_revision: "unknown".into(),
+            server_connection: None,
+            ip_version: None,
+            rtkmem: rtkmem_default(),
+            install: install_default(),
+        }
+    }
+}
+
+impl UsageContext {
+    /// Read the already-probed platform inventory. `tv::probe_device` runs before telemetry boot and
+    /// before the first usage event; an unavailable field is reported honestly as `unknown`. This
+    /// is the server-LESS form — a generic screen or app event has no one server when an account
+    /// owns N of them, so it OMITS `server_connection`/`ip_version` entirely rather than
+    /// inheriting whichever registry slot happens to be current or reporting a hardcoded
+    /// `unknown` for a connection the event never had. The one server-addressed producer is
+    /// [`Self::for_snapshot`], for an event that captured its own `(link, ip)` up front.
+    pub fn current() -> Self {
+        Self::build(None)
+    }
+
+    /// Capture network facts from an ALREADY-CAPTURED `(link, ip)` pair rather than a live
+    /// registry read. `server.is_some()` is what decides "this event addresses one server" (and
+    /// so gets fields at all, possibly `unknown`); `server.is_none()` omits both regardless of
+    /// `link`/`ip`, matching [`Self::current`]'s server-less behaviour exactly.
+    pub fn for_snapshot(
+        server: Option<plx_plex::plex::ServerId>,
+        link: Option<plx_plex::plex::probe::Location>,
+        ip: Option<plx_plex::plex::IpVersion>,
+    ) -> Self {
+        Self::build(server.map(|_| (link, ip)))
+    }
+
+    fn build(connection: Option<(Option<plx_plex::plex::probe::Location>, Option<plx_plex::plex::IpVersion>)>) -> Self {
+        let os = plx_platform::tv::device::info();
+        let hw = plx_platform::tv::device::device();
+        let connection = connection.map(|(link, ip)| {
+            let connection = match link {
+                Some(plx_plex::plex::probe::Location::Local) => "local",
+                Some(plx_plex::plex::probe::Location::Remote) => "remote",
+                Some(plx_plex::plex::probe::Location::Relay) => "relay",
+                None => "unknown",
+            };
+            let ip = match ip {
+                Some(plx_plex::plex::IpVersion::V4) => "v4",
+                Some(plx_plex::plex::IpVersion::V6) => "v6",
+                None => "unknown",
+            };
+            (connection, ip)
+        });
+        Self {
+            app_version: dimension(crate::telemetry::app_version()),
+            webos_release: dimension(&os.release),
+            webos_api: dimension(&os.api),
+            webos_codename: dimension(&os.codename),
+            device_model: dimension(&hw.model),
+            soc: dimension(&hw.board),
+            hardware_revision: dimension(&hw.hw_revision),
+            server_connection: connection.map(|(c, _)| c.to_string()),
+            ip_version: connection.map(|(_, ip)| ip.to_string()),
+            rtkmem: plx_platform::tv::sandbox::context().into(),
+            install: plx_base::paths::install_kind().into(),
+        }
+    }
+
+    /// What the consent preview shows before the app has permission to capture real values.
+    pub fn preview() -> Self {
+        Self {
+            app_version: "<app version>".into(),
+            webos_release: "<webOS release>".into(),
+            webos_api: "<webOS API version>".into(),
+            webos_codename: "<webOS codename>".into(),
+            device_model: "<device model class>".into(),
+            soc: "<SoC/platform class>".into(),
+            hardware_revision: "<hardware revision class>".into(),
+            server_connection: Some("<local / remote / relay / unknown>".into()),
+            ip_version: Some("<v4 / v6 / unknown>".into()),
+            rtkmem: "<ok / missing / n/a>".into(),
+            install: "<devmode / homebrew / unknown>".into(),
+        }
+    }
+}
+
+/// Keep platform-owned dimensions bounded and single-line without inventing a taxonomy that would
+/// merge two Store compatibility classes. All known nyx values use this alphabet.
+fn dimension(value: &str) -> String {
+    let value: String = value
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if value.is_empty() {
+        "unknown".into()
+    } else {
+        value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum UsageValue {
+    Str(String),
+    Int(i64),
+}
+
+impl UsageEnvelope {
+    pub const VERSION: u8 = 1;
+
+    pub fn capture(event: DiagEvent, occurred_at_ms: u64, session_id: &str) -> Self {
+        Self::capture_with_context(event, occurred_at_ms, session_id, UsageContext::current())
+    }
+
+    /// Connection facts come from an already-captured `(link, ip)` snapshot rather than a live
+    /// registry read (#95 step 8, item 4) — what a playback attempt event wants, since
+    /// `player::report::requested` snapshots the attempt's server connection once and every later
+    /// event on that attempt must report THAT connection, not whatever the client reads as at
+    /// send time after a mid-attempt re-point. The one server-addressed producer; a generic event
+    /// with no one server goes through [`Self::capture`] instead.
+    pub fn capture_for_snapshot(
+        event: DiagEvent,
+        occurred_at_ms: u64,
+        session_id: &str,
+        server: plx_plex::plex::ServerId,
+        link: Option<plx_plex::plex::probe::Location>,
+        ip: Option<plx_plex::plex::IpVersion>,
+    ) -> Self {
+        Self::capture_with_context(
+            event,
+            occurred_at_ms,
+            session_id,
+            UsageContext::for_snapshot(Some(server), link, ip),
+        )
+    }
+
+    pub fn capture_with_context(
+        event: DiagEvent,
+        occurred_at_ms: u64,
+        session_id: &str,
+        context: UsageContext,
+    ) -> Self {
+        let (name, fields) = serialize(event);
+        Self {
+            version: Self::VERSION,
+            occurred_at_ms,
+            session_id: session_id.to_string(),
+            context,
+            name: name.to_string(),
+            fields: fields
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key.to_string(),
+                        match value {
+                            Value::Str(s) => UsageValue::Str(s.to_string()),
+                            Value::Int(n) => UsageValue::Int(n),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(self).ok()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let value: Self = serde_json::from_slice(bytes).ok()?;
+        (value.version == Self::VERSION).then_some(value)
+    }
+
+    /// Does this body claim to be one of our neutral durable envelopes, even if its version is not
+    /// understood? Legacy PostHog bodies predate this shape and have no `version` field. Senders
+    /// may pass those through, but must fail closed on a future/invalid internal envelope rather
+    /// than posting its storage representation as if it were vendor wire JSON.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn claims_neutral_format(bytes: &[u8]) -> bool {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|v| v.get("version").cloned())
+            .is_some()
+    }
+}
+
+/// One event's name and fields, ready for a sender to wrap in whatever envelope it needs.
+///
+/// Returning the pair rather than a JSON string keeps this file free of any one vendor's format:
+/// the Sentry and PostHog bodies differ in shape, and both are built from this. That was a
+/// prediction when this function was written and is now load-bearing — `telemetry::posthog` calls
+/// it to build both of PostHog's two endpoint shapes, which put the identity in different places,
+/// from one description of the event. It carried an `#[allow(dead_code)]` until that caller
+/// existed; the attribute is gone rather than left behind, because a stale allowance is how a
+/// genuinely dead function later hides in plain sight.
+pub fn serialize(e: DiagEvent) -> (&'static str, Vec<(&'static str, Value)>) {
+    match e {
+        DiagEvent::AppLaunch => ("app.launch", Vec::new()),
+        DiagEvent::RouteEntered { screen } => {
+            ("route.entered", vec![("screen", Value::Str(screen))])
+        }
+        DiagEvent::SignInCompleted => ("signin.completed", Vec::new()),
+        DiagEvent::SignInStarted => ("signin.started", Vec::new()),
+        DiagEvent::SignInFailed { kind } => {
+            ("signin.failed", vec![("kind", Value::Str(kind.code()))])
+        }
+        DiagEvent::SignInCancelled => ("signin.cancelled", Vec::new()),
+        DiagEvent::FeatureUsed { feature } => (
+            "feature.used",
+            vec![("feature", Value::Str(feature.code()))],
+        ),
+        DiagEvent::EnhancementRefused { boost_dialog, normalize_loudness } => (
+            "enhancement.refused",
+            vec![
+                ("boost_dialog", Value::Str(if boost_dialog { "true" } else { "false" })),
+                ("normalize_loudness", Value::Str(if normalize_loudness { "true" } else { "false" })),
+            ],
+        ),
+        DiagEvent::PlaybackRequested { playback_id } => (
+            "playback.requested",
+            vec![("playback_id", Value::Int(playback_id))],
+        ),
+        DiagEvent::PlaybackStarted {
+            playback_id,
+            mode,
+            raster,
+            fps,
+            video,
+            audio,
+            startup,
+        } => (
+            "playback.started",
+            vec![
+                ("playback_id", Value::Int(playback_id)),
+                ("mode", Value::Str(mode)),
+                ("raster", Value::Str(raster)),
+                ("fps", Value::Str(fps)),
+                ("video", Value::Str(video)),
+                ("audio", Value::Str(audio)),
+                ("startup", Value::Str(startup)),
+            ],
+        ),
+        DiagEvent::PlaybackFailed {
+            playback_id,
+            mode,
+            kind,
+        } => (
+            "playback.failed",
+            vec![
+                ("playback_id", Value::Int(playback_id)),
+                ("mode", Value::Str(mode)),
+                ("kind", Value::Str(kind)),
+            ],
+        ),
+        DiagEvent::PlaybackEnded {
+            playback_id,
+            mode,
+            watched,
+        } => (
+            "playback.ended",
+            vec![
+                ("playback_id", Value::Int(playback_id)),
+                ("mode", Value::Str(mode)),
+                ("watched", Value::Str(watched)),
+            ],
+        ),
+        DiagEvent::PlaybackCancelled { playback_id, mode } => (
+            "playback.cancelled",
+            vec![
+                ("playback_id", Value::Int(playback_id)),
+                ("mode", Value::Str(mode)),
+            ],
+        ),
+        DiagEvent::PlaybackAbandoned { playback_id, mode } => (
+            "playback.abandoned",
+            vec![
+                ("playback_id", Value::Int(playback_id)),
+                ("mode", Value::Str(mode)),
+            ],
+        ),
+        DiagEvent::PlaybackQuality {
+            playback_id,
+            rebuffers,
+            buffering,
+        } => (
+            "playback.quality",
+            vec![
+                ("playback_id", Value::Int(playback_id)),
+                ("rebuffers", Value::Str(rebuffers)),
+                ("buffering", Value::Str(buffering)),
+            ],
+        ),
+    }
+}
+
+/// **The registry: one declaration per event, carrying its name, its fields and what each field
+/// may hold.** `PRIVACY.md`'s schema table is rendered from this and checked against it, and so is
+/// [`serialize`].
+///
+/// It replaced a NAME LIST plus a grep. The name list caught a variant that shipped undeclared and
+/// could say nothing about fields — so a field added to an existing event changed what leaves the
+/// television with no document, and no test, noticing. And the in-app notice was guarded by
+/// grepping `src/telemetry` for a call to `net::post_ca`, which is a proxy for "can this build
+/// send" and answers nothing about WHAT. A registry is the thing itself: the promise `PRIVACY.md`
+/// makes is about fields and their domains, so that is what is declared, once, here.
+///
+/// `domain` is prose and it is the column a reader of the privacy document actually reads. It is
+/// held beside the field rather than in the document because the document is the OUTPUT — written
+/// there, the two drift, and the one that goes stale is the one nobody compiles.
+///
+/// **`#[cfg(any(test, feature = "test-support"))]`, and that is the honest shape rather than a compromise** (the application's consent-document tests read it through `test-support`). This is a
+/// SPECIFICATION, checked against the implementation; at runtime [`serialize`] *is* the schema, and
+/// nothing needs a second copy of it in the shipped binary. The alternative was an
+/// `#[allow(dead_code)]`, and this file's own doc argues against exactly that: a standing allowance
+/// is how a genuinely dead declaration later hides in plain sight. Every comparison that gives this
+/// registry its value — against `serialize`, against `PRIVACY.md`, against the consent screen's
+/// preview — is a test, and `make check` runs them all.
+#[cfg(any(test, feature = "test-support"))]
+pub const EVENT_SPECS: &[EventSpec] = &[
+    EventSpec { name: "app.launch", fields: &[] },
+    EventSpec {
+        name: "route.entered",
+        fields: &[F { key: "screen", domain: "one of a fixed list of screen names" }],
+    },
+    EventSpec { name: "signin.completed", fields: &[] },
+    EventSpec { name: "signin.started", fields: &[] },
+    EventSpec { name: "signin.failed", fields: &[F { key: "kind", domain: "`pin_create` / `authorization` / `discovery` / `other`" }] },
+    EventSpec { name: "signin.cancelled", fields: &[] },
+    EventSpec { name: "feature.used", fields: &[F { key: "feature", domain: "one of a fixed list of feature names" }] },
+    EventSpec {
+        name: "enhancement.refused",
+        fields: &[
+            F { key: "boost_dialog", domain: "`true` / `false`" },
+            F { key: "normalize_loudness", domain: "`true` / `false`" },
+        ],
+    },
+    EventSpec { name: "playback.requested", fields: &[F { key: "playback_id", domain: PLAYBACK_ID }] },
+    EventSpec {
+        name: "playback.started",
+        fields: &[
+            F { key: "playback_id", domain: PLAYBACK_ID },
+            F { key: "mode", domain: MODE },
+            F { key: "raster", domain: "`sd` / `hd` / `fhd` / `uhd` / `unknown` — never the raster" },
+            F { key: "fps", domain: "a fixed rung: `24`/`25`/`30`/`50`/`60`/`100`/`other`/`unknown` — never the measured rate" },
+            F { key: "video", domain: "a codec name from a fixed table; anything else is `other`" },
+            F { key: "audio", domain: "a codec name from a fixed table; anything else is `other`" },
+            F { key: "startup", domain: "`<1s` / `1-3s` / `3-10s` / `10s+` — never the interval" },
+        ],
+    },
+    EventSpec {
+        name: "playback.failed",
+        fields: &[
+            F { key: "playback_id", domain: PLAYBACK_ID },
+            F { key: "mode", domain: MODE },
+            F { key: "kind", domain: "`decision_refused` / `playback_policy` / `no_video_transcode_target` / `no_video_track` / `media_source` / `playback_interrupted` / `tv_pipeline` / `original_rollback` / `jail_missing_rtkmem` / `load_timeout` / `unspecified`" },
+        ],
+    },
+    EventSpec {
+        name: "playback.cancelled",
+        fields: &[F { key: "playback_id", domain: PLAYBACK_ID }, F { key: "mode", domain: MODE }],
+    },
+    EventSpec {
+        name: "playback.abandoned",
+        fields: &[F { key: "playback_id", domain: PLAYBACK_ID }, F { key: "mode", domain: MODE }],
+    },
+    EventSpec {
+        name: "playback.quality",
+        fields: &[
+            F { key: "playback_id", domain: PLAYBACK_ID },
+            F { key: "rebuffers", domain: "`0` / `1` / `2-3` / `4+`" },
+            F { key: "buffering", domain: "`none` / `<2s` / `2-10s` / `10s+` — never the interval" },
+        ],
+    },
+    EventSpec {
+        name: "playback.ended",
+        fields: &[
+            F { key: "playback_id", domain: PLAYBACK_ID },
+            F { key: "mode", domain: MODE },
+            F { key: "watched", domain: "`abandoned` / `some` / `most` / `finished` — never a position or a duration" },
+        ],
+    },
+];
+
+/// Properties attached to every usage event by the durable envelope. Kept separate from
+/// [`EVENT_SPECS`] because these classify the app/device/network context, not the action itself.
+#[cfg(any(test, feature = "test-support"))]
+pub const CONTEXT_SPECS: &[F] = &[
+    F {
+        key: "app_version",
+        domain: "the PlxNative package version",
+    },
+    F {
+        key: "webos_release",
+        domain: "the webOS release reported by nyx",
+    },
+    F {
+        key: "webos_api",
+        domain: "the webOS API version reported by nyx",
+    },
+    F {
+        key: "webos_codename",
+        domain: "the webOS firmware family reported by nyx",
+    },
+    F {
+        key: "device_model",
+        domain: "the LG model/platform class reported by nyx",
+    },
+    F {
+        key: "soc",
+        domain: "the SoC/board class reported by nyx",
+    },
+    F {
+        key: "hardware_revision",
+        domain: "the hardware revision class reported by nyx",
+    },
+    F {
+        key: "server_connection",
+        domain: "`local` / `remote` / `relay` / `unknown` — omitted entirely on an event with no \
+                  one server, such as `app.launch`, `route.entered` or a `signin.*` event",
+    },
+    F {
+        key: "ip_version",
+        domain: "`v4` / `v6` / `unknown` — omitted entirely on an event with no one server, same \
+                  as `server_connection`",
+    },
+    F {
+        key: "rtkmem",
+        domain: "`ok` / `missing` / `n/a` — the k5lp/k3lp `/dev/rtkmem` jail pre-flight",
+    },
+    F {
+        key: "install",
+        domain: "`devmode` / `homebrew` / `unknown` — never the install path",
+    },
+];
+
+#[cfg(any(test, feature = "test-support"))]
+const PLAYBACK_ID: &str = "a random number minted per attempt, never stored and never reused";
+#[cfg(any(test, feature = "test-support"))]
+const MODE: &str = "`direct` / `transcode` / `unknown` — `unknown` when no route was installed, as for a plan the server or a playback setting refused";
+
+/// One event's contract. See [`EVENT_SPECS`].
+#[cfg(any(test, feature = "test-support"))]
+pub struct EventSpec {
+    pub name: &'static str,
+    pub fields: &'static [F],
+}
+
+/// One field's contract: its key, and what it may hold in the words the privacy document prints.
+#[cfg(any(test, feature = "test-support"))]
+pub struct F {
+    pub key: &'static str,
+    pub domain: &'static str,
+}
+
+/// The schema table exactly as `PRIVACY.md` carries it. **The document is the OUTPUT** — a test
+/// asserts the file contains this verbatim and prints the block on failure, so the fix to a stale
+/// document is a paste rather than an act of authorship.
+#[cfg(any(test, feature = "test-support"))]
+pub fn privacy_table() -> String {
+    let mut out = String::from("| event | fields |\n|---|---|\n");
+    for spec in EVENT_SPECS {
+        let fields = if spec.fields.is_empty() {
+            "*(none)*".to_string()
+        } else {
+            spec.fields
+                .iter()
+                .map(|f| format!("`{}` — {}", f.key, f.domain))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        out.push_str(&format!("| `{}` | {fields} |\n", spec.name));
+    }
+    out
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn privacy_context_table() -> String {
+    let mut out = String::from("| property | value |\n|---|---|\n");
+    for field in CONTEXT_SPECS {
+        out.push_str(&format!("| `{}` | {} |\n", field.key, field.domain));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One instance of every variant. A new variant that is not added here makes the exhaustive
+    /// match below fail to compile, which is the point — this list cannot silently fall behind.
+    fn every_variant() -> Vec<DiagEvent> {
+        // The match is what forces this list to stay complete: adding a variant without adding it
+        // here is a compile error, not a quietly weaker test.
+        let all = vec![
+            DiagEvent::AppLaunch,
+            DiagEvent::RouteEntered { screen: "home" },
+            DiagEvent::SignInCompleted,
+            DiagEvent::SignInStarted,
+            DiagEvent::SignInFailed {
+                kind: SignInFailure::Authorization,
+            },
+            DiagEvent::SignInCancelled,
+            DiagEvent::FeatureUsed {
+                feature: Feature::Pause,
+            },
+            DiagEvent::EnhancementRefused {
+                boost_dialog: true,
+                normalize_loudness: false,
+            },
+            DiagEvent::PlaybackRequested { playback_id: 7 },
+            DiagEvent::PlaybackStarted {
+                playback_id: 7,
+                mode: "direct",
+                raster: "fhd",
+                fps: "24",
+                video: "h264",
+                audio: "ac3",
+                startup: "1-3s",
+            },
+            DiagEvent::PlaybackFailed {
+                playback_id: 7,
+                mode: "transcode",
+                kind: "no_video_track",
+            },
+            DiagEvent::PlaybackEnded {
+                playback_id: 7,
+                mode: "direct",
+                watched: "most",
+            },
+            DiagEvent::PlaybackCancelled {
+                playback_id: 7,
+                mode: "direct",
+            },
+            DiagEvent::PlaybackAbandoned {
+                playback_id: 7,
+                mode: "direct",
+            },
+            DiagEvent::PlaybackQuality {
+                playback_id: 7,
+                rebuffers: "1",
+                buffering: "<2s",
+            },
+        ];
+        for e in &all {
+            match e {
+                DiagEvent::AppLaunch => {}
+                DiagEvent::RouteEntered { .. } => {}
+                DiagEvent::SignInCompleted => {}
+                DiagEvent::SignInStarted => {}
+                DiagEvent::SignInFailed { .. } => {}
+                DiagEvent::SignInCancelled => {}
+                DiagEvent::FeatureUsed { .. } => {}
+                DiagEvent::EnhancementRefused { .. } => {}
+                DiagEvent::PlaybackRequested { .. } => {}
+                DiagEvent::PlaybackStarted { .. } => {}
+                DiagEvent::PlaybackFailed { .. } => {}
+                DiagEvent::PlaybackEnded { .. } => {}
+                DiagEvent::PlaybackCancelled { .. } => {}
+                DiagEvent::PlaybackAbandoned { .. } => {}
+                DiagEvent::PlaybackQuality { .. } => {}
+            }
+        }
+        all
+    }
+
+    /// The Next episode preference is reported as `feature.used` carrying exactly one of three
+    /// fixed codes — the mode and nothing else, with no free-text field to put anything in.
+    #[test]
+    fn the_next_episode_setting_reports_only_its_mode() {
+        use plx_plex::plex::session::NextEpisodeMode;
+        let sent: Vec<_> = NextEpisodeMode::LADDER
+            .iter()
+            .map(|&mode| serialize(DiagEvent::FeatureUsed { feature: Feature::NextEpisode(mode) }))
+            .collect();
+        let want = |code| ("feature.used", vec![("feature", Value::Str(code))]);
+        assert_eq!(
+            sent,
+            [
+                want("next_episode_countdown"),
+                want("next_episode_after_credits"),
+                want("next_episode_off"),
+            ]
+        );
+    }
+
+    /// The Skip interval preference is reported as `feature.used` carrying exactly one of five
+    /// fixed codes — the length and nothing else, with no free-text field to put anything in.
+    #[test]
+    fn the_skip_interval_setting_reports_only_its_length() {
+        use plx_plex::plex::session::SkipInterval;
+        let sent: Vec<_> = SkipInterval::LADDER
+            .iter()
+            .map(|&interval| serialize(DiagEvent::FeatureUsed { feature: Feature::SkipInterval(interval) }))
+            .collect();
+        let want = |code| ("feature.used", vec![("feature", Value::Str(code))]);
+        assert_eq!(
+            sent,
+            [
+                want("skip_interval_5s"),
+                want("skip_interval_10s"),
+                want("skip_interval_15s"),
+                want("skip_interval_30s"),
+                want("skip_interval_60s"),
+            ]
+        );
+    }
+
+    /// **What is SENT is exactly what is DECLARED — name and every field key, in order.**
+    ///
+    /// This is what the old name list could not do. It caught a variant that shipped with no
+    /// declaration and said nothing about fields, so adding a field to an existing event changed
+    /// what leaves the television with neither the document nor a test noticing. The registry makes
+    /// that a compile-adjacent failure: the serialiser and the declaration are compared key by key.
+    #[test]
+    fn every_variant_sends_exactly_the_fields_it_declares() {
+        for e in every_variant() {
+            let (name, fields) = serialize(e);
+            let spec = EVENT_SPECS
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} is not declared in EVENT_SPECS"));
+            let sent: Vec<&str> = fields.iter().map(|(k, _)| *k).collect();
+            let declared: Vec<&str> = spec.fields.iter().map(|f| f.key).collect();
+            assert_eq!(
+                sent, declared,
+                "{name} sends fields it does not declare, or vice versa"
+            );
+            let mut keys = sent.clone();
+            keys.sort_unstable();
+            let n = keys.len();
+            keys.dedup();
+            assert_eq!(keys.len(), n, "{name} has a duplicate field key");
+        }
+    }
+
+    /// …and every declared event is actually produced by some variant. Otherwise the registry — and
+    /// with it the privacy document — grows entries describing events that cannot happen, which is
+    /// a different kind of untrue document from an incomplete one and no better.
+    #[test]
+    fn every_declared_event_is_produced_by_a_variant() {
+        let produced: Vec<&str> = every_variant()
+            .into_iter()
+            .map(|e| serialize(e).0)
+            .collect();
+        for s in EVENT_SPECS {
+            assert!(
+                produced.contains(&s.name),
+                "{} is declared but no variant produces it",
+                s.name
+            );
+        }
+    }
+
+    /// **No field's declared domain may name a thing that must never be sent.** A cheap check on
+    /// prose, and it is aimed at the one way a registry could rot into decoration: somebody adds a
+    /// field whose domain honestly says "the item title", the document renders it, and the row
+    /// reads as though it had been reviewed.
+    #[test]
+    fn no_declared_domain_admits_content() {
+        for s in EVENT_SPECS {
+            for f in s.fields {
+                let d = f.domain.to_ascii_lowercase();
+                for banned in [
+                    "title",
+                    "search",
+                    "query",
+                    "path",
+                    "url",
+                    "address",
+                    "rating key",
+                    "server name",
+                ] {
+                    assert!(
+                        !d.contains(banned),
+                        "{}.{} declares a domain mentioning {banned:?}: {}",
+                        s.name,
+                        f.key,
+                        f.domain
+                    );
+                }
+            }
+        }
+    }
+
+    /// **THE GUARANTEE.** No variant may carry a `String`, and no field value may be one — that is
+    /// what makes `PRIVACY.md`'s "titles, search terms and server names are not included" a
+    /// statement about the TYPE rather than about how careful the call sites are.
+    ///
+    /// Greps this file's own source, in the same spirit as
+    /// `eventlog::scrub`'s `no_log_call_site_interpolates_viewing_content`: the property is structural
+    /// and no unit test of behaviour can express it, because the failure is a variant that does
+    /// not exist yet.
+    #[test]
+    fn no_variant_can_carry_a_runtime_string() {
+        let src = include_str!("schema.rs");
+        // **Exactly the region the claim is about**: the event type, the value vocabulary and the
+        // serialiser. It used to be everything above the test module, which is wider than the
+        // property — `privacy_table` renders a DOCUMENT and legitimately returns a `String`, and a
+        // guard that has to be argued with is one somebody eventually deletes. Narrowing it here
+        // rather than adding an exemption keeps the failure meaning one thing.
+        let from = src
+            .find("pub enum DiagEvent")
+            .expect("the event type");
+        let to = src
+            .find("pub struct UsageEnvelope")
+            .expect("the durable envelope boundary");
+        let decls = &src[from..to];
+        for (i, line) in decls.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            assert!(
+                !code.contains("String") && !code.contains("Cow<"),
+                "line {} of the schema's declaration region introduces an owned string: {line}",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_usage_envelope_round_trips_occurrence_metadata() {
+        let original = UsageEnvelope::capture(
+            DiagEvent::PlaybackRequested { playback_id: 42 },
+            1_234_567,
+            "session-a",
+        );
+        let bytes = original.encode().expect("serialises");
+        assert_eq!(UsageEnvelope::decode(&bytes), Some(original));
+
+        let future = br#"{"version":99,"occurred_at_ms":1,"session_id":"s","name":"app.launch","fields":[]}"#;
+        assert!(
+            UsageEnvelope::decode(future).is_none(),
+            "unknown spool schemas fail closed"
+        );
+        assert!(UsageEnvelope::claims_neutral_format(future));
+        assert!(!UsageEnvelope::claims_neutral_format(
+            br#"{"api_key":"legacy","event":"app.launch"}"#
+        ));
+    }
+
+    #[test]
+    fn runtime_dimensions_are_bounded_single_line_values() {
+        assert_eq!(dimension("4.10.2-31"), "4.10.2-31");
+        assert_eq!(dimension("M19 DVB\nsecret"), "M19_DVB_secret");
+        assert_eq!(dimension(""), "unknown");
+        assert_eq!(dimension(&"x".repeat(80)).len(), 64);
+    }
+
+    /// The privacy document lists every event this build can emit.
+    ///
+    /// `PRIVACY.md` promises, as a binding term, that the literal structure sent is documented
+    /// there *before* it ships. This is that promise as a test: add a variant, and the document
+    /// has to gain a row in the same change or `make check` fails. It reads the file from the
+    /// repository root rather than embedding a copy, so the two cannot drift.
+    #[test]
+    fn the_privacy_document_carries_the_generated_table() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("rust-modules/telemetry has a repository root above it")
+            .join("PRIVACY.md");
+        let doc = std::fs::read_to_string(&root).expect("PRIVACY.md is readable");
+        let want = privacy_table();
+        assert!(
+            doc.contains(&want),
+            "PRIVACY.md's schema table is not the one this build would send. The document is the \
+             OUTPUT of `diag::schema::EVENT_SPECS`, so the fix is to paste the block below over \
+             the table in PRIVACY.md — not to edit the registry to match the document.\n\n{want}"
+        );
+        let context = privacy_context_table();
+        assert!(
+            doc.contains(&context),
+            "PRIVACY.md does not contain the generated usage context table:\n\n{context}"
+        );
+    }
+
+    /// **`playback.failed`'s declared `kind` domain must name every `FailureClass` code.**
+    ///
+    /// This is the check that was missing when `FailureClass::JailMissingRtkmem` shipped: nothing
+    /// tied the *documented* domain (this file's `EVENT_SPECS`, and through it `PRIVACY.md`, whose
+    /// own test only compares the two against EACH OTHER) to the *actual* enum a `playback.failed`
+    /// event's `kind` field is built from — `telemetry::classes::FailureClass::code`, which
+    /// `player::FailureKind::code` returns. So a new variant reached production PostHog rows with
+    /// a value neither document ever named, which is exactly the shape of drift the value would be
+    /// filtered out by in any dashboard, insight or taxonomy definition built from the documented
+    /// list rather than from the enum itself. Add a `FailureClass` variant, forget the domain, and
+    /// this test is what catches it — not a dashboard going quiet on a code nobody recognises.
+    #[test]
+    fn every_failure_kind_code_is_named_in_the_playback_failed_domain() {
+        use crate::telemetry::classes::FailureClass as F;
+        let spec = EVENT_SPECS
+            .iter()
+            .find(|s| s.name == "playback.failed")
+            .expect("playback.failed is declared");
+        let domain = spec
+            .fields
+            .iter()
+            .find(|f| f.key == "kind")
+            .expect("playback.failed declares a kind field")
+            .domain;
+        // Every variant, including the retained historical `original_rollback` code — see
+        // `FailureClass`'s own doc for why that one still exists with no live producer.
+        for kind in F::ALL {
+            assert!(
+                domain.contains(kind.code()),
+                "playback.failed's declared kind domain omits {:?} ({}): {domain}",
+                kind,
+                kind.code()
+            );
+        }
+    }
+}

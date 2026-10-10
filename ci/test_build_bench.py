@@ -1,0 +1,780 @@
+#!/usr/bin/env python3
+"""`make build-bench` (tools/build-bench.py): the shape of what it prints, and the fences around it.
+
+Hermetic. The benchmark runs against a SCRATCH git repository (`--repo`) whose Makefile answers
+`print-bench-config` with canned values, and a FAKE `cargo` / `rustc` / `uptime` / `sysctl` in a
+throwaway HOME's `.cargo/bin` (the script puts that first on PATH, as the Makefile's recipes do).
+Nothing is compiled and no real source file is edited. What this pins:
+
+* the Markdown table and the `--json` document have the documented shape, every timed scenario
+  ran `--runs` times, interleaved, and a no-op build that recompiled the app crate is flagged;
+* the edit targets are restored byte for byte AND with their original mtime (so the tree reads fresh
+  again and the next row needs no untimed rebuild) even when cargo FAILS mid-edit, and a target that
+  is dirty at the start is refused before any cargo runs;
+* a red unit test is a failed scenario that names the tests (and exits 1) without costing the other
+  scenarios, and a red gate is reported by the steps that failed, with their own output;
+* RELEASE=1 is refused (environment, Makefile config, and `make build-bench` itself);
+* an absent target-fast tree or ARM archive is a SKIP with a note, never a build;
+* the load / swap noise warning fires and stays quiet;
+* the cargo invocations are the Makefile's: the mirrored subcommand skeletons are compared with the
+  real recipes, `print-bench-config` carries no telemetry credential, and the Makefile wiring
+  (lock wrapper, `--quick`, SIDE_EFFECT_FREE, check-python registration) is present.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import check_steps
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "tools" / "build-bench.py"
+
+spec = importlib.util.spec_from_file_location("build_bench", SCRIPT)
+bb = importlib.util.module_from_spec(spec)
+sys.modules["build_bench"] = bb
+spec.loader.exec_module(bb)
+
+FAKE_CARGO = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[2:]  # argv[1] is the +toolchain
+log = os.environ["FAKE_LOG"]
+with open(log, "a") as f:
+    f.write(json.dumps({"args": args, "cwd": os.getcwd(), "incr": os.environ.get("CARGO_INCREMENTAL"),
+                        "tdir": os.environ.get("CARGO_TARGET_DIR"), "rustflags": os.environ.get("RUSTFLAGS"),
+                        "runtime": bool(os.environ.get("PLXNATIVE_RUNTIME_DIR"))}) + "\n")
+def read(p):
+    try:
+        return open(p).read()
+    except OSError:
+        return ""
+EDITED = ("base/src/cbuf.rs", "machine/src/landgate.rs", "platform/src/devcaps.rs", "gfx/src/overdraw.rs", "net/src/stream_redirect.rs", "ui/src/dwell.rs", "plex/src/plex/retry.rs", "telemetry/src/telemetry/window.rs", "data/src/stores/tape.rs", "session/src/auth/scripted.rs", "media/src/abr/units.rs", "appkit/src/skip_pill.rs", "screens/src/clock_readout.rs", "src/coldstart.rs", "ui/src/lib.rs")
+if os.environ.get("FAKE_FAIL_ON_EDIT") and "build-bench edit" in "".join(read(p) for p in EDITED):
+    sys.stderr.write("error: fake cargo failed on the edited tree\n")
+    sys.exit(101)
+if "--no-run" in args:
+    # cargo judges a path package by mtime: stale when a source file is NEWER than what the last build
+    # wrote (the state file's own mtime stands for the dependency info), fresh otherwise
+    state = os.environ["FAKE_STATE"] + "." + (os.environ.get("CARGO_TARGET_DIR") or "target").replace("/", "_")
+    fresh = (os.path.exists(state) and all(os.stat(p).st_mtime_ns <= os.stat(state).st_mtime_ns for p in EDITED if os.path.exists(p))
+             and not os.environ.get("FAKE_ALWAYS_DIRTY"))
+    open(state, "w").write("built")
+    if os.environ.get("FAKE_COUNT_BUILDS"):
+        open(os.environ["FAKE_COUNT_BUILDS"], "a").write("fresh\n" if fresh else "rebuilt\n")
+    print("   Compiling noise on stdout that is not JSON")
+    # The unit suite goes through tools/cargo-test-parallel.py, which runs the test executables this
+    # build reports: one per package, each printing its own `test result:` line.
+    exes = {"plx_base": 5300, "plxnative-modules": 125}
+    def art(pkg_path, name, version):
+        exe = os.path.join(os.environ["FAKE_STATE"] + ".bins", name)
+        os.makedirs(os.path.dirname(exe), exist_ok=True)
+        with open(exe, "w") as f:
+            if os.environ.get("FAKE_TEST_FAIL") and name == "plx_base":
+                f.write("#!/bin/sh\necho 'test a::b ... FAILED'\necho 'test c::d ... FAILED'\necho 'test e::f ... ok'\n"
+                        "echo 'test result: FAILED. 5298 passed; 2 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.10s'\nexit 101\n")
+            else:
+                f.write("#!/bin/sh\necho 'test result: ok. %d passed; 0 failed; %d ignored; 0 measured; 0 filtered out; finished in 0.10s'\n"
+                        % (exes.get(name, 0), 7 if name == "plx_base" else 0))
+        os.chmod(exe, 0o755)
+        print(json.dumps({"reason": "compiler-artifact", "package_id": "path+file:///r/rust-modules%s#%s@%s" % (pkg_path, name, version),
+                          "fresh": fresh, "manifest_path": os.getcwd() + "/Cargo.toml", "target": {"name": name},
+                          "profile": {"test": True}, "executable": exe}))
+    print(json.dumps({"reason": "compiler-artifact", "package_id": "registry+x#serde@1.0.0", "fresh": True}))
+    art('/base', 'plx_base', '0.0.0')
+    art('/machine', 'plx_machine', '0.0.0')
+    art('/platform', 'plx_platform', '0.0.0')
+    art('/gfx', 'plx_gfx', '0.0.0')
+    art('/net', 'plx_net', '0.0.0')
+    art('/ui', 'plx_ui', '0.0.0')
+    art('/plex', 'plx_plex', '0.0.0')
+    art('/telemetry', 'plx_telemetry', '0.0.0')
+    art('/data', 'plx_data', '0.0.0')
+    art('/session', 'plx_session', '0.0.0')
+    art('/media', 'plx_media', '0.0.0')
+    art('/appkit', 'plx_appkit', '0.0.0')
+    art('/screens', 'plx_screens', '0.0.0')
+    art('', 'plxnative-modules', '0.7.0')
+elif args[0] == "rustc":
+    tgt = args[args.index("--target") + 1]
+    tdir = args[args.index("--target-dir") + 1]
+    out = os.path.join(tdir, tgt, "release")
+    os.makedirs(out, exist_ok=True)
+    open(os.path.join(out, "libplxnative_modules.a"), "wb").write(b"!<arch>\nfake archive")
+    print(json.dumps({"reason": "compiler-artifact", "fresh": False}))
+'''
+FAKE_RUSTC = "#!/bin/sh\necho 'rustc 1.99.0-nightly (fake 2026-01-01)'\n"
+FAKE_UPTIME = '#!/bin/sh\necho " 3:30  up 1 day, load averages: ${FAKE_LOAD:-0.10} 0.2 0.3"\n'
+FAKE_SYSCTL = ('#!/bin/sh\ncase "$2" in\n'
+               '  vm.swapusage) echo "total = 1000.00M  used = ${FAKE_SWAP_USED:-100.00}M  free = 1.00M  (encrypted)";;\n'
+               '  *) echo "Fake CPU";;\nesac\n')
+SCRATCH_MAKEFILE = r'''print-bench-config:
+	@printf '%s\n' 'RUST_NIGHTLY=nightly' 'RUST_TDIR=target' 'RUST_TARGET=arm-unknown-linux-gnueabi' \
+	  'RUST_FEATFLAGS=' 'RUST_LIB=rust-modules/target/arm-unknown-linux-gnueabi/release/libplxnative_modules.a' \
+	  'RUST_ENV=RUSTFLAGS="-C target-cpu=fake -C x"' 'TEST_FAST_TDIR=target-fast' 'UNIT_RUN=python3 ../tools/cargo-test-parallel.py' 'RELEASE=$(RELEASE)'
+'''
+LEAF = "rust-modules/base/src/cbuf.rs"
+MACHINE_LEAF = "rust-modules/machine/src/landgate.rs"
+PLATFORM_LEAF = "rust-modules/platform/src/devcaps.rs"
+GFX_LEAF = "rust-modules/gfx/src/overdraw.rs"
+NET_LEAF = "rust-modules/net/src/stream_redirect.rs"
+UI_LEAF = "rust-modules/ui/src/dwell.rs"
+PLEX_LEAF = "rust-modules/plex/src/plex/retry.rs"
+TELEMETRY_LEAF = "rust-modules/telemetry/src/telemetry/window.rs"
+DATA_LEAF = "rust-modules/data/src/stores/tape.rs"
+SESSION_LEAF = "rust-modules/session/src/auth/scripted.rs"
+MEDIA_LEAF = "rust-modules/media/src/abr/units.rs"
+APPKIT_LEAF = "rust-modules/appkit/src/skip_pill.rs"
+SCREENS_LEAF = "rust-modules/screens/src/clock_readout.rs"
+APP_LEAF = "rust-modules/src/coldstart.rs"
+HUB = "rust-modules/ui/src/lib.rs"
+SRC_FILES = {LEAF: "pub fn leaf() {}\n", MACHINE_LEAF: "pub fn machine() {}\n", PLATFORM_LEAF: "pub fn platform() {}\n", GFX_LEAF: "pub fn gfx() {}\n", NET_LEAF: "pub fn net() {}\n", UI_LEAF: "pub fn ui() {}\n", PLEX_LEAF: "pub fn plex() {}\n", TELEMETRY_LEAF: "pub fn telemetry() {}\n", DATA_LEAF: "pub fn data() {}\n", SESSION_LEAF: "pub fn session() {}\n", MEDIA_LEAF: "pub fn media() {}\n", APPKIT_LEAF: "pub fn appkit() {}\n", SCREENS_LEAF: "pub fn screens() {}\n", APP_LEAF: "pub fn app() {}\n", HUB: "pub fn hub() {}",
+             "rust-modules/src/lib.rs": "mod coldstart;\n"}
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                          cwd=repo, capture_output=True, text=True, check=True)
+
+
+class Sandbox:
+    """A scratch repo, a fake toolchain home, and a way to run the script against them."""
+
+    def __enter__(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self.repo = base / "repo"
+        self.home = base / "home"
+        bindir = self.home / ".cargo" / "bin"
+        bindir.mkdir(parents=True)
+        for name, body in (("cargo", FAKE_CARGO), ("rustc", FAKE_RUSTC), ("uptime", FAKE_UPTIME),
+                           ("sysctl", FAKE_SYSCTL)):
+            (bindir / name).write_text(body)
+            (bindir / name).chmod(0o755)
+        for rel, body in SRC_FILES.items():
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / rel).write_text(body)
+        (self.repo / "Makefile").write_text(SCRATCH_MAKEFILE)
+        (self.repo / "tools").mkdir()
+        shutil.copy(ROOT / "tools" / "cargo-test-parallel.py", self.repo / "tools" / "cargo-test-parallel.py")
+        git(self.repo, "init", "-q")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "scratch")
+        self.log = base / "cargo.log"
+        self.state = base / "fresh-state"
+        return self
+
+    def __exit__(self, *exc):
+        self._tmp.cleanup()
+
+    def run(self, *args, env=None):
+        full = {k: v for k, v in os.environ.items() if k not in ("RELEASE", "CARGO_TARGET_DIR", "MAKEFLAGS", "CARGO_BUILD_RUSTFLAGS", "RUSTFLAGS")}   # a benchmark started by `make build-bench` hands its own -Zthreads down: the fake run must not inherit it
+        full.update(HOME=str(self.home), FAKE_LOG=str(self.log), FAKE_STATE=str(self.state))
+        full.update(env or {})
+        return subprocess.run([sys.executable, str(SCRIPT), "--repo", str(self.repo), *args],
+                              capture_output=True, text=True, env=full)
+
+    def calls(self):
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def assert_sources_untouched(self, test):
+        for rel, body in SRC_FILES.items():
+            test.assertEqual((self.repo / rel).read_text(), body, f"{rel} was not restored")
+        test.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=no").stdout.strip(), "")
+
+
+class ShapeTests(unittest.TestCase):
+    def test_table_json_and_restoration(self):
+        with Sandbox() as sb:
+            (sb.repo / "rust-modules" / "target").mkdir(parents=True)
+            (sb.repo / "rust-modules" / "target" / "blob").write_bytes(b"x" * 4096)
+            out = sb.repo.parent / "out.json"
+            proc = sb.run("--runs", "2", "--only", "noop,leaf,machine,platform,gfx,net,ui,plex,telemetry,data,session,media,appkit,screens,hub,tests,sizes", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            md = proc.stdout
+            self.assertIn("| Scenario | Runs | Median | Min | Max | Notes |", md)
+            for title in (bb.TITLES["noop"], bb.TITLES["leaf"], bb.TITLES["machine"], bb.TITLES["platform"], bb.TITLES["gfx"], bb.TITLES["net"], bb.TITLES["ui"], bb.TITLES["plex"], bb.TITLES["telemetry"], bb.TITLES["data"], bb.TITLES["session"], bb.TITLES["media"], bb.TITLES["appkit"], bb.TITLES["screens"], bb.TITLES["hub"],
+                          bb.TITLES["tests"]):
+                self.assertRegex(md, re.escape(f"| {title} | 2 | ") + r"[\d.]+ s \| [\d.]+ s \| [\d.]+ s \|")
+            self.assertIn("app crate rebuilt: no", md)   # the no-op row
+            self.assertIn("app crate rebuilt: yes", md)  # the edit rows
+            self.assertIn("5425 passed / 0 failed / 7 ignored", md)
+            self.assertIn("| Target dirs (1) |", md)
+            self.assertNotIn("WARNING", md)
+
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["schema"], 1)
+            self.assertRegex(doc["git_sha"], r"^[0-9a-f]{12}$")
+            self.assertIn("fake", doc["toolchain"])
+            self.assertTrue(doc["host"]["machine"] and doc["host"]["os"])
+            self.assertGreaterEqual(doc["host"]["cores"], 1)
+            self.assertEqual(doc["runs"], 2)
+            self.assertTrue(doc["restored_clean"])
+            self.assertEqual([s["id"] for s in doc["scenarios"]], ["noop", "leaf", "machine", "platform", "gfx", "net", "ui", "plex", "telemetry", "data", "session", "media", "appkit", "screens", "hub", "tests", "sizes"])
+            for sc in doc["scenarios"]:
+                if sc["id"] == "sizes":
+                    continue
+                self.assertEqual(len(sc["samples"]), 2)
+                self.assertLessEqual(sc["min"], sc["median"])
+                self.assertLessEqual(sc["median"], sc["max"])
+                for sample in sc["samples"]:
+                    self.assertIn("load1", sample)
+                    self.assertIn("swap_used_pct", sample)
+            by_id = {s["id"]: s for s in doc["scenarios"]}
+            self.assertFalse(any(s["app_rebuilt"] for s in by_id["noop"]["samples"]))
+            self.assertTrue(all(s["app_rebuilt"] for s in by_id["leaf"]["samples"]))
+            self.assertTrue(all(s["machine_rebuilt"] and s["app_rebuilt"] for s in by_id["machine"]["samples"]))
+            self.assertIn("plx_machine rebuilt: yes", md)
+            self.assertTrue(all(s["platform_rebuilt"] and s["app_rebuilt"] for s in by_id["platform"]["samples"]))
+            self.assertIn("plx_platform rebuilt: yes", md)
+            self.assertTrue(all(s["gfx_rebuilt"] and s["app_rebuilt"] for s in by_id["gfx"]["samples"]))
+            self.assertIn("plx_gfx rebuilt: yes", md)
+            self.assertTrue(all(s["net_rebuilt"] and s["app_rebuilt"] for s in by_id["net"]["samples"]))
+            self.assertIn("plx_net rebuilt: yes", md)
+            self.assertTrue(all(s["ui_rebuilt"] and s["app_rebuilt"] for s in by_id["ui"]["samples"]))
+            self.assertIn("plx_ui rebuilt: yes", md)
+            self.assertTrue(all(s["plex_rebuilt"] and s["app_rebuilt"] for s in by_id["plex"]["samples"]))
+            self.assertIn("plx_plex rebuilt: yes", md)
+            self.assertTrue(all(s["telemetry_rebuilt"] and s["app_rebuilt"] for s in by_id["telemetry"]["samples"]))
+            self.assertIn("plx_telemetry rebuilt: yes", md)
+            self.assertTrue(all(s["data_rebuilt"] and s["app_rebuilt"] for s in by_id["data"]["samples"]))
+            self.assertIn("plx_data rebuilt: yes", md)
+            self.assertTrue(all(s["session_rebuilt"] and s["app_rebuilt"] for s in by_id["session"]["samples"]))
+            self.assertIn("plx_session rebuilt: yes", md)
+            self.assertTrue(all(s["media_rebuilt"] and s["app_rebuilt"] for s in by_id["media"]["samples"]))
+            self.assertIn("plx_media rebuilt: yes", md)
+            self.assertTrue(all(s["appkit_rebuilt"] and s["app_rebuilt"] for s in by_id["appkit"]["samples"]))
+            self.assertIn("plx_appkit rebuilt: yes", md)
+            self.assertTrue(all(s["screens_rebuilt"] and s["app_rebuilt"] for s in by_id["screens"]["samples"]))
+            self.assertIn("plx_screens rebuilt: yes", md)
+            self.assertEqual(by_id["tests"]["samples"][0]["passed"], 5425)
+            self.assertEqual(doc["sizes"]["count"], 1)
+            self.assertNotIn("PLX_", out.read_text())
+            sb.assert_sources_untouched(self)
+
+    def test_rounds_interleave_the_scenarios(self):
+        with Sandbox() as sb:
+            proc = sb.run("--runs", "2", "--only", "noop,leaf,hub")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            rounds = re.findall(r"round (\d)/2: (\w+)", proc.stderr)
+            self.assertEqual(rounds, [("1", "noop"), ("1", "leaf"), ("1", "hub"),
+                                      ("2", "noop"), ("2", "leaf"), ("2", "hub")])
+
+    def test_quick_is_noop_leaf_and_sizes_at_one_run(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "q.json"
+            proc = sb.run("--quick", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["runs"], 1)
+            self.assertEqual([s["id"] for s in doc["scenarios"]], ["noop", "leaf", "sizes"])
+
+    def test_cargo_is_called_the_way_the_makefile_does(self):
+        with Sandbox() as sb:
+            (sb.repo / "rust-modules" / "target-fast").mkdir(parents=True)
+            lib = sb.repo / "rust-modules/target/arm-unknown-linux-gnueabi/release/libplxnative_modules.a"
+            lib.parent.mkdir(parents=True)
+            lib.write_bytes(b"old")
+            proc = sb.run("--runs", "1", "--only", "noop,leaf-inc,tests,arm")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            calls = sb.calls()
+            for c in calls:
+                self.assertTrue(c["cwd"].endswith("rust-modules"), c)
+            plain = [c for c in calls if c["args"][:2] == ["test", "--lib"] and c["incr"] == "0"]
+            self.assertTrue(plain)
+            self.assertTrue(all(c["tdir"] is None and c["runtime"] for c in plain), plain)
+            inc = [c for c in calls if c["incr"] == "1"]
+            self.assertTrue(inc)
+            self.assertTrue(all(c["tdir"] == "target-fast" and c["args"] == list(bb.HOST_TEST_BUILD_ARGS)
+                                for c in inc), inc)
+            # The suite itself: the runner builds the very command `make check` names, then runs
+            # the binaries (no `test --lib` without --no-run is ever issued by it).
+            self.assertIn(list(bb.HOST_TEST_ARGS) + ["--no-run", "--message-format=json-render-diagnostics"],
+                          [c["args"] for c in plain])
+            arm = [c for c in calls if c["args"][0] == "rustc"]
+            self.assertEqual(len(arm), 1)
+            self.assertEqual(arm[0]["args"], ["rustc", "--release", "--target", "arm-unknown-linux-gnueabi",
+                                              "--lib", "--crate-type", "staticlib", "--target-dir", "target",
+                                              "--message-format=json-render-diagnostics"])
+            self.assertEqual(arm[0]["incr"], "0")
+            self.assertEqual(arm[0]["rustflags"], "-C target-cpu=fake -C x")
+            self.assertIn("archive 0.0 MiB, sha256 ", proc.stdout)
+
+
+class EditRestoreTests(unittest.TestCase):
+    """The edit rows put the file back with its original mtime, so only the first build of a run is untimed."""
+
+    SCENARIOS = "noop,leaf,ui,screens,app,tests"
+
+    def test_the_mtime_comes_back_with_the_bytes(self):
+        with Sandbox() as sb:
+            old = 1_700_000_000_123_456_789   # long before the fake cargo's state file, as a checkout is before a build
+            for rel in SRC_FILES:
+                os.utime(sb.repo / rel, ns=(old, old))
+            proc = sb.run("--runs", "2", "--only", self.SCENARIOS)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            for rel in (LEAF, UI_LEAF, SCREENS_LEAF, APP_LEAF):
+                self.assertEqual((sb.repo / rel).stat().st_mtime_ns, old, rel)
+            sb.assert_sources_untouched(self)
+
+    def test_the_mtime_is_restored_when_cargo_fails(self):
+        with Sandbox() as sb:
+            old = 1_700_000_000_000_000_000
+            os.utime(sb.repo / LEAF, ns=(old, old))
+            proc = sb.run("--runs", "1", "--only", "noop,leaf", env={"FAKE_FAIL_ON_EDIT": "1"})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual((sb.repo / LEAF).stat().st_mtime_ns, old)
+
+    def test_only_the_first_build_is_an_untimed_warm_up(self):
+        # Four edit rows and a no-op and the suite, two rounds. Every edit rebuilds (it is the measurement);
+        # nothing else does but the very first build, and the benchmark says "warming" once.
+        with Sandbox() as sb:
+            counts = sb.repo.parent / "builds.txt"
+            old = 1_700_000_000_000_000_000
+            for rel in SRC_FILES:
+                os.utime(sb.repo / rel, ns=(old, old))
+            proc = sb.run("--runs", "2", "--only", self.SCENARIOS, env={"FAKE_COUNT_BUILDS": str(counts)})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stderr.count("warming the non-incremental test build"), 1, proc.stderr)
+            builds = counts.read_text().split()
+            self.assertEqual(builds.count("rebuilt"), 1 + 4 * 2, builds)   # the warm-up, then four edit rows twice
+            self.assertEqual(builds[0], "rebuilt")
+
+    def test_an_edit_row_really_rebuilds(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "e.json"
+            proc = sb.run("--runs", "2", "--only", "noop,leaf,ui", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            by_id = {s["id"]: s for s in json.loads(out.read_text())["scenarios"]}
+            self.assertTrue(all(s["app_rebuilt"] for s in by_id["leaf"]["samples"]))
+            self.assertTrue(all(s["app_rebuilt"] for s in by_id["ui"]["samples"]))
+            self.assertFalse(any(s["app_rebuilt"] for s in by_id["noop"]["samples"]))
+
+
+class RedTests(unittest.TestCase):
+    """A red unit test is a failed scenario with names, not a timing, and not the end of the run."""
+
+    def test_failing_tests_are_named_and_the_run_still_reports_the_rest(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "red.json"
+            proc = sb.run("--runs", "2", "--only", "noop,leaf,tests", "--json", str(out), env={"FAKE_TEST_FAIL": "1"})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("unit suite: 2 test(s) FAILED: a::b, c::d", proc.stderr)
+            self.assertIn("RED: " + bb.TITLES["tests"] + ": 2 unit test(s) failed: a::b, c::d", proc.stdout)
+            doc = json.loads(out.read_text())
+            by_id = {s["id"]: s for s in doc["scenarios"]}
+            self.assertEqual(by_id["tests"]["status"], "failed")
+            self.assertEqual(by_id["tests"]["note"], "2 unit test(s) failed: a::b, c::d")
+            self.assertEqual(doc["red"], ["tests"])
+            self.assertIsNone(doc["failure"])
+            self.assertEqual(by_id["leaf"]["status"], "ok")
+            self.assertEqual(len(by_id["leaf"]["samples"]), 2)   # the second round still ran
+            sb.assert_sources_untouched(self)
+
+    def test_a_green_suite_is_not_red(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "green.json"
+            proc = sb.run("--runs", "1", "--only", "tests", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["red"], [])
+            self.assertEqual(doc["scenarios"][0]["status"], "ok")
+
+    def test_the_parsers(self):
+        text = "test a::b ... ok\ntest a::c ... FAILED\ntest a::c ... FAILED\ntest d ... FAILED\n    test e ... FAILED\n"
+        self.assertEqual(bb.failed_tests(text), ["a::c", "d"])   # once each, at the start of a line only
+        unit = "ERROR: test_a (__main__.A.test_a)\nok\nFAIL: test_b (mod.B.test_b)\nERROR: test_a (__main__.A.test_a)\nFAIL: setUpClass (mod.C)\n"
+        self.assertEqual(bb.failed_unittests(unit), ["test_a (__main__.A.test_a)", "test_b (mod.B.test_b)"])
+        self.assertIn("2 python test(s) failed: test_a (__main__.A.test_a), test_b (mod.B.test_b)", bb.check_failure_summary(2, unit))
+
+
+class FenceTests(unittest.TestCase):
+    def test_edit_targets_are_restored_when_cargo_fails(self):
+        with Sandbox() as sb:
+            proc = sb.run("--runs", "1", "--only", "noop,leaf,hub", env={"FAKE_FAIL_ON_EDIT": "1"})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("FAILED:", proc.stdout)
+            self.assertIn("fake cargo failed on the edited tree", proc.stdout)
+            self.assertRegex(proc.stdout, r"\| " + re.escape(bb.TITLES["leaf"]) + r" \| 0 \| failed")
+            sb.assert_sources_untouched(self)
+
+    def test_a_dirty_edit_target_is_refused_before_any_cargo(self):
+        with Sandbox() as sb:
+            (sb.repo / LEAF).write_text("pub fn leaf() {} // someone's work\n")
+            proc = sb.run("--only", "leaf")
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("refusing to start", proc.stderr)
+            self.assertIn(LEAF, proc.stderr)
+            self.assertEqual(sb.calls(), [])
+            self.assertEqual((sb.repo / LEAF).read_text(), "pub fn leaf() {} // someone's work\n")
+
+    def test_a_dirty_file_that_is_not_edited_does_not_matter(self):
+        with Sandbox() as sb:
+            (sb.repo / HUB).write_text("changed")
+            proc = sb.run("--runs", "1", "--only", "noop,leaf")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual((sb.repo / HUB).read_text(), "changed")
+
+    def test_release_is_refused_from_the_environment(self):
+        with Sandbox() as sb:
+            proc = sb.run("--only", "noop", env={"RELEASE": "1"})
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("RELEASE=1", proc.stderr)
+            self.assertEqual(sb.calls(), [])
+
+    def test_release_is_refused_from_the_makefile_config(self):
+        with Sandbox() as sb:
+            (sb.repo / "Makefile").write_text(SCRATCH_MAKEFILE.replace("'RELEASE=$(RELEASE)'", "'RELEASE=1'"))
+            proc = sb.run("--only", "noop")
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("RELEASE=1", proc.stderr)
+            self.assertEqual(sb.calls(), [])
+
+    def test_unknown_scenario_is_refused(self):
+        with Sandbox() as sb:
+            self.assertEqual(sb.run("--only", "nope").returncode, 2)
+
+
+class SkipTests(unittest.TestCase):
+    def test_absent_incremental_tree_and_arm_archive_are_skipped_with_a_note(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "s.json"
+            proc = sb.run("--runs", "1", "--only", "noop,leaf-inc,hub-inc,arm", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertRegex(proc.stdout, r"\| " + re.escape(bb.TITLES["leaf-inc"]) + r" \| - \| skipped .*target-fast.* is absent")
+            self.assertRegex(proc.stdout, r"\| " + re.escape(bb.TITLES["arm"]) + r" \| - \| skipped .*no ARM staticlib")
+            self.assertIn("never triggers the FFmpeg build", proc.stdout)
+            doc = json.loads(out.read_text())
+            by_id = {s["id"]: s for s in doc["scenarios"]}
+            for sid in ("leaf-inc", "hub-inc", "arm"):
+                self.assertEqual(by_id[sid]["status"], "skipped")
+                self.assertTrue(by_id[sid]["note"])
+            self.assertEqual([c for c in sb.calls() if c["args"][0] == "rustc"], [])
+            self.assertEqual([c for c in sb.calls() if c["incr"] == "1"], [])
+            self.assertFalse((sb.repo / "rust-modules" / "target-fast").exists())
+
+    def test_an_edit_in_one_tree_does_not_make_the_next_noop_look_stale(self):
+        # The restored file keeps its original mtime, so neither target dir is stale after an edit and
+        # the no-op row (and every row after it) starts from a built tree without rebuilding it.
+        with Sandbox() as sb:
+            out = sb.repo.parent / "m.json"
+            proc = sb.run("--runs", "3", "--only", "noop,leaf-inc", "--cold", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            noop = next(s for s in json.loads(out.read_text())["scenarios"] if s["id"] == "noop")
+            self.assertEqual([s["app_rebuilt"] for s in noop["samples"]], [False, False, False])
+            self.assertNotIn("UNEXPECTED", proc.stdout)
+
+    def test_cold_builds_the_incremental_tree_instead_of_skipping(self):
+        with Sandbox() as sb:
+            proc = sb.run("--runs", "1", "--only", "leaf-inc", "--cold")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("skipped", proc.stdout)
+            self.assertTrue([c for c in sb.calls() if c["incr"] == "1"])
+            sb.assert_sources_untouched(self)
+
+
+DASH = "—"
+# The gate in the scratch repository is the REAL runner, tools/check-parallel.py, started the way the
+# Makefile's `check-unlocked` starts it: two branches named `cargo` and `python`, the python one itself a
+# step-mode run of a manifest. Nothing here prints a banner by hand: a parser tested against banners a
+# test author typed is how the first green gate on a runner came back "unreadable" (the parser looked for
+# `==== step: cargo`, the runner prints `==== check: cargo`).
+FAKE_CHECK_MAKEFILE = SCRATCH_MAKEFILE + (
+    "check-unlocked:\n"
+    "\t@echo \"$$PLX_CHECK_LOCK|$$MAKEFLAGS|$$PLXNATIVE_RUNTIME_DIR\" > $(CURDIR)/../check-env.txt\n"
+    "\t@python3 tools/check-parallel.py \\\n"
+    "\t  cargo='python3 -c \"print(\\\"cargo ran\\\")\"' \\\n"
+    "\t  python='python3 tools/check-parallel.py --steps steps-$(if $(FAKE_CHECK_FAIL),red,ok).txt'\n")
+
+
+def install_gate(sb):
+    """Write the scratch repository's gate: the real step runner, a manifest that passes and one that does not."""
+    shutil.copy(ROOT / "tools" / "check-parallel.py", sb.repo / "tools" / "check-parallel.py")
+    (sb.repo / "ci").mkdir(exist_ok=True)
+    (sb.repo / "ci" / "test_y.py").write_text("print('fine')\n")
+    (sb.repo / "ci" / "test_x.py").write_text("import sys\nprint('AssertionError: the gate said no')\nsys.exit(1)\n")
+    (sb.repo / "steps-ok.txt").write_text("python3 ci/test_y.py\n")
+    (sb.repo / "steps-red.txt").write_text("python3 ci/test_x.py\npython3 ci/test_y.py\n")
+    (sb.repo / "Makefile").write_text(FAKE_CHECK_MAKEFILE, encoding="utf-8")
+
+
+class CheckScenarioTests(unittest.TestCase):
+    """`--only check`: the whole host gate, opt-in, without taking the lock this process already holds."""
+
+    def test_it_is_opt_in(self):
+        self.assertNotIn("check", bb.ALL_SCENARIOS)
+        self.assertNotIn("check", bb.QUICK_SCENARIOS)
+        self.assertIn("check", bb.OPTIONAL_SCENARIOS)
+        self.assertIn("check", bb.TITLES)
+
+    def test_wall_time_and_branch_times_are_reported(self):
+        with Sandbox() as sb:
+            install_gate(sb)
+            out = sb.repo.parent / "check.json"
+            proc = sb.run("--runs", "2", "--only", "check", "--json", str(out),
+                          env={"MAKEFLAGS": "-j9", "PLXNATIVE_RUNTIME_DIR": "/should/not/leak"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertRegex(proc.stdout, re.escape(f"| {bb.TITLES['check']} | 2 | ") + r"[\d.]+ s \| [\d.]+ s \| [\d.]+ s \|")
+            self.assertRegex(proc.stdout, r"cargo branch \d+ s, python branch \d+ s")
+            doc = json.loads(out.read_text())
+            (sc,) = doc["scenarios"]
+            self.assertEqual(sc["id"], "check")
+            self.assertEqual(len(sc["samples"]), 2)
+            for branch in bb.CHECK_BRANCHES:   # the times the REAL runner printed for each branch
+                self.assertGreaterEqual(sc["branches"][branch]["median"], 0)
+                self.assertTrue(all(f"{branch}_seconds" in sample for sample in sc["samples"]), branch)
+            # No lock (this process holds it exclusively), and nothing of the bench's environment leaks in.
+            lock, makeflags, runtime = (sb.repo.parent / "check-env.txt").read_text().strip().split("|")
+            self.assertEqual(lock, "off")
+            self.assertNotIn("-j9", makeflags)   # make adds its own flags (--no-print-directory); ours are not inherited
+            self.assertEqual(runtime, "")
+            self.assertEqual(sb.calls(), [])   # the gate runs through make, not through this script's cargo
+
+    def test_a_red_gate_is_a_failed_run_and_records_no_number(self):
+        with Sandbox() as sb:
+            install_gate(sb)
+            out = sb.repo.parent / "red.json"
+            proc = sb.run("--runs", "1", "--only", "check", "--json", str(out), env={"FAKE_CHECK_FAIL": "1"})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("FAILED: check: the gate exited", proc.stdout)
+            # the report names the step that failed, not the tail of the log...
+            self.assertIn("check: the gate exited 2: 1 step(s) failed: python3 ci/test_x.py", proc.stdout)
+            # ...and the step's own output reaches the log, where the runner's job log can show it
+            self.assertIn("the gate's step `python3 ci/test_x.py` failed (exit 1)", proc.stderr)
+            self.assertIn("AssertionError: the gate said no", proc.stderr)
+            self.assertNotIn("fine", proc.stderr.split("the gate's step")[1].split("the gate's output")[0])
+            doc = json.loads(out.read_text())
+            self.assertTrue(doc["failure"])
+            self.assertNotIn("median", doc["scenarios"][0])
+            self.assertEqual(doc["scenarios"][0]["status"], "failed")
+
+    def test_what_the_gate_printed_is_read_back_as_steps_branches_and_tests(self):
+        text = (f"==== step: python3 ci/a.py {DASH} FAILED, exit 1 (9.0s, cpu 1.0s) ====\nTraceback...\nTimeoutExpired\n"
+                f"==== step: python3 ci/b.py {DASH} ok (1.0s, cpu 1.0s) ====\nfine\n"
+                f"==== step: python3 ci/c.py {DASH} FAILED, exit -9 (2.0s) ====\nkilled\n"
+                f"==== check: cargo {DASH} ALSO FAILED, exit 101 (30s) ====\ntest m::t ... FAILED\n")
+        self.assertEqual(bb.failed_steps(text), [("python3 ci/a.py", 1, "Traceback...\nTimeoutExpired"),
+                                                 ("python3 ci/c.py", -9, "killed")])
+        summary = bb.check_failure_summary(2, text)
+        self.assertEqual(summary, "check: the gate exited 2: 2 step(s) failed: python3 ci/a.py; python3 ci/c.py"
+                                  " | branch(es) failed: cargo | 1 test(s) failed: m::t")
+        # nothing readable: the tail of the output is all there is
+        self.assertIn("no failed step or test could be read", bb.check_failure_summary(2, "make: *** [x] Error 2"))
+
+    def test_a_gate_that_passed_but_printed_no_branch_banner_is_recorded_as_a_total(self):
+        # Exit 0 is the verdict. A banner that cannot be read costs the two branch rows, nothing else.
+        with Sandbox() as sb:
+            (sb.repo / "Makefile").write_text(SCRATCH_MAKEFILE + "check-unlocked:\n\t@echo nothing useful\n")
+            out = sb.repo.parent / "unread.json"
+            proc = sb.run("--runs", "1", "--only", "check", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("the gate PASSED but no", proc.stderr)
+            self.assertIn("the gate passed; its branch times could not be read, only the total is recorded", proc.stdout)
+            (sc,) = json.loads(out.read_text())["scenarios"]
+            self.assertEqual(sc["status"], "ok")
+            self.assertIn("median", sc)
+            self.assertEqual(sc["branches"], {b: {} for b in bb.CHECK_BRANCHES})
+
+    def test_the_parser_reads_what_the_real_runner_prints(self):
+        # tools/check-parallel.py itself, branch mode around a nested step-mode run: the shape of `make check`.
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "steps.txt"
+            manifest.write_text(f"{shlex.join([sys.executable, '-c', 'print(1)'])}\n")
+            nested = shlex.join([sys.executable, str(ROOT / "tools" / "check-parallel.py"), "--steps", str(manifest)])
+            green = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "check-parallel.py"),
+                 "cargo=" + shlex.join([sys.executable, "-c", "import time; time.sleep(1.2); print('c')"]), "python=" + nested],
+                capture_output=True, text=True)
+            self.assertEqual(green.returncode, 0, green.stdout + green.stderr)
+            read = bb.parse_check_branches(green.stdout)
+            self.assertEqual(sorted(read), ["cargo", "python"], green.stdout)
+            self.assertGreaterEqual(read["cargo"], 1)       # whole seconds, as the runner prints them
+            # a branch that failed or was stopped has no time to read
+            red = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "check-parallel.py"),
+                 "cargo=" + shlex.join([sys.executable, "-c", "import time; time.sleep(30)"]),
+                 "python=" + shlex.join([sys.executable, "-c", "import sys; sys.exit(3)"])],
+                capture_output=True, text=True)
+            self.assertNotEqual(red.returncode, 0)
+            self.assertEqual(bb.parse_check_branches(red.stdout), {}, red.stdout)
+
+    def test_the_makefiles_gate_names_the_branches_the_parser_reads(self):
+        recipe = (ROOT / "Makefile").read_text()
+        body = recipe[recipe.index("\ncheck-unlocked:") + 1:]
+        body = body[:body.index("\n\n")]
+        self.assertEqual(re.findall(r"(?m)^\s+(\w+)='\$\(MAKE\)", body), list(bb.CHECK_BRANCHES))
+        self.assertIn("tools/check-parallel.py", body)
+
+    def test_the_banner_parser_takes_the_last_banner_of_each_branch(self):
+        # the python branch's own output nests the banners of its halves; its own comes after them
+        text = (f"==== check: cargo {DASH} ok (338s) ====\ncheck: still running: rest (120s)\n"
+                f"==== check: rest {DASH} ok (157s) ====\n==== check: 76 steps {DASH} all ok (157s wall) ====\n"
+                f"==== check: harness {DASH} ok (223s) ====\n==== check: python {DASH} ok (224s) ====\n")
+        self.assertEqual(bb.parse_check_branches(text), {"cargo": 338.0, "python": 224.0})
+        failed = f"==== check: cargo {DASH} stopped, a sibling branch failed (254s) ====\n==== check: python {DASH} FAILED, exit 2 (254s) ====\n"
+        self.assertEqual(bb.parse_check_branches(failed), {})
+        self.assertEqual(bb.parse_check_branches("no banners"), {})
+
+
+class RunnerBlockTests(unittest.TestCase):
+    ALLOWED = {"cpu", "cores", "system", "arch", "runner_os", "runner_arch", "image_os", "image_version"}
+
+    def test_the_json_names_the_machine_without_identifying_it(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "r.json"
+            proc = sb.run("--runs", "1", "--only", "noop", "--json", str(out),
+                          env={"RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "ImageOS": "macos15", "ImageVersion": "20260101.1"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            runner = json.loads(out.read_text())["runner"]
+            self.assertLessEqual(set(runner), self.ALLOWED)
+            self.assertTrue(runner["cpu"])
+            self.assertEqual((runner["runner_os"], runner["runner_arch"], runner["image_os"], runner["image_version"]),
+                             ("macOS", "ARM64", "macos15", "20260101.1"))
+
+    def test_off_a_runner_only_the_machine_fields_are_present(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "r2.json"
+            env = {k: "" for k in ("RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")}
+            proc = sb.run("--runs", "1", "--only", "noop", "--json", str(out), env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(set(json.loads(out.read_text())["runner"]), {"cpu", "cores", "system", "arch"})
+
+
+class NoiseTests(unittest.TestCase):
+    def test_load_above_core_count_warns(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "w.json"
+            proc = sb.run("--runs", "1", "--only", "noop", "--json", str(out), env={"FAKE_LOAD": "9999.00"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("WARNING: noop run 1: load 9999.00 >", proc.stdout)
+            self.assertIn("numbers are noisy", proc.stdout)
+            self.assertTrue(json.loads(out.read_text())["warnings"])
+
+    def test_swap_over_ninety_percent_warns(self):
+        with Sandbox() as sb:
+            proc = sb.run("--runs", "1", "--only", "noop", env={"FAKE_SWAP_USED": "950.00"})
+            self.assertIn("WARNING: noop run 1: swap 95% used", proc.stdout)
+
+    def test_swap_at_ninety_percent_does_not(self):
+        with Sandbox() as sb:
+            proc = sb.run("--runs", "1", "--only", "noop", env={"FAKE_SWAP_USED": "900.00"})
+            self.assertNotIn("WARNING", proc.stdout)
+
+    def test_the_front_end_threads_the_rows_ran_with_are_reported(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "threads.json"
+            proc = sb.run("--runs", "1", "--only", "noop", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("rustc front end: serial", proc.stdout)
+            self.assertEqual(json.loads(out.read_text())["front_end_threads"], 0)
+            proc = sb.run("--runs", "1", "--only", "noop", "--json", str(out),
+                          env={"CARGO_BUILD_RUSTFLAGS": "-Zthreads=8"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("rustc front end: 8 threads (-Zthreads)", proc.stdout)
+            self.assertEqual(json.loads(out.read_text())["front_end_threads"], 8)
+
+    def test_front_end_threads_reads_what_cargo_is_given(self):
+        self.assertEqual(bb.front_end_threads({}), 0)
+        self.assertEqual(bb.front_end_threads({"CARGO_BUILD_RUSTFLAGS": "-Zthreads=8"}), 8)
+        self.assertEqual(bb.front_end_threads({"CARGO_BUILD_RUSTFLAGS": "-Zthreads=1"}), 0)
+        # RUSTFLAGS is what cargo reads first, so it decides, flag or no flag
+        self.assertEqual(bb.front_end_threads({"RUSTFLAGS": "-C x", "CARGO_BUILD_RUSTFLAGS": "-Zthreads=8"}), 0)
+        self.assertEqual(bb.front_end_threads({"RUSTFLAGS": "-Z threads=4"}), 4)
+
+    def test_a_noop_build_that_recompiles_the_app_is_flagged(self):
+        with Sandbox() as sb:
+            proc = sb.run("--runs", "1", "--only", "noop", env={"FAKE_ALWAYS_DIRTY": "1"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("UNEXPECTED: a no-op build recompiled the app crate", proc.stdout)
+
+    def test_parsers(self):
+        self.assertEqual(bb.parse_load("up 23 days, load averages: 7.62 6.14 6.39"), 7.62)
+        self.assertEqual(bb.parse_load("up 1 day, load average: 0.52, 0.40, 0.30"), 0.52)
+        self.assertEqual(bb.parse_swap_pct("total = 4096.00M  used = 3048.88M  free = 1047.12M  (encrypted)"), 74.4)
+        self.assertEqual(bb.parse_swap_pct("total = 2.00G  used = 1024.00M  free = 1024.00M"), 50.0)
+        self.assertIsNone(bb.parse_swap_pct("no swap here"))
+        self.assertEqual(bb.parse_test_result("test result: ok. 5425 passed; 0 failed; 7 ignored; 0 measured"),
+                         {"status": "ok", "passed": 5425, "failed": 0, "ignored": 7})
+
+
+class MakefileWiringTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.makefile = (ROOT / "Makefile").read_text()
+
+    def make(self, *args, env=None):
+        full = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "RELEASE")}
+        full.update(env or {})
+        return subprocess.run(["make", *args], cwd=ROOT, capture_output=True, text=True, env=full)
+
+    def recipe(self, header):
+        m = re.search(r"^" + re.escape(header) + r".*\n((?:\t.*\n|[ \t]*\n|#.*\n)*)", self.makefile, re.M)
+        self.assertIsNotNone(m, header)
+        return m.group(1).replace("\\\n", " ")
+
+    def test_host_test_skeleton_matches_the_recipes(self):
+        want = " ".join(bb.HOST_TEST_ARGS)
+        for header in ("check-cargo-unit-default:", "test-fast:"):
+            self.assertRegex(self.recipe(header), r"cargo \+\$\(RUST_NIGHTLY\) " + re.escape(want) + r"(?=\s|$)", header)
+
+    def test_arm_skeleton_matches_the_staticlib_recipe(self):
+        recipe = self.recipe("$(RUST_LIB):")
+        m = re.search(r"cargo \+\$\(RUST_NIGHTLY\) (rustc .*?--message-format=json-render-diagnostics)", recipe)
+        self.assertIsNotNone(m, "the Makefile no longer spells the staticlib cargo line this way")
+        want = bb.arm_argv({"RUST_TARGET": "$(RUST_TARGET)", "RUST_TDIR": "$(RUST_TDIR)",
+                            "RUST_FEATFLAGS": "$(RUST_FEATFLAGS)", "ARM_PROFILE_FLAG": "$(ARM_PROFILE_FLAG)"})
+        self.assertEqual(shlex.split(m.group(1)), want)
+
+    def test_arm_argv_follows_the_makefiles_profile(self):
+        base = {"RUST_TARGET": "arm-t", "RUST_TDIR": "target", "RUST_FEATFLAGS": ""}
+        self.assertEqual(bb.arm_argv(base)[:4], ["rustc", "--release", "--target", "arm-t"])
+        fast = bb.arm_argv(dict(base, ARM_PROFILE_FLAG="--profile tvdev"))
+        self.assertEqual(fast[:5], ["rustc", "--profile", "tvdev", "--target", "arm-t"])
+
+    def test_print_bench_config_reports_the_recipes_values_and_no_credential(self):
+        proc = self.make("-s", "print-bench-config", env={"PLX_SENTRY_DSN": "https://secret-dsn.invalid/1",
+                                                          "PLX_POSTHOG_KEY": "phc_secretvalue"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        cfg = dict(line.split("=", 1) for line in proc.stdout.splitlines())
+        for key in ("RUST_NIGHTLY", "RUST_TDIR", "RUST_TARGET", "RUST_FEATFLAGS", "RUST_LIB", "RUST_ENV",
+                    "TEST_FAST_TDIR", "RELEASE", "ARM_PROFILE", "ARM_PROFILE_FLAG"):
+            self.assertIn(key, cfg)
+        self.assertEqual(cfg["TEST_FAST_TDIR"], "target-fast")
+        self.assertEqual(cfg["RELEASE"], "")
+        self.assertTrue(cfg["RUST_ENV"].startswith("RUSTFLAGS="))
+        self.assertNotIn("secret", proc.stdout)
+        self.assertNotIn("PLX_", proc.stdout)
+
+    def test_make_refuses_release_without_starting_anything(self):
+        for goal in ("build-bench", "build-bench-quick"):
+            proc = self.make(goal, "RELEASE=1")
+            self.assertNotEqual(proc.returncode, 0, goal)
+            self.assertIn("refused under RELEASE=1", proc.stderr)
+            self.assertNotIn("round 1", proc.stderr)
+
+    def test_dry_run_goes_through_the_lock_with_the_make_environment(self):
+        proc = self.make("-n", "build-bench-quick", "ARGS=--runs 2")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertRegex(proc.stdout, r"tools/check-lock\.py --exclusive -- env PLX_BENCH_VIA_MAKE=1[\s\S]*tools/build-bench\.py --quick --runs 2")
+        full = self.make("-n", "build-bench").stdout
+        self.assertNotIn("--quick", full)
+
+    def test_the_goals_are_side_effect_free_and_checked(self):
+        m = re.search(r"^SIDE_EFFECT_FREE = (.*)$", self.makefile, re.M)
+        self.assertIsNotNone(m)
+        self.assertTrue({"build-bench", "build-bench-quick"} <= set(m.group(1).split()))
+        self.assertIn("python3 ci/test_build_bench.py", check_steps.commands())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,312 @@
+name: Simulator CI
+
+on:
+  push:
+    branches: [main, 'release/v*']
+    paths: &simulator_paths
+      - '.github/workflows/simulators.yml'
+      - '.github/actions/apt-install/**'
+      - 'Makefile'
+      - 'rust-modules/**'
+      # Nested guides such as rust-modules/media/src/player/CLAUDE.md read by no gate in this workflow;
+      # a docs-only edit there should not cost a ~20 min macOS+Linux simulator build.
+      - '!rust-modules/**/*.md'
+      - 'src/svg.c'
+      - 'src/ass.c'
+      - 'src/ass_composite.h'
+      - 'include/ass.h'
+      - 'assets/icons/**'
+      - 'vendor/nanosvg/**'
+      - 'pkg/appfont*.ttf'
+      - 'pkg/OFL.txt'
+      - 'pkg/le-roots.pem'
+      - 'LICENSE'
+      - 'ci/build-ffmpeg.sh'
+      - 'ci/host-toolchain-id.sh'
+      - 'ci/stage-host-ffmpeg.sh'
+      - 'ci/build-libass.sh'
+      - 'ci/build-libass.py'
+      - 'ci/libass-dependencies.json'
+      - 'ci/ffabi-assert.c'
+      - 'tests/fixtures/mkv_zlib_subs.mkv'
+      - 'tests/fixtures/replay/**'
+      - 'tests/replay_fixtures.py'
+      - 'tests/test_replay_fixtures.py'
+      - 'tools/sim.ps1'
+      - 'tools/sim-smoke.py'
+  pull_request:
+    paths: *simulator_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: simulator-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux simulator build + launch
+    runs-on: ubuntu-latest
+    # Measured max 32.5 min over the last 40 successful runs, 29 of it one apt stall this change
+    # bounds (typical 4.2); the limit is the apt bound plus the typical build with margin (unset = 360).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install SDL/OpenGL and virtual display
+        # One shared, bounded apt path (cached .debs, `timeout` on every network phase, http AND
+        # https timeouts): a plain `apt-get update` here once stalled a sibling job for 4 h 36 min.
+        # `recommends` stays on: this step has always been a plain `apt-get install -y`.
+        timeout-minutes: 15
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev libgl1-mesa-dri xvfb xauth gdb cmake pkg-config
+          recommends: "true"
+      - id: toolchain
+        name: Identify the host toolchain
+        run: echo "id=$(./ci/host-toolchain-id.sh)" >> "$GITHUB_OUTPUT"
+      - name: Cache the host libass stack
+        # This job builds only libass (FreeType, FriBidi, HarfBuzz, libass: ~1-2 minutes of the
+        # job); see the `macos` job for how the two entries below work and what keys them.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-prefix-host
+          key: host-libass-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('ci/build-libass.sh', 'ci/build-libass.py', 'ci/libass-dependencies.json', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'src/ass.c', 'src/ass_composite.h', 'include/ass.h') }}
+      - name: Cache the libass source tarballs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-sources
+          key: host-libass-sources-${{ hashFiles('ci/libass-dependencies.json') }}
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: rust-modules -> target-sim-ci
+          key: simulator-linux
+      - name: Build native Linux simulator
+        # Line tables only: a crash's core then symbolizes to file:line in the smoke step below.
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: make sim-linux SIM_TDIR=rust-modules/target-sim-ci
+      - name: Route core dumps to the runner's temp directory
+        # The runner's default core_pattern pipes to apport, which discards a crash in a binary
+        # that no package owns. A launch that dies on a signal must leave a core that
+        # `tools/sim-smoke.py --core-dir` can print every thread's stack from.
+        run: |
+          mkdir -p "$RUNNER_TEMP/cores"
+          sudo sysctl -w kernel.core_pattern="$RUNNER_TEMP/cores/core.%e.%p"
+      - name: Launch and capture 1080p frame
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a -s '-screen 0 1920x1080x24' python3 tools/sim-smoke.py \
+            --binary "$GITHUB_WORKSPACE/rust-modules/target-sim-ci/release/plxnative-sim" \
+            --runtime "$RUNNER_TEMP/plxnative-sim-runtime" \
+            --assets "$GITHUB_WORKSPACE/pkg" \
+            --output "$RUNNER_TEMP/plxnative-linux.png" \
+            --core-dir "$RUNNER_TEMP/cores"
+      - name: Preserve Linux capture
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: simulator-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/plxnative-linux.png
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Preserve Linux event log and core on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: simulator-linux-crash-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/plxnative-sim-runtime/plxnative-events.log
+            ${{ runner.temp }}/cores
+            rust-modules/target-sim-ci/release/plxnative-sim
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos:
+    name: macOS simulator build + launch
+    runs-on: macos-latest
+    # Measured max 22.6 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install SDL
+        # A step-level bound: macOS runners have no `timeout(1)`, and a stalled bottle download
+        # would otherwise run to the job's limit.
+        timeout-minutes: 15
+        run: brew install sdl2_ttf cmake pkg-config
+      - id: toolchain
+        name: Identify the host toolchain
+        # The compiler, SDK and build environment are inputs of both builds below, and a
+        # `hashFiles` key cannot see them: see ci/host-toolchain-id.sh for what it covers and why.
+        run: echo "id=$(./ci/host-toolchain-id.sh)" >> "$GITHUB_OUTPUT"
+      - name: Cache the host FFmpeg build tree
+        # A hit here means NO rebuild. This used to cache `vendor/ffmpeg-prefix-host` and
+        # `vendor/ffmpeg-build`, which hit and did nothing: the restored header is older than the
+        # fresh checkout's `ci/build-ffmpeg.sh`, so make re-ran the script, and the script keeps
+        # its extracted source and every object under `$PLX_BUILD_CACHE/ffmpeg/<arch>-<version>-<key>`
+        # (default `~/.cache/plxnative`), which nothing saved; it configured and compiled FFmpeg
+        # (52-79 s) every run. So this caches that tree, plus the pinned tarball beside it, and
+        # leaves the prefix to be re-installed from it (about a second). No mtime decides anything:
+        # the script re-derives its own content key on every run (version, SHA-256 pin, compiler,
+        # configure flags, the hashes of `ci/arm-cc.py` and `ci/check-link-evidence.py`, and the
+        # build variables it inherits), so a stale restore can only fail to match and rebuild, never
+        # hand back objects of other inputs. This key therefore only has to change when those can:
+        # the script, the two files it hashes, and the machine side (`steps.toolchain`). Without the
+        # last, a runner-image update would keep hitting and rebuilding on every run.
+        #
+        # The ARM job in ci.yml caches the same directory for the same reason.
+        #
+        # A pull request whose inputs are unchanged restores `main`'s entry and saves nothing;
+        # only one that edits an input saves its own, which `cache-cleanup.yml` deletes on close.
+        # The entry is ~34 MB compressed.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/plxnative/ffmpeg
+          key: host-ffmpeg-work-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('ci/build-ffmpeg.sh', 'ci/arm-cc.py', 'ci/check-link-evidence.py') }}
+      - name: Cache the host libass stack
+        # `ci/build-libass.py` stamps `vendor/libass-prefix-host/.dependencies-key` with a content
+        # key (pins, the script, the compiler, the flags, the two helper scripts) and skips the
+        # FreeType/FriBidi/HarfBuzz/libass builds (72-104 s) when the stamp and the four static
+        # libraries are present; the facade (`src/ass.c`) is relinked every run. This caches that
+        # prefix (~2.5 MB compressed). The key lists every file of the Makefile's `LIBASS_INPUTS`
+        # (a superset of what the script hashes) plus the machine side, as above.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-prefix-host
+          key: host-libass-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('ci/build-libass.sh', 'ci/build-libass.py', 'ci/libass-dependencies.json', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'src/ass.c', 'src/ass_composite.h', 'include/ass.h') }}
+      - name: Cache the libass source tarballs
+        # The script verifies and fetches all four archives BEFORE it looks at its stamp, so
+        # without these a prefix hit still downloaded ~25 MB from four hosts. Pinned by SHA-256 (the
+        # script re-checks every file), so the entry moves only with the pins and is shared by every
+        # OS. The fetch logic and its mirror fallback are untouched.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-sources
+          key: host-libass-sources-${{ hashFiles('ci/libass-dependencies.json') }}
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: rust-modules -> target-sim-ci
+          key: simulator-macos
+      - name: Build native macOS simulator
+        run: make sim-macos SIM_TDIR=rust-modules/target-sim-ci
+      - name: Replay all committed product recordings
+        # 960x540, not the driver's 1920x1080 default. The runner has no GPU (the log says `GL:
+        # Apple Software Renderer`), so a replay is CPU-bound in the rasteriser and costs what the
+        # window has pixels: a lone 584-frame replay took 72 s at 1920x1080 and 24.6 s at 960x540
+        # (diagnostic run 37869088696), with the same counters. The graded hash is logical state
+        # (route, overlay, focus, tree, session, present decisions) on a fixed 1920x1080 canvas
+        # that `surface::viewport` scales into the window, so the window changes no grade. The
+        # launch step below still opens a full-size window.
+        run: |
+          python3 tests/replay_fixtures.py \
+            --window 960x540 \
+            --sim "$GITHUB_WORKSPACE/rust-modules/target-sim-ci/debug/plxnative-sim" \
+            --output "$RUNNER_TEMP/plxnative-replay"
+      - name: Preserve replay evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: simulator-replay-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/plxnative-replay/**/plxnative-events.log
+            ${{ runner.temp }}/plxnative-replay/**/sim.out
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Launch and capture 1080p frame
+        run: |
+          python3 tools/sim-smoke.py \
+            --binary "$GITHUB_WORKSPACE/rust-modules/target-sim-ci/debug/plxnative-sim" \
+            --runtime "$RUNNER_TEMP/plxnative-sim-runtime" \
+            --assets "$GITHUB_WORKSPACE/pkg" \
+            --output "$RUNNER_TEMP/plxnative-macos.png"
+      - name: Preserve macOS capture
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: simulator-macos-${{ github.sha }}
+          path: ${{ runner.temp }}/plxnative-macos.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos-host-tests:
+    name: macOS tests against bundled FFmpeg and ASS
+    runs-on: macos-latest
+    # These were the tail of the `macos` job, run after its replay step for no reason: they share
+    # nothing with the simulator build or the replays except the host FFmpeg and libass builds,
+    # and they use their own target dir and toolchain. As a job of their own they run beside the
+    # replay instead of behind it. Same commands, same runner image, nothing dropped. The limit
+    # allows a cold FFmpeg build (a ci/build-ffmpeg.sh change) like the `macos` job's does.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install SDL
+        # Same step-level bound and package set as the `macos` job: the host test binary links SDL
+        # (build.rs links it for every host test binary) and libass's dependencies need cmake.
+        timeout-minutes: 15
+        run: brew install sdl2_ttf cmake pkg-config
+      - id: toolchain
+        name: Identify the host toolchain
+        run: echo "id=$(./ci/host-toolchain-id.sh)" >> "$GITHUB_OUTPUT"
+      - name: Cache the host FFmpeg build tree
+        # The SAME key as the `macos` job, so one entry serves both; see that job for what the
+        # entry holds and why it is the script's work tree rather than the prefix. A cached build
+        # of the same inputs is the bundled FFmpeg built from the pinned source, which is what
+        # this job tests: the script re-derives its content key (version, SHA-256 pin, compiler,
+        # flags) on every run and rebuilds on any difference. On a miss both jobs build FFmpeg and
+        # the later save is refused as already existing; that happens only when an input changes.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/plxnative/ffmpeg
+          key: host-ffmpeg-work-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('ci/build-ffmpeg.sh', 'ci/arm-cc.py', 'ci/check-link-evidence.py') }}
+      - name: Cache the host libass stack
+        # The same entry as the `macos` job's (same key), which explains it. Likewise the bundled
+        # libass built from the pinned sources, restored instead of rebuilt when no input moved.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-prefix-host
+          key: host-libass-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('ci/build-libass.sh', 'ci/build-libass.py', 'ci/libass-dependencies.json', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'src/ass.c', 'src/ass_composite.h', 'include/ass.h') }}
+      - name: Cache the libass source tarballs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-sources
+          key: host-libass-sources-${{ hashFiles('ci/libass-dependencies.json') }}
+      - name: Install nightly Rust
+        # `make check-ffmpeg` runs the host suite's FFmpeg-backed tests on the toolchain `make
+        # check` uses; the simulator job builds on the runner's default one. `rust-src` is not
+        # optional: rust-modules/.cargo/config.toml sets `[unstable] build-std` for every nightly
+        # cargo run, host tests included — the same component ci.yml's host checks install.
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - name: Tests against the bundled FFmpeg
+        # The one place the host FFmpeg (same component list as the shipped one) is available to
+        # the test suite — `make check` has none, so these are #[ignore]d there.
+        run: make check-ffmpeg
+      - name: Tests against the bundled ASS renderer
+        # Builds the pinned host libass first, unless the cache above restored a build of exactly
+        # these inputs (the script's own content key decides; see the `macos` job).
+        run: make check-ass
+
+  windows-launcher:
+    name: Windows launcher syntax
+    runs-on: windows-latest
+    # Measured max 0.8 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Parse with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'tools/sim.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+      - name: Parse with PowerShell 7
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'tools/sim.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { $errors | Format-List; exit 1 }

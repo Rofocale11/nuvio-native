@@ -1,0 +1,1075 @@
+{
+  "widgets.diagnostics.uploading": {
+    "value": "Uploading diagnostics…",
+    "description": "Status toast after the viewer requests a diagnostic upload."
+  },
+  "widgets.diagnostics.uploaded": {
+    "value": "Diagnostics uploaded",
+    "description": "Status toast after the viewer requests a diagnostic upload."
+  },
+  "widgets.diagnostics.failed": {
+    "value": "Diagnostics upload failed",
+    "description": "Status toast after the viewer requests a diagnostic upload."
+  },
+  "widgets.menu.options": {
+    "value": "Options",
+    "description": "Option or section label in the player overflow menu."
+  },
+  "widgets.menu.quality": {
+    "value": "Quality",
+    "description": "Option or section label in the player overflow menu."
+  },
+  "widgets.menu.stats": {
+    "value": "Stats for nerds",
+    "description": "Option or section label in the player overflow menu."
+  },
+  "widgets.menu.diagnostics": {
+    "value": "Send diagnostics",
+    "description": "Option or section label in the player overflow menu."
+  },
+  "widgets.badge.forced": {
+    "value": "FORCED",
+    "description": "Compact media-track badge. This describes a subtitle or audio track."
+  },
+  "widgets.toggle.on": {
+    "value": "On",
+    "description": "Trailing value of an on/off settings switch."
+  },
+  "widgets.toggle.off": {
+    "value": "Off",
+    "description": "Trailing value of an on/off settings switch."
+  },
+  "widgets.tracks.audio": {
+    "value": "Audio",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.subtitles": {
+    "value": "Subtitles",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.unknown": {
+    "value": "Unknown",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.off": {
+    "value": "Off",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.mono": {
+    "value": "Mono",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.stereo": {
+    "value": "Stereo",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.original": {
+    "value": "Original: {language}",
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "language": "str"
+    }
+  },
+  "widgets.tracks.converted_by_server": {
+    "value": "{track} · converted by your server",
+    "description": "Sub-line under an audio track in the player's audio menu when the TV cannot decode that track and the server converts its audio. {track} is the codec and channel layout, e.g. AAC 7.1.",
+    "args": {
+      "track": "str"
+    }
+  },
+  "widgets.action.mark_watched": {
+    "value": "Mark as Watched",
+    "description": "Action verb shared by the media context menu and detail-page controls."
+  },
+  "widgets.action.mark_unwatched": {
+    "value": "Mark as Unwatched",
+    "description": "Action verb shared by the media context menu and detail-page controls."
+  },
+  "widgets.action.play_start": {
+    "value": "Play from Start",
+    "description": "Action verb shared by the media context menu and detail-page controls."
+  },
+  "widgets.action.play_trailer": {
+    "value": "Play Trailer",
+    "description": "Action verb shared by the media context menu and detail-page controls."
+  },
+  "widgets.source.remote": {
+    "value": "Remote",
+    "description": "Server/library availability, connection type, or library-picker action."
+  },
+  "widgets.source.relay": {
+    "value": "Relay",
+    "description": "Server/library availability, connection type, or library-picker action."
+  },
+  "widgets.source.needs_library": {
+    "value": "The app needs one library",
+    "description": "Sub-line under the last remaining library row in the Library panel. One line, no wrap (about 400px at most in Spanish, 450px in Belarusian): keep it short."
+  },
+  "widgets.source.new_shares": {
+    "value": "Check for shared libraries",
+    "description": "Row in the Library panel that re-checks the account for newly shared libraries. A row label in a 527px column, no wrap: keep it short."
+  },
+  "widgets.source.unauthorized": {
+    "value": "Not authorized",
+    "description": "Server/library availability, connection type, or library-picker action."
+  },
+  "widgets.source.unreachable": {
+    "value": "Not reachable",
+    "description": "Server/library availability, connection type, or library-picker action."
+  },
+  "widgets.source.insecure": {
+    "value": "Not secure",
+    "description": "Server/library availability, connection type, or library-picker action."
+  },
+  "widgets.info.from_beginning": {
+    "value": "From Beginning",
+    "description": "Action button in the in-player information card."
+  },
+  "widgets.info.go_show": {
+    "value": "Go to Show",
+    "description": "Action button in the in-player information card."
+  },
+  "widgets.info.go_movie": {
+    "value": "Go to Movie",
+    "description": "Action button in the in-player information card."
+  },
+  "widgets.playback.direct_play": {
+    "value": "Direct Play",
+    "description": "Human-readable description of the active playback delivery mode."
+  },
+  "widgets.playback.direct_stream": {
+    "value": "Direct Stream",
+    "description": "Human-readable description of the active playback delivery mode."
+  },
+  "widgets.playback.converting": {
+    "value": "Converting",
+    "description": "Human-readable description of the active playback delivery mode."
+  },
+  "widgets.playback.converting_codec": {
+    "value": "Converting · {codec}",
+    "description": "Human-readable description of the active playback delivery mode.",
+    "args": {
+      "codec": "str"
+    }
+  },
+  "widgets.chapters.number": {
+    "value": "Chapter {number}",
+    "description": "Fallback chapter name when the server supplies no title.",
+    "args": {
+      "number": "i64"
+    }
+  },
+  "widgets.skip.intro": {
+    "value": "Skip Intro",
+    "description": "Player action that skips the currently offered introduction or credits marker."
+  },
+  "widgets.skip.credits": {
+    "value": "Skip Credits",
+    "description": "Player action that skips the currently offered introduction or credits marker."
+  },
+  "widgets.next.episode": {
+    "value": "Next Episode",
+    "description": "Up-next episode card over the player; keep the supplied episode title intact."
+  },
+  "widgets.next.credits": {
+    "value": "Watch Credits",
+    "description": "Up-next episode card over the player; keep the supplied episode title intact."
+  },
+  "widgets.next.caption": {
+    "value": "Up Next · {episode}",
+    "description": "Up-next episode card over the player; keep the supplied episode title intact.",
+    "args": {
+      "episode": "str"
+    }
+  },
+  "widgets.status.preparing": {
+    "value": "Preparing…",
+    "description": "Short player status beside a spinner or terminal playback error."
+  },
+  "widgets.status.connecting": {
+    "value": "Connecting…",
+    "description": "Short player status beside a spinner or terminal playback error."
+  },
+  "widgets.status.buffering": {
+    "value": "Buffering…",
+    "description": "Short player status beside a spinner or terminal playback error."
+  },
+  "widgets.status.switching_audio": {
+    "value": "Switching audio…",
+    "description": "Short player status beside a spinner while the stream is rebuilt for an audio track the viewer picked."
+  },
+  "widgets.status.seeking": {
+    "value": "Seeking…",
+    "description": "Short player status beside a spinner or terminal playback error."
+  },
+  "widgets.status.failed": {
+    "value": "Playback failed",
+    "description": "Short player status beside a spinner or terminal playback error."
+  },
+  "widgets.player.info": {
+    "value": "Info",
+    "description": "Bottom navigation tab in the player."
+  },
+  "widgets.player.chapters": {
+    "value": "Chapters",
+    "description": "Bottom navigation tab in the player."
+  },
+  "widgets.card.new_episode": {
+    "value": "New episode",
+    "description": "Secondary caption beneath a focused media card."
+  },
+  "widgets.card.show_new_episode": {
+    "value": "{show} · New episode",
+    "description": "Secondary caption beneath a focused media card.",
+    "args": {
+      "show": "str"
+    }
+  },
+  "widgets.card.season_episode": {
+    "value": "S{season} • E{episode}",
+    "description": "Secondary caption beneath a focused media card.",
+    "args": {
+      "episode": "i64",
+      "season": "i64"
+    }
+  },
+  "widgets.card.episode": {
+    "value": "E{episode}",
+    "description": "Secondary caption beneath a focused media card.",
+    "args": {
+      "episode": "i64"
+    }
+  },
+  "widgets.failure.jail": {
+    "value": "Playback failed — this TV's sandbox blocks native video",
+    "description": "failure jail"
+  },
+  "widgets.failure.refused": {
+    "value": "Playback failed — the server cannot play or convert this file",
+    "description": "Player error caption or supporting subscription fact."
+  },
+  "widgets.failure.audio_only": {
+    "value": "Playback failed — server sent audio only",
+    "description": "Player error caption or supporting subscription fact."
+  },
+  "widgets.failure.no_video": {
+    "value": "Playback failed — no video in the file",
+    "description": "Player error caption or supporting subscription fact."
+  },
+  "widgets.failure.open": {
+    "value": "Playback failed — the media stream could not be opened",
+    "description": "Player error caption or supporting subscription fact."
+  },
+  "widgets.failure.stopped": {
+    "value": "Playback failed — playback stopped after starting",
+    "description": "Player error caption or supporting subscription fact."
+  },
+  "widgets.failure.tv_rejected": {
+    "value": "Playback failed — the TV rejected the stream",
+    "description": "Player error caption or supporting subscription fact."
+  },
+  "widgets.reason.jail": {
+    "value": "This set's sandbox does not give the app /dev/rtkmem",
+    "description": "reason jail"
+  },
+  "widgets.reason.refused": {
+    "value": "The server cannot play or convert this file",
+    "description": "Explanation beneath the playback-failed heading. Device paths and project identifiers stay unchanged."
+  },
+  "widgets.reason.audio_only": {
+    "value": "The server sent audio only — it found no usable video transcode target",
+    "description": "Explanation beneath the playback-failed heading. Device paths and project identifiers stay unchanged."
+  },
+  "widgets.reason.no_video": {
+    "value": "This file has no video track",
+    "description": "Explanation beneath the playback-failed heading. Device paths and project identifiers stay unchanged."
+  },
+  "widgets.reason.open": {
+    "value": "The media stream could not be opened",
+    "description": "Explanation beneath the playback-failed heading. Device paths and project identifiers stay unchanged."
+  },
+  "widgets.reason.stopped": {
+    "value": "Playback stopped after it had started",
+    "description": "Explanation beneath the playback-failed heading. Device paths and project identifiers stay unchanged."
+  },
+  "widgets.reason.tv_rejected": {
+    "value": "This TV could not start the video stream",
+    "description": "Explanation beneath the playback-failed heading. Device paths and project identifiers stay unchanged."
+  },
+  "widgets.reason.unknown": {
+    "value": "The player stopped before it could identify the problem",
+    "description": "Explanation beneath the playback-failed heading. Device paths and project identifiers stay unchanged."
+  },
+  "widgets.hint.return": {
+    "value": "Press {key} to return",
+    "description": "Complete sentence. {key} is a remote button rendered as a keycap; keep exactly one occurrence.",
+    "args": {
+      "key": "str"
+    }
+  },
+  "widgets.hint.scroll": {
+    "value": "Scroll",
+    "description": "widgets hint scroll"
+  },
+  "widgets.hint.hold_options": {
+    "value": "Hold {key} for options",
+    "description": "Complete sentence in the Home screen's standing hint capsule, teaching that holding the remote's OK button on a card opens its context menu. {key} is the OK button rendered as a keycap; keep exactly one occurrence. Must fit one line in the capsule at CAPTION size in every shipped language.",
+    "args": {
+      "key": "str"
+    }
+  },
+  "widgets.failure.no_pass": {
+    "value": "This server has no {subscription}",
+    "description": "Player error caption or supporting subscription fact.",
+    "args": {
+      "subscription": "str"
+    }
+  },
+  "widgets.tracks.playing": {
+    "value": "playing",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.forced": {
+    "value": "Forced",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.external": {
+    "value": "External",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.container": {
+    "value": "Container",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.size": {
+    "value": "Size",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.total_bitrate": {
+    "value": "Total bitrate",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.duration": {
+    "value": "Duration",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.aspect": {
+    "value": "Aspect ratio",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.codec": {
+    "value": "Codec",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.resolution": {
+    "value": "Resolution",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.frame_rate": {
+    "value": "Frame rate",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.bitrate": {
+    "value": "Bitrate",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.bit_depth": {
+    "value": "Bit depth",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.profile": {
+    "value": "Profile",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.level": {
+    "value": "Level",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.version": {
+    "value": "Version",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.base_layer": {
+    "value": "Base layer",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.present": {
+    "value": "Present",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.file_heading": {
+    "value": "FILE",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.video_heading": {
+    "value": "VIDEO",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.audio_heading": {
+    "value": "AUDIO",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.subtitles_heading": {
+    "value": "SUBTITLES",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.heading": {
+    "value": "TRACK INFORMATION",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.channels": {
+    "value": "{count} ch",
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "count": "i64"
+    }
+  },
+  "widgets.tracks.depth": {
+    "value": "{depth}-bit",
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "depth": "i64"
+    }
+  },
+  "widgets.tracks.count": {
+    "value": {
+      "one": "{count} track",
+      "other": "{count} tracks"
+    },
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "count": "i64"
+    }
+  },
+  "widgets.tracks.count_detail": {
+    "value": {
+      "one": "{description} · {count} track",
+      "other": "{description} · {count} tracks"
+    },
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "count": "i64",
+      "description": "str"
+    }
+  },
+  "widgets.tracks.count_heading": {
+    "value": {
+      "one": "{heading} · {count} TRACK",
+      "other": "{heading} · {count} TRACKS"
+    },
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "count": "i64",
+      "heading": "str"
+    }
+  },
+  "widgets.reason.jail_help": {
+    "value": "Repair requires a rooted TV and Homebrew Channel access. See plxnative.com/troubleshooting/#playback-reports-jail_missing_rtkmem for help.",
+    "description": "reason jail_help"
+  },
+  "widgets.tracks.empty": {
+    "value": "No tracks",
+    "description": "Label or formatted fact in the media track information sheet or track selector."
+  },
+  "widgets.tracks.bytes": {
+    "value": {
+      "one": "{count} byte",
+      "other": "{count} bytes"
+    },
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "count": "i64"
+    }
+  },
+  "widgets.tracks.fps": {
+    "value": "{rate} fps",
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "rate": "str"
+    }
+  },
+  "widgets.tracks.mbps": {
+    "value": "{rate} Mbps",
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "rate": "str"
+    }
+  },
+  "widgets.tracks.kbps": {
+    "value": "{rate} kbps",
+    "description": "Label or formatted fact in the media track information sheet or track selector.",
+    "args": {
+      "rate": "str"
+    }
+  },
+  "widgets.panel.jail": {
+    "value": "this install's sandbox blocks access to /dev/rtkmem; PlxNative can offer a confirmed repair through rooted Homebrew Channel access",
+    "description": "panel jail"
+  },
+  "widgets.panel.refused": {
+    "value": "the server refused the item at /decision — it can neither direct play nor convert it",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.panel.audio_only_no_pass": {
+    "value": "server sent audio only — it found no usable video transcode target (server has no Plex Pass)",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.panel.audio_only": {
+    "value": "server sent audio only — it found no usable video transcode target",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.panel.no_video": {
+    "value": "the stream carries no video track",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.panel.open": {
+    "value": "the media stream could not be opened or read",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.panel.stopped": {
+    "value": "the media producer stopped before playback completed",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.panel.tv_rejected": {
+    "value": "the television media pipeline rejected the stream",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.panel.unknown": {
+    "value": "the player stopped without a reported cause",
+    "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
+  },
+  "widgets.failure.load_timeout": {
+    "value": "Playback failed — the TV did not finish starting the stream",
+    "description": "failure load_timeout"
+  },
+  "widgets.panel.load_timeout": {
+    "value": "the television media pipeline did not finish starting the stream in time",
+    "description": "panel load_timeout"
+  },
+  "widgets.reason.load_timeout": {
+    "value": "This TV did not finish starting the video stream in time",
+    "description": "reason load_timeout"
+  },
+  "widgets.failure.forced_playback": {
+    "value": "Playback failed — Force Direct Play could not play this stream",
+    "description": "failure forced_playback"
+  },
+  "widgets.panel.forced_playback": {
+    "value": "Force Direct Play could not use the original stream; automatic fallback is disabled",
+    "description": "panel forced_playback"
+  },
+  "widgets.reason.forced_playback": {
+    "value": "Force Direct Play could not play this stream",
+    "description": "reason forced_playback"
+  },
+  "widgets.reason.forced_playback_help": {
+    "value": "Force Direct Play is on, so the server couldn’t step in with a converted stream.",
+    "description": "reason forced_playback_help"
+  },
+  "widgets.repair.question": {
+    "value": "Repair PlxNative’s sandbox?",
+    "description": "repair question"
+  },
+  "widgets.repair.body": {
+    "value": "Use Homebrew Channel’s root access to update PlxNative’s sandbox with LG’s native profile. This requires a rooted TV. Close and reopen PlxNative afterward.",
+    "description": "repair body"
+  },
+  "widgets.repair.action": {
+    "value": "Repair",
+    "description": "repair action"
+  },
+  "widgets.repair.running": {
+    "value": "Repairing this app’s sandbox…",
+    "description": "repair running"
+  },
+  "widgets.repair.wait": {
+    "value": "Wait for the result before closing the app.",
+    "description": "repair wait"
+  },
+  "widgets.repair.completed": {
+    "value": "Sandbox repair completed",
+    "description": "repair completed"
+  },
+  "widgets.repair.reopen": {
+    "value": "Close and reopen PlxNative before playing video.",
+    "description": "repair reopen"
+  },
+  "widgets.repair.failed": {
+    "value": "Sandbox repair could not be confirmed",
+    "description": "repair failed"
+  },
+  "widgets.repair.start_failed": {
+    "value": "Could not start the repair. Close and reopen PlxNative to try again.",
+    "description": "repair start_failed"
+  },
+  "widgets.repair.hbc_unavailable": {
+    "value": "Homebrew Channel service is unavailable.",
+    "description": "repair hbc_unavailable"
+  },
+  "widgets.repair.not_root": {
+    "value": "Homebrew Channel service is not running as root.",
+    "description": "repair not_root"
+  },
+  "widgets.repair.command_failed": {
+    "value": "The sandbox repair command failed.",
+    "description": "repair command_failed"
+  },
+  "widgets.repair.timeout": {
+    "value": "Repair outcome is unknown. Close and reopen the app to check again.",
+    "description": "repair timeout"
+  },
+  "widgets.repair.unreadable": {
+    "value": "Repair completed, but this app cannot see /dev/rtkmem yet. Close and reopen the app.",
+    "description": "repair unreadable"
+  },
+  "widgets.repair.unsupported": {
+    "value": "Sandbox repair is not available on this device.",
+    "description": "repair unsupported"
+  },
+  "widgets.tracks.color": {
+    "value": "Color",
+    "description": "tracks color"
+  },
+  "widgets.tracks.boost_dialog": {
+    "value": "Boost dialog",
+    "description": "Audio panel of the player's track selector (Plex Pass only, issue #266). Toggle row label; the On/Off read-out comes from the row's own switch state, not this string."
+  },
+  "widgets.tracks.normalize_loudness": {
+    "value": "Normalize loudness",
+    "description": "Audio panel of the player's track selector (Plex Pass only, issue #266). Toggle row label; the On/Off read-out comes from the row's own switch state, not this string."
+  },
+  "widgets.tracks.enh_note_sidecar": {
+    "value": "Subtitles won't change.",
+    "description": "Issue #266/M7. One-line note under the ENABLED Boost dialog / Normalize loudness rows when the subtitle on screen is an external file the app draws itself — reassures the viewer that turning the toggle on leaves it untouched. No jargon: never say sidecar/remux/burn."
+  },
+  "widgets.tracks.enh_note_burn": {
+    "value": "Subtitles stay on. Your Plex server will rework the video to keep them, so the picture may look a little softer.",
+    "description": "Issue #266/M7. One-line note under the ENABLED Boost dialog / Normalize loudness rows when the subtitle on screen is embedded in the file — turning the toggle on makes the server re-encode the video to keep it in view. No jargon: never say burn/re-encode/transcode."
+  },
+  "widgets.tracks.enh_note_dv_off": {
+    "value": "Dolby Vision turns off while this is on. The video still plays in HDR.",
+    "description": "Issue #266/M7. One-line note under the ENABLED Boost dialog / Normalize loudness rows for a Dolby Vision source whose base layer is usable — turning the toggle on plays the HDR10 base picture without the Dolby Vision declaration."
+  },
+  "widgets.tracks.enh_reason_not_analyzed": {
+    "value": "Not ready for this video yet. Your Plex server needs to scan its sound first.",
+    "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows when the carried audio track has no canNormalizeLoudness fact yet."
+  },
+  "widgets.tracks.enh_reason_dv_unusable": {
+    "value": "Not available for this Dolby Vision video.",
+    "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows for a Dolby Vision source whose base layer is not self-displayable (Profile 5)."
+  },
+  "widgets.tracks.enh_reason_dv_subtitle": {
+    "value": "Can't be used with subtitles on this Dolby Vision video. Turn subtitles off to use it.",
+    "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows for a declared Dolby Vision source with an embedded subtitle on screen — the server copies the video and silently drops the subtitle rather than honoring either ask."
+  },
+  "widgets.tracks.enh_reason_quality": {
+    "value": "Available only at Original quality.",
+    "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows when the live route is not Direct/Remux (a fixed quality rung, HLS, a relay) or no Original candidate exists."
+  },
+  "widgets.tracks.enh_reason_refused": {
+    "value": "Your Plex server couldn't turn this on for this video.",
+    "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows after this playback's server already refused or ignored the params once."
+  },
+  "widgets.tracks.sub_burn_audio": {
+    "value": "Drawn by your server while it converts the audio.",
+    "description": "Subtitles tab of the player's track selector. One-line reason under the DIMMED Timing and Style rows while the subtitle on screen is drawn into the picture by the server because it is converting the audio (a remux, or the audio enhancement's own burn): the text is already in the video, so neither control can reach it. No jargon: never say burn/remux/transcode."
+  },
+  "widgets.tracks.sub_burn_quality": {
+    "value": "Drawn by your server at this quality.",
+    "description": "Subtitles tab of the player's track selector. One-line reason under the DIMMED Timing and Style rows while the subtitle on screen is drawn into the picture by the server for any reason other than converting the audio (a quality-limited re-encode, a picture subtitle that must be burned): the text is already in the video, so neither control can reach it. No jargon: never say burn/remux/transcode."
+  },
+  "widgets.tracks.style": {
+    "value": "Style",
+    "description": "Subtitles tab of the player's track selector. The drill-in row that opens the caption style pages (Size, Position, Color), and the title of that page."
+  },
+  "widgets.tracks.style_size": {
+    "value": "Size",
+    "description": "Style page of the player's subtitle menu. Row label and page title for the caption size; its value reads out the chosen size (Small, Medium, Large, Extra Large)."
+  },
+  "widgets.tracks.style_position": {
+    "value": "Position",
+    "description": "Style page of the player's subtitle menu. Row label and page title for where the caption sits on screen; its value reads out the chosen height (Low, Middle, High)."
+  },
+  "widgets.tracks.style_image_note": {
+    "value": "Image subtitles keep their own size and position.",
+    "description": "Note under the Style rows when the subtitle on screen is a picture (PGS, VobSub): the Size and Position rows are dimmed because the picture carries its own geometry. No jargon."
+  },
+  "widgets.tracks.style_styled_note": {
+    "value": "Styled subtitles keep their own size and position.",
+    "description": "Note under the Style rows when the subtitle on screen is a styled script (ASS/SSA) that positions and sizes its own text: the Size and Position rows are dimmed. No jargon."
+  },
+  "widgets.tracks.timing": {
+    "value": "Timing",
+    "description": "tracks timing"
+  },
+  "widgets.tracks.external_badge": {
+    "value": "EXTERNAL",
+    "description": "tracks external_badge"
+  },
+  "widgets.tracks.tone_white": {
+    "value": "White",
+    "description": "tracks tone_white"
+  },
+  "widgets.tracks.tone_silver": {
+    "value": "Silver",
+    "description": "tracks tone_silver"
+  },
+  "widgets.tracks.tone_light_grey": {
+    "value": "Light gray",
+    "description": "tracks tone_light_grey"
+  },
+  "widgets.tracks.tone_grey": {
+    "value": "Gray",
+    "description": "tracks tone_grey"
+  },
+  "widgets.tracks.tone_dark_grey": {
+    "value": "Dark gray",
+    "description": "tracks tone_dark_grey"
+  },
+  "widgets.tracks.tone_charcoal": {
+    "value": "Charcoal",
+    "description": "tracks tone_charcoal"
+  },
+  "widgets.runtime.main_thread": {
+    "value": "MAIN THREAD {kind} {milliseconds}ms · {label}",
+    "description": "Developer warning; kind and label are technical diagnostic identifiers",
+    "args": {
+      "kind": "str",
+      "label": "str",
+      "milliseconds": "i64"
+    }
+  },
+  "widgets.verdict.direct_play_disabled": {
+    "value": "Direct Play is disabled. This original-only stream requires Direct Play to be set to Auto.",
+    "description": "Playback failure detail when the Direct Play setting is Disabled but the stream can only play as the original file."
+  },
+  "widgets.verdict.forced_no_original": {
+    "value": "Force Direct Play is on, and this item has no original file to play.",
+    "description": "Playback failure detail while Force Direct Play is on: the item has no original file."
+  },
+  "widgets.verdict.forced_container": {
+    "value": "Force Direct Play is on, and this file’s container can’t play without conversion.",
+    "description": "Playback failure detail while Force Direct Play is on: the file's container format cannot be played directly."
+  },
+  "widgets.verdict.forced_video": {
+    "value": "Force Direct Play is on, and this video format can’t play without conversion.",
+    "description": "Playback failure detail while Force Direct Play is on: the video format cannot be played directly."
+  },
+  "widgets.verdict.forced_audio": {
+    "value": "Force Direct Play is on, and this audio format can’t play without conversion.",
+    "description": "Playback failure detail while Force Direct Play is on: the audio format cannot be played directly."
+  },
+  "widgets.verdict.forced_unauthorized": {
+    "value": "Force Direct Play is on, and the server didn’t allow the original file to play.",
+    "description": "Playback failure detail while Force Direct Play is on: the Plex server did not allow playing the original file."
+  },
+  "widgets.verdict.forced_open": {
+    "value": "Force Direct Play is on, and the original file couldn’t be opened.",
+    "description": "Playback failure detail while Force Direct Play is on: the original file could not be opened."
+  },
+  "widgets.verdict.forced_audio_conversion": {
+    "value": "Force Direct Play is on, and this audio track needs conversion.",
+    "description": "Playback failure detail while Force Direct Play is on: the selected audio track would need server conversion."
+  },
+  "widgets.quality.original": {
+    "value": "Original",
+    "description": "Playback quality choice that plays the original file without conversion."
+  },
+  "widgets.ass.start_failed": {
+    "value": "Couldn’t start styled subtitles",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.invalid_file": {
+    "value": "This styled subtitle file is invalid or too large",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.invalid_track": {
+    "value": "This styled subtitle track is invalid or too large",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.invalid_events": {
+    "value": "This styled subtitle track contains invalid events",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.track_too_large": {
+    "value": "This styled subtitle track is too large",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.too_many_fonts": {
+    "value": "This styled subtitle track contains too many fonts",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.invalid_fonts": {
+    "value": "This styled subtitle track contains invalid fonts",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.render_failed": {
+    "value": "Couldn’t render this styled subtitle",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.unavailable": {
+    "value": "Styled subtitle support is unavailable in this installation",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.fonts_unavailable": {
+    "value": "Couldn’t load subtitle fonts",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.init_failed": {
+    "value": "Couldn’t initialize styled subtitles",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.font_too_large": {
+    "value": "The installed subtitle font is too large",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.unreadable": {
+    "value": "This styled subtitle file could not be read",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.font_name": {
+    "value": "This subtitle font name is invalid",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.track_fonts": {
+    "value": "Couldn’t load this subtitle’s fonts",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.too_many_events": {
+    "value": "This styled subtitle track contains too many events",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.invalid_regions": {
+    "value": "The styled subtitle renderer returned invalid regions",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.invalid_pixels": {
+    "value": "The styled subtitle renderer returned invalid pixels",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.ass.overlapping_regions": {
+    "value": "The styled subtitle renderer returned overlapping regions",
+    "description": "Message drawn in place of styled (ASS/SSA) subtitles when they cannot be shown."
+  },
+  "widgets.sidecar.fetch_failed": {
+    "value": "Couldn’t load this subtitle from the server",
+    "description": "Message drawn in place of an external subtitle file that could not be downloaded."
+  },
+  "widgets.sidecar.empty": {
+    "value": "This subtitle file has no readable lines",
+    "description": "Message drawn in place of an external subtitle file that contains no readable text."
+  },
+  "widgets.badge.cc": {
+    "value": "CC",
+    "description": "Badge: the title has closed captions. The mark the explanation text browse.detail.closed_captions defines; keep the two in step. Latin CC is the international mark in Spain and in the be catalog's own explanation."
+  },
+  "widgets.badge.sdh": {
+    "value": "SDH",
+    "description": "Badge: subtitles for the deaf and hard of hearing. Must match the abbreviation in browse.detail.sdh, which introduces it."
+  },
+  "widgets.badge.ad": {
+    "value": "AD",
+    "description": "Badge: the title has an audio-description track. Must match the abbreviation in browse.detail.audio_description (es: audiodescripción, AD)."
+  },
+  "widgets.tracks.other_languages": {
+    "value": "Other languages",
+    "description": "Subtitles panel of the player's track selector. Row that opens the page of subtitle languages that are not the viewer's own, and that page's title."
+  },
+  "widgets.tracks.search.open": {
+    "value": "Search for subtitles",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Row on the Subtitles tab that opens the page, and that page's title."
+  },
+  "widgets.tracks.search.language": {
+    "value": "Language",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Row that shows and changes the language being searched; also the language list's title."
+  },
+  "widgets.tracks.search.results": {
+    "value": "Results",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Section header above the subtitles the server found."
+  },
+  "widgets.tracks.search.searching": {
+    "value": "Searching…",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Shown while the server is still searching."
+  },
+  "widgets.tracks.search.none": {
+    "value": "No subtitles found.",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). The search finished and found nothing. An answer, not an error."
+  },
+  "widgets.tracks.search.failed": {
+    "value": "Couldn't search for subtitles. Your playback isn't affected.",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). The server did not answer the search. Never alarming: playback continues."
+  },
+  "widgets.tracks.search.denied": {
+    "value": "This server doesn't allow this account to add subtitles.",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). The server refused the request for this account. Blames nobody; no retry is offered."
+  },
+  "widgets.tracks.search.missing": {
+    "value": "Subtitles can't be searched for this item.",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). The server could not find the item to search for."
+  },
+  "widgets.tracks.search.bad_language": {
+    "value": "Subtitles can't be searched in this language.",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). The chosen language has no code the server accepts."
+  },
+  "widgets.tracks.search.retry": {
+    "value": "Try again",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Row that repeats a search that failed."
+  },
+  "widgets.tracks.search.adding": {
+    "value": "Adding…",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Read-out on a result row while the server downloads it."
+  },
+  "widgets.tracks.search.added": {
+    "value": "Added",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Read-out on a result row once the subtitle is in the item."
+  },
+  "widgets.tracks.search.requested": {
+    "value": "Requested",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Read-out when the server accepted the download but it has not appeared yet."
+  },
+  "widgets.tracks.search.add_failed": {
+    "value": "Couldn't add",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). Read-out on a result row the server could not add."
+  },
+  "widgets.tracks.search.add_failed_note": {
+    "value": "The server couldn't add this subtitle. Try another one.",
+    "description": "Subtitles panel of the player's track selector, the Search for subtitles page (an agent search on the Plex server, e.g. OpenSubtitles). One-line note under the results after a download failed."
+  },
+  "widgets.tracks.track_ordinal": {
+    "value": "Track {number}",
+    "description": "Subtitles panel of the player's track selector. Tells apart subtitle tracks that are otherwise identical; the number is the track's position among them.",
+    "args": {
+      "number": "i64"
+    }
+  },
+  "widgets.tracks.kind_full": {
+    "value": "Full",
+    "description": "Subtitles panel of the player's track selector. Label of a nameless subtitle track that carries every line of dialogue (not forced-only, not SDH)."
+  },
+  "widgets.tracks.kind_commentary": {
+    "value": "Commentary",
+    "description": "Subtitles panel of the player's track selector. Label of a nameless subtitle track that transcribes a commentary."
+  },
+  "widgets.tracks.capsule_later": {
+    "value": "Subtitles {duration} later",
+    "description": "On-video timing control of the player: subtitles are shown this much later than the file's own timing. The duration is already formatted, e.g. \"0.3 s\".",
+    "args": {
+      "duration": "str"
+    }
+  },
+  "widgets.tracks.capsule_earlier": {
+    "value": "Subtitles {duration} earlier",
+    "description": "On-video timing control of the player: subtitles are shown this much earlier than the file's own timing. The duration is already formatted, e.g. \"0.3 s\".",
+    "args": {
+      "duration": "str"
+    }
+  },
+  "widgets.tracks.capsule_original": {
+    "value": "Original timing",
+    "description": "On-video timing control of the player: subtitles use the file's own timing (no offset)."
+  },
+  "widgets.region.gb": {
+    "value": "United Kingdom",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.us": {
+    "value": "United States",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.br": {
+    "value": "Brazil",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.pt": {
+    "value": "Portugal",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.es": {
+    "value": "Spain",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.mx": {
+    "value": "Mexico",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.fr": {
+    "value": "France",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.be": {
+    "value": "Belgium",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.ca": {
+    "value": "Canada",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.de": {
+    "value": "Germany",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.at": {
+    "value": "Austria",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.ch": {
+    "value": "Switzerland",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.cn": {
+    "value": "China",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.tw": {
+    "value": "Taiwan",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.hk": {
+    "value": "Hong Kong",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.in": {
+    "value": "India",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.au": {
+    "value": "Australia",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.ru": {
+    "value": "Russia",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.ua": {
+    "value": "Ukraine",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.it": {
+    "value": "Italy",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.jp": {
+    "value": "Japan",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.kr": {
+    "value": "South Korea",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.nl": {
+    "value": "Netherlands",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.region.latin_america": {
+    "value": "Latin America",
+    "description": "Region name shown under a subtitle track's language when the track carries no name of its own (a BCP-47 region subtag)."
+  },
+  "widgets.failure.play_auto": {
+    "value": "Switch to Auto and play",
+    "description": "Failed-playback button: sets Direct Play back to Auto (the Settings value, saved) and plays the item again."
+  },
+  "widgets.failure.change_quality": {
+    "value": "Change quality",
+    "description": "Failed-playback button: opens the quality ladder; picking a rung retries at it."
+  }
+}
