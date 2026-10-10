@@ -2455,6 +2455,10 @@ pub mod keypin {
     /// that name belongs to [`super::post_ca`]'s telemetry bundle, which is a different trust
     /// decision for a different set of hosts.
     pub const ROOTS_FILE: &str = "le-roots.pem";
+    /// NuvioNative: the broad public-root bundle (Mozilla's CA list, `pkg/public-roots.pem`) offered
+    /// to every OTHER DNS-named host — debrid CDNs, addon hosts — whose issuer a 2020 firmware's
+    /// store lacks. Same rules as [`ROOTS_FILE`]: chain, dates and name are all still verified.
+    pub const PUBLIC_ROOTS_FILE: &str = "public-roots.pem";
     /// The only host names the bundled roots are ever offered for.
     const PLEX_DIRECT_SUFFIX: &str = ".plex.direct";
 
@@ -2517,6 +2521,22 @@ pub mod keypin {
             && host.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))
     }
 
+    /// Which bundle a host may be retried against: the four LE roots for a `*.plex.direct` name,
+    /// the broad public list for any other DNS name, none for an IP literal or anything that is not
+    /// a plain DNS name (no certificate a public CA issues names a bare address the way these do).
+    pub fn roots_file_for(host: &str) -> Option<&'static str> {
+        if is_plex_direct(host) {
+            return Some(ROOTS_FILE);
+        }
+        let h = host.strip_suffix('.').unwrap_or(host);
+        let dns = h.contains('.')
+            && h.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))
+            && h.bytes().any(|b| b.is_ascii_alphabetic())
+            && !h.starts_with('.')
+            && !h.contains("..");
+        dns.then_some(PUBLIC_ROOTS_FILE)
+    }
+
     /// The host of a [`key_of`] key (`host:port`, the host unbracketed and lowercase).
     fn host_of_key(key: &str) -> &str {
         key.rsplit_once(':').map_or(key, |(host, _)| host)
@@ -2530,11 +2550,12 @@ pub mod keypin {
     /// handing libcurl a `CURLOPT_CAINFO` it cannot load (rc 77 on every `*.plex.direct` request
     /// that lacked an issuer). Fail-closed either way; said once per process, since it does not
     /// change between requests.
-    fn roots_bundle() -> Option<String> {
+    fn roots_bundle(key: &str) -> Option<String> {
+        let file = roots_file_for(host_of_key(key))?;
         #[cfg(any(test, feature = "test-support"))]
-        let path = test_roots::get().map_or_else(|| plx_base::paths::in_app_dir(ROOTS_FILE), std::path::PathBuf::from);
+        let path = test_roots::get().map_or_else(|| plx_base::paths::in_app_dir(file), std::path::PathBuf::from);
         #[cfg(not(any(test, feature = "test-support")))]
-        let path = plx_base::paths::in_app_dir(ROOTS_FILE);
+        let path = plx_base::paths::in_app_dir(file);
         // Opened, then asked of the descriptor: readable and a regular, non-empty file in one look.
         let usable = std::fs::File::open(&path)
             .and_then(|f| f.metadata())
@@ -2544,7 +2565,7 @@ pub mod keypin {
             static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if !SAID.swap(true, Ordering::Relaxed) {
                 plx_base::eventlog::log(&format!(
-                    "net: no usable {ROOTS_FILE} beside the binary (missing, empty or unreadable) — the bundled public roots are not available as a fallback"
+                    "net: no usable {file} beside the binary (missing, empty or unreadable) — the bundled public roots are not available as a fallback"
                 ));
             }
         }
@@ -2870,7 +2891,7 @@ pub mod keypin {
         if roots_live {
             // Looked up outside the lock (it stats a file). A bundle that has gone since the
             // latch was set ends the latch: there is nothing to serve the host against.
-            match roots_bundle() {
+            match roots_bundle(key) {
                 Some(path) => return Mode::Roots { path, verify: None },
                 None => {
                     state().roots_latched.remove(key);
@@ -2886,11 +2907,11 @@ pub mod keypin {
     /// nothing else decides it, so they cannot disagree about a rung.
     ///
     /// * **After [`Mode::Strict`]**: a date failure goes to key mode when a key is held; a
-    ///   missing-issuer failure on a `*.plex.direct` name goes to roots mode when the bundle is on
+    ///   missing-issuer failure on a DNS name goes to roots mode when the bundle is on
     ///   disk and this request has not already been refused by it.
     ///   Anything else (a name mismatch, a self-signed leaf, 51, a refused connection) goes nowhere.
-    ///   Roots mode is for the NAMES a household's own server is reached by and nothing else: plex.tv,
-    ///   a telemetry sink or any other host that fails for this reason fails as before.
+    ///   NuvioNative: a `*.plex.direct` name is retried against the four LE roots and any other DNS
+    ///   name against the broad public list ([`roots_file_for`]); an IP literal never is.
     /// * **After [`Mode::Roots`]**: a DATE failure goes to key mode when a key is held. This is the
     ///   rung a television with an old trust store AND a wrong clock needs: strict fails on the
     ///   missing issuer, the bundle verifies the chain and then refuses the dates, and the key the
@@ -2925,10 +2946,10 @@ pub mod keypin {
             };
         }
         match ran {
-            Mode::Strict if !roots_tried && is_untrusted_issuer(rc, verify) && is_plex_direct(host_of_key(key)) => {
-                let path = roots_bundle()?;
+            Mode::Strict if !roots_tried && is_untrusted_issuer(rc, verify) && roots_file_for(host_of_key(key)).is_some() => {
+                let path = roots_bundle(key)?;
                 plx_base::eventlog::log(&format!(
-                    "net: a plex.direct certificate failed the device trust store (X509 verify result {}) — retrying against the bundled public roots",
+                    "net: a certificate failed the device trust store (X509 verify result {}) — retrying against the bundled public roots",
                     verify.unwrap_or_default()
                 ));
                 Some(Mode::Roots { path, verify })

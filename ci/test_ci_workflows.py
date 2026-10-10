@@ -111,8 +111,8 @@ class NightlyHomebrewRepository(unittest.TestCase):
         build = code("build-package.yml")
         start = build.index("Generate the Homebrew Channel manifest")
         step = build[start:build.index("LGPL corresponding source", start)]
-        self.assertIn("app_id=com.beb.plxnative.nightly", step)
-        self.assertIn("app_id=com.beb.plxnative\n", step)
+        self.assertIn("app_id=com.nuvionative.app.nightly", step)
+        self.assertIn("app_id=com.nuvionative.app\n", step)
         self.assertIn('-o "pkg/${app_id}.manifest.json"', step)
         # the hash gate also pins the id and the version, not just the bytes
         self.assertIn("manifest['id']}_{manifest['version']}_arm.ipk", step)
@@ -125,9 +125,9 @@ class NightlyHomebrewRepository(unittest.TestCase):
 
     def test_the_manifest_is_published_with_the_release_and_checked_after(self):
         publish = job_body("nightly.yml", "publish")
-        self.assertIn("dist/com.beb.plxnative.nightly.manifest.json", publish.split("gh release create")[1].split("--target")[0])
+        self.assertIn("dist/com.nuvionative.app.nightly.manifest.json", publish.split("gh release create")[1].split("--target")[0])
         self.assertLess(publish.index("gh release create"),
-                        publish.index("--pattern com.beb.plxnative.nightly.manifest.json"))
+                        publish.index("--pattern com.nuvionative.app.nightly.manifest.json"))
 
     def test_check_package_grades_a_nightly_without_the_build_environment(self):
         # In CI, check-package.py runs as its OWN step, without the PLX_NIGHTLY_DATE the build step

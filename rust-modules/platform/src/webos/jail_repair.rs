@@ -184,14 +184,14 @@ mod tests {
         let called = std::cell::Cell::new(false);
         for (path, id) in [
             (dir("com.evil"), "com.evil"),
-            (dir("com.beb.plxnative.bad;id"), "com.beb.plxnative.bad;id"),
+            (dir("com.nuvionative.app.bad;id"), "com.nuvionative.app.bad;id"),
             (
-                PathBuf::from("/tmp/com.beb.plxnative"),
+                PathBuf::from("/tmp/com.nuvionative.app"),
                 plx_base::paths::STABLE_APP_ID,
             ),
             (
                 PathBuf::from(
-                    "/media/developer/apps/usr/palm/applications/com.beb.plxnative.debug",
+                    "/media/developer/apps/usr/palm/applications/com.nuvionative.app.debug",
                 ),
                 plx_base::paths::STABLE_APP_ID,
             ),
@@ -214,11 +214,11 @@ mod tests {
 
     #[test]
     fn command_is_fixed_and_contains_the_only_validated_install_arguments() {
-        let id = "com.beb.plxnative.debug-1";
+        let id = "com.nuvionative.app.debug-1";
         let c = command(&dir(id), id).unwrap();
-        assert!(c.contains("/usr/bin/jailer -t native -p '/media/developer/apps/usr/palm/applications/com.beb.plxnative.debug-1' -i 'com.beb.plxnative.debug-1' /bin/true"));
+        assert!(c.contains("/usr/bin/jailer -t native -p '/media/developer/apps/usr/palm/applications/com.nuvionative.app.debug-1' -i 'com.nuvionative.app.debug-1' /bin/true"));
         assert!(c.contains("id -u"));
         assert!(c.contains("[ ! -c /dev/rtkmem ]"));
-        assert!(c.contains("/var/palm/jail/com.beb.plxnative.debug-1/dev/rtkmem"));
+        assert!(c.contains("/var/palm/jail/com.nuvionative.app.debug-1/dev/rtkmem"));
     }
 }

@@ -194,7 +194,7 @@ else
   at=$(echo "$block"   | sed -n 's/^at: *//p' | head -1)
   # WHICH `bin:` line. The tracer emits one per maps line naming our executable, and that path
   # carries the app directory — so the match has to be ANCHORED on `/<id>/`. A bare substring test
-  # would not do: `com.beb.plxnative` is a PREFIX of `com.beb.plxnative.debug`, so triaging the
+  # would not do: `com.nuvionative.app` is a PREFIX of `com.nuvionative.app.debug`, so triaging the
   # stable install would happily accept the debug install's load base and hand addr2line an offset
   # into the wrong binary — which does not fail, it answers with a confident wrong function.
   # A RELATED but different guard sits on the tracer's side, in src/crashfmt.h: it emits a `bin:`
@@ -301,7 +301,7 @@ hr
 # SIGILL — `(128+sig) << 8` — and expect no crashd report beside it.
 echo "== SAM exit status for $APPID (768 = exit(3); a signal death shows WIFSIGNALED in the low byte)"
 # Filtered to this install, and anchored on the RIGHT: /var/log/messages carries both apps' lines,
-# and `com.beb.plxnative` is a prefix of `com.beb.plxnative.debug`, so a plain grep for the stable
+# and `com.nuvionative.app` is a prefix of `com.nuvionative.app.debug`, so a plain grep for the stable
 # id also returns the debug id's deaths — the other install's crash reported as this one's.
 # The dots are escaped because they are regex metacharacters, not separators, to grep.
 APPID_RE=$(printf '%s' "$APPID" | sed 's/\./\\./g')

@@ -1058,7 +1058,8 @@ mod tests {
 
     #[test]
     fn store_policy_refuses_credentials_over_plaintext_http() {
-        let http = Origin::http("127.0.0.1", 32400);
+        // A LAN address: literal loopback is the NuvioNative shim's exemption (`origin::is_loopback`).
+        let http = Origin::http("192.168.1.10", 32400);
         let https = Origin::parse("https://127-0-0-1.hash.plex.direct:32400").unwrap();
         let token_path = "/identity?X-Plex-Token=secret";
 

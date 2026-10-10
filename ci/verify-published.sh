@@ -12,9 +12,9 @@
 # It is a CI job, not a checklist item, for the reason the whole exercise exists: v0.2.1 was
 # published by hand, which skipped every gate, and a checklist would have been skipped with them.
 #
-# `com.beb.plxnative` is written out three times below and every one is deliberate, not a leftover
-# the FLAVOR work missed: a release is always the STABLE flavour, never `com.beb.plxnative.debug`
-# (docs/two-installs.md). The trailing `/` in the `applications/com.beb.plxnative/` payload path is
+# `com.nuvionative.app` is written out three times below and every one is deliberate, not a leftover
+# the FLAVOR work missed: a release is always the STABLE flavour, never `com.nuvionative.app.debug`
+# (docs/two-installs.md). The trailing `/` in the `applications/com.nuvionative.app/` payload path is
 # load-bearing for the flip side of the same fact — the stable id is a PREFIX of the debug id, so an
 # unanchored match would also walk a debug install's directory if one ever landed in an archive.
 set -uo pipefail
@@ -64,7 +64,7 @@ if true; then
 
   gh release download "$TAG" -D "$WORK" --clobber >/dev/null 2>&1 \
     || { bad "release $TAG has downloadable assets"; exit 1; }
-  IPK="$WORK/com.beb.plxnative_${VER}_arm.ipk"
+  IPK="$WORK/com.nuvionative.app_${VER}_arm.ipk"
   [ -f "$IPK" ] && ok "the .ipk is published" || { bad "no .ipk asset named for $VER"; exit 1; }
 
   SHA=$(shasum -a 256 "$IPK" | cut -d' ' -f1)
@@ -76,7 +76,7 @@ if true; then
 
   # Four copies of the hash must agree: the artifact, the checksum file, the manifest, the note.
   grep -q "$SHA" "$WORK/ipk.sha256" 2>/dev/null && ok "checksum file matches the artifact" || bad "checksum file disagrees with the artifact"
-  python3 - "$WORK/com.beb.plxnative.manifest.json" "$SHA" "$IPK" <<'PY' && ok "manifest hash and size match the artifact" || bad "manifest disagrees with the artifact"
+  python3 - "$WORK/com.nuvionative.app.manifest.json" "$SHA" "$IPK" <<'PY' && ok "manifest hash and size match the artifact" || bad "manifest disagrees with the artifact"
 import json, sys, os
 m = json.load(open(sys.argv[1]))
 sys.exit(0 if m["ipkHash"]["sha256"] == sys.argv[2] and m["ipkSize"] == os.path.getsize(sys.argv[3]) else 1)
@@ -95,7 +95,7 @@ PY
 d=open('$(basename "$IPK")','rb').read(); i=d.find(b'data.tar.gz')
 open('data.tar.gz','wb').write(d[i+60:i+60+int(d[i+48:i+58])])" && tar xzf data.tar.gz ) >/dev/null 2>&1
   DIRTY=0
-  for f in "$WORK"/usr/palm/applications/com.beb.plxnative/*; do
+  for f in "$WORK"/usr/palm/applications/com.nuvionative.app/*; do
     [ -f "$f" ] || continue
     scan_paths "$f" || { bad "$(basename "$f") carries a build-machine path"; DIRTY=1; }
   done
