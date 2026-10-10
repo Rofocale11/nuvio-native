@@ -682,6 +682,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "plx_pmsshim"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "plx_net",
+ "plx_stremio",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "plx_screens"
 version = "0.0.0"
 dependencies = [
@@ -714,6 +725,16 @@ dependencies = [
  "plx_plex",
  "plx_session",
  "plx_telemetry",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "plx_stremio"
+version = "0.0.0"
+dependencies = [
+ "plx_base",
+ "plx_net",
  "serde",
  "serde_json",
 ]
