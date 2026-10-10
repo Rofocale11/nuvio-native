@@ -22,6 +22,7 @@ members = [
     "screens",
     "storage",
     "stremio",
+    "pmsshim",
 ]
 resolver = "2"
 
