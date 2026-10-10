@@ -1707,6 +1707,8 @@ expected = {
     # `*.plex.direct` server whose certificate chains to a 2025 Let's Encrypt root is unreachable on
     # a 2020 firmware, silently — the fallback just never engages.
     "le-roots.pem",
+    # NuvioNative: the same fallback for every other public DNS host (debrid CDNs, addon hosts).
+    "public-roots.pem",
     "THIRD-PARTY-NOTICES.md", "LICENSE", "LICENSING.md", "TRADEMARKS.md", *NEEDED_LICENCES,
 }
 data_blob = None
