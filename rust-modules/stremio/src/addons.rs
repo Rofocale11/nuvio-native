@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::http;
+use crate::addon_http as http;
 use crate::lenient;
 use crate::model::*;
 

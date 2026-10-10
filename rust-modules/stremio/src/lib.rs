@@ -21,7 +21,10 @@ pub use classify::{classify_stream, StreamInfo};
 
 pub mod nuvio;
 
-pub mod http;
+/// The HTTP door. Named `addon_http` because the module-layer gate reads every workspace crate as
+/// one module tree, where `http` is already `plx_plex`'s; `plx_stremio::http` stays the public path.
+pub mod addon_http;
+pub use addon_http as http;
 
 pub mod torrent;
 pub use torrent::playable_url;

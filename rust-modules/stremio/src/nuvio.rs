@@ -35,7 +35,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::addons::{self, AddonSet};
-use crate::http;
+use crate::addon_http as http;
 use crate::model::{Addon, Error, Manifest, Result};
 
 /// A pending TV sign-in: show `qr_url` as a QR code and `user_code` as text.

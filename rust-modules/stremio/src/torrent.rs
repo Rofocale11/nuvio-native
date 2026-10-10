@@ -16,7 +16,7 @@
 
 use serde_json::{json, Value};
 
-use crate::http;
+use crate::addon_http as http;
 use crate::model::{Error, Result, Stream};
 
 /// The ports Nuvio's companion service tries, in order (`services/webos/src/constants.js`).
