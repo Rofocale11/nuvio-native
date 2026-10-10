@@ -15,8 +15,10 @@ the shim (`plx_pmsshim`) must do for that to work. Read with `ARCHITECTURE.md`.
 - **credentials never cross origin**: the `X-Plex-Token` query pair and the credential header
   block ride a hop only when scheme+host+port equal the shim's; a third-party host gets exactly
   what its `Location` spells (`stream_redirect.rs` module doc; curlio `next_hop`);
-- every seek reopens the **effective** URL with `Range: bytes=N-` (the chain is not replayed), so
-  short-lived per-request debrid links work. A server that ignores `Range` (200 instead of 206)
+- a seek reopens with `Range: bytes=N-`. Measured on the host (probe over a loopback 302 to an
+  https CDN): the curl source re-asks the shim's Part URL on each reopen, so the shim's 302 is
+  re-issued per seek — cheap, and correct for short-lived per-request debrid links (the shim may
+  re-resolve an expired link there). A server that ignores `Range` (200 instead of 206)
   fails the seek rather than silently restarting at byte 0;
 - `Origin` 127.0.0.1/::1 may carry the token in plaintext even in a store build
   (`plex::origin::is_loopback`, this branch). Without it a RELEASE build refuses every shim request.
@@ -86,7 +88,8 @@ timing, seek, A/V sync) — a multi-day change.
 With the probe's `dovi` record in the PMS fields, `Dovi::presentation` behaves as on a Plex server:
 P8.x and P5 single-layer **declare** (when configd confirms DV) and direct play; **P7 (UHD BluRay
 remux, `el=true`) is refused** ("dual-layer") — the buffer feed carries one elementary stream.
-To play a P7 remux as HDR10 instead, the shim may **omit `DOVIELPresent`/all DOVI keys for a
+**Decision (lead/playback): the player keeps upstream's rule; the shim does this:** to play a P7
+remux as HDR10 instead, the shim must **omit `DOVIELPresent`/all DOVI keys for a
 P7 stream whose `bl_compat` is 6 or 1 (HDR10 base)** — the route then direct-plays it as plain
 HEVC; the decoder ignores the EL NAL units (layer id > 0) and shows the HDR10 base layer. This is
 unverified on the CX; see the TV checklist.
@@ -129,3 +132,15 @@ All on the shim origin with the token; JSON shapes per `tests/mock_pms.py`.
 10. `GET /identity` — `{MediaContainer:{machineIdentifier}}`.
 Never reached for direct play: `/video/:/transcode/universal/start.mkv`, `/transcode/sessions/*`,
 `/video/:/transcode/universal/stop` (answer 200 if called).
+
+## Verified on the host (2026-10-10, `cargo test -p plx_media --lib live_probe`, host FFmpeg 9.0)
+
+| URL | result |
+|---|---|
+| jellyfin `4K DV P8.1.mp4` (https) | mp4, hevc 3840x2160 60 fps, 10-bit, trc 16 / pri 9 / spc 9, dovi P8 L9 bl_compat 1, el false |
+| jellyfin `1080p DV P5.mp4` (https) | mp4, hevc 1920x1080, trc/pri/spc 2/2/2, dovi P5 bl_compat 0 → 10-bit inferred |
+| github.com `test5.mkv` (302 → raw.githubusercontent) | mkv, h264 1024x576 24 fps, 2× aac (default; eng "Commentary"), 8× subrip with languages |
+| `http://127.0.0.1:<port>/library/parts/7/1/file.mp4?X-Plex-Token=…` → 302 → jellyfin P8.1 | probed through the hop; the token only ever reached the loopback server |
+
+Not verified: anything on the television (decoder, DV mode, HDR10 base of a P7 file, the CX's
+own trust store against debrid hosts). See the TV checklist in the playback agent's report.
