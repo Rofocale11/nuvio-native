@@ -18,9 +18,9 @@ fn main() {
     }
     let _ = plx_net::net::global_init();
     let backend: Arc<dyn plx_pmsshim::Backend> = if args.iter().any(|a| a == "--fake") {
-        Arc::new(plx_pmsshim::fake::FakeBackend)
+        Arc::new(plx_pmsshim::shim_fake::FakeBackend)
     } else {
-        let set = val("--addons").and_then(|p| plx_stremio::AddonSet::load(std::path::Path::new(&p))).unwrap_or_else(plx_stremio::AddonSet::defaults);
+        let set = val("--addons").and_then(|p| plx_stremio::addons::AddonSet::load(std::path::Path::new(&p))).unwrap_or_else(plx_stremio::addons::AddonSet::defaults);
         eprintln!("pmsshim: {} addon(s): {}", set.addons.len(), set.addons.iter().map(|a| a.manifest.name.as_str()).collect::<Vec<_>>().join(", "));
         Arc::new(plx_pmsshim::AddonBackend::new(set))
     };

@@ -11,6 +11,9 @@ use std::time::Duration;
 
 /// Connections served at once. The app opens a handful (control plane, poster workers, the media
 /// plane's part probe); anything past this is refused rather than queued without bound.
+/// A connection runs addon/account requests (libcurl, JSON, QR encoding) inline: 256 KiB overflowed
+/// on the Nuvio sign-in path and aborted the process, so 1 MiB (virtual; only touched pages are
+/// resident).
 const MAX_CONNECTIONS: usize = 48;
 const IDLE: Duration = Duration::from_secs(30);
 const MAX_HEAD: usize = 64 * 1024;
@@ -75,7 +78,7 @@ pub fn serve(listener: TcpListener, handler: Arc<Handler>) {
         }
         live.fetch_add(1, Ordering::Relaxed);
         let (h, live2) = (handler.clone(), live.clone());
-        let spawned = std::thread::Builder::new().name("pmsshim-conn".into()).stack_size(256 * 1024).spawn(move || {
+        let spawned = std::thread::Builder::new().name("pmsshim-conn".into()).stack_size(1024 * 1024).spawn(move || {
             connection(stream, &*h);
             live2.fetch_sub(1, Ordering::Relaxed);
         });
@@ -93,7 +96,10 @@ fn connection(stream: TcpStream, handler: &Handler) {
     loop {
         let Some((req, keep_alive)) = read_request(&mut rd) else { return };
         let head_only = req.method == "HEAD";
-        let resp = handler(&req);
+        // A bug in one route answers 500 rather than taking the connection (and, under an abort
+        // strategy, the app) with it.
+        let resp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&req)))
+            .unwrap_or_else(|_| Response::bytes(500, "text/plain", b"internal error".to_vec()));
         if write_response(&mut out, &resp, head_only, keep_alive).is_err() || !keep_alive {
             return;
         }

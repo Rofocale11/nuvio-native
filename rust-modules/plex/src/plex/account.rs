@@ -43,6 +43,11 @@ const PLEX_TV: &str = "https://plex.tv";
 /// plex.tv also moves Discover ([`discover`]): the mock answers both.
 pub fn plex_tv() -> &'static str {
     static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    // NuvioNative: there is no plex.tv. The in-process shim answers the account surface, so every
+    // account call stays on loopback.
+    if let Some(local) = plx_base::local_server::get() {
+        return BASE.get_or_init(|| local.origin.trim_end_matches('/').to_string());
+    }
     BASE.get_or_init(|| match plx_base::devtrig::read("plextv") {
         Some(v) if loopback_http(&v) => {
             #[cfg(feature = "devtriggers")]

@@ -256,6 +256,10 @@ plx_appkit = { path = "appkit" }
 # the registry that names them. It links nothing on the television; its build script is for the host
 # test binary.
 plx_screens = { path = "screens" }
+# NuvioNative: the Stremio backend and the in-process PMS shim the app talks to instead of Plex
+# (`src/app/nuvio.rs`, docs/nuvio/ARCHITECTURE.md).
+plx_stremio = { path = "stremio" }
+plx_pmsshim = { path = "pmsshim" }
 # safe pure-Rust JPEG/PNG decoders — replaces vendored stb_image.h (~8k lines C)
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # raw socket/libc FFI for the stream module (correct constants + struct layouts)

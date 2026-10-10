@@ -21,6 +21,9 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 # gunzip of addon subtitle downloads (already in the tree through `image`'s png decoder).
 flate2 = "1"
+# The Nuvio sign-in QR the shim serves in place of plex.tv's (both already in the tree via `ui`/`image`).
+qrcodegen = "=1.8.0"
+png = "0.18"
 
 [lints]
 workspace = true

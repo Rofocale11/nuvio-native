@@ -2,7 +2,8 @@
 //! `Media[0]` (it has no version picker); `/nuvio/streams` and `/nuvio/select` let a picker reorder.
 
 use plx_stremio::classify::Hdr;
-use plx_stremio::{Stream, StreamInfo};
+use plx_stremio::classify::StreamInfo;
+use plx_stremio::model::Stream;
 use serde_json::{json, Value};
 
 /// Streams per item exposed as Media. Torrentio can return 150; nobody walks past this many.
@@ -11,74 +12,23 @@ pub const MAX_STREAMS: usize = 200;
 /// `part id = ratingKey * PART_STRIDE + stream index`.
 pub const PART_STRIDE: i64 = 1000;
 
-/// Classify, tolerating a classifier that is not implemented yet (the contract crate's `todo!()`).
-/// The global panic hook is NOT swapped (the app's crash reporter owns it); an unimplemented
-/// classifier panics once, is latched off, and the fallback answers from then on.
 pub fn classify(s: &Stream, runtime_secs: Option<u32>) -> StreamInfo {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static BROKEN: AtomicBool = AtomicBool::new(false);
-    if !BROKEN.load(Ordering::Relaxed) {
-        match std::panic::catch_unwind(|| plx_stremio::classify_stream(s, runtime_secs)) {
-            Ok(info) => return info,
-            Err(_) => BROKEN.store(true, Ordering::Relaxed),
-        }
-    }
-    fallback_classify(s)
+    plx_stremio::classify::classify_stream(s, runtime_secs)
 }
 
-fn fallback_classify(s: &Stream) -> StreamInfo {
-    let text = format!(
-        "{} {} {} {}",
-        s.name.as_deref().unwrap_or(""),
-        s.title.as_deref().unwrap_or(""),
-        s.description.as_deref().unwrap_or(""),
-        s.behavior_hints.filename.as_deref().unwrap_or("")
-    )
-    .to_lowercase();
-    let height = if text.contains("2160") || text.contains("4k") || text.contains("uhd") {
-        Some(2160)
-    } else if text.contains("1080") {
-        Some(1080)
-    } else if text.contains("720") {
-        Some(720)
-    } else if text.contains("480") {
-        Some(480)
-    } else {
-        None
-    };
-    let hdr = if text.contains(" dv") || text.contains("dolby vision") || text.contains(".dv.") {
-        Hdr::DolbyVision { with_hdr10_fallback: text.contains("hdr") }
-    } else if text.contains("hdr10+") {
-        Hdr::Hdr10Plus
-    } else if text.contains("hdr") {
-        Hdr::Hdr10
-    } else {
-        Hdr::Sdr
-    };
-    let video_codec = if text.contains("hevc") || text.contains("x265") || text.contains("h265") {
-        Some("hevc".into())
-    } else if text.contains("av1") {
-        Some("av1".into())
-    } else if text.contains("x264") || text.contains("h264") || text.contains("avc") {
-        Some("h264".into())
-    } else {
-        None
-    };
-    let label = s.name.as_deref().unwrap_or("").replace('\n', " ");
-    StreamInfo { height, hdr, video_codec, size_bytes: s.behavior_hints.video_size, label, filename: s.behavior_hints.filename.clone(), ..Default::default() }
-}
+/// A torrent the streaming server must pick the file of (`/create`) — resolved when it is played,
+/// never while listing. The marker keeps it rankable and identifiable until then.
+pub const TORRENT_SCHEME: &str = "torrent:";
 
-/// The URL the TV should open, or None when this stream cannot play here (YouTube, external
-/// links, a torrent with no streaming server configured).
+/// The URL the TV should open, a [`TORRENT_SCHEME`] marker for a torrent still to resolve, or None
+/// when this stream cannot play here (YouTube, external links, a torrent with no streaming server).
 pub fn playable_url(s: &Stream, torrent_server: Option<&str>) -> Option<String> {
-    if let Some(u) = s.url.as_deref().filter(|u| u.starts_with("http://") || u.starts_with("https://")) {
-        return Some(u.to_string());
+    if let Some(u) = plx_stremio::torrent::playable_url(s, torrent_server) {
+        return Some(u);
     }
-    let hash = s.info_hash.as_deref()?.to_ascii_lowercase();
-    let server = torrent_server?.trim_end_matches('/');
-    // The Stremio streaming-server route: `/{infoHash}/{fileIdx}`; -1 asks it to pick the largest.
-    let idx = s.file_idx.map(i64::from).unwrap_or(-1);
-    Some(format!("{server}/{hash}/{idx}"))
+    let hash = plx_stremio::torrent::info_hash(s)?;
+    torrent_server.filter(|t| !t.trim().is_empty())?;
+    Some(format!("{TORRENT_SCHEME}{hash}"))
 }
 
 pub struct Classified {
@@ -98,7 +48,9 @@ fn hdr_rank(h: Hdr) -> u8 {
 
 /// Keep the playable streams, classify, and order best first: debrid-cached/direct HTTP before
 /// torrents, then resolution, then HDR, then size (bigger is higher bitrate for the same title).
-pub fn rank(streams: &[Stream], runtime_secs: Option<u32>, torrent_server: Option<&str>) -> Vec<Classified> {
+/// `audio_ok`: the TV's audio codecs; a stream whose label names a codec outside it (DTS, TrueHD on
+/// a CX) ranks after the playable ones of its resolution. Empty = unknown.
+pub fn rank(streams: &[Stream], runtime_secs: Option<u32>, torrent_server: Option<&str>, audio_ok: &[String]) -> Vec<Classified> {
     let mut v: Vec<Classified> = streams
         .iter()
         .filter_map(|s| {
@@ -109,9 +61,11 @@ pub fn rank(streams: &[Stream], runtime_secs: Option<u32>, torrent_server: Optio
     v.sort_by(|a, b| {
         let key = |c: &Classified| {
             let direct = c.stream.url.is_some() || c.info.cached;
+            let audio_bad = !audio_ok.is_empty() && c.info.audio_codec.as_ref().is_some_and(|a| !audio_ok.iter().any(|x| x == a));
             (
                 std::cmp::Reverse(direct),
                 std::cmp::Reverse(c.info.height.unwrap_or(0)),
+                audio_bad,
                 std::cmp::Reverse(hdr_rank(c.info.hdr)),
                 std::cmp::Reverse(c.info.size_bytes.unwrap_or(0)),
             )
@@ -268,16 +222,16 @@ mod tests {
     fn ranks_direct_then_resolution_and_skips_unplayable() {
         let v = vec![
             s("720p", Some("https://a/720.mp4"), None),
-            s("4k HDR", None, Some("ABCDEF")),
+            s("4k HDR", None, Some("abcdef0123456789abcdef0123456789abcdef01")),
             s("1080p", Some("https://a/1080.mkv"), None),
             Stream { yt_id: Some("x".into()), ..Default::default() },
         ];
-        let r = rank(&v, None, None);
+        let r = rank(&v, None, None, &[]);
         assert_eq!(r.len(), 2, "torrent without a server and YouTube are dropped");
         assert_eq!(r[0].url, "https://a/1080.mkv");
-        let r = rank(&v, None, Some("http://10.0.0.2:11470/"));
+        let r = rank(&v, None, Some("http://10.0.0.2:11470/"), &[]);
         assert_eq!(r.len(), 3);
-        assert_eq!(r[2].url, "http://10.0.0.2:11470/abcdef/-1");
+        assert!(r[2].url.starts_with(TORRENT_SCHEME), "no fileIdx: resolved on play");
     }
 
     #[test]
