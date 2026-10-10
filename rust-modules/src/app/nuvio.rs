@@ -33,14 +33,29 @@ pub(crate) fn handle() -> Option<&'static plx_pmsshim::Handle> {
 }
 
 fn data_dir() -> PathBuf {
-    let tv = Path::new("/media/developer");
-    if tv.is_dir() {
-        let d = tv.join(format!("{}.nuvio", plx_base::paths::app_id()));
-        if std::fs::create_dir_all(&d).is_ok() {
-            return d;
+    // The first candidate this process can really WRITE: a Developer Mode jail answers `is_dir`
+    // and even `create_dir_all` on paths it then refuses files in. The runtime dir is the last
+    // resort — writable everywhere, but on a TV it is /tmp, so it lasts until the set reboots.
+    let writable = |d: &Path| {
+        std::fs::create_dir_all(d).is_ok() && {
+            let probe = d.join(".probe");
+            let ok = std::fs::write(&probe, b"1").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            ok
+        }
+    };
+    let candidates = [
+        PathBuf::from(format!("/media/developer/{}.nuvio", plx_base::paths::app_id())),
+        plx_base::paths::persistent_state_root().join("nuvio"),
+        plx_base::paths::runtime_dir().join("nuvio"),
+    ];
+    for d in &candidates {
+        if writable(d) {
+            log(&format!("nuvio: data dir {}", d.display()));
+            return d.clone();
         }
     }
-    plx_base::paths::persistent_state_root().join("nuvio")
+    candidates[2].clone()
 }
 
 #[derive(serde::Deserialize, Default)]
