@@ -175,7 +175,7 @@ pub fn plex_tv_credential(snapshot_user: &UserRef) -> Option<String> {
 /// every boot, with a fresh `X-Plex-Client-Identifier` each time.
 ///
 /// The first entry is still deliberately OUTSIDE the app install dir: appinstalld replaces
-/// `applications/com.beb.plxnative/` wholesale on every ipk (re)install, which silently signed the
+/// `applications/com.nuvionative.app/` wholesale on every ipk (re)install, which silently signed the
 /// user out when the file lived there.
 #[cfg(not(any(test, feature = "test-support")))]
 fn auth_paths() -> Vec<std::path::PathBuf> {

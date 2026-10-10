@@ -870,7 +870,7 @@ class ReplayFixtures(unittest.TestCase):
 
 class TeardownProcessTable(unittest.TestCase):
     def test_non_utf8_argv_cannot_hide_or_crash_a_run_stream_pid(self):
-        marker = "/tmp/com.beb.plxnative.debug/plxnative-events.log"
+        marker = "/tmp/com.nuvionative.app.debug/plxnative-events.log"
         raw = b"431 ssh " + marker.encode("ascii") + b" \xdflegacy\n"
         fake = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=raw))
         with mock.patch.object(run, "RUN_STREAM_MARK", marker):
@@ -906,7 +906,7 @@ class StoredSessionGate(unittest.TestCase):
         cases = [{"name": "offline_play", "session": "stored"},
                  {"name": "normal_case"}]
         remaining, skipped = run.partition_stored_sessions(
-            cases, "needs a signed-in session on com.beb.plxnative")
+            cases, "needs a signed-in session on com.nuvionative.app")
         self.assertEqual([c["name"] for c in remaining], ["normal_case"])
         self.assertEqual([c["name"] for c in skipped], ["offline_play"])
 
@@ -1937,12 +1937,12 @@ class ResolutionSpike(unittest.TestCase):
 
     def test_apply_triggers_removes_a_stale_trace_before_arming(self):
         saved = run.RUNDIR
-        run.RUNDIR = "/tmp/com.beb.plxnative.debug"
+        run.RUNDIR = "/tmp/com.nuvionative.app.debug"
         try:
             with mock.patch.object(run, "ssh") as ssh:
                 run.apply_triggers("192.0.2.20", [("plxnative-gstlog", "GST_EVENT:6")])
             command = ssh.call_args.args[1]
-            self.assertIn("rm -f /tmp/com.beb.plxnative.debug/plxnative-gst.log", command)
+            self.assertIn("rm -f /tmp/com.nuvionative.app.debug/plxnative-gst.log", command)
             self.assertIn("plxnative-gstlog", command)
         finally:
             run.RUNDIR = saved
