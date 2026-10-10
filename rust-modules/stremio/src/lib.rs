@@ -5,6 +5,10 @@
 //! CONTRACT (fixed by the lead; the shim codes against it): the types in [`model`] and the
 //! functions/methods re-exported below. Extend freely; do not rename or remove without telling the
 //! lead.
+//!
+//! LOGGING RULE: configured addon URLs and stream URLs carry credentials (debrid keys, AIOStreams
+//! config blobs). Log them only through [`redact_url`] (host only); `Debug` on [`Addon`] and
+//! [`Stream`] already does.
 
 pub mod model;
 pub use model::*;
@@ -18,3 +22,10 @@ pub use classify::{classify_stream, StreamInfo};
 pub mod nuvio;
 
 pub mod http;
+
+pub mod torrent;
+pub use torrent::playable_url;
+
+pub mod import;
+
+mod lenient;
