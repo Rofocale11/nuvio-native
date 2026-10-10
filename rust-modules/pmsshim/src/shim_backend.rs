@@ -1,8 +1,8 @@
 //! What the shim needs from a content source. [`AddonBackend`] is the real one (the user's Stremio
-//! addons through `plx_stremio`); [`crate::fake::FakeBackend`] serves a fixed library for host tests
+//! addons through `plx_stremio`); [`crate::shim_fake::FakeBackend`] serves a fixed library for host tests
 //! and for running the simulator with no network.
 
-use plx_stremio::{Meta, MetaPreview, Stream, Subtitle};
+use plx_stremio::model::{Meta, MetaPreview, Stream, Subtitle};
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -34,22 +34,22 @@ pub trait Backend: Send + Sync {
 /// The user's addons. Swappable at run time ([`AddonBackend::replace`]) so Settings can install,
 /// remove or re-import addons without restarting the shim.
 pub struct AddonBackend {
-    set: RwLock<plx_stremio::AddonSet>,
+    set: RwLock<plx_stremio::addons::AddonSet>,
 }
 
 impl AddonBackend {
-    pub fn new(set: plx_stremio::AddonSet) -> AddonBackend {
+    pub fn new(set: plx_stremio::addons::AddonSet) -> AddonBackend {
         AddonBackend { set: RwLock::new(set) }
     }
-    pub fn replace(&self, set: plx_stremio::AddonSet) {
+    pub fn replace(&self, set: plx_stremio::addons::AddonSet) {
         *self.set.write().unwrap_or_else(|e| e.into_inner()) = set;
     }
-    pub fn snapshot(&self) -> plx_stremio::AddonSet {
+    pub fn snapshot(&self) -> plx_stremio::addons::AddonSet {
         self.set.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
-fn info(set: &plx_stremio::AddonSet, c: &plx_stremio::addons::CatalogRef) -> CatalogInfo {
+fn info(set: &plx_stremio::addons::AddonSet, c: &plx_stremio::addons::CatalogRef) -> CatalogInfo {
     let addon = &set.addons[c.addon].manifest;
     let genres = c.decl.extra.iter().find(|e| e.name == "genre").map(|e| e.options.clone()).unwrap_or_default();
     let base = c.decl.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| c.decl.id.clone());

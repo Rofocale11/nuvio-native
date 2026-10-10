@@ -51,6 +51,10 @@ use super::legal::CONTACT_EMAIL;
 /// chose — a consent prompt in front of any of them would quietly re-point the entire harness at
 /// a screen nobody wrote an assertion for.
 pub fn should_show(c: &Consent, automated: bool) -> bool {
+    // NuvioNative ships no telemetry endpoints, so there is nothing to consent to.
+    if plx_base::local_server::get().is_some() {
+        return false;
+    }
     consent::should_ask(c, automated)
 }
 

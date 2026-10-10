@@ -1,8 +1,8 @@
 //! A fixed, network-free library for host tests and for running the simulator without addons:
 //! the Blender open movies (CC-BY) with their public sample-video URLs, and one synthetic series.
 
-use crate::backend::{Backend, CatalogInfo};
-use plx_stremio::{Meta, MetaPreview, Stream, Subtitle, Video};
+use crate::shim_backend::{Backend, CatalogInfo};
+use plx_stremio::model::{Meta, MetaPreview, Stream, Subtitle, Video};
 use std::time::Duration;
 
 const GTV: &str = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample";

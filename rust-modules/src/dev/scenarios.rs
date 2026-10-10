@@ -202,6 +202,10 @@ pub(crate) fn login_forced() -> bool {
 
 /// `/tmp/plxnative-token` — the harness/headless test identity, read once. Never logged.
 pub(crate) fn dev_token() -> String {
+    // NuvioNative: the in-process PMS shim is the primary server whenever it is running.
+    if let Some(local) = plx_base::local_server::get() {
+        return local.token.clone();
+    }
     match plx_base::devtrig::read("token") {
         Some(s) if !s.is_empty() => {
             #[cfg(feature = "devtriggers")]
@@ -215,6 +219,9 @@ pub(crate) fn dev_token() -> String {
 /// Optional primary endpoint for a synthetic PMS fixture. Used only with the explicitly
 /// injected dev token; a persisted account is never redirected. Absent in shipping builds.
 pub(crate) fn pms_origin() -> Option<plx_plex::plex::Origin> {
+    if let Some(local) = plx_base::local_server::get() {
+        return plx_plex::plex::Origin::parse(&local.origin);
+    }
     plx_base::devtrig::read("pms-origin").and_then(|s| plx_plex::plex::Origin::parse(s.trim()))
 }
 

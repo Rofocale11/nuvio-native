@@ -119,6 +119,7 @@ mod recorder;
 mod window_activity;
 pub(crate) mod events;
 pub(crate) mod lifecycle;
+pub(crate) mod nuvio;
 pub(crate) mod playback;
 mod preferences;
 pub(crate) mod input;

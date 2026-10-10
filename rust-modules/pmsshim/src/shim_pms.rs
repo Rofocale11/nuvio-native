@@ -1,12 +1,12 @@
 //! The PMS routes. Every shape here is one `plx_plex::plex::models` deserialises; fields it does not
 //! read are left out rather than invented.
 
-use crate::backend::{Backend, CatalogInfo};
-use crate::http::{pct_encode, Request, Response};
-use crate::media::{self, Classified, SubRef, PART_STRIDE};
-use crate::store::{now_secs, Ident, Keys, Watch, WatchState};
-use crate::{Config, MACHINE_ID};
-use plx_stremio::{Meta, MetaPreview, Stream, Video};
+use crate::shim_backend::{Backend, CatalogInfo};
+use crate::shim_http::{pct_encode, Request, Response};
+use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
+use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
+use crate::shim_core::{Config, MACHINE_ID};
+use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -24,6 +24,11 @@ const STREAM_TTL: Duration = Duration::from_secs(30 * 60);
 /// Rows a catalog listing reports beyond what it has fetched while the catalog is not exhausted,
 /// so a grid keeps asking for the next page.
 const MORE_HINT: i64 = 50;
+/// How long a DETAIL request waits for streams. The page must not hang on addons; a play waits
+/// the full deadline at `/decision` / the Part instead.
+const DETAIL_WAIT: Duration = Duration::from_millis(800);
+/// The Part index that means "whichever stream leads when this is played".
+const BEST_PART: usize = PART_STRIDE as usize - 1;
 const DEFAULT_EPISODE_MS: i64 = 45 * 60_000;
 const DEFAULT_MOVIE_MS: i64 = 110 * 60_000;
 const SECTION_MOVIES: i64 = 1;
@@ -65,7 +70,16 @@ pub struct Shim {
     next_sub: AtomicI64,
     permits: (Mutex<usize>, Condvar),
     /// Real stream metadata from the app's FFmpeg (installed at boot; absent on the host bin).
-    pub probes: crate::probe::ProbeCache,
+    pub probes: crate::shim_probe::ProbeCache,
+    /// Torrent markers resolved on a streaming server (`/create`), by marker + ratingKey.
+    resolved: Mutex<HashMap<(i64, String), String>>,
+    torrent_server: std::sync::RwLock<Option<String>>,
+    /// Audio codecs this TV decodes (`devcaps`); empty = unknown, rank on video alone.
+    audio_codecs: std::sync::RwLock<Vec<String>>,
+    /// Set by [`Shim::bind_self`]: background work started from a `&self` method.
+    me: std::sync::OnceLock<std::sync::Weak<Shim>>,
+    /// plex.tv's account surface, answered by the Nuvio account (`account.rs`).
+    pub account: crate::shim_account::Account,
 }
 
 fn container(fields: Value) -> Value {
@@ -196,6 +210,8 @@ fn trailing_key(s: &str) -> Option<i64> {
 impl Shim {
     pub fn new(backend: Arc<dyn Backend>, cfg: Config) -> Shim {
         let dir = cfg.data_dir.clone();
+        let cfg_ts = cfg.torrent_server.clone();
+        let cfg_token = cfg.token.clone();
         Shim {
             backend,
             keys: Keys::open(dir.as_deref()),
@@ -208,8 +224,33 @@ impl Shim {
             sub_urls: Mutex::new(HashMap::new()),
             next_sub: AtomicI64::new(900_000_000),
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
-            probes: crate::probe::ProbeCache::default(),
+            probes: crate::shim_probe::ProbeCache::default(),
+            resolved: Mutex::new(HashMap::new()),
+            torrent_server: std::sync::RwLock::new(cfg_ts),
+            audio_codecs: std::sync::RwLock::new(Vec::new()),
+            me: std::sync::OnceLock::new(),
+            account: crate::shim_account::Account::new(dir.as_deref(), &cfg_token),
         }
+    }
+
+    pub fn bind_self(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
+    }
+
+    /// The Stremio-compatible streaming server torrents play through, if any.
+    pub fn torrent_server(&self) -> Option<String> {
+        self.torrent_server.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The audio codecs this TV decodes: a stream whose label names another ranks after the
+    /// playable ones of the same resolution.
+    pub fn set_audio_codecs(&self, codecs: Vec<String>) {
+        *self.audio_codecs.write().unwrap_or_else(|e| e.into_inner()) = codecs;
+    }
+
+    pub fn set_torrent_server(&self, server: Option<String>) {
+        *self.torrent_server.write().unwrap_or_else(|e| e.into_inner()) = server;
+        self.streams.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Drop every cache that depends on the addon set (after Settings changed it).
@@ -348,23 +389,25 @@ impl Shim {
 
     /// The ranked playable streams of an item (waiting per the deadline/grace rules) and the
     /// subtitles known so far. Each entry carries its arrival index.
-    fn ranked(&self, rk: i64, ident: &Ident, runtime_secs: Option<u32>) -> (Vec<(usize, Classified)>, Vec<SubRef>) {
-        let Some(slot) = self.slot(rk, ident) else { return (Vec::new(), Vec::new()) };
+    fn ranked(&self, rk: i64, ident: &Ident, runtime_secs: Option<u32>, max_wait: Duration) -> (Vec<(usize, Classified)>, Vec<SubRef>, bool) {
+        let Some(slot) = self.slot(rk, ident) else { return (Vec::new(), Vec::new(), true) };
+        let deadline = self.cfg.stream_deadline.min(slot.started.elapsed() + max_wait);
         let mut st = slot.state.lock().unwrap_or_else(|e| e.into_inner());
-        let ts = self.cfg.torrent_server.as_deref();
+        let ts_owned = self.torrent_server();
+        let ts = ts_owned.as_deref();
         let mut first_playable: Option<Instant> = None;
         loop {
             if st.done {
                 break;
             }
             let elapsed = slot.started.elapsed();
-            if elapsed >= self.cfg.stream_deadline {
+            if elapsed >= deadline {
                 break;
             }
-            if first_playable.is_none() && st.streams.iter().any(|s| media::playable_url(s, ts).is_some()) {
+            if first_playable.is_none() && st.streams.iter().any(|s| shim_media::playable_url(s, ts).is_some()) {
                 first_playable = Some(Instant::now());
             }
-            let mut wait = self.cfg.stream_deadline - elapsed;
+            let mut wait = deadline - elapsed;
             if let Some(t) = first_playable {
                 let g = self.cfg.stream_grace.saturating_sub(t.elapsed());
                 if g.is_zero() {
@@ -386,11 +429,13 @@ impl Shim {
         let subs: Vec<SubRef> = st.subs.iter().map(|s| SubRef { id: s.id, lang: s.lang.clone() }).collect();
         let indexed: Vec<Stream> = st.streams.clone();
         let selected = st.selected;
+        let done = st.done;
         drop(st);
         let mut out: Vec<(usize, Classified)> = Vec::new();
-        for c in media::rank(&indexed, runtime_secs, ts) {
+        let audio = self.audio_codecs.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for c in shim_media::rank(&indexed, runtime_secs, ts, &audio) {
             // `rank` clones; recover the arrival index by identity of the URL + name.
-            let i = indexed.iter().position(|s| media::playable_url(s, ts).as_deref() == Some(c.url.as_str()) && s.name == c.stream.name).unwrap_or(0);
+            let i = indexed.iter().position(|s| shim_media::playable_url(s, ts).as_deref() == Some(c.url.as_str()) && s.name == c.stream.name).unwrap_or(0);
             out.push((i, c));
         }
         if let Some(sel) = selected {
@@ -399,7 +444,7 @@ impl Shim {
                 out.insert(0, x);
             }
         }
-        (out, subs)
+        (out, subs, done)
     }
 
     // ---- rows -------------------------------------------------------------------------------
@@ -493,6 +538,31 @@ impl Shim {
         self.keys.key_of(&Ident::Episode { series: series.into(), video: video.into() })
     }
 
+    /// The URL to open for a ranked stream: itself, or — for a torrent marker — what the streaming
+    /// server answers `/create` with (season/episode let it pick the file in a season pack).
+    fn open_url(&self, rk: i64, stream: &Stream, url: &str) -> Option<String> {
+        if !url.starts_with(shim_media::TORRENT_SCHEME) {
+            return Some(url.to_string());
+        }
+        let key = (rk, url.to_string());
+        if let Some(u) = self.resolved.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return Some(u.clone());
+        }
+        let server = self.torrent_server()?;
+        let server = server.as_str();
+        let (season, episode) = match self.keys.ident(rk) {
+            Some(Ident::Episode { video, .. }) => {
+                let mut it = video.rsplit(':').filter_map(|x| x.parse::<u32>().ok());
+                let e = it.next();
+                (it.next(), e)
+            }
+            _ => (None, None),
+        };
+        let u = plx_stremio::torrent::resolve(server, stream, season, episode).ok()?;
+        self.resolved.lock().unwrap_or_else(|e| e.into_inner()).insert(key, u.clone());
+        Some(u)
+    }
+
     fn season_row(&self, show_rk: i64, m: &Meta, n: u32) -> Value {
         let rk = self.keys.key_of(&Ident::Season { series: m.id.clone(), n });
         let eps: Vec<_> = episodes_of(m).into_iter().filter(|(s, _, _)| *s == n).collect();
@@ -570,27 +640,53 @@ impl Shim {
     /// The full item: the row plus, for a playable leaf, its `Media[]`. Media whose stream was
     /// probed already carry the real fields; `probe_index` probes that Media now (the decision
     /// path) and returns the verdict beside the row.
-    fn item_probed(&self, rk: i64, probe_index: Option<usize>) -> Option<(Value, Option<Result<crate::probe::ProbeInfo, String>>)> {
+    fn item_probed(&self, rk: i64, probe_index: Option<usize>) -> Option<(Value, Option<Result<crate::shim_probe::ProbeInfo, String>>)> {
         let ident = self.keys.ident(rk)?;
         let mut row = self.row(rk)?;
         let mut verdict = None;
         if self.stream_target(&ident).is_some() {
             let dur = row["duration"].as_i64().unwrap_or(0);
-            let (ranked, subs) = self.ranked(rk, &ident, u32::try_from(dur / 1000).ok());
-            let mut media = Vec::with_capacity(ranked.len());
+            let wait = if probe_index.is_some() { self.cfg.stream_deadline } else { DETAIL_WAIT };
+            let (ranked, subs, done) = self.ranked(rk, &ident, u32::try_from(dur / 1000).ok(), wait);
+            let mut media = Vec::with_capacity(ranked.len().max(1));
+            // Pre-probe the leading stream once the list is complete, off this request: the play that
+            // usually follows a detail page then finds real fields (and a warmed source) waiting.
+            if probe_index.is_none() && done && self.probes.has_prober() {
+                if let Some((_, c)) = ranked.first() {
+                    let url = self.resolved.lock().unwrap_or_else(|e| e.into_inner()).get(&(rk, c.url.clone())).cloned().unwrap_or_else(|| c.url.clone());
+                    if !url.starts_with(shim_media::TORRENT_SCHEME) && self.probes.cached(&url).is_none() {
+                        if let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) {
+                            let _ = std::thread::Builder::new().name("pmsshim-preprobe".into()).spawn(move || {
+                                let _ = me.probes.probe(&url);
+                            });
+                        }
+                    }
+                }
+            }
             for (n, (i, c)) in ranked.iter().enumerate() {
-                let mut m = media::media_json(rk, *i, c, dur, &subs);
+                let mut m = shim_media::media_json(rk, *i, c, dur, &subs);
                 let probed = if probe_index == Some(n) {
-                    let r = self.probes.probe(&c.url);
+                    let r = match self.open_url(rk, &c.stream, &c.url) {
+                        Some(u) => self.probes.probe(&u),
+                        None => Some(Err("the streaming server could not open this torrent".into())),
+                    };
                     verdict = r.clone();
                     r
                 } else {
-                    self.probes.cached(&c.url)
+                    self.resolved.lock().unwrap_or_else(|e| e.into_inner()).get(&(rk, c.url.clone())).cloned()
+                        .or_else(|| Some(c.url.clone()))
+                        .and_then(|u| self.probes.cached(&u))
                 };
                 if let Some(Ok(p)) = &probed {
-                    crate::probe::apply(&mut m, p);
+                    crate::shim_probe::apply(&mut m, p);
                 }
                 media.push(m);
+            }
+            if media.is_empty() && !done {
+                // Addons still answering: a Part that plays whichever stream leads at play time, so
+                // the page is never held up and its Play button always has something to start.
+                let pending = shim_media::Classified { stream: Stream::default(), info: plx_stremio::classify::StreamInfo { label: "Finding streams…".into(), ..Default::default() }, url: String::new() };
+                media.push(shim_media::media_json(rk, BEST_PART, &pending, dur, &subs));
             }
             if let Some(d) = media.first().and_then(|m| m["duration"].as_i64()).filter(|d| *d > 0) {
                 row["duration"] = json!(d);
@@ -620,7 +716,7 @@ impl Shim {
         match verdict {
             Some(Err(e)) => return refuse(format!("This stream could not be opened ({e}). Pick another stream.")),
             Some(Ok(p)) => {
-                if let Some(why) = crate::probe::refusal(&p) {
+                if let Some(why) = crate::shim_probe::refusal(&p) {
                     return refuse(why);
                 }
             }
@@ -751,6 +847,18 @@ impl Shim {
     // ---- routing ---------------------------------------------------------------------------
 
     pub fn handle(self: &Arc<Self>, req: &Request) -> Response {
+        // Paths only: a query can carry the token, and part redirects carry credentialed URLs.
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *TRACE.get_or_init(|| std::env::var_os("PMSSHIM_TRACE").is_some()) {
+            let t = Instant::now();
+            let r = self.route(req);
+            eprintln!("pmsshim: {} {} -> {} ({} ms)", req.method, req.path, r.status, t.elapsed().as_millis());
+            return r;
+        }
+        self.route(req)
+    }
+
+    fn route(self: &Arc<Self>, req: &Request) -> Response {
         let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
         let p = req.path.as_str();
         match (req.method.as_str(), segs.as_slice()) {
@@ -758,15 +866,8 @@ impl Shim {
                 "machineIdentifier": MACHINE_ID, "friendlyName": "Nuvio", "version": "1.41.0.0000-nuvio",
                 "platform": "webOS", "myPlex": false, "myPlexSubscription": true,
             }))),
-            // plex.tv, when the app's plex.tv base points here (no account exists).
-            (_, ["api", "v2", "user"]) => Response::json(&json!({
-                "id": 1, "uuid": "nuvio-local", "username": "nuvio", "title": "Nuvio", "friendlyName": "Nuvio",
-                "email": "", "thumb": "", "profile": {"autoSelectAudio": true, "defaultSubtitleLanguage": "en", "autoSelectSubtitle": 0},
-                "subscription": {"active": true, "status": "Active", "plan": "lifetime"},
-            })),
-            (_, ["api", "v2", "user", "profile"]) => Response::json(&json!({"autoSelectAudio": true, "autoSelectSubtitle": 0, "defaultSubtitleLanguage": "en"})),
-            (_, ["api", "v2", "home", "users"]) => Response::json(&json!({"users": [{"id": 1, "uuid": "nuvio-local", "title": "Nuvio", "admin": true, "restricted": false, "protected": false, "thumb": ""}]})),
-            (_, ["api", "v2", "resources"]) => Response::json(&json!([])),
+            // plex.tv: the app's plex.tv base points here; sign-in maps onto the Nuvio account.
+            (_, ["api", "v2", rest @ ..]) => self.account.handle(req, rest),
             (_, ["api", ..]) => Response::json_status(404, &json!({"error": "no plex.tv here"})),
 
             (_, ["library", "sections"]) => Response::json(&container(json!({"Directory": [
@@ -879,10 +980,10 @@ impl Shim {
             (_, ["nuvio", "streams"]) => {
                 let rk = req.q("ratingKey").and_then(|v| v.parse().ok()).unwrap_or(-1);
                 let Some(ident) = self.keys.ident(rk) else { return Response::not_found() };
-                let (ranked, _) = self.ranked(rk, &ident, None);
+                let (ranked, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline);
                 let done = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).is_some_and(|s| s.state.lock().map(|g| g.done).unwrap_or(true));
                 Response::json(&json!({"ratingKey": rk, "complete": done,
-                    "streams": ranked.iter().map(|(i, c)| media::summary_json(*i, c)).collect::<Vec<_>>()}))
+                    "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>()}))
             }
             (_, ["nuvio", "select"]) => {
                 let rk = req.q("ratingKey").and_then(|v| v.parse().ok()).unwrap_or(-1);
@@ -994,7 +1095,9 @@ impl Shim {
 
     fn play_queue(&self, req: &Request) -> Response {
         let rk = req.q("uri").and_then(trailing_key).or_else(|| req.q("key").and_then(trailing_key)).unwrap_or(-1);
-        let Some(first) = self.item(rk) else { return Response::json(&container(json!({"Metadata": [], "playQueueID": 1}))) };
+        // The play is about to start: wait for the streams and probe the lead, so the queue's row
+        // carries the real fields rather than the detail page's early guesses.
+        let Some((first, _)) = self.item_probed(rk, Some(0)) else { return Response::json(&container(json!({"Metadata": [], "playQueueID": 1}))) };
         let mut rows = vec![first];
         if req.q("continuous") == Some("1") {
             if let Some(Ident::Episode { series, video }) = self.keys.ident(rk) {
@@ -1026,10 +1129,18 @@ impl Shim {
         let (rk, idx) = (pid / PART_STRIDE, (pid % PART_STRIDE) as usize);
         let Some(ident) = self.keys.ident(rk) else { return Response::not_found() };
         // Make sure the slot exists (a resume after a restart lands here first) and has waited.
-        let _ = self.ranked(rk, &ident, None);
-        let slot = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).cloned();
-        let stream = slot.and_then(|s| s.state.lock().unwrap_or_else(|e| e.into_inner()).streams.get(idx).cloned());
-        match stream.and_then(|s| media::playable_url(&s, self.cfg.torrent_server.as_deref())) {
+        let (ranked, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline);
+        let stream = if idx == BEST_PART {
+            ranked.first().map(|(_, c)| c.stream.clone())
+        } else {
+            let slot = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).cloned();
+            slot.and_then(|s| s.state.lock().unwrap_or_else(|e| e.into_inner()).streams.get(idx).cloned())
+        };
+        let url = stream.as_ref().and_then(|s| {
+            let u = shim_media::playable_url(s, self.torrent_server().as_deref())?;
+            self.open_url(rk, s, &u)
+        });
+        match url {
             Some(url) => Response::redirect(&url),
             None => Response::bytes(502, "text/plain", b"stream no longer available".to_vec()),
         }
@@ -1038,7 +1149,7 @@ impl Shim {
     fn subtitle(&self, sid: i64) -> Response {
         let Some(url) = self.sub_urls.lock().unwrap_or_else(|e| e.into_inner()).get(&sid).cloned() else { return Response::not_found() };
         match plx_net::net::request(&url, &[], "GET", None, plx_net::net::API, true, Some(4 << 20), None) {
-            Some(r) if r.ok() => Response::bytes(200, "text/plain; charset=utf-8", crate::subs::to_utf8_text(r.body)),
+            Some(r) if r.ok() => Response::bytes(200, "text/plain; charset=utf-8", crate::shim_subs::to_utf8_text(r.body)),
             _ => Response::bytes(502, "text/plain", b"subtitle fetch failed".to_vec()),
         }
     }
