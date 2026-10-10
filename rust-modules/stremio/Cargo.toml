@@ -21,3 +21,6 @@ plx_base = { path = "../base" }
 plx_net = { path = "../net" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
+
+[lints]
+workspace = true

@@ -5,6 +5,10 @@
 //! CONTRACT (fixed by the lead; the shim codes against it): the types in [`model`] and the
 //! functions/methods re-exported below. Extend freely; do not rename or remove without telling the
 //! lead.
+//!
+//! LOGGING RULE: configured addon URLs and stream URLs carry credentials (debrid keys, AIOStreams
+//! config blobs). Log them only through [`redact_url`] (host only); `Debug` on [`Addon`] and
+//! [`Stream`] already does.
 
 pub mod model;
 pub use model::*;
@@ -17,4 +21,14 @@ pub use classify::{classify_stream, StreamInfo};
 
 pub mod nuvio;
 
-pub mod http;
+/// The HTTP door. Named `addon_http` because the module-layer gate reads every workspace crate as
+/// one module tree, where `http` is already `plx_plex`'s; `plx_stremio::http` stays the public path.
+pub mod addon_http;
+pub use addon_http as http;
+
+pub mod torrent;
+pub use torrent::playable_url;
+
+pub mod import;
+
+mod lenient;
