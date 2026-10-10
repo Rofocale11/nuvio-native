@@ -62,11 +62,13 @@ fn a_media_open_without_the_issuing_root_in_the_bundle_fails_as_before() {
     assert!(!keypin::is_roots_latched(&key));
 }
 
+/// NuvioNative: a public DNS name (a debrid CDN) reads through the public bundle exactly like a
+/// `*.plex.direct` name; an address never uses a bundle.
 #[test]
-fn a_media_open_on_a_host_that_is_not_a_plex_direct_name_never_uses_the_bundle() {
+fn a_media_open_on_a_public_name_reads_through_the_bundle_and_an_address_never_does() {
     let _serial = plx_base::testlock::serial();
     if !curl_ready() { return; }
-    for host in ["127.0.0.1", "plex.direct.evil.example", "notplex.direct"] {
+    for host in ["127.0.0.1", "plex.direct.evil.example", "cdn.debrid.invalid"] {
         let (ca, port, _accepted) = serve(host);
         let _device = TestCaGuard::install(&mint_cert(&["unrelated.invalid"]).pem, "roots-media-name");
         let _roots = keypin::test_roots::Guard::install(&ca, "roots-media-name");
@@ -75,11 +77,14 @@ fn a_media_open_on_a_host_that_is_not_a_plex_direct_name_never_uses_the_bundle()
         }
         let key = keypin::key_of(host, i32::from(port));
         let _watch = keypin::Scoped::watch(&key);
-        let err = crate::curlio::CurlSource::open(&format!("https://{host}:{port}/video.mkv"), 0)
-            .err()
-            .expect("the bundle is for *.plex.direct names only");
-        assert_eq!(err, crate::curlio::OpenErr::Transport(60), "{host}");
-        assert!(!keypin::is_roots_latched(&key), "{host}");
+        let opened = crate::curlio::CurlSource::open(&format!("https://{host}:{port}/video.mkv"), 0);
+        if host == "127.0.0.1" {
+            assert_eq!(opened.err().expect("an address never uses a bundle"), crate::curlio::OpenErr::Transport(60));
+            assert!(!keypin::is_roots_latched(&key));
+        } else {
+            assert!(opened.is_ok(), "{host} reads through the public bundle");
+            assert!(keypin::is_roots_latched(&key), "{host}");
+        }
     }
 }
 
