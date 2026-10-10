@@ -81,6 +81,53 @@ impl StreamInfo {
     }
 }
 
+// --- text normalisation -------------------------------------------------------------------------
+
+/// Fold the decorative Unicode AIOStreams/other formatters use into plain ASCII before matching:
+/// zero-width joiners and BOMs vanish (`Web\u{200d}-\u{200d}dl` → `Web-dl`), no-break spaces become
+/// spaces, small capitals / super- and subscripts become their letters and digits
+/// (`79.4 ᴹᵇᵖˢ` → `79.4 Mbps`, `s₀₁·ᴇ₀₁` → `s01·e01`).
+pub fn fold(text: &str) -> String {
+    const MAP: &[(char, char)] = &[
+        ('ᴀ', 'a'), ('ʙ', 'b'), ('ᴄ', 'c'), ('ᴅ', 'd'), ('ᴇ', 'e'), ('ꜰ', 'f'), ('ɢ', 'g'), ('ʜ', 'h'),
+        ('ɪ', 'i'), ('ᴊ', 'j'), ('ᴋ', 'k'), ('ʟ', 'l'), ('ᴍ', 'm'), ('ɴ', 'n'), ('ᴏ', 'o'), ('ᴘ', 'p'),
+        ('ǫ', 'q'), ('ʀ', 'r'), ('ꜱ', 's'), ('ᴛ', 't'), ('ᴜ', 'u'), ('ᴠ', 'v'), ('ᴡ', 'w'), ('ʏ', 'y'),
+        ('ᴢ', 'z'), ('ᴬ', 'A'), ('ᴮ', 'B'), ('ᴰ', 'D'), ('ᴱ', 'E'), ('ᴳ', 'G'), ('ᴴ', 'H'), ('ᴵ', 'I'),
+        ('ᴶ', 'J'), ('ᴷ', 'K'), ('ᴸ', 'L'), ('ᴹ', 'M'), ('ᴺ', 'N'), ('ᴼ', 'O'), ('ᴾ', 'P'), ('ᴿ', 'R'),
+        ('ᵀ', 'T'), ('ᵁ', 'U'), ('ⱽ', 'V'), ('ᵂ', 'W'), ('ᵃ', 'a'), ('ᵇ', 'b'), ('ᶜ', 'c'), ('ᵈ', 'd'),
+        ('ᵉ', 'e'), ('ᶠ', 'f'), ('ᵍ', 'g'), ('ʰ', 'h'), ('ⁱ', 'i'), ('ʲ', 'j'), ('ᵏ', 'k'), ('ˡ', 'l'),
+        ('ᵐ', 'm'), ('ⁿ', 'n'), ('ᵒ', 'o'), ('ᵖ', 'p'), ('ʳ', 'r'), ('ˢ', 's'), ('ᵗ', 't'), ('ᵘ', 'u'),
+        ('ᵛ', 'v'), ('ʷ', 'w'), ('ˣ', 'x'), ('ʸ', 'y'), ('ᶻ', 'z'), ('⁰', '0'), ('¹', '1'), ('²', '2'),
+        ('³', '3'), ('⁴', '4'), ('⁵', '5'), ('⁶', '6'), ('⁷', '7'), ('⁸', '8'), ('⁹', '9'), ('₀', '0'),
+        ('₁', '1'), ('₂', '2'), ('₃', '3'), ('₄', '4'), ('₅', '5'), ('₆', '6'), ('₇', '7'), ('₈', '8'),
+        ('₉', '9'), ('\u{a0}', ' '), ('\u{2007}', ' '), ('\u{202f}', ' '),
+    ];
+    text.chars()
+        .filter(|c| !matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{fe0e}'))
+        .map(|c| MAP.iter().find(|(k, _)| *k == c).map(|(_, v)| *v).unwrap_or(c))
+        .collect()
+}
+
+/// An explicitly stated bitrate: `79.4 Mbps`, `25 Mb/s`, `8000 kbps`.
+pub fn bitrate_from_text(text: &str) -> Option<u32> {
+    let l = text.to_lowercase();
+    for (unit, mult) in [("mbps", 1000.0), ("mb/s", 1000.0), ("mbit/s", 1000.0), ("kbps", 1.0), ("kb/s", 1.0)] {
+        for (pos, _) in l.match_indices(unit) {
+            if !boundary(l[pos + unit.len()..].chars().next()) {
+                continue;
+            }
+            let head = l[..pos].trim_end();
+            let num: String = head.chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect::<Vec<_>>().into_iter().rev().collect();
+            if let Ok(n) = num.replace(',', ".").parse::<f64>() {
+                if n > 0.0 {
+                    return Some((n * mult) as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
 // --- token matching -----------------------------------------------------------------------------
 
 fn boundary(c: Option<char>) -> bool {
@@ -126,7 +173,10 @@ pub fn resolution_from_text(text: &str) -> Option<u32> {
     if any_token(&t, &["360p", "360"]) {
         return Some(360);
     }
-    None
+    // Any other `<n>p` token (`406p`, `540p`) within plausible video heights.
+    t.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter_map(|w| w.strip_suffix('p')?.parse::<u32>().ok())
+        .find(|h| (240..=4320).contains(h))
 }
 
 /// Nuvio's `qualityFromText`, as its display label.
@@ -326,17 +376,16 @@ fn debrid_tag(name: &str) -> Option<String> {
     None
 }
 
-/// The first line of a Torrentio/MediaFusion/Comet text block when it is a file or release name:
-/// it ends in a container extension, or it is a spaceless dotted release name
-/// (`Movie.2019.2160p.BluRay.x265-GRP`).
+/// The file or release name in a Torrentio/MediaFusion/Comet text block: a line ending in a
+/// container extension (Torrentio puts the episode file of a season pack on line 2), else a first
+/// line that is a spaceless dotted release name (`Movie.2019.2160p.BluRay.x265-GRP`).
 fn first_line_filename(s: &str) -> Option<String> {
-    let first = s.lines().next()?.trim().trim_start_matches(|c: char| !c.is_ascii_alphanumeric() && c != '[').trim();
-    if first.is_empty() {
-        return None;
+    let clean = |l: &str| l.trim().trim_start_matches(|c: char| !c.is_ascii_alphanumeric() && c != '[').trim().to_string();
+    if let Some(l) = s.lines().map(clean).find(|l| !l.is_empty() && container_of_name(l).is_some()) {
+        return Some(l);
     }
-    let has_ext = container_of_name(first).is_some();
-    let release_like = !first.contains(' ') && first.matches('.').count() >= 3;
-    (has_ext || release_like).then(|| first.to_string())
+    let first = clean(s.lines().next()?);
+    (!first.is_empty() && !first.contains(' ') && first.matches('.').count() >= 3).then_some(first)
 }
 
 fn format_size(bytes: u64) -> String {
@@ -350,9 +399,9 @@ fn format_size(bytes: u64) -> String {
 
 /// `runtime_secs` lets the classifier estimate bitrate from size.
 pub fn classify_stream(stream: &Stream, runtime_secs: Option<u32>) -> StreamInfo {
-    let name = stream.name.clone().unwrap_or_default();
-    let title = stream.title.clone().unwrap_or_default();
-    let desc = stream.description.clone().unwrap_or_default();
+    let name = fold(stream.name.as_deref().unwrap_or_default());
+    let title = fold(stream.title.as_deref().unwrap_or_default());
+    let desc = fold(stream.description.as_deref().unwrap_or_default());
     let hint_name = stream.behavior_hints.filename.clone().unwrap_or_default();
     let filename = stream
         .behavior_hints
@@ -385,10 +434,10 @@ pub fn classify_stream(stream: &Stream, runtime_secs: Option<u32>) -> StreamInfo
         .or_else(|| size_from_text(&desc))
         .or_else(|| size_from_text(&title))
         .or_else(|| size_from_text(&name));
-    let bitrate_kbps = match (size_bytes, runtime_secs) {
+    let bitrate_kbps = bitrate_from_text(&all).or(match (size_bytes, runtime_secs) {
         (Some(b), Some(r)) if r > 0 => u32::try_from(b.saturating_mul(8) / u64::from(r) / 1000).ok(),
         _ => None,
-    };
+    });
     let seeders = seeders_from_text(&all);
     let cached = cached_from_text(&name, &all);
     let source = source_from_text(&lower).map(str::to_string);
@@ -458,7 +507,8 @@ fn build_label(info: &StreamInfo, stream: &Stream) -> String {
     } else {
         stream.addon_name.clone()
     };
-    if let Some(tag) = stream.name.as_deref().and_then(debrid_tag) {
+    let all = fold(&[stream.name.as_deref().unwrap_or(""), stream.description.as_deref().unwrap_or(""), stream.title.as_deref().unwrap_or("")].join("\n"));
+    if let Some(tag) = debrid_tag(&all) {
         origin = format!("{origin} {tag}{}", if info.cached { "+" } else { "" }).trim().to_string();
     } else if info.cached {
         origin = format!("{origin} ⚡").trim().to_string();
@@ -601,6 +651,39 @@ mod tests {
         assert_eq!(size_from_text("1,5 GB"), Some((1.5 * (1u64 << 30) as f64) as u64));
         assert_eq!(size_from_text("no size here 1080p"), None);
         assert_eq!(size_from_text("2 GBP"), None);
+    }
+
+    #[test]
+    fn aiostreams_custom_template() {
+        // The shape of a user's custom AIOStreams formatter: decorative Unicode throughout.
+        let mut st = s(
+            "\u{a0}\u{a0}4K\u{a0}\u{200d}\u{200d}⚡\u{200d}\n\u{a0}〈Web\u{200d}-\u{200d}dl〉\u{200d}\n\u{a0}★★★★☆",
+            "",
+            "✎  Some Show  s₀₁·ᴇ₀₁\n▣  HEVC ✦ DV · HDR10+\n♬  Atmos · DD+  ♯ 5.1\n◈ 27.2 / 54.3 GB · 25 ᴹᵇᵖˢ · 1d\n⛉ [TB] ComeTorz · GRP\n✓ ᴇɴ · sᴜʙ (ᴇɴ)",
+        );
+        st.addon_name = "SELection".into();
+        st.behavior_hints.video_size = Some(29_205_777_000);
+        let i = classify_stream(&st, None);
+        assert_eq!(i.height, Some(2160));
+        assert_eq!(i.hdr, Hdr::DolbyVision { with_hdr10_fallback: true });
+        assert_eq!(i.video_codec.as_deref(), Some("hevc"));
+        assert_eq!(i.audio_codec.as_deref(), Some("eac3"));
+        assert!(i.atmos && i.cached);
+        assert_eq!(i.source.as_deref(), Some("WEB-DL"));
+        assert_eq!(i.bitrate_kbps, Some(25_000));
+        assert_eq!(i.size_bytes, Some(29_205_777_000));
+        assert_eq!(i.label, "4K DV HDR HEVC WEB-DL Atmos · 27.2 GB · SELection TB+");
+        assert_eq!(fold("79.4 ᴹᵇᵖˢ"), "79.4 Mbps");
+    }
+
+    #[test]
+    fn season_pack_file_line_and_odd_heights() {
+        let st = s("Torrentio\n406p", "Game Of Thrones Complete Season 1 406p mkv + Subs\nGame Of Thrones S01E01 Winter Is Coming.mkv\n👤 7 💾 341.45 MB", "");
+        let i = classify_stream(&st, None);
+        assert_eq!(i.height, Some(406));
+        assert_eq!(i.filename.as_deref(), Some("Game Of Thrones S01E01 Winter Is Coming.mkv"));
+        assert_eq!(i.container.as_deref(), Some("mkv"));
+        assert_eq!(resolution_from_text("x 5000p"), None);
     }
 
     #[test]
