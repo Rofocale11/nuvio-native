@@ -12,6 +12,7 @@ pub struct Manifest {
     pub id: String,
     pub name: String,
     pub version: String,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub description: Option<String>,
     pub logo: Option<String>,
     /// Either plain names (`"stream"`) or objects; normalised by [`Manifest::resources`].
@@ -33,14 +34,24 @@ pub struct ResourceDecl {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CatalogDecl {
-    #[serde(rename = "type")]
+    /// `apiType` is the field name in Nuvio's cached (already-mapped) manifests.
+    #[serde(rename = "type", alias = "apiType")]
     pub type_: ContentType,
     pub id: String,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub name: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::extras")]
     pub extra: Vec<ExtraDecl>,
     /// Legacy form of `extra[].isRequired`.
     pub extra_required: Vec<String>,
     pub extra_supported: Vec<String>,
+    /// The addon's `showInHome`: when ANY catalog of an addon sets it explicitly, Nuvio puts on
+    /// Home only the ones set to true.
+    #[serde(deserialize_with = "crate::lenient::opt_bool")]
+    pub show_in_home: Option<bool>,
+    /// Page size for `skip` paging, when the addon declares one.
+    #[serde(deserialize_with = "crate::lenient::opt_u32")]
+    pub page_size: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -52,7 +63,9 @@ pub struct ExtraDecl {
 }
 
 /// An installed addon: where it lives plus its manifest.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// `Debug` prints the transport URL as host only: configured addon URLs (AIOStreams, Torrentio
+/// with debrid) embed credentials, and logs must never carry them.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Addon {
     /// Base URL, WITHOUT the trailing `/manifest.json` (that is how Stremio and Nuvio store it).
@@ -60,6 +73,60 @@ pub struct Addon {
     pub manifest: Manifest,
     /// User disabled it without uninstalling.
     pub disabled: bool,
+    /// The user's display-name override (Nuvio's `name` column), when set.
+    pub display_name: Option<String>,
+}
+
+impl std::fmt::Debug for Addon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Addon")
+            .field("transport_url", &redact_url(&self.transport_url))
+            .field("id", &self.manifest.id)
+            .field("name", &self.manifest.name)
+            .field("disabled", &self.disabled)
+            .field("display_name", &self.display_name)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Stream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stream")
+            .field("url", &self.url.as_deref().map(redact_url))
+            .field("info_hash", &self.info_hash)
+            .field("file_idx", &self.file_idx)
+            .field("external_url", &self.external_url.as_deref().map(redact_url))
+            .field("name", &self.name)
+            .field("title", &self.title)
+            .field("description", &self.description)
+            .field("behavior_hints", &self.behavior_hints)
+            .field("subtitles", &self.subtitles.len())
+            .field("addon_name", &self.addon_name)
+            .finish()
+    }
+}
+
+/// `scheme://host` of a URL, for logs: never the path or query, which carry addon configuration
+/// and credentials.
+pub fn redact_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => return "<url>".to_string(),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    format!("{scheme}://{host}")
+}
+
+impl Addon {
+    /// What the UI calls this addon: the override, else the manifest name, else the id.
+    pub fn label(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(Some(self.manifest.name.as_str()).filter(|s| !s.trim().is_empty()))
+            .unwrap_or(&self.manifest.id)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -72,9 +139,13 @@ pub struct MetaPreview {
     pub poster: Option<String>,
     pub background: Option<String>,
     pub logo: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub description: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub release_info: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_rating: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::string_vec")]
     pub genres: Vec<String>,
 }
 
@@ -88,17 +159,30 @@ pub struct Meta {
     pub poster: Option<String>,
     pub background: Option<String>,
     pub logo: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub description: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub release_info: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub released: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_rating: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub runtime: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::string_vec")]
     pub genres: Vec<String>,
+    #[serde(deserialize_with = "crate::lenient::string_vec")]
     pub cast: Vec<String>,
+    #[serde(deserialize_with = "crate::lenient::string_vec")]
     pub director: Vec<String>,
+    #[serde(deserialize_with = "crate::lenient::string_vec")]
     pub writer: Vec<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub country: Option<String>,
     pub videos: Vec<Video>,
+    /// IMDb id when the meta's own id is not one (`tmdb:…` catalogs carry it here).
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
+    pub imdb_id: Option<String>,
     pub trailers: Vec<serde_json::Value>,
     pub behavior_hints: serde_json::Value,
 }
@@ -112,20 +196,25 @@ pub struct Video {
     /// Some addons use `name` instead of `title`.
     pub title: Option<String>,
     pub name: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_u32")]
     pub season: Option<u32>,
-    #[serde(alias = "number")]
+    #[serde(deserialize_with = "crate::lenient::opt_u32")]
     pub episode: Option<u32>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub released: Option<String>,
     pub thumbnail: Option<String>,
-    #[serde(alias = "description")]
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub overview: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// `Debug` redacts `url`/`external_url` to host only (debrid/AIOStreams playback URLs embed
+/// credentials).
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Stream {
     pub url: Option<String>,
     pub info_hash: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_u32")]
     pub file_idx: Option<u32>,
     pub file_must_include: Option<serde_json::Value>,
     pub yt_id: Option<String>,
@@ -134,6 +223,7 @@ pub struct Stream {
     pub name: Option<String>,
     /// Legacy; newer addons use `description`. Torrentio puts size/seeders/file name here.
     pub title: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub description: Option<String>,
     pub sources: Vec<String>,
     pub subtitles: Vec<Subtitle>,
@@ -151,6 +241,7 @@ pub struct StreamBehaviorHints {
     pub not_web_ready: bool,
     pub binge_group: Option<String>,
     pub filename: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::opt_u64")]
     pub video_size: Option<u64>,
     pub video_hash: Option<String>,
     /// `{ "request": {hdr: val}, "response": {...} }`
@@ -176,5 +267,18 @@ pub enum Error {
     /// No installed addon serves this request.
     NoAddon,
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Network => write!(f, "network error"),
+            Error::Status(s) => write!(f, "HTTP {s}"),
+            Error::Parse(m) => write!(f, "parse error: {m}"),
+            Error::NoAddon => write!(f, "no addon serves this request"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
