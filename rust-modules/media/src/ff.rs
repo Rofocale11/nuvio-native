@@ -1756,6 +1756,9 @@ use pcm::PcmLane;
 mod enc;
 pub use enc::{declare as declare_enc, EncSpec};
 use enc::EncLane;
+// NuvioNative: open a third-party stream and report what it really holds (the PMS shim's input).
+#[path = "ff_probe.rs"]
+pub mod probe;
 use subs::{SubKind, SubTracks};
 #[cfg(test)]
 use subs::{decode_bitmap_cue, open_sub_decoder, sub_kind};
