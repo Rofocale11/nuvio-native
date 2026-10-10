@@ -120,18 +120,26 @@ fn with_no_bundle_on_disk_the_fallback_does_not_engage() {
     refused_with(&out, &[60]);
 }
 
+/// NuvioNative: any public DNS name (a debrid CDN, an addon host) whose issuer the device store
+/// lacks is verified once more against the bundled public roots, exactly like a plex.direct name.
 #[test]
-fn a_host_that_is_not_a_plex_direct_name_never_uses_the_bundle() {
+fn a_public_dns_host_whose_issuer_the_device_lacks_is_verified_through_the_public_bundle() {
     let _serial = plx_base::testlock::serial();
     if !curl_ready() { return; }
-    for host in [
-        "roots-test.invalid",
-        "plex.direct.evil.example",
-        "notplex.direct",
-        "127-0-0-1.0123456789abcdef0123456789abcdef.plex.direct.evil.example",
-    ] {
+    for host in ["roots-test.invalid", "cdn.debrid.invalid"] {
         let cert = leaf(&[host]);
-        refused_with(&request_to(host, Arc::clone(&cert), &unrelated_store(), Some(&cert.pem), "roots-name"), &[60]);
+        let out = request_to(host, Arc::clone(&cert), &unrelated_store(), Some(&cert.pem), "roots-public");
+        assert!(out.result.as_ref().is_ok_and(|r| r.status == 200), "{host}: verified through the public bundle");
+    }
+}
+
+#[test]
+fn the_bundle_a_host_may_use_is_le_for_plex_direct_public_for_names_and_none_for_addresses() {
+    assert_eq!(keypin::roots_file_for("1-2-3-4.0123456789abcdef0123456789abcdef.plex.direct"), Some(keypin::ROOTS_FILE));
+    assert_eq!(keypin::roots_file_for("download.real-debrid.com"), Some(keypin::PUBLIC_ROOTS_FILE));
+    assert_eq!(keypin::roots_file_for("plex.direct.evil.example"), Some(keypin::PUBLIC_ROOTS_FILE));
+    for host in ["10.0.0.5", "127.0.0.1", "::1", "localhost", "", ".", "a..b", "x.y:443@evil"] {
+        assert_eq!(keypin::roots_file_for(host), None, "{host:?}");
     }
 }
 
@@ -378,7 +386,7 @@ fn is_plex_direct_is_a_suffix_rule_on_a_clean_host_name() {
 }
 
 #[test]
-fn the_roots_trigger_is_a_missing_issuer_on_a_plex_direct_name_and_never_a_date_or_a_name() {
+fn the_roots_trigger_is_a_missing_issuer_on_a_dns_name_and_never_a_date_or_an_address() {
     let _serial = plx_base::testlock::serial();
     let bundle = keypin::test_roots::Guard::install(&mint_cert(&["decision.invalid"]).pem, "roots-decision");
     let key = keypin::key_of(PLEX_DIRECT, 41001);
@@ -394,7 +402,11 @@ fn the_roots_trigger_is_a_missing_issuer_on_a_plex_direct_name_and_never_a_date_
     for rc in [0, 6, 7, 28, 35, 51, 58, 77, 90] {
         assert_eq!(after_strict_failure(&key, rc, Some(20)), None, "rc {rc}");
     }
-    for other in ["plex.tv", "plex.direct.evil.example", "notplex.direct", "127.0.0.1"] {
+    // NuvioNative: any public DNS name gets the (public) bundle; an address never does.
+    for name in ["plex.tv", "plex.direct.evil.example", "notplex.direct"] {
+        assert!(matches!(after_strict_failure(&keypin::key_of(name, 443), 60, Some(20)), Some(keypin::Mode::Roots { .. })), "{name}");
+    }
+    for other in ["127.0.0.1", "10.0.0.73", "localhost"] {
         assert_eq!(after_strict_failure(&keypin::key_of(other, 443), 60, Some(20)), None, "{other}");
     }
     // The two modes are disjoint: a held key answers a date failure, the bundle an issuer failure.
