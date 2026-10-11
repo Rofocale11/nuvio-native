@@ -113,4 +113,8 @@ the original library. The button layout was inspected on the TV. The broad `make
 check` follow-up was stopped at the user's request to prioritize delivery; the
 focused screen/shim/addon suites, six replays and shipping compile had passed.
 Continue Watching now refreshes stored artwork through the same poster policy.
-The refreshed stable install remains pending.
+The first TV poster check exposed `WebP is not supported` decode failures:
+BetterPosters serves WebP even for `.jpg` paths. Both image dependency declarations
+now enable the pure Rust WebP decoder, retaining the existing allocation limits.
+The shipping compile passed after enabling it. The refreshed TV poster check and
+stable install remain pending.
