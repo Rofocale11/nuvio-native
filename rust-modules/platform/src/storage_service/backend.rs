@@ -243,6 +243,29 @@ impl<R: Rpc> Backend<R> {
             }
         }
         match request {
+            Request::LoadNuvio {} => Ok(Response::Nuvio {
+                payload: self.load_nuvio()?.map(|(_, payload)| SecretString(payload)),
+            }),
+            Request::SaveNuvio { payload } => {
+                if payload.0.len() > state::MAX_LOGICAL_BYTES {
+                    return Err(ErrorCode::Invalid);
+                }
+                // A separate object in the helper's private kind: no session mutation can
+                // erase the addons, and DB8 never adds fields to the opaque JSON string.
+                let current = self.load_nuvio()?;
+                let mut object = json!({"_id": self.nuvio_id(), "_kind": format!("{}:1", self.service),
+                    "nuvio": payload.0});
+                if let Some((rev, _)) = current { object["_rev"] = json!(rev); }
+                let put = self.rpc.call("luna://com.palm.db/put", &json!({"objects": [object]}));
+                record_put_failure(&put);
+                // A lost reply is reconciled by exact readback; never delete an import on
+                // an unverified save. Concurrent saves are fenced by DB8's revision.
+                if self.load_nuvio()?.is_some_and(|(_, stored)| stored == payload.0) {
+                    Ok(Response::Nuvio { payload: Some(payload) })
+                } else {
+                    Err(ErrorCode::Unavailable)
+                }
+            },
             Request::Load {} => match self.load().map_err(load_stage)? {
                 None => Ok(Response::Missing),
                 Some((rev, state)) => {
@@ -346,6 +369,25 @@ impl<R: Rpc> Backend<R> {
             } => self.commit(expected, operation_id, digest, mutation),
             Request::Hello { .. } => Err(ErrorCode::Protocol),
         }
+    }
+    fn nuvio_id(&self) -> String {
+        self.flavor.object_id().replacen("plxstate", "nvaddons", 1)
+    }
+
+    fn load_nuvio(&mut self) -> Result<Option<(u64, String)>, ErrorCode> {
+        let reply = self.rpc.call("luna://com.palm.db/get", &json!({"ids": [self.nuvio_id()]}))?;
+        if reply["returnValue"] != true { return Err(db8_failure(&reply)); }
+        let objects = reply["results"].as_array().ok_or(ErrorCode::Corrupt)?;
+        if objects.is_empty() { return Ok(None); }
+        if objects.len() != 1 { return Err(ErrorCode::Corrupt); }
+        let object = &objects[0];
+        if object["_kind"] != format!("{}:1", self.service) || object["_id"] != self.nuvio_id() {
+            return Err(ErrorCode::Corrupt);
+        }
+        let rev = object["_rev"].as_u64().ok_or(ErrorCode::Corrupt)?;
+        let payload = object["nuvio"].as_str().ok_or(ErrorCode::Corrupt)?;
+        if payload.len() > state::MAX_LOGICAL_BYTES { return Err(ErrorCode::Corrupt); }
+        Ok(Some((rev, payload.to_string())))
     }
     fn commit(
         &mut self,
@@ -1310,6 +1352,47 @@ mod tests {
             Flavor::Stable,
             "com.beb.plxnative.storage".into(),
         )
+    }
+    fn addon_record(rev: u64, payload: &str) -> Value {
+        json!({"returnValue":true,"results":[{"_id":"nvaddons.stable",
+            "_kind":"com.nuvionative.app.storage:1","_rev":rev,"nuvio":payload}]})
+    }
+    #[test]
+    fn addon_configuration_survives_restart_as_opaque_json() {
+        let payload = r#"{"version":1,"addons":[{"private":"fixture"}]}"#;
+        let mut writer = backend(vec![Ok(json!({"returnValue":true,"results":[]})),
+            Ok(json!({"returnValue":true})), Ok(Value::Null)]);
+        assert!(matches!(writer.try_dispatch(Request::SaveNuvio {payload:SecretString(payload.into())}),
+            Ok(Response::Nuvio {payload:Some(p)}) if p.0 == payload));
+        let saved = &writer.rpc.calls[1].1["objects"][0];
+        assert!(saved["nuvio"].is_string(), "DB8 must not rewrite addon array objects");
+        assert_eq!(saved["_id"], "nvaddons.stable");
+        let mut restarted = backend(vec![Ok(addon_record(1,payload))]);
+        assert!(matches!(restarted.try_dispatch(Request::LoadNuvio {}),
+            Ok(Response::Nuvio {payload:Some(p)}) if p.0 == payload));
+        assert!(writer.rpc.calls.iter().all(|(_,v)| !v.to_string().contains("plxstate")),
+            "saving addons must not mutate account/session state");
+    }
+    #[test]
+    fn addon_save_reconciles_a_lost_reply_and_fences_updates_by_revision() {
+        let mut writer = backend(vec![Ok(addon_record(9,"old")),Err(ErrorCode::Unavailable),
+            Ok(addon_record(10,"new"))]);
+        assert!(writer.try_dispatch(Request::SaveNuvio {payload:SecretString("new".into())}).is_ok());
+        assert_eq!(writer.rpc.calls[1].1["objects"][0]["_rev"],9);
+        let mut rejected = backend(vec![Ok(addon_record(9,"old")),
+            Ok(json!({"returnValue":false,"errorCode":-3961})),Ok(addon_record(9,"old"))]);
+        assert!(rejected.try_dispatch(Request::SaveNuvio {payload:SecretString("new".into())}).is_err());
+    }
+    #[test]
+    fn addon_storage_rejects_wrong_owners_and_oversized_payloads() {
+        let mut bad = addon_record(1,"fixture");
+        bad["results"][0]["_kind"]=json!("other.app:1");
+        let mut reader=backend(vec![Ok(bad)]);
+        assert!(reader.try_dispatch(Request::LoadNuvio {}).is_err());
+        let mut writer=backend(vec![]);
+        assert!(writer.try_dispatch(Request::SaveNuvio {
+            payload:SecretString("x".repeat(state::MAX_LOGICAL_BYTES+1))}).is_err());
+        assert!(writer.rpc.calls.is_empty());
     }
     fn record(rev: u64) -> Value {
         let state = CanonicalState::new(Flavor::Stable, Generation([1; 16]));

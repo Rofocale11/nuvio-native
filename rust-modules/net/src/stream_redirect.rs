@@ -37,7 +37,7 @@ use std::os::raw::c_int;
 use std::time::Instant;
 
 use super::{
-    hs_redirect_location, http_open_with_timeouts, log_endpoint, HttpOpenError, HttpStream,
+    hs_redirect_location, http_open_with_timeouts, HttpOpenError, HttpStream,
     CONNECT_TIMEOUT_MS, MEDIA_RECV_TIMEOUT_MS, MEDIA_SEND_TIMEOUT_MS,
 };
 use plx_base::checkpoint::Checkpoint;
@@ -145,9 +145,8 @@ pub fn open_following(
         }
         if !(req.credential_gate)(&cur.origin, &cur.path, &header_lines(&extra)) {
             plx_base::eventlog::log(&format!(
-                "stream: {}{} REFUSED: a credential may not travel to this plaintext origin",
-                cur.origin.log_form(),
-                log_endpoint(&cur.path)
+                "stream: {} REFUSED: a credential may not travel to this plaintext origin",
+                cur.origin.log_form()
             ));
             return Err(FollowError::Refused);
         }
@@ -188,17 +187,15 @@ pub fn open_following(
         let next = hs_redirect_location(hs).and_then(|loc| resolve_location(&cur, &loc));
         let Some(mut next) = next else {
             plx_base::eventlog::log(&format!(
-                "stream: redirect {status} from {}{} has no usable Location",
-                cur.origin.log_form(),
-                log_endpoint(&cur.path)
+                "stream: redirect {status} from {} has no usable Location",
+                cur.origin.log_form()
             ));
             return Err(FollowError::BadLocation(status));
         };
         if hop >= MAX_HOPS {
             plx_base::eventlog::log(&format!(
-                "stream: redirect {status} -> {}{} REFUSED: more than {MAX_HOPS} hops",
-                next.origin.log_form(),
-                log_endpoint(&next.path)
+                "stream: redirect {status} -> {} REFUSED: more than {MAX_HOPS} hops",
+                next.origin.log_form()
             ));
             return Err(FollowError::TooManyHops);
         }
@@ -206,9 +203,8 @@ pub fn open_following(
         let same = same_origin(&next.origin, req.origin);
         if !same && req.same_origin_only {
             plx_base::eventlog::log(&format!(
-                "stream: redirect {status} -> {}{} REFUSED: this request may not leave {}",
+                "stream: redirect {status} -> {} REFUSED: this request may not leave {}",
                 next.origin.log_form(),
-                log_endpoint(&next.path),
                 req.origin.log_form()
             ));
             return Err(FollowError::LeftOrigin);
@@ -219,9 +215,8 @@ pub fn open_following(
             }
         }
         plx_base::eventlog::log(&format!(
-            "stream: redirect {status} -> {}{} hop={hop} same_origin={same}",
-            next.origin.log_form(),
-            log_endpoint(&next.path)
+            "stream: redirect {status} -> {} hop={hop} same_origin={same}",
+            next.origin.log_form()
         ));
         cur = next;
     }

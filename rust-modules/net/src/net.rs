@@ -857,6 +857,26 @@ pub const BULK: Timeouts = Timeouts {
     low_speed_s: 30,
 };
 
+/// Only an authority, without userinfo, path or query, may enter a network diagnostic.
+fn diagnostic_peer(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return "<unknown>".into(); };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || !authority.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)) {
+        return "<redacted>".into();
+    }
+    let has_port = if authority.starts_with('[') { authority.contains("]:") } else { authority.contains(':') };
+    if has_port { authority.into() }
+    else { format!("{authority}:{}", if scheme.eq_ignore_ascii_case("https") { 443 } else { 80 }) }
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostic_peers_never_include_credentials_or_paths() {
+    assert_eq!(diagnostic_peer("http://127.0.0.1:2710/status"), "127.0.0.1:2710");
+    assert_eq!(diagnostic_peer("https://example.invalid/private-key/manifest.json?token=secret"), "example.invalid:443");
+    assert_eq!(diagnostic_peer("https://user:secret@example.invalid/private"), "<redacted>");
+}
+
 /// Protocol floor for a public redirect. A TLS request may remain TLS only; a plaintext request
 /// may stay plaintext or upgrade. Pure so the no-downgrade rule is host-testable.
 fn allowed_redirect_protocols(url: &[u8]) -> c_long {
@@ -2525,7 +2545,7 @@ fn request_tls_sink(
         // A key-mode pin mismatch has its own line ([`keypin::key_refused`]); this one would call
         // it a stale lab session.
         if !(matches!(final_mode, keypin::Mode::Key { .. }) && rc == keypin::PIN_MISMATCH) {
-            plx_base::eventlog::log(&format!("net: curl rc={rc} — {why}"));
+            plx_base::eventlog::log(&format!("net: curl rc={rc} peer={} — {why}", diagnostic_peer(url)));
         }
     }
     // `done_verify` is read only for the one code that carries it, from the attempt that DECIDED

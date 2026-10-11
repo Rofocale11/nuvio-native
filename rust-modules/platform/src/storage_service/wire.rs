@@ -88,6 +88,8 @@ pub enum WireMutation {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    LoadNuvio {},
+    SaveNuvio { payload: SecretString },
     Hello {
         protocol: u32,
         nonce: String,
@@ -221,6 +223,7 @@ pub enum AuthLoad {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    Nuvio { payload: Option<SecretString> },
     Hello {
         protocol: u32,
         nonce: String,

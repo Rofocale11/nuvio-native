@@ -1351,6 +1351,7 @@ pub enum AppMsg {
     /// the destination and the PAGE navigates, which is `LibraryMenu`'s shape (`LibrarySelect`) and
     /// what keeps "what a press means on the Detail page" in one place instead of two.
     AltSourceOpen(ContentArg),
+    NuvioStreamSelected,
 }
 
 /// What the consent machine is told (§2.3): a person's answer to both questions at once.

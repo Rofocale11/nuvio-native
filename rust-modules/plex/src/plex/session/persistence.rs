@@ -1054,6 +1054,7 @@ fn helper_commit_with(
         }),
         Ok(response) => {
             let shape = match response {
+                Response::Nuvio { .. } => "nuvio",
                 Response::Commit { .. } => "commit",
                 Response::Reconcile { .. } => "reconcile",
                 Response::Hello { .. } => "hello",

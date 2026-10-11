@@ -477,16 +477,24 @@ impl AddonSet {
     /// Load from / save to the app's JSON file (format owned by this crate).
     pub fn load(path: &Path) -> Option<AddonSet> {
         let bytes = std::fs::read(path).ok()?;
-        let p: Persisted = serde_json::from_slice(&bytes).ok()?;
+        Self::from_json(std::str::from_utf8(&bytes).ok()?)
+    }
+
+    /// Versioned, opaque storage payload. Contains addon credentials; never log it.
+    pub fn from_json(payload: &str) -> Option<AddonSet> {
+        let p: Persisted = serde_json::from_str(payload).ok()?;
         if p.version != PERSIST_VERSION {
             return None;
         }
         Some(AddonSet { addons: p.addons })
     }
 
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(&Persisted { version: PERSIST_VERSION, addons: self.addons.clone() })
+    }
+
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let p = Persisted { version: PERSIST_VERSION, addons: self.addons.clone() };
-        let bytes = serde_json::to_vec(&p).map_err(std::io::Error::other)?;
+        let bytes = self.to_json().map_err(std::io::Error::other)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }

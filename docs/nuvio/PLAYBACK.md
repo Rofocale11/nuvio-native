@@ -47,8 +47,8 @@ opens the URL with the bundled libavformat over a private curl transfer and retu
 duration, size, the video track (codec, WxH, fps, bit depth, profile, `color_trc/primaries/space`,
 `dovi {profile, level, bl_compat, rpu, el, bl}`), and every audio/subtitle track in **file order**
 (codec, profile, channels, language, title, default, forced). Callable from any thread after
-`ff::boot()`. The shim should run it when the player asks `/video/:/transcode/universal/decision`
-for an item (or when a stream is picked), cache it per stream URL, and emit the PMS fields from it:
+`ff::boot()`. The shim runs it when the player asks `/video/:/transcode/universal/decision`
+for an item (or when a stream is picked), caches it per stream URL, and emits the PMS fields from it:
 
 | PMS field | from |
 |---|---|
@@ -61,7 +61,10 @@ for an item (or when a stream is picked), cache it per stream URL, and emit the 
 | `Part.size`, `Part.duration`, `Media.duration` | `p.size`, `p.duration_ms` |
 
 Until the probe answers, label guesses are acceptable for the **detail page** only; a play must
-not start on guessed fields. A probe failure (`Err`) means "not playable here" (unsupported
+not start on guessed fields. The Nuvio route fetches this decision BEFORE queueing or
+planning playback, replaces the detail item with the probed item, and uses Original
+quality because the shim has no transcoder. Discovery has a 60 s budget, probing 45 s,
+and the control-plane decision request has a 120 s deadline. A probe failure (`Err`) means "not playable here" (unsupported
 container — the bundled FFmpeg demuxes only Matroska/WebM, MP4/MOV, MPEG-TS and raw H.264/HEVC —
 or unreachable); say so instead of starting the player.
 
@@ -142,5 +145,19 @@ Never reached for direct play: `/video/:/transcode/universal/start.mkv`, `/trans
 | github.com `test5.mkv` (302 → raw.githubusercontent) | mkv, h264 1024x576 24 fps, 2× aac (default; eng "Commentary"), 8× subrip with languages |
 | `http://127.0.0.1:<port>/library/parts/7/1/file.mp4?X-Plex-Token=…` → 302 → jellyfin P8.1 | probed through the hop; the token only ever reached the loopback server |
 
-Not verified: anything on the television (decoder, DV mode, HDR10 base of a P7 file, the CX's
-own trust store against debrid hosts). See the TV checklist in the playback agent's report.
+## Verified on the CX (2026-10-10, debug install)
+
+An AIOStreams 86.4 GB source probed as HEVC 3840×2160, 23.976 fps, DV P8, two audio
+tracks and eight embedded subtitles. The native Load declared H265/AC3 with DV P8,
+and Starfish reported `hdrType: DolbyVision`. Displayed frames and position advanced.
+Pause held the position and resume advanced it. Seeks reopened the CDN range and
+returned success. An audio switch loaded AC3 PLUS (EAC3).
+
+The Streams overlay selected a second 4K DV source (HEVC 3832×1600, 23.976 fps,
+four audio tracks, three embedded subtitle tracks). That source played and sought.
+Selecting an embedded text subtitle returned HTTP 200, followed by nonempty timed
+subtitle cues. Native UI screenshots do not include the video plane and are suppressed
+while it is bound, so they cannot prove visible subtitle compositing.
+
+P7 HDR10 fallback and Nuvio account QR login remain unverified. See `VALIDATION.md`
+for the stable install's final checks.

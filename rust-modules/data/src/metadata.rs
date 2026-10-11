@@ -2770,12 +2770,12 @@ pub fn fetch_playing_item(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Pla
         return None;
     }
     let it = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(rk));
-    Some(playing_item_from(sid, rk, it.as_ref()))
+    playing_item_from_metadata(sid, rk, it.as_ref())
 }
 
 /// The conversion half of [`fetch_playing_item`], pure so the parse is testable without a server:
 /// the played item's streams, markers, chapters, frame size and type, given the server's item.
-fn playing_item_from(sid: plx_plex::plex::ServerId, rk: &str, it: Option<&plx_plex::plex::Metadata>) -> PlayingItem {
+pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: Option<&plx_plex::plex::Metadata>) -> Option<PlayingItem> {
     // Markers and chapters hang off the ITEM, streams off its first Part — so a part-less response
     // still yields both of those instead of discarding all three. `Client::metadata` already sends
     // `includeChapters=1` (plex/library.rs), so the Chapter[] is on the wire either way: taking it
@@ -2804,7 +2804,7 @@ fn playing_item_from(sid: plx_plex::plex::ServerId, rk: &str, it: Option<&plx_pl
         .and_then(|it| it.primary_media().map(|m| (m.width, m.height, m.bitrate)))
         .unwrap_or((0, 0, 0));
     let kind = it.map(|it| it.kind.clone()).unwrap_or_default();
-    PlayingItem {
+    Some(PlayingItem {
         sid,
         rk: rk.to_string(),
         show_rk,

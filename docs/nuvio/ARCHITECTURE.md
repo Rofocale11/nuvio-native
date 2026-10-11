@@ -39,12 +39,20 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   Search → `/hubs/search`. Streams → the item's `Media[]` list (one Media per stream, with
   resolution/codec/HDR/size/bitrate from `plx_stremio::classify`), so PlxNative's existing
   version/source picker is the stream picker. Part URLs redirect (or proxy, when headers are
-  needed) to the stream's real URL; the decision endpoint always answers direct play.
+  needed) to the stream's real URL. The decision endpoint waits for discovery/probing
+  and refuses media that cannot direct play; the native route uses its probed fields.
+  The Streams overlay uses `/nuvio/streams` and `/nuvio/select`, retaining the shim's
+  ranked index instead of confusing it with the selected-first Media list.
+- Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
+  loaded/saved through the authenticated storage helper. Stable/debug/nightly own
+  separate records. The helper verifies readback before import files are removed.
 - Torrents (`infoHash`): played through a Stremio-compatible streaming server URL
   (`<server>/<infoHash>/<fileIdx>`) when one is configured; debrid-resolved HTTP links from
-  Torrentio/AIOStreams play directly.
+  Torrentio/AIOStreams play directly. Local server scanning is off by default and
+  requires `enableTorrents`; a configured `torrentServer` can be used directly.
 - Watch state / progress: stored locally by the shim (the app already reports timeline to "the
-  server").
+  server"). Developer Mode's writable-directory fallback is `/tmp`, so this state
+  and the key table are not yet durable across TV reboots.
 
 ## Crates
 

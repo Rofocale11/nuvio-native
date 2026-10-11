@@ -28,7 +28,7 @@ impl Default for Config {
         Config {
             data_dir: None,
             torrent_server: None,
-            stream_deadline: Duration::from_secs(8),
+            stream_deadline: Duration::from_secs(60),
             stream_grace: Duration::from_millis(2500),
             token: "nuvionative-local".into(),
         }

@@ -1606,7 +1606,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         return plan;
     }
     let forced = env.direct_play_mode == DirectPlayMode::Forced;
-    let playback_quality = if forced { Quality::Original } else { env.quality };
+    let mut playback_quality = if forced { Quality::Original } else { env.quality };
     let client = match plx_plex::plex::client_for(env.sid) {
         Some(c) => c,
         None => return plan,
@@ -1615,6 +1615,28 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // a PlayQueue so the server tracks this as a real player with a playQueueItemID.
     let session = new_sess(rk);
     plan.sess = session.clone();
+    // Addon labels are useful on Detail but cannot declare the TV's decoder. Ask the
+    // shim to probe first, then derive every playback field from that one response.
+    let nuvio_decision = if client.is_nuvio() && !rk.is_empty() {
+        playback_quality = Quality::Original;
+        match client.mde_decision(rk, &session, env.audio_sid, env.sub_sid) {
+            Some(mc) => {
+                if let Some(why) = refusal(&mc) {
+                    plan.verdict = Some(PlayVerdict::Server(why, DecisionCodes::of(&mc)));
+                    return plan;
+                }
+                Some(mc)
+            }
+            None => return plan,
+        }
+    } else { None };
+    let nuvio_media = nuvio_decision.as_ref().and_then(|mc| mc.metadata.first()).and_then(|m| m.primary_media());
+    let vcodec = nuvio_media.map_or(vcodec, |m| m.video_codec.as_str());
+    let acodec = nuvio_media.map_or(acodec, |m| m.audio_codec.as_str());
+    let part = nuvio_media.and_then(|m| m.part.first()).map_or(part, |p| p.key.as_str());
+    plan.part_id = part_id_of(part);
+    plan.src_vcodec = vcodec.to_string();
+    plan.src_acodec = acodec.to_string();
     if !rk.is_empty() && !env.preview {
         let q = resolve_playqueue(
             client,
@@ -1632,7 +1654,9 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // the playing item's OWN track lists (menu + audio pick + esInfo fps read them) — the
     // loaded detail can be a different item (show page / straight-from-Home play)
     // detail already had this item's streams — no GET
-    plan.playing = env
+    plan.playing = if let Some(mc) = &nuvio_decision {
+        plx_data::metadata::playing_item_from_metadata(env.sid, rk, mc.metadata.first())
+    } else { env
         .cached_item
         .clone()
         .or_else(|| plx_data::metadata::fetch_playing_item(env.sid, rk));

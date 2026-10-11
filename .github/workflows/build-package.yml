@@ -476,12 +476,12 @@ jobs:
           # which release.yml and the webosbrew listing resolve by that exact name, and
           # `com.beb.plxnative.nightly` for nightly, which `ci/nightly.py repo-json` reads.
           if [ "$FLAVOR" = nightly ]; then
-            app_id=com.beb.plxnative.nightly
+            app_id=com.nuvionative.app.nightly
             # The nightly tile's own artwork (130 px, badged), so the listing shows the badge
             # that tells the two installs apart — not the stable icon.
             icon="https://raw.githubusercontent.com/${{ github.repository }}/main/pkg/nightly/largeIcon.png"
           else
-            app_id=com.beb.plxnative
+            app_id=com.nuvionative.app
             # icon160.png, NOT largeIcon.png: 130x130 is LG's launcher size, while the channel
             # listing wants 160 (and 320 for the detail icon) — `tools/mkicons.py` cuts all four
             # from one master for exactly this reason. The URL must return 200 or webosbrew's own

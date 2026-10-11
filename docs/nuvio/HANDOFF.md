@@ -1,51 +1,72 @@
-# Handoff: finish Nuvio Native (for Codex)
+# Nuvio Native handoff (2026-10-10)
 
-Repo: ~/Developer/nuvio-native/app (branch main, HEAD 5dec3ea). A fork of PlxNative (Rust native webOS
-Plex client, GPL-3). Read docs/nuvio/ARCHITECTURE.md and docs/nuvio/PLAYBACK.md first. Commit as
-`Chris <dahl1376@umn.edu>` with no AI attribution lines. Never modify the installed Nuvio app
-`space.nuvio.webos`. Never print or commit addon URLs (they embed debrid credentials) or
-rust-modules/stremio/nuvio.local.env.
+Repo: ~/Developer/nuvio-native/app. Commit as `Chris <dahl1376@umn.edu>` with no AI
+attribution lines. Never modify the installed `space.nuvio.webos` app. Never print
+or commit addon URLs or `rust-modules/stremio/nuvio.local.env`.
 
-## Architecture
-- `rust-modules/stremio` (plx_stremio): Stremio addon client, Nuvio account (Supabase) + localStorage import,
-  stream classification (resolution/HDR/DV/size/bitrate), torrent helpers. 37 tests pass.
-- `rust-modules/pmsshim` (plx_pmsshim): in-process HTTP server on 127.0.0.1:32420 speaking the Plex
-  Media Server dialect over plx_stremio, so PlxNative's UI and player work unchanged. Booted from
-  rust-modules/src/app/nuvio.rs (dev-token boot, no plex.tv).
-- App id com.nuvionative.app (debug: com.nuvionative.app.debug).
+Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
 
-## Build / deploy (all working)
-- `source ~/.cargo/env; make ipk` → pkg/com.nuvionative.app.debug_0.8.0_arm.ipk
-- Release: `make FLAVOR=stable RELEASE=1 ipk` → pkg/com.nuvionative.app_0.8.0_arm.ipk
-- TV: ares device `tv` (10.0.0.73, LG CX webOS 5, Developer Mode, NOT rooted). Use tools/nv-tv.py
-  (install/launch/close/log/grep/keys/trigger/shot). `ares-push` is unsupported; use ares-novacom.
-- Import the user's Nuvio addons (Nuvio must be running): `node tools/nv-import-nuvio.mjs 10.0.0.73 --appid com.nuvionative.app.debug`
-- UI screenshot: `tools/nv-tv.py trigger capture`, launch, then `tools/nv-tv.py shot out.jpg` (UI plane only).
+## Build and TV
 
-## Verified on the TV
-- Installs beside Nuvio, launches, 60 fps UI (Nuvio web baseline: 22.8 fps avg, 37% late frames;
-  tools/bench/webapp-fps.mjs).
-- Shim starts, imports the user's 4 addons (Nuvio Catalog, OpenSubtitles v3, AIOStreams "SELection",
-  BetterPosters), boots straight to Home, detail page renders with real metadata ("Direct Play").
+- Debug: `source ~/.cargo/env; make ipk` → `pkg/com.nuvionative.app.debug_0.8.0_arm.ipk`.
+- Stable: `source ~/.cargo/env; make FLAVOR=stable RELEASE=1 ipk` →
+  `pkg/com.nuvionative.app_0.8.0_arm.ipk`.
+- TV: ares device `tv`, LG CX, webOS 5, Developer Mode, not rooted. Use
+  `tools/nv-tv.py` under `NV_DEVICE=tv tools/tv-lock.sh with …`.
+- With the original Nuvio running, import its configuration using
+  `node tools/nv-import-nuvio.mjs 10.0.0.73 --appid com.nuvionative.app.debug`
+  (use `com.nuvionative.app` for stable). This reads the original app's localStorage.
+- Debug UI captures require the `capture` trigger at launch. `shot --frames 6`
+  while navigating skips cached frames. Captures exclude the hardware video plane.
+  Stable releases have no capture listener or remote FIFO; use the physical remote.
 
-## Remaining work, in priority order
-1. **Playback on the TV does not start yet.** Pressing Play on a movie detail page didn't reach the player; the event log
-   shows repeated `net: curl rc=7 — transport error` (connection refused) and
-   `stream: GET /photo/:/transcode status=404`. Find which origin curl fails to reach: possibly the
-   shim's advertised origin/link classification (`boot: dev token — link=Remote`), plex.tv/telemetry
-   calls, or the stream fetch. Fix, then verify playback with an AIOStreams 4K HEVC/DV link
-   (follow the TV checklist in PLAYBACK.md).
-2. Shim: answer `/photo/:/transcode` (302 to the source image URL, or resize-free passthrough).
-3. Persistence: in Developer Mode only /tmp is writable for the app uid, so addons live in
-   /tmp/<appid>/nuvio and are lost on TV reboot. Persist through the existing DB8 storage helper
-   (`plxnative-storage` / platform::storage) instead.
-4. The route takes codecs from the detail store (guessed from filenames); use the decision response /
-   `plx_media::ff::probe::probe_url` results instead.
-5. Stream picker UI: the shim exposes `/nuvio/streams` and `/nuvio/select`; wire them into the existing
-   version/source list (appkit/source_list.rs) so users can pick resolution/HDR/size.
-6. Login screen still says Plex; rebrand strings. Nuvio QR account login is implemented but never run end to end.
-7. Torrents: Nuvio's companion service runs a Stremio server on 127.0.0.1:2710-2714 (start via luna
-   ping to space.nuvio.webos.service); user has P2P disabled, so this is low priority.
-8. DTS audio can't be decoded (no FFmpeg audio decoders); falls back to AC3/EAC3/AAC tracks.
-9. Final: `make FLAVOR=stable RELEASE=1 ipk`, install com.nuvionative.app, verify launch + Home +
-   playback + seek/pause/subtitles on the TV, then report the package path and test results.
+## Completed work
+
+- Play now uses the loaded detail item when the catalog selection has no Part.
+  Before creating the playback plan, the route asks the shim for its probed
+  decision and consumes that response's codecs, frame rate, tracks and DV fields.
+  Unprobed or unsupported media is refused, rather than loaded with guessed codecs.
+- The refused curl connections were optional torrent-server scans at
+  `127.0.0.1:2710–2714`, not the shim at port 32420. Automatic scans now require
+  `enableTorrents: true`; HTTP/debrid playback works without them.
+- The photo endpoint resolves relative metadata images and proxies image bytes;
+  supported CDN sizing avoids decoding unnecessarily large posters.
+- TV addon configuration uses the private DB8 storage helper, separate from the
+  session record. Legacy/import files are removed only after verified persistence. The importer uses a
+  group-writable handoff directory so the native UID can unlink its dev-owned file,
+  including stable's sticky `/tmp` runtime root.
+  Host configuration remains file-backed.
+- The Streams overlay lists the shim's ranked choices, with codec, HDR/DV,
+  resolution, size and bitrate, and selects through `/nuvio/select` before refreshing
+  detail metadata. It waits for discovery so indices do not shift under a selection.
+- Login copy is branded Nuvio in all three supplied locales.
+- Diagnostic redirect logs omit private URL paths, and the TV helper redacts URLs.
+
+## Verified on debug TV
+
+- Install, launch, Home, real metadata, posters/backdrops, and all four imported
+  addons: Nuvio Catalog, OpenSubtitles v3, AIOStreams SELection, BetterPosters.
+- AIOStreams 86.4 GB HEVC 3840×2160 at 23.976 fps, DV P8, AC3: Starfish reported
+  `hdrType: DolbyVision`; displayed frame counts and play position advanced.
+- Pause held the play position; resume advanced it. Multiple seeks returned success
+  and resumed playback through CDN range reopens.
+- Audio switch to EAC3, selection of another 4K DV source (3832×1600), and playback
+  after that source switch. Selected embedded subtitles returned HTTP 200 and emitted
+  nonempty timed subtitle cues (dialogue is never logged).
+- Addons restored from DB8 after app reinstall/relaunch.
+
+## Known limitations / follow-up
+
+- Watch progress and the shim key table can still be lost on a TV reboot because
+  their Developer Mode fallback is `/tmp`; the addon configuration is in DB8.
+- Nuvio account QR login is implemented, but account authentication was not exercised
+  end to end. Imported addon configuration was used for device testing.
+- Torrents require a configured Stremio-compatible server or explicit local scanning.
+  The user's P2P-disabled setup was tested with HTTP/debrid streams.
+- No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required.
+- P7 enhancement-layer playback is unsupported; the HDR10 base-layer fallback has
+  not been tested on this CX. P8 Dolby Vision was tested.
+- Some upstream images/logos are absent; the proxy cannot manufacture missing images.
+
+The stable verification procedure is in `VALIDATION.md`; the final task report records
+its observed results.

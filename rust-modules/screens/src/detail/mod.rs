@@ -2290,6 +2290,12 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 self.content(fx, ContentReq::Present(arg.clone()));
                 Handled::Yes
             }
+            ScreenEvent::App(AppMsg::NuvioStreamSelected) => {
+                self.selected = None;
+                self.start_reconciliation(fx, meta);
+                fx.invalidate(Provenance::Landing(fx.from()));
+                Handled::Yes
+            }
             // Dismissed: the page under this surface has just been entered again, and it decided
             // what to ask for on the store as it stands. A request of this page's still in flight
             // would land on top of the item that page found loaded — and this page's teardown,
@@ -4229,7 +4235,9 @@ impl DetailScreen {
     /// four controls' worth of geometry and three drawn) is exactly the class of bug this
     /// publication exists to remove.
     pub fn alt_available(&self, meta: plx_data::metadata::MetadataView<'_>) -> bool {
-        meta.alt_available(self.sid, &self.rk)
+        plx_plex::plex::client_for(self.sid).is_some_and(|c| c.is_nuvio())
+            && self.detail(meta).is_some_and(|d| !d.is_show)
+            || meta.alt_available(self.sid, &self.rk)
     }
 
     /// **Is there a file for the *Track information* sheet to describe?** — the Languages column's
@@ -4449,7 +4457,7 @@ impl DetailScreen {
                 ),
             }
         } else {
-            let play = self.selected().map_or_else(
+            let play = self.selected().filter(|m| !m.part.is_empty()).map_or_else(
                 || PlayIntent::Item {
                     sid: plx_media::route::item_sid(d.sid),
                     rk: d.rk.clone(),

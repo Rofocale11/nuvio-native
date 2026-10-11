@@ -2,16 +2,16 @@
 //! addons and install it as the app's one server (`plx_base::local_server`), before anything asks
 //! for a server or for plex.tv. See `docs/nuvio/ARCHITECTURE.md`.
 //!
-//! - Addons live in `<data>/addons.json` (`plx_stremio::AddonSet`'s format); Cinemeta + OpenSubtitles
+//! - TV addons live in private DB8 storage; host addons live in `<data>/addons.json` (`plx_stremio::AddonSet`'s format); Cinemeta + OpenSubtitles
 //!   when there is none.
-//! - `<runtime dir>/nuvio-import.json` (written by `tools/nv-import-nuvio.mjs` from the user's Nuvio
+//! - `<runtime dir>/nuvio-import/nuvio-import.json` (written by `tools/nv-import-nuvio.mjs` from the user's Nuvio
 //!   install) replaces that set once, is persisted, then deleted.
 //! - The shim's watch state and key table live in `<data>/shim/`. `<data>` survives an app
-//!   reinstall on the TV (`/media/developer/<appid>.nuvio`, beside the session file), so watch
-//!   progress is not lost with each `.ipk`.
+//!   reinstall only when a persistent writable directory is available. Developer Mode falls
+//!   back to `/tmp`, so watch progress and key mappings can be lost on reboot.
 //! - Streams are probed with the bundled FFmpeg at play time ([`prober`]).
 //! - Torrents play through a Stremio-compatible streaming server: `<data>/settings.json`'s
-//!   `torrentServer`, else one found running on this device.
+//!   `torrentServer`, else an explicitly enabled (`enableTorrents`) local scan.
 //!
 //! Never logs an addon URL: Nuvio/AIOStreams URLs embed credentials. Hosts at most.
 
@@ -62,6 +62,7 @@ fn data_dir() -> PathBuf {
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     torrent_server: Option<String>,
+    enable_torrents: bool,
 }
 
 /// `{"local_storage": {"installedAddonUrls": "<raw>", ...}, "profile_id": "1"}`.
@@ -96,6 +97,40 @@ fn describe(set: &plx_stremio::AddonSet) -> String {
     set.addons.iter().map(|a| a.manifest.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
+fn save_addons(set: &plx_stremio::AddonSet, path: &Path) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "arm"))]
+    {
+        let _ = path;
+        set.to_json().ok().is_some_and(|payload| plx_platform::storage::client::save_nuvio(payload).is_ok())
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+    { set.save(path).is_ok() }
+}
+
+fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
+    #[cfg(all(target_os = "linux", target_arch = "arm"))]
+    {
+        match plx_platform::storage::client::load_nuvio() {
+            Ok(Some(payload)) => {
+                log("nuvio: addon configuration restored from DB8");
+                return plx_stremio::AddonSet::from_json(&payload);
+            }
+            Err(_) => log("nuvio: addon storage unavailable; retaining import/cache for retry"),
+            Ok(None) => (),
+        }
+        if let Some(set) = plx_stremio::AddonSet::load(path) {
+            if save_addons(&set, path) {
+                log("nuvio: addon configuration migrated to DB8");
+                let _ = std::fs::remove_file(path);
+            }
+            return Some(set);
+        }
+        None
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+    { plx_stremio::AddonSet::load(path) }
+}
+
 /// Start the shim and install it. Call once, after `plx_net::net::global_init`, before the boot
 /// reads its token/origin. A failure leaves the app as upstream (it will ask for a Plex sign-in),
 /// which is loud enough to notice and never worse than not starting.
@@ -103,19 +138,31 @@ pub(crate) fn boot() {
     let data = data_dir();
     let _ = std::fs::create_dir_all(&data);
     let addons_path = data.join("addons.json");
-    let import_path = plx_base::paths::runtime_dir().join("nuvio-import.json");
+    // The dev shell and native app have different UIDs. A group-writable, non-sticky
+    // handoff directory lets the app remove the dev-owned file after verified DB8 save.
+    // Stable's runtime root is sticky /tmp; a file placed directly there cannot be removed.
+    let handoff = plx_base::paths::runtime_dir().join("nuvio-import/nuvio-import.json");
+    let import_path = if handoff.is_file() { handoff } else {
+        plx_base::paths::runtime_dir().join("nuvio-import.json")
+    };
     let mut fresh_import = false;
+    let mut imported = None;
     if import_path.is_file() {
         if let Some(set) = import(&import_path) {
             log(&format!("nuvio: imported {} addon(s) from Nuvio: {}", set.addons.len(), describe(&set)));
-            if set.save(&addons_path).is_err() {
+            if !save_addons(&set, &addons_path) {
                 log("nuvio: could not persist imported addons");
+            } else {
+                log("nuvio: imported addon configuration persisted");
+                if std::fs::remove_file(&import_path).is_err() {
+                    log("nuvio: persisted import retained — removal denied");
+                }
             }
             fresh_import = true;
+            imported = Some(set);
         }
-        let _ = std::fs::remove_file(&import_path);
     }
-    let set = plx_stremio::AddonSet::load(&addons_path).unwrap_or_else(plx_stremio::AddonSet::defaults);
+    let set = imported.or_else(|| load_addons(&addons_path)).unwrap_or_else(plx_stremio::AddonSet::defaults);
     log(&format!("nuvio: {} addon(s): {}", set.addons.len(), describe(&set)));
     let settings: Settings = std::fs::read(data.join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let cfg = plx_pmsshim::Config {
@@ -142,7 +189,7 @@ pub(crate) fn boot() {
         let (backend, shim, path) = (backend.clone(), shim.clone(), addons_path.clone());
         shim.clone().account.set_sink(Arc::new(move |set: plx_stremio::AddonSet| {
             log(&format!("nuvio: account addons: {}", describe(&set)));
-            if set.save(&path).is_err() {
+            if !save_addons(&set, &path) {
                 log("nuvio: could not persist account addons");
             }
             backend.replace(set);
@@ -154,12 +201,12 @@ pub(crate) fn boot() {
     let _ = HANDLE.set(handle);
     shim.warm();
     // Off the boot path: manifests an import could not carry, and a streaming server on this TV.
-    let need_server = settings.torrent_server.is_none();
+    let need_server = settings.enable_torrents && settings.torrent_server.is_none();
     let _ = plx_base::task::spawn("nuvio-boot", move || {
         if fresh_import {
             let mut set = backend.snapshot();
             if set.refresh_manifests(std::time::Duration::from_secs(20)) > 0 {
-                let _ = set.save(&addons_path);
+                let _ = save_addons(&set, &addons_path);
                 backend.replace(set);
                 shim.addons_changed();
                 shim.warm();
@@ -178,7 +225,12 @@ pub(crate) fn boot() {
 fn prober() -> plx_pmsshim::shim_probe::Prober {
     use plx_pmsshim::shim_probe as p;
     Arc::new(|url: &str, deadline: std::time::Duration| {
+        log("nuvio: probing selected stream");
         let m = plx_media::ff::probe::probe_url(url, deadline)?;
+        if let Some(v) = &m.video {
+            log(&format!("nuvio: probe {} {}x{} fps={:.3} dovi={} audio={} subs={}",
+                v.codec, v.width, v.height, v.fps, v.dovi.is_some(), m.audio.len(), m.subtitles.len()));
+        }
         let caps = plx_platform::devcaps::caps();
         let video_decodable = m.video.as_ref().is_some_and(|v| match v.codec.as_str() {
             "h264" => true,

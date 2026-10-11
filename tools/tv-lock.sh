@@ -95,13 +95,21 @@ resolve_tv() {
   printf '%s' "$(printf '%s' "$h" | tr -d ' \t\n\r')"
 }
 HOST="$(resolve_tv)"
+[ -z "${NV_DEVICE:-}" ] || HOST="ares:$NV_DEVICE"
 
 # Every ssh goes through tools/tv-ssh: this Mac's key first, `sshpass` (webosbrew's published
 # dev-mode root password -- the same on every rooted set, so it identifies nobody; the ADDRESS is
 # the part that stays out of the repo) only when the set refuses the key, and a fast failure for a
 # set that is unreachable. Its stderr is dropped here: callers decide what an unreachable set means.
 ssh_tv() {
-  PLX_TV_ADDR="$HOST" "$REPO/tools/tv-ssh" ssh tv "$@" 2>/dev/null
+  if [ -n "${NV_DEVICE:-}" ]; then
+    local command="$*"
+    if [ "$command" = 'sh -s' ]; then command="$(cat)"; fi
+    if [ "$command" = true ]; then command='echo lock-ready'; fi
+    ares-novacom --device "$NV_DEVICE" --run "$command" 2>/dev/null | sed '/^\[Info\]/d'
+  else
+    PLX_TV_ADDR="$HOST" "$REPO/tools/tv-ssh" ssh tv "$@" 2>/dev/null
+  fi
 }
 
 # ------------------------------------------------------- the protocol itself ---
