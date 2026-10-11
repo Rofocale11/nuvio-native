@@ -78,6 +78,15 @@ A fresh approval on the follow-up release reached the local server and loaded th
 account addons. Physical checks of the new audio default and rating setting remain
 pending; do not treat the stream probe as proof of playback.
 
+## BetterPosters / My List delivery
+
+The refreshed debug TV rendered BetterPosters with RT percentages, including
+Continue Watching. Add and Remove from My List were confirmed by fresh backend
+pulls, and the existing list returned after the test. The final stable package
+built from `6e9c2acc` installed with a matching payload hash, launched Home with
+`features=release`, restored four DB8 addons and loaded the saved library.
+See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
+
 ## Known limitations / follow-up
 
 - Watch progress and the shim key table can still be lost on a TV reboot because

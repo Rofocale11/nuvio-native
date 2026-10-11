@@ -116,5 +116,13 @@ Continue Watching now refreshes stored artwork through the same poster policy.
 The first TV poster check exposed `WebP is not supported` decode failures:
 BetterPosters serves WebP even for `.jpg` paths. Both image dependency declarations
 now enable the pure Rust WebP decoder, retaining the existing allocation limits.
-The shipping compile passed after enabling it. The refreshed TV poster check and
-stable install remain pending.
+The shipping compile passed after enabling it. On the refreshed debug TV build,
+Continue Watching displayed BetterPosters artwork with RT percentages and Home's
+My List shelf displayed the existing saved title; the decode failures stopped.
+
+The final stable package was built from `6e9c2acc` with `FLAVOR=stable RELEASE=1`.
+Its package/ELF assertions passed, installation payload hash matched, launch logged
+`features=release`, four addons restored from DB8, and Home loaded 41 shelves.
+The stable library endpoint reported the original one saved title. No fresh physical
+playback/subtitle check was run on this artwork/list follow-up; the earlier stable
+viewer confirmation and login observations above remain the playback evidence.
