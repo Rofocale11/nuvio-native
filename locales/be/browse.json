@@ -491,5 +491,10 @@
   "browse.clock.key_changed": "Ключ вашага сервера змяніўся. Злучыце тэлевізар з інтэрнэтам адзін раз, каб праграма магла праверыць яго зноў.",
   "browse.streams.loading": "Пошук плыняў…",
   "browse.streams.empty": "Няма даступных плыняў.",
-  "browse.streams.failed": "Не ўдалося загрузіць плыні. Закрыйце і паспрабуйце зноў."
+  "browse.streams.failed": "Не ўдалося загрузіць плыні. Закрыйце і паспрабуйце зноў.",
+  "browse.list.add": "У мой спіс",
+  "browse.list.remove": "Выдаліць",
+  "browse.list.saving": "Чакаем…",
+  "browse.list.retry": "Паўтарыць",
+  "browse.list.signin": "Увайсці"
 }

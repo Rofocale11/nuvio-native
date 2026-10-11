@@ -26,6 +26,8 @@ pub trait Backend: Send + Sync {
     /// Search across every search-capable catalog.
     fn search(&self, query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)>;
     fn meta(&self, type_: &str, id: &str) -> Option<Meta>;
+    /// Poster provider; fake/other backends retain their supplied artwork.
+    fn poster(&self, _id: &str, original: Option<&str>) -> Option<String> { original.map(str::to_string) }
     /// Streams for a movie (`id`) or an episode (the video id), progressively through `on_batch`.
     fn streams(&self, type_: &str, id: &str, deadline: Duration, on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream>;
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle>;
@@ -83,10 +85,29 @@ impl Backend for AddonBackend {
     fn meta(&self, type_: &str, id: &str) -> Option<Meta> {
         self.snapshot().meta(type_, id).ok()
     }
+    fn poster(&self, id: &str, original: Option<&str>) -> Option<String> {
+        if id.strip_prefix("tt").is_some_and(|digits| digits.len() >= 7 && digits.bytes().all(|b| b.is_ascii_digit())) {
+            Some(format!("https://btttr.cc/poster/imdb/poster-default/{id}.jpg?rs=RT"))
+        } else { original.map(str::to_string) }
+    }
     fn streams(&self, type_: &str, id: &str, deadline: Duration, on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream> {
         self.snapshot().streams(type_, id, deadline, on_batch)
     }
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle> {
         self.snapshot().subtitles(type_, id)
+    }
+}
+
+#[cfg(test)]
+mod poster_tests {
+    use super::*;
+    #[test]
+    fn better_posters_apply_to_titles_from_other_catalogs() {
+        let backend = AddonBackend::new(plx_stremio::addons::AddonSet::defaults());
+        let p = backend.poster("tt0133093", Some("https://example.invalid/original.jpg")).unwrap();
+        assert!(p.starts_with("https://btttr.cc/poster/imdb/poster-default/tt0133093.jpg"));
+        assert!(p.ends_with("rs=RT"));
+        assert_eq!(backend.poster("tmdb:123", Some("original")), Some("original".into()));
+        assert_eq!(backend.poster("tt123?credential", Some("original")), Some("original".into()));
     }
 }

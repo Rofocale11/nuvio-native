@@ -533,7 +533,7 @@ impl Client {
     /// this: a non-2xx PMS answer is not a container, and `http_open` has already logged the
     /// status line (`stream: GET /path status=…`) on the plaintext arm.
     #[track_caller]
-    fn body_2xx(&self, path_no_token: &str, method: Method, headers: &[&str]) -> Option<Vec<u8>> {
+    pub(super) fn body_2xx(&self, path_no_token: &str, method: Method, headers: &[&str]) -> Option<Vec<u8>> {
         let r = self.send(path_no_token, method, headers)?;
         r.ok().then_some(r.body)
     }

@@ -40,6 +40,7 @@ pub const ELEM_ALT: u32 = 2;
 pub const ELEM_MARK_WATCHED: u32 = 3;
 pub const ELEM_MARK_UNWATCHED: u32 = 4;
 pub const ELEM_TRAILER: u32 = 5;
+pub const ELEM_MY_LIST: u32 = 6;
 
 /// The hero's one focus group. Local to this screen — nothing outside `screens::detail` ever names
 /// it — so, like `screens::profiles`'s `ROSTER_GROUP`/`FOOTER_GROUP`, any small integer would do;
@@ -88,6 +89,8 @@ fn trailer_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_tra
 /// `ui/detail.rs::HeroCtl`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeroCtl {
+    /// Save/remove this Nuvio title in the active account profile.
+    MyList,
     /// the Play/Resume pill — always present, always first
     Play,
     /// the ↺ disc, present only while there is a resume point for it to ignore
@@ -107,6 +110,7 @@ impl HeroCtl {
     /// This control's fixed `u32` identity (never its position — see the module doc).
     pub const fn elem(self) -> u32 {
         match self {
+            HeroCtl::MyList => ELEM_MY_LIST,
             HeroCtl::Play => ELEM_PLAY,
             HeroCtl::Restart => ELEM_RESTART,
             HeroCtl::Trailer => ELEM_TRAILER,
@@ -120,6 +124,7 @@ impl HeroCtl {
     /// their own disjoint range, per the module doc).
     pub fn of_elem(e: u32) -> Option<Self> {
         match e {
+            ELEM_MY_LIST => Some(HeroCtl::MyList),
             ELEM_PLAY => Some(HeroCtl::Play),
             ELEM_RESTART => Some(HeroCtl::Restart),
             ELEM_TRAILER => Some(HeroCtl::Trailer),
@@ -140,17 +145,18 @@ impl HeroCtl {
 /// toggle wears.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct HeroSet {
+    pub list: bool,
     pub restart: bool,
     pub trailer: bool,
     pub alt: bool,
     pub mark: PosterMark,
 }
 
-/// The row's controls, in drawn order, for a given set. A fixed 5-slot array (Play + Restart +
-/// Trailer + Alt + one watch face is the widest the row ever gets) plus a live count, so no
+/// The row's controls, in drawn order, for a given set. A fixed 6-slot array (Play + Restart +
+/// Trailer + Alt + My List + one watch face is the widest the row ever gets) plus a live count, so no
 /// per-frame allocation.
-pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; 5], usize) {
-    let mut v = [HeroCtl::Play; 5];
+pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; 6], usize) {
+    let mut v = [HeroCtl::Play; 6];
     let mut n = 1;
     if set.restart {
         v[n] = HeroCtl::Restart;
@@ -164,6 +170,7 @@ pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; 5], usize) {
         v[n] = HeroCtl::Alt;
         n += 1;
     }
+    if set.list { v[n] = HeroCtl::MyList; n += 1; }
     v[n] = if set.mark == PosterMark::Watched {
         HeroCtl::MarkUnwatched
     } else {
@@ -202,12 +209,12 @@ pub fn focusable(ctl: HeroCtl, full_trailer: bool) -> bool {
 /// presentation mode. Every call site that enumerates the row for focus/hit-testing extent must go
 /// through this rather than `hero_ctls` directly, or the two can disagree about which controls
 /// exist right now.
-pub fn visible_ctls(set: HeroSet, full_trailer: bool) -> ([HeroCtl; 5], usize) {
+pub fn visible_ctls(set: HeroSet, full_trailer: bool) -> ([HeroCtl; 6], usize) {
     let (all, n) = hero_ctls(set);
     if !full_trailer {
         return (all, n);
     }
-    let mut v = [HeroCtl::Play; 5];
+    let mut v = [HeroCtl::Play; 6];
     let mut count = 0;
     for &c in &all[..n] {
         if focusable(c, full_trailer) {
@@ -367,6 +374,7 @@ pub fn alt_pill_w(measure: &dyn Measure) -> f32 {
 /// `ui/detail.rs::HeroWidths`.
 #[derive(Clone, Copy, Debug)]
 pub struct HeroWidths {
+    pub list: f32,
     pub pill: f32,
     pub alt: f32,
     /// the three discs, in [`disc_verb`]'s slot order, each already unfurled
@@ -381,6 +389,7 @@ pub fn hero_btn_rect_at(set: HeroSet, i: usize, y: f32, cw: HeroWidths) -> Rect 
     let mut w = cw.pill;
     for (k, c) in v[..n].iter().enumerate() {
         w = match c {
+            HeroCtl::MyList => cw.list,
             HeroCtl::Play => cw.pill,
             HeroCtl::Alt => cw.alt,
             HeroCtl::Restart => cw.disc[0],
@@ -433,6 +442,7 @@ pub(super) fn disc_caps_at(
 ) -> [f32; 3] {
     let (_, n) = hero_ctls(set);
     let closed = HeroWidths {
+        list: 0.0,
         pill,
         alt,
         disc: [CD; 3],
@@ -452,6 +462,7 @@ pub(super) fn disc_caps_at(
         n.saturating_sub(1),
         0.0,
         HeroWidths {
+            list: 0.0,
             pill,
             alt,
             disc: open,
@@ -474,9 +485,10 @@ pub fn hero_widths(
     named_show: bool,
 ) -> HeroWidths {
     HeroWidths {
+        list: if set.list { my_list_width(measure) } else { 0.0 },
         pill: hero_pill_w(measure, has_restart),
         alt: alt_pill_w(measure),
-        disc: disc_caps(measure, set, unfurl, named_show),
+        disc: if set.list { [CD; 3] } else { disc_caps(measure, set, unfurl, named_show) },
     }
 }
 
@@ -846,6 +858,7 @@ mod tests {
 
     fn set_full(restart: bool, alt: bool, mark: PosterMark, trailer: bool) -> HeroSet {
         HeroSet {
+            list: false,
             restart,
             trailer,
             alt,
@@ -1029,6 +1042,7 @@ mod tests {
     #[test]
     fn the_row_s_controls_never_overlap_at_any_set_size() {
         let cw = HeroWidths {
+            list: 0.0,
             pill: 200.0,
             alt: 260.0,
             disc: [CD, CD, CD],
@@ -1256,6 +1270,7 @@ mod tests {
     #[test]
     fn restart_and_the_watch_tail_are_independent() {
         let set = HeroSet {
+            list: false,
             restart: true,
             trailer: false,
             alt: false,
@@ -1271,12 +1286,14 @@ mod tests {
     #[test]
     fn the_actions_row_grows_an_also_available_control_only_for_a_second_source() {
         let without = HeroSet {
+            list: false,
             restart: false,
             trailer: false,
             alt: false,
             mark: PosterMark::None,
         };
         let with = HeroSet {
+            list: false,
             alt: true,
             ..without
         };
@@ -1289,6 +1306,7 @@ mod tests {
         for alt in [false, true] {
             for trailer in [false, true] {
                 let set = HeroSet {
+                    list: false,
                     restart: true,
                     trailer,
                     alt,
@@ -1409,12 +1427,14 @@ mod tests {
     #[test]
     fn hero_indices_mean_different_actions_in_the_two_control_sets() {
         let compact = HeroSet {
+            list: false,
             restart: false,
             trailer: false,
             alt: false,
             mark: PosterMark::None,
         };
         let wide = HeroSet {
+            list: false,
             restart: true,
             trailer: false,
             alt: true,
@@ -1428,12 +1448,14 @@ mod tests {
     #[test]
     fn the_actions_row_accumulates_around_a_variable_width_control() {
         let set = HeroSet {
+            list: false,
             restart: true,
             trailer: false,
             alt: true,
             mark: PosterMark::None,
         };
         let widths = HeroWidths {
+            list: 0.0,
             pill: 210.0,
             alt: 300.0,
             disc: [90.0, 120.0, 120.0],
@@ -1483,6 +1505,7 @@ mod tests {
                                         n - 1,
                                         0.0,
                                         HeroWidths {
+                                            list: 0.0,
                                             pill: PW + 62.0,
                                             alt: 340.0,
                                             disc,
@@ -1504,6 +1527,7 @@ mod tests {
     fn the_real_verbs_all_fit_the_widest_row() {
         let measure = plx_ui::fixture::FixtureMeasure;
         let wide = HeroSet {
+            list: false,
             restart: true,
             trailer: true,
             alt: true,
@@ -1516,6 +1540,7 @@ mod tests {
             n - 1,
             0.0,
             HeroWidths {
+                list: 0.0,
                 pill: hero_pill_w(&measure, true),
                 alt: alt_pill_w(&measure),
                 disc: caps,
@@ -1527,6 +1552,7 @@ mod tests {
         );
 
         let roomy = HeroSet {
+            list: false,
             restart: false,
             trailer: true,
             alt: false,
@@ -1553,6 +1579,7 @@ mod tests {
     #[test]
     fn a_verb_that_does_not_fit_is_dropped_whole() {
         let set = HeroSet {
+            list: false,
             restart: true,
             trailer: true,
             alt: true,
@@ -1592,6 +1619,7 @@ mod tests {
     #[test]
     fn the_widest_action_row_clears_the_people_column() {
         let set = HeroSet {
+            list: false,
             restart: true,
             trailer: true,
             alt: true,
@@ -1603,6 +1631,7 @@ mod tests {
             n - 1,
             0.0,
             HeroWidths {
+                list: 0.0,
                 pill: PW + 62.0,
                 alt: 340.0,
                 disc: [CD; 3],
@@ -1783,4 +1812,12 @@ mod tests {
             "the third unfurl spring is quiet at rest"
         );
     }
+}
+
+
+/// Reserve the widest translated state, so an asynchronous list reply never shifts other buttons.
+pub fn my_list_width(measure: &dyn Measure) -> f32 {
+    use plx_platform::i18n::msg;
+    [msg::browse_list_add_c(),msg::browse_list_remove_c(),msg::browse_list_saving_c(),msg::browse_list_retry_c(),msg::browse_list_signin_c()]
+        .into_iter().map(|label| pill_w(measure,label,theme::size::BODY,false,false)).fold(0.0,f32::max)
 }

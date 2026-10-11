@@ -2091,7 +2091,8 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // 0xbc1d_d51d_5b11_1273.
 // Nuvio rating source adds a Playback field and picker option vocabulary.
 // Real simulator recordings are required; previous pin: 0xf541c16b15ec999f.
-const SCREEN_SHAPES_PIN: u64 = 0xb74dd7b8a1ffdc55;
+// My List adds the detail page's asynchronous account-library state. Real recordings replace the old shape.
+const SCREEN_SHAPES_PIN: u64 = 0xb9582887de5b0626;
 
 #[cfg(test)]
 mod arg_tests {

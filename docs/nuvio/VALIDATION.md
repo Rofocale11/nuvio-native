@@ -88,3 +88,29 @@ See `HANDOFF.md`: watch state/key table and account backend session persistence
 across TV reboot, configured torrent service, DTS/TrueHD conversion and P7 fallback
 remain follow-up work. RT scores require metadata supplied by an addon; MDBList
 was not configured or tested here.
+
+
+## BetterPosters and My List follow-up
+
+The public BetterPosters configure page generates the IMDb poster URL pattern and
+advertises uppercase `RT` as its Rotten Tomatoes source. A live Matrix poster fetch
+returned HTTP 200 WebP with a visible 83% score. Its addon metadata did not include
+an independent Rotten Tomatoes number. The user chose poster ratings for now.
+
+The deployed Nuvio OpenAPI schema confirmed the profile-scoped library item/delta
+RPCs. A temporary single-title add/remove on profile 1 was followed by fresh pulls:
+the added title appeared, the existing saved title remained, and removal restored
+the original key set. No original-app state was written.
+
+Host coverage includes provider fallback, identity validation, single-item RPC
+payloads, failed sync presentation, login routing and translated action-row fit.
+Fresh synthetic recordings (shorter settled key cadence on a 120 Hz host) pass
+all six Targets/Resolve replays with zero differences. The default recording
+cadence exceeded the parser's decoded-memory budget; the budget was retained.
+The debug package was installed with its payload hash checked. Native detail Add
+changed to Remove only after the backend confirmed the saved title; Remove restored
+the original library. The button layout was inspected on the TV. The broad `make
+check` follow-up was stopped at the user's request to prioritize delivery; the
+focused screen/shim/addon suites, six replays and shipping compile had passed.
+Continue Watching now refreshes stored artwork through the same poster policy.
+The refreshed stable install remains pending.

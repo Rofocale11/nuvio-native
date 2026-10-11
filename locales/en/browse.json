@@ -2074,5 +2074,25 @@
   "browse.streams.failed": {
     "value": "Couldn’t load streams. Close and try again.",
     "description": "Addon stream picker status"
+  },
+  "browse.list.add": {
+    "value": "Add to My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.remove": {
+    "value": "Remove from My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.saving": {
+    "value": "Syncing My List…",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.retry": {
+    "value": "Retry My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.signin": {
+    "value": "Sign in for My List",
+    "description": "Nuvio account My List action/status."
   }
 }

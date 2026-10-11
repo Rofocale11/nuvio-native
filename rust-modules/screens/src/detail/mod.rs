@@ -86,7 +86,7 @@ const EP_SCALE_MAX: usize = 40;
 const K_SCROLL: f32 = plx_ui::consts::K_SCROLL;
 const K_STRIP_SCROLL: f32 = 240.0;
 
-pub const SHAPE: &str = "DetailScreen{return_pending:bool,next_elem:u32,keys:[DetailKey{identity:DetailIdentity,elem:u32}],sid:u32,rk:str,pending_season:opt<u32>,season_settle:f32,refresh:u32,restore:opt<RestoreIntent{spot:Spot{section:u32,col:u32,ep_text:bool,saved_col:[u32;8],season:opt<u64>},episode:opt<str>,season_requested:bool}>}";
+pub const SHAPE: &str = "DetailScreen{list_pending:bool,list_error:bool,list_state:opt<{signed_in:bool,saved:bool}>,return_pending:bool,next_elem:u32,keys:[DetailKey{identity:DetailIdentity,elem:u32}],sid:u32,rk:str,pending_season:opt<u32>,season_settle:f32,refresh:u32,restore:opt<RestoreIntent{spot:Spot{section:u32,col:u32,ep_text:bool,saved_col:[u32;8],season:opt<u64>},episode:opt<str>,season_requested:bool}>}";
 
 const _: () = assert!(hero::HERO_ELEM_RANGE_END == season::SEASON_ELEM_RANGE_START);
 const _: () = assert!(season::SEASON_ELEM_RANGE_END == episodes::EPISODES_ELEM_RANGE_START);
@@ -106,6 +106,10 @@ struct RestoreIntent {
 
 pub struct DetailScreen {
     entry: EntryId,
+    list_state: Option<plx_plex::plex::nuvio::LibraryState>,
+    list_pending: bool,
+    list_error: bool,
+    list_mailbox: std::sync::Arc<std::sync::Mutex<Option<Option<plx_plex::plex::nuvio::LibraryState>>>>,
     sid: ServerId,
     rk: String,
     keys: Vec<DetailKey>,
@@ -223,7 +227,7 @@ pub struct DetailScreen {
     cast: Shelf,
     tabs: TabStrip,
     season_pop: CtlPop<1>,
-    ctl_pop: CtlPop<5>,
+    ctl_pop: CtlPop<6>,
     disc_unfurl: [Spring; 3],
     season_metrics: season::Metrics,
     about_rows: about::Rows,
@@ -403,6 +407,10 @@ impl DetailScreen {
         }
         Self {
             entry,
+            list_state: None,
+            list_pending: false,
+            list_error: false,
+            list_mailbox: Default::default(),
             sid,
             rk,
             keys: Vec::new(),
@@ -1728,6 +1736,16 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 Handled::Yes
             }
             ScreenEvent::Tick(t) => {
+                let reply = self.list_mailbox.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(state) = reply {
+                    self.list_pending = false;
+                    self.list_error = state.is_none();
+                    self.list_state = state;
+                    if state.is_some() {
+                        fx.push(Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))));
+                    }
+                    fx.invalidate(Provenance::Landing(fx.from()));
+                }
                 self.tick(*t, cx, fx);
                 Handled::Yes
             }
@@ -1752,6 +1770,9 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 // resumes from what the stop committed, not from the `viewOffset` the page
                 // opened with.
                 let fresh_open = matches!(kind, Enter::Fresh { .. });
+                if fresh_open || self.list_state.is_none() && !self.list_pending && !self.list_error {
+                    self.request_list(None);
+                }
                 let request = refresh == DetailRefreshPhase::Deferred
                     || refresh == DetailRefreshPhase::Requested && request_status.is_none()
                     || refresh == DetailRefreshPhase::None
@@ -2686,6 +2707,10 @@ impl DetailScreen {
                 .ground(ground)
                 .scale(scale)
                 .draw(&Env::inert(), p),
+                hero::HeroCtl::MyList => {
+                    Button::new(self.list_label().as_ptr(), theme::size::BODY, rect)
+                        .focused(focused).palette(palette).ground(ground).scale(scale).draw(&Env::inert(), p)
+                }
                 hero::HeroCtl::Alt => {
                     Button::new(hero::alt_label().as_ptr(), theme::size::BODY, rect)
                         .trailing_icon(plx_ui::icons::Icon::ChevronDown)
@@ -3056,6 +3081,8 @@ impl Located {
 impl LogicalState for DetailScreen {
     fn write(&self, w: &mut Canon) {
         debug_assert!(!SHAPE.is_empty());
+        w.bool(self.list_pending).bool(self.list_error).bool(self.list_state.is_some());
+        if let Some(state) = self.list_state { w.bool(state.signed_in).bool(state.saved); }
         w.bool(self.return_pending).u32(self.next_elem).seq(self.keys.len());
         for key in &self.keys { key.identity.write(w); w.u32(key.elem); }
         w.u32(u32::from(self.sid.raw())).str(&self.rk);
@@ -3674,6 +3701,27 @@ impl DetailScreen {
         true
     }
 
+    fn list_label(&self) -> &'static std::ffi::CStr {
+        use plx_platform::i18n::msg;
+        if self.list_pending { msg::browse_list_saving_c() }
+        else if self.list_error { msg::browse_list_retry_c() }
+        else if self.list_state.is_some_and(|s| !s.signed_in) { msg::browse_list_signin_c() }
+        else if self.list_state.is_some_and(|s| s.saved) { msg::browse_list_remove_c() }
+        else { msg::browse_list_add_c() }
+    }
+
+    fn request_list(&mut self, saved: Option<bool>) {
+        if self.list_pending || !plx_plex::plex::client_for(self.sid).is_some_and(|c| c.is_nuvio()) { return; }
+        self.list_pending = true;
+        self.list_error = false;
+        let (sid, rk, mailbox) = (self.sid, self.rk.clone(), self.list_mailbox.clone());
+        if plx_base::task::spawn("nuvio-my-list", move || {
+            let state = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_library(&rk, saved));
+            *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
+            plx_machine::idle::invalidate();
+        }).is_none() { self.list_pending = false; self.list_error = true; }
+    }
+
     fn hero_set(&self, meta: plx_data::metadata::MetadataView<'_>) -> hero::HeroSet {
         let (restart, mark) = self
             .detail(meta)
@@ -3690,6 +3738,7 @@ impl DetailScreen {
         // `!hero_set().trailer` and then drive `ELEM_TRAILER` directly to prove `activate_hero`'s
         // handling stays correct even though the disc itself is never shown.)
         hero::HeroSet {
+            list: self.detail(meta).is_some_and(|d| d.guid.starts_with("nuvio://movie/") || d.guid.starts_with("nuvio://series/")),
             restart,
             trailer: false,
             alt: self.alt_available(meta),
@@ -3832,6 +3881,14 @@ impl DetailScreen {
     ) {
         let measure = cx.measure;
         match ctl {
+            hero::HeroCtl::MyList => {
+                if self.list_state.is_some_and(|s| !s.signed_in) && !self.list_pending {
+                    fx.push(Fx::App(AppFx::Loop(crate::registry::LoopReq::AccountSignIn)));
+                } else if !self.list_pending {
+                    let saved = self.list_state.filter(|s| s.signed_in).map(|s| !s.saved);
+                    self.request_list(if self.list_error { None } else { saved });
+                }
+            }
             hero::HeroCtl::Play => {
                 self.play_hero(false, fx, meta);
             }

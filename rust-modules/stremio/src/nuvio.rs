@@ -27,7 +27,7 @@
 //! `NUVIO_SUPABASE_URL` / `NUVIO_SUPABASE_ANON_KEY` (+ `NUVIO_SUPABASE_FALLBACK_URL`,
 //! `DEVICE_LOGIN_WEB_BASE_URL`, `TV_LOGIN_WEB_BASE_URL`), which the Makefile exports from the
 //! gitignored `rust-modules/stremio/nuvio.local.env`; [`configure`] overrides them at run time.
-//! Nothing here writes to the user's account: the only writes are the device-login handshake.
+//! Account writes are the device-login handshake and explicit My List item mutations.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -568,3 +568,98 @@ mod tests {
 
 /// Safe account diagnostics supplied by the shim: callers must pass only fixed categories/statuses.
 pub fn log_account_event(message: &str) { plx_base::eventlog::log(message); }
+
+/// Account-backed My List, paged with the same RPC as NuvioTVSmart.
+/// These rows may include private addon fields; callers must never log the raw response.
+pub fn saved_library(session: &Session, profile: &str) -> Result<Vec<crate::model::MetaPreview>> {
+    let c = require_config()?;
+    let pid = library_profile(profile)?;
+    let mut items = Vec::new();
+    for offset in (0..100_000).step_by(500) {
+        let v = ok(call(&c, "POST", "/rest/v1/rpc/sync_pull_library", Some(&session.access_token),
+            Some(&json!({"p_profile_id":pid,"p_limit":500,"p_offset":offset})))?)?;
+        let rows = v.as_array().ok_or_else(|| Error::Parse("invalid saved library page".into()))?;
+        items.extend(rows.iter().filter_map(library_preview));
+        if rows.len() < 500 { return Ok(items); }
+    }
+    Err(Error::Parse("saved library pagination exceeded limit".into()))
+}
+
+fn library_profile(profile: &str) -> Result<u32> {
+    profile.parse::<u32>().ok().filter(|n| *n > 0)
+        .ok_or_else(|| Error::Parse("invalid library profile".into()))
+}
+
+fn library_preview(v: &Value) -> Option<crate::model::MetaPreview> {
+    let id = str_field(v, &["content_id", "contentId"]);
+    let type_ = str_field(v, &["content_type", "contentType"]);
+    if id.is_empty() || !matches!(type_.as_str(), "movie" | "series") { return None; }
+    Some(crate::model::MetaPreview {
+        id, type_, name: str_field(v, &["name", "title"]),
+        poster: v["poster"].as_str().map(str::to_string),
+        background: v["background"].as_str().map(str::to_string),
+        logo: v["logo"].as_str().map(str::to_string),
+        description: v["description"].as_str().map(str::to_string),
+        release_info: v["release_info"].as_str().map(str::to_string),
+        imdb_rating: match &v["imdb_rating"] { Value::Number(n) => Some(n.to_string()), Value::String(s) => Some(s.clone()), _ => None },
+        genres: v["genres"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
+        ..Default::default()
+    })
+}
+
+/// Mutate ONE item, rather than replacing the whole library and overwriting another device's changes.
+/// The item/delta RPC signatures are verified against the deployed Nuvio backend's OpenAPI schema.
+pub fn save_library_item(session: &Session, profile: &str, meta: &crate::model::Meta, saved: bool) -> Result<()> {
+    let c = require_config()?;
+    let (path, payload) = library_write(profile, meta, saved)?;
+    ok(call(&c, "POST", path, Some(&session.access_token), Some(&payload))?)?;
+    Ok(())
+}
+
+fn library_write(profile: &str, meta: &crate::model::Meta, saved: bool) -> Result<(&'static str, Value)> {
+    let pid = library_profile(profile)?;
+    if !matches!(meta.type_.as_str(), "movie" | "series") || meta.id.is_empty() || meta.id.len() > 512 || meta.id.chars().any(char::is_control) {
+        return Err(Error::Parse("invalid saved library item".into()));
+    }
+    let common = json!({"p_profile_id":pid,"p_origin_client_id":"nuvio-native"});
+    let mut payload = common;
+    if saved {
+        payload["p_items"] = json!([{
+            "content_id":meta.id,"content_type":meta.type_,"name":meta.name,
+            "poster":meta.poster,"poster_shape":"POSTER","background":meta.background,"logo":meta.logo,
+            "description":meta.description,"release_info":meta.release_info,
+            "imdb_rating":meta.imdb_rating.as_deref().and_then(|s| s.parse::<f64>().ok()).filter(|n| n.is_finite()),
+            "genres":meta.genres,"addon_base_url":null,"added_at":now_unix()*1000
+        }]);
+        Ok(("/rest/v1/rpc/sync_push_library_items", payload))
+    } else {
+        payload["p_keys"] = json!([{"content_id":meta.id,"content_type":meta.type_}]);
+        Ok(("/rest/v1/rpc/sync_delete_library_items", payload))
+    }
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+    #[test]
+    fn single_item_writes_are_profile_scoped_and_do_not_replace_other_titles() {
+        let m = crate::model::Meta { id:"tt0133093".into(),type_:"movie".into(),name:"The Matrix".into(),..Default::default() };
+        let (path, body) = library_write("2", &m, true).unwrap();
+        assert_eq!(path,"/rest/v1/rpc/sync_push_library_items");
+        assert_eq!(body["p_profile_id"],2);
+        assert_eq!(body["p_items"].as_array().unwrap().len(),1);
+        assert!(body["p_items"][0]["addon_base_url"].is_null());
+        let (path, body) = library_write("2", &m, false).unwrap();
+        assert_eq!(path,"/rest/v1/rpc/sync_delete_library_items");
+        assert_eq!(body["p_keys"],json!([{"content_id":"tt0133093","content_type":"movie"}]));
+        assert!(library_write("0",&m,true).is_err());
+        assert!(library_write("1",&crate::model::Meta::default(),true).is_err());
+    }
+    #[test]
+    fn library_rows_map_without_exposing_addon_configuration() {
+        let p = library_preview(&json!({"content_id":"tt0133093","content_type":"movie","name":"The Matrix","imdb_rating":8.7,"genres":["Action"],"profile_id":2})).unwrap();
+        assert_eq!(p.imdb_rating.as_deref(),Some("8.7"));
+        assert_eq!(p.type_,"movie");
+        assert!(library_preview(&json!({"name":"missing identity"})).is_none());
+    }
+}

@@ -53,3 +53,20 @@ pub fn set_rating_source(source: super::session::RatingSource) -> bool {
     super::session::update_with_outcome(|s| Some(s.with_rating_source(source)))
         .is_some_and(|write| matches!(write.classify(), super::session::async_persistence::CompletionOutcome::Durable(_)))
 }
+
+
+#[derive(Clone, Copy, Default, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryState { pub signed_in: bool, pub saved: bool }
+
+impl Client {
+    pub fn nuvio_library(&self, rk: &str, saved: Option<bool>) -> Option<LibraryState> {
+        if !self.is_nuvio() { return None; }
+        let mut path = QueryBuilder::new("/nuvio/library").str("ratingKey", rk);
+        let method = if let Some(saved) = saved {
+            path = path.int("saved", i64::from(saved));
+            crate::http::Method::Post
+        } else { crate::http::Method::Get };
+        serde_json::from_slice(&self.body_2xx(&path.build(), method, &[])?).ok()
+    }
+}

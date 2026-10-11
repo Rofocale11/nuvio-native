@@ -32,11 +32,20 @@ pub struct Account {
     file: Option<PathBuf>,
     session: Mutex<Option<plx_stremio::nuvio::Session>>,
     pins: Mutex<HashMap<i64, PendingPin>>,
+    /// The selected profile and library cache share a lock: profile switches cannot race a write.
+    library: Arc<Mutex<LibraryContext>>,
     next_pin: AtomicI64,
     sink: Mutex<Option<AddonSink>>,
     /// The token handed to the app in place of a plex.tv account token.
     token: String,
     origin: Mutex<String>,
+}
+
+#[derive(Default)]
+struct LibraryContext {
+    profile: Option<String>,
+    generation: u64,
+    cached: Option<(std::time::Instant, Vec<plx_stremio::model::MetaPreview>)>,
 }
 
 struct PendingPin {
@@ -60,11 +69,14 @@ fn session_from_json(v: &Value) -> Option<plx_stremio::nuvio::Session> {
 impl Account {
     pub fn new(dir: Option<&std::path::Path>, token: &str) -> Account {
         let file = dir.map(|d| d.join("nuvio-session.json"));
-        let session = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| session_from_json(&v));
+        let stored = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let session = stored.as_ref().and_then(session_from_json);
+        let profile = stored.as_ref().and_then(|v| v["profile_id"].as_str()).filter(|s| s.parse::<u32>().is_ok_and(|n| n > 0)).map(str::to_string);
         Account {
             file,
             session: Mutex::new(session),
             pins: Mutex::new(HashMap::new()),
+            library: Arc::new(Mutex::new(LibraryContext { profile, ..Default::default() })),
             next_pin: AtomicI64::new(1_000_001),
             sink: Mutex::new(None),
             token: token.to_string(),
@@ -86,17 +98,8 @@ impl Account {
 
     fn save(&self, s: Option<&plx_stremio::nuvio::Session>) {
         let Some(f) = &self.file else { return };
-        match s {
-            Some(s) => {
-                let tmp = f.with_extension("json.tmp");
-                if std::fs::write(&tmp, serde_json::to_vec(&session_to_json(s)).unwrap_or_default()).is_ok() {
-                    let _ = std::fs::rename(&tmp, f);
-                }
-            }
-            None => {
-                let _ = std::fs::remove_file(f);
-            }
-        }
+        let profile = if s.is_some() { self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() } else { None };
+        save_session_file(f, s, profile.as_deref());
     }
 
     /// The stored session, refreshed when it is near expiry.
@@ -115,8 +118,57 @@ impl Account {
     }
 
     pub fn sign_out(&self) {
+        let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.save(None);
+        if let Some(file) = &self.file { save_session_file(file, None, None); }
+        context.generation = context.generation.wrapping_add(1);
+        context.profile = None;
+        context.cached = None;
+    }
+
+    /// Read the active account's saved library; failures remain failures, never an empty success.
+    pub fn saved_library(&self, refresh: bool) -> plx_stremio::model::Result<Vec<plx_stremio::model::MetaPreview>> {
+        let session = self.fresh_session().ok_or(plx_stremio::model::Error::Status(401))?;
+        let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.user_id == session.user_id) {
+            return Err(plx_stremio::model::Error::Status(401));
+        }
+        if !refresh {
+            if let Some((at, rows)) = &context.cached {
+                if at.elapsed() < std::time::Duration::from_secs(60) { return Ok(rows.clone()); }
+            }
+        }
+        let pid = match &context.profile {
+            Some(pid) => pid.clone(),
+            None => plx_stremio::nuvio::profiles(&session)?.first().map(|p| p.id.clone()).unwrap_or_else(|| "1".into()),
+        };
+        let rows = plx_stremio::nuvio::saved_library(&session, &pid)?;
+        context.profile = Some(pid);
+        context.cached = Some((std::time::Instant::now(), rows.clone()));
+        Ok(rows)
+    }
+
+    /// Explicit save/remove; confirm with a fresh pull before publishing the new state to the UI.
+    pub fn set_saved(&self, meta: &plx_stremio::model::Meta, saved: bool) -> plx_stremio::model::Result<()> {
+        let session = self.fresh_session().ok_or(plx_stremio::model::Error::Status(401))?;
+        let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.user_id == session.user_id) {
+            return Err(plx_stremio::model::Error::Status(401));
+        }
+        let pid = match &context.profile {
+            Some(pid) => pid.clone(),
+            None => plx_stremio::nuvio::profiles(&session)?.first().map(|p| p.id.clone()).unwrap_or_else(|| "1".into()),
+        };
+        context.cached = None;
+        plx_stremio::nuvio::save_library_item(&session, &pid, meta, saved)?;
+        let rows = plx_stremio::nuvio::saved_library(&session, &pid)?;
+        if rows.iter().any(|r| r.id == meta.id && r.type_ == meta.type_) != saved {
+            return Err(plx_stremio::model::Error::Parse("saved library confirmation failed".into()));
+        }
+        context.profile = Some(pid);
+        context.cached = Some((std::time::Instant::now(), rows));
+        plx_stremio::nuvio::log_account_event(if saved { "nuvio: My List add confirmed" } else { "nuvio: My List remove confirmed" });
+        Ok(())
     }
 
     /// The plex.tv surface. `segs` are the path segments after `api/v2`.
@@ -241,8 +293,22 @@ impl Account {
         let Some(session) = self.fresh_session() else { return };
         let Some(sink) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
         let profile = profile.map(str::to_string);
+        let library = self.library.clone();
+        let file = self.file.clone();
+        // Mark unresolved immediately, so no request can retain the previous profile's library.
+        let generation = {
+            let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
+            context.generation = context.generation.wrapping_add(1);
+            context.profile = profile.clone();
+            context.cached = None;
+            context.generation
+        };
         let _ = std::thread::Builder::new().name("pmsshim-profile".into()).spawn(move || {
-            let pid = profile.or_else(|| plx_stremio::nuvio::profiles(&session).ok().and_then(|p| p.first().map(|p| p.id.clone()))).unwrap_or_else(|| "1".into());
+            let pid = profile.clone().or_else(|| plx_stremio::nuvio::profiles(&session).ok().and_then(|p| p.first().map(|p| p.id.clone()))).unwrap_or_else(|| "1".into());
+            let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
+            if context.generation != generation { return; }
+            context.profile = Some(pid.clone());
+            if let Some(file) = file { save_session_file(&file, Some(&session), Some(&pid)); }
             if let Ok(addons) = plx_stremio::nuvio::addons(&session, &pid) {
                 if !addons.is_empty() {
                     sink(plx_stremio::addons::AddonSet { addons });
@@ -291,4 +357,17 @@ fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
     let category = match error { plx_stremio::model::Error::Network => "network", plx_stremio::model::Error::Status(_) => "http", plx_stremio::model::Error::Parse(_) => "response", plx_stremio::model::Error::NoAddon => "addon" };
     let status = match error { plx_stremio::model::Error::Status(s) => *s, _ => 0 };
     plx_stremio::nuvio::log_account_event(&format!("nuvio account: {stage} failed category={category} status={status}"));
+}
+
+
+fn save_session_file(file: &std::path::Path, session: Option<&plx_stremio::nuvio::Session>, profile: Option<&str>) {
+    match session {
+        Some(session) => {
+            let mut value = session_to_json(session);
+            value["profile_id"] = json!(profile);
+            let tmp = file.with_extension("json.tmp");
+            if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() { let _ = std::fs::rename(&tmp,file); }
+        }
+        None => { let _ = std::fs::remove_file(file); }
+    }
 }
