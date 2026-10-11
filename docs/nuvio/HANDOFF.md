@@ -1,6 +1,6 @@
 # Nuvio Native handoff (2026-10-10)
 
-Repo: ~/Developer/nuvio-native/app. Commit as `Chris <dahl1376@umn.edu>` with no AI
+Repo: ~/Developer/nuvio-native/app. Fork: https://github.com/current/nuvio-native. Commit as `Chris <dahl1376@umn.edu>` with no AI
 attribution lines. Never modify the installed `space.nuvio.webos` app. Never print
 or commit addon URLs or `rust-modules/stremio/nuvio.local.env`.
 
@@ -39,7 +39,14 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
 - The Streams overlay lists the shim's ranked choices, with codec, HDR/DV,
   resolution, size and bitrate, and selects through `/nuvio/select` before refreshing
   detail metadata. It waits for discovery so indices do not shift under a selection.
-- Login copy is branded Nuvio in all three supplied locales.
+- Login copy is branded Nuvio in all three supplied locales. Release discovery now
+  admits the exact registered in-process shim (matching origin, token and machine
+  identity); unregistered loopback and remote HTTP candidates retain the release policy.
+- Initial audio selection prefers compatible English dialogue over a foreign-language
+  file default or English commentary. Explicit audio selection still takes precedence.
+- Settings → Playback → Rating source offers IMDb or Rotten Tomatoes. The preference
+  uses the canonical session/DB8 record and updates cached detail presentation. Rotten
+  Tomatoes scores must be supplied by a metadata addon; absent scores remain absent.
 - Diagnostic redirect logs omit private URL paths, and the TV helper redacts URLs.
 
 ## Verified on debug TV
@@ -55,12 +62,26 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
   nonempty timed subtitle cues (dialogue is never logged).
 - Addons restored from DB8 after app reinstall/relaunch.
 
+## Stable TV observation
+
+The user confirmed Home, 4K Dolby Vision playback, seek, pause/resume and visible
+English subtitles on the stable build before the audio/login/rating follow-up.
+A fresh approval on the follow-up release reached the local server and loaded the
+account addons. Physical checks of the new audio default and rating setting remain
+pending; do not treat the stream probe as proof of playback.
+
 ## Known limitations / follow-up
 
 - Watch progress and the shim key table can still be lost on a TV reboot because
   their Developer Mode fallback is `/tmp`; the addon configuration is in DB8.
-- Nuvio account QR login is implemented, but account authentication was not exercised
-  end to end. Imported addon configuration was used for device testing.
+- The prior stable QR attempt authenticated but failed discovery with
+  `discovery_insecure_only`. A host regression reproduces that failure and passes
+  with the registered-shim fix. Fresh stable approval reached the server and loaded
+  account addons.
+- Rotten Tomatoes availability depends on addon metadata. No MDBList provider was
+  configured as part of this work.
+- The account backend session file remains in the Developer Mode runtime directory;
+  addon configuration and native preference persistence are separate DB8 records.
 - Torrents require a configured Stremio-compatible server or explicit local scanning.
   The user's P2P-disabled setup was tested with HTTP/debrid streams.
 - No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required.

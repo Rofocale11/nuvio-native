@@ -360,7 +360,7 @@ impl LayoutStamp {
         if d.is_show {
             flags |= 1;
         }
-        if !d.ratings.is_empty() {
+        if !d.shown_ratings().is_empty() {
             flags |= 2;
         }
         Self {
@@ -797,7 +797,7 @@ impl DetailScreen {
             .measure_h(plx_ui::detail_layout::HERO_TEXT_W);
         plx_ui::detail_layout::hero_chain(
             synopsis_h,
-            d.is_some_and(|detail| !detail.ratings.is_empty()),
+            d.is_some_and(|detail| !detail.shown_ratings().is_empty()),
             measure,
         )
     }
@@ -2603,14 +2603,14 @@ impl DetailScreen {
         let cy = y + (top + base) * 0.5;
         let mut x = plx_ui::consts::MARGIN_X;
         let mut i = 0;
-        while i < d.ratings.len() {
-            let provider = d.ratings[i].art.provider();
-            let end = i + d.ratings[i..].partition_point(|r| r.art.provider() == provider);
-            let scores: Vec<String> = d.ratings[i..end]
+        while i < d.shown_ratings().len() {
+            let provider = d.shown_ratings()[i].art.provider();
+            let end = i + d.shown_ratings()[i..].partition_point(|r| r.art.provider() == provider);
+            let scores: Vec<String> = d.shown_ratings()[i..end]
                 .iter()
                 .map(|r| plx_ui::fmt::rating_score(rating_scale(r.art), r.value))
                 .collect();
-            let cells: Vec<plx_ui::widgets::RatingCell<'_>> = d.ratings[i..end]
+            let cells: Vec<plx_ui::widgets::RatingCell<'_>> = d.shown_ratings()[i..end]
                 .iter()
                 .zip(scores.iter())
                 .map(|(r, score)| plx_ui::widgets::RatingCell {

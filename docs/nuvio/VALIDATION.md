@@ -33,14 +33,26 @@ harness, plus the default and hostsim Rust suites and lint checks. Representativ
 unit-test result lines (the gate retains every crate's result):
 
 ```
-test result: ok. 227 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;
+test result: ok. 493 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;
 test result: ok. 1165 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out;
-test result: ok. 979 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;
+test result: ok. 1205 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;
 ```
 
 The ignored media cases require the native host FFmpeg/libass integration harness;
-the other ignored case requires a breadcrumb capsule produced on the TV. The stable package and physical-remote checks
-are recorded in the final task report.
+the other ignored case requires a breadcrumb capsule produced on the TV. The shim and Stremio addon suites also passed:
+
+```
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;
+```
+
+The release discovery regression first failed under `HttpsOnly` and then passed.
+It covers the registered shim plus rejected absent registration, wrong token, wrong
+machine identity, wrong port, unowned resource and a falsely registered LAN server.
+English audio tests cover a foreign default and English commentary. Rating tests
+cover canonical DB8 preference splitting and switching a cached detail without
+substituting IMDb when RT is absent. The picker was inspected in the simulator;
+all three fresh synthetic fixtures passed both replay modes with zero differences.
 
 ## Stable release
 
@@ -56,7 +68,23 @@ The release disables injected remote keys and UI capture, so visible playback/su
 checks require the physical remote. Addon restoration should be checked by relaunching
 with the consumed import file absent.
 
+## Stable observations
+
+The user confirmed Home, 4K Dolby Vision playback, seek, pause/resume and visible
+English subtitles on the initial stable build. The follow-up release installed and
+launched, restored four addons from DB8, and its payload hash matched the installed
+binary; the boot identity reported `features=release`.
+
+A fresh QR approval then logged `authorized — discovering server`, reached the
+registered Nuvio server, installed its PMS client and loaded the account's addons.
+The previous `discovery_insecure_only` failure no longer occurred. A newly selected
+source probed as HEVC 3840×1604, 23.976 fps, Dolby Vision, two audio tracks and three
+embedded subtitles. That probe alone does not establish playback or English audio.
+Physical confirmation of the new audio default and rating setting is still pending.
+
 ## Limitations
 
-See `HANDOFF.md`: watch state/key table persistence across TV reboot, account QR login,
-configured torrent service, DTS/TrueHD conversion and P7 fallback remain follow-up work.
+See `HANDOFF.md`: watch state/key table and account backend session persistence
+across TV reboot, configured torrent service, DTS/TrueHD conversion and P7 fallback
+remain follow-up work. RT scores require metadata supplied by an addon; MDBList
+was not configured or tested here.

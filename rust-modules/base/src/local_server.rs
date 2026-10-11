@@ -12,13 +12,15 @@ pub struct LocalServer {
     pub origin: String,
     /// The token the shim was started with. Not a secret (loopback only); never logged anyway.
     pub token: String,
+    /// Identity returned by this exact in-process server.
+    pub machine_id: String,
 }
 
 static SLOT: OnceLock<LocalServer> = OnceLock::new();
 
 /// Install the local server. First call wins; returns false if one was already installed.
-pub fn set(origin: String, token: String) -> bool {
-    SLOT.set(LocalServer { origin, token }).is_ok()
+pub fn set(origin: String, token: String, machine_id: String) -> bool {
+    SLOT.set(LocalServer { origin, token, machine_id }).is_ok()
 }
 
 pub fn get() -> Option<&'static LocalServer> {

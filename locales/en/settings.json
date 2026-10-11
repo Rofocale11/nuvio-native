@@ -1186,5 +1186,21 @@
   "settings.consent.placeholder.webos_codename_short": {
     "value": "webOS codename",
     "description": "Placeholder shown inside angle brackets in the data preview, standing for the TV software's release codename."
+  },
+  "settings.ratings.title": {
+    "value": "Rating source",
+    "description": "Nuvio rating provider preference."
+  },
+  "settings.ratings.copy": {
+    "value": "Choose IMDb or Rotten Tomatoes. Scores appear when your metadata addon supplies them.",
+    "description": "Nuvio rating provider preference."
+  },
+  "settings.ratings.imdb": {
+    "value": "IMDb",
+    "description": "Rating provider brand."
+  },
+  "settings.ratings.tomatoes": {
+    "value": "Rotten Tomatoes",
+    "description": "Rating provider brand."
   }
 }

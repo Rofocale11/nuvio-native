@@ -43,6 +43,7 @@ fn preview(f: &Film) -> MetaPreview {
         description: Some(f.summary.into()),
         release_info: Some(f.year.into()),
         imdb_rating: Some("7.0".into()),
+        ratings: serde_json::Value::Null, mdb_list_ratings: serde_json::Value::Null, rotten_tomatoes_rating: None,
         genres: vec![f.genre.into()],
     }
 }
@@ -58,6 +59,7 @@ fn series_preview() -> MetaPreview {
         description: Some("The Blender open movies, as a series.".into()),
         release_info: Some("2006-2012".into()),
         imdb_rating: Some("8.1".into()),
+        ratings: serde_json::Value::Null, mdb_list_ratings: serde_json::Value::Null, rotten_tomatoes_rating: None,
         genres: vec!["Animation".into()],
     }
 }

@@ -125,6 +125,10 @@ fn call(c: &Config, verb: &str, path: &str, bearer: Option<&str>, body: Option<&
         let url = format!("{host}{path}");
         match http::request_status(&url, verb, &headers, bytes.as_deref(), http::CONTROL) {
             Ok((status, raw)) => {
+                if !(200..300).contains(&status) {
+                    let endpoint = path.split('?').next().unwrap_or("/unknown");
+                    plx_base::eventlog::log(&format!("nuvio account: {verb} {endpoint} status={status}"));
+                }
                 let retryable = matches!(status, 408 | 500 | 502 | 503 | 504 | 520..=526 | 530);
                 let v = serde_json::from_slice(&raw).unwrap_or(Value::Null);
                 last = Ok((status, v));
@@ -298,6 +302,7 @@ pub fn start_login() -> Result<DeviceLogin> {
         anon_refresh: anon.refresh_token,
     })
     .map_err(|e| Error::Parse(e.to_string()))?;
+    plx_base::eventlog::log("nuvio account: QR session created");
     Ok(DeviceLogin { qr_url, user_code, poll_interval_secs: interval.clamp(1, 30) as u32, handle })
 }
 
@@ -316,9 +321,13 @@ pub fn poll_login(login: &DeviceLogin) -> Result<Option<Session>> {
     }
     let row = first_row(ok(res)?);
     match str_field(&row, &["status"]).as_str() {
-        "approved" => {}
+        "approved" => { plx_base::eventlog::log("nuvio account: QR approved; exchanging session"); }
         "pending" | "" => return Ok(None),
-        other => return Err(Error::Parse(format!("login {other}"))),
+        other => {
+            let state = match other { "expired" => "expired", "used" => "used", "cancelled" => "cancelled", _ => "unknown" };
+            plx_base::eventlog::log(&format!("nuvio account: QR state={state}"));
+            return Err(Error::Parse(format!("login {state}")));
+        },
     }
     let v = ok(call(&c, "POST", "/functions/v1/tv-logins-exchange", Some(&bearer), Some(&json!({"code": h.code, "device_nonce": h.nonce})))?)?;
     session_from(&v).map(Some).ok_or_else(|| Error::Parse("login exchange returned no session".into()))
@@ -556,3 +565,6 @@ mod tests {
         *OVERRIDE.lock().unwrap() = None;
     }
 }
+
+/// Safe account diagnostics supplied by the shim: callers must pass only fixed categories/statuses.
+pub fn log_account_event(message: &str) { plx_base::eventlog::log(message); }

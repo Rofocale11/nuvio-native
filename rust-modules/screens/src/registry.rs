@@ -82,6 +82,7 @@ pub enum PreferenceCmd {
         update: plx_plex::plex::account::PreferenceUpdate,
         reply: std::sync::mpsc::Sender<AccountPreferenceReply>,
     },
+    RatingSource { source: plx_plex::plex::session::RatingSource, reply: std::sync::mpsc::Sender<bool> },
     Quality { quality: plx_plex::plex::session::PlaybackQuality, reply: std::sync::mpsc::Sender<bool> },
     DirectPlay { mode: plx_plex::plex::session::DirectPlayMode, reply: std::sync::mpsc::Sender<bool> },
     NextEpisode { mode: plx_plex::plex::session::NextEpisodeMode, reply: std::sync::mpsc::Sender<bool> },
@@ -2088,7 +2089,9 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Person adopts `cards::Stack` (cards-stack PR 5): its logical state gains the stack's motion canon
 // (`stack:Stack{scroll,target,sections}`), the same as Collection's; the previous pin was
 // 0xbc1d_d51d_5b11_1273.
-const SCREEN_SHAPES_PIN: u64 = 0xf541c16b15ec999f;
+// Nuvio rating source adds a Playback field and picker option vocabulary.
+// Real simulator recordings are required; previous pin: 0xf541c16b15ec999f.
+const SCREEN_SHAPES_PIN: u64 = 0xb74dd7b8a1ffdc55;
 
 #[cfg(test)]
 mod arg_tests {

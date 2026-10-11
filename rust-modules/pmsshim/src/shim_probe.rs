@@ -217,9 +217,14 @@ pub fn apply(media: &mut Value, p: &ProbeInfo) {
         streams.push(s);
         index += 1;
     }
-    // The first decodable default (else first decodable) is the selected track: the route picks
-    // compatible siblings itself, but a selected undecodable default would start it on the wrong one.
-    let pick = p.audio.iter().position(|a| a.default && a.decodable).or_else(|| p.audio.iter().position(|a| a.decodable)).unwrap_or(0);
+    // Nuvio has no Plex account language preference. Prefer a decodable English track over
+    // a release group's foreign-language default. Session track choices still outrank this
+    // initial selection in the route. If English is absent, retain the file's usual order.
+    let english = |a: &Audio| matches!(a.language.to_ascii_lowercase().as_str(), "en" | "eng" | "en-us" | "en-gb");
+    let pick = p.audio.iter().position(|a| english(a) && a.default && a.decodable && !a.title.to_ascii_lowercase().contains("commentary"))
+        .or_else(|| p.audio.iter().position(|a| english(a) && a.decodable && !a.title.to_ascii_lowercase().contains("commentary")))
+        .or_else(|| p.audio.iter().position(|a| a.default && a.decodable))
+        .or_else(|| p.audio.iter().position(|a| a.decodable)).unwrap_or(0);
     for (n, a) in p.audio.iter().enumerate() {
         let atmos = a.profile == 30 && matches!(a.codec.as_str(), "eac3" | "truehd");
         let name = if atmos { format!("{} Atmos", audio_name(a)) } else { audio_name(a) };
@@ -231,7 +236,7 @@ pub fn apply(media: &mut Value, p: &ProbeInfo) {
             "displayTitle": format!("{} ({} {}ch)", lang, name, a.channels),
             "selected": n == pick, "default": a.default,
         }));
-        if n == 0 {
+        if n == pick {
             media["audioCodec"] = json!(a.codec);
             media["audioChannels"] = json!(a.channels);
         }
@@ -271,6 +276,20 @@ pub fn apply(media: &mut Value, p: &ProbeInfo) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn english_audio_beats_a_decodable_foreign_default() {
+        let mut p = p7(6);
+        p.audio = vec![
+            Audio { codec: "ac3".into(), language: "rus".into(), default: true, decodable: true, ..Default::default() },
+            Audio { codec: "eac3".into(), language: "eng".into(), decodable: true, ..Default::default() },
+        ];
+        let mut m = json!({"Part": [{"id": 5}]});
+        apply(&mut m, &p);
+        let s = &m["Part"][0]["Stream"];
+        assert_eq!(s[1]["selected"], false);
+        assert_eq!(s[2]["selected"], true);
+    }
+
     fn p7(bl_compat: u8) -> ProbeInfo {
         ProbeInfo {
             container: "mkv".into(),
@@ -285,6 +304,18 @@ mod tests {
             ],
             subtitles: vec![Sub { codec: "subrip".into(), language: "eng".into(), ..Default::default() }],
         }
+    }
+
+    #[test]
+    fn english_commentary_does_not_outrank_english_dialogue() {
+        let mut p = p7(6);
+        p.audio = vec![
+            Audio { codec: "ac3".into(), language: "en".into(), title: "Director commentary".into(), default: true, decodable: true, ..Default::default() },
+            Audio { codec: "eac3".into(), language: "en-US".into(), decodable: true, ..Default::default() },
+        ];
+        let mut m = json!({"Part": [{"id": 5}]}); apply(&mut m, &p);
+        assert_eq!(m["Part"][0]["Stream"][2]["selected"], true);
+        assert_eq!(m["audioCodec"], "eac3");
     }
 
     #[test]

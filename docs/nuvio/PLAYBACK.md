@@ -75,6 +75,13 @@ own open hits a warmed torrent.
 
 ### Audio
 
+Initial selection prefers a decodable English dialogue track (`en`, `eng`, including
+regional tags) over a foreign-language file default. A default English dialogue
+track leads other English dialogue tracks; commentary is excluded from the English
+preference. Without English dialogue, the compatible file default is retained.
+An explicit user audio choice takes precedence over this initial selection.
+
+
 `devcaps` admits DTS only when the TV's codec table lists it (a 2020 CX does not); TrueHD is never
 direct-play. With accurate `Stream(type 2)` rows the route's existing smart-direct-play picks a
 compatible AAC/AC3/EAC3 sibling of a DTS/TrueHD default. **When there is no compatible track the
@@ -159,5 +166,10 @@ Selecting an embedded text subtitle returned HTTP 200, followed by nonempty time
 subtitle cues. Native UI screenshots do not include the video plane and are suppressed
 while it is bound, so they cannot prove visible subtitle compositing.
 
-P7 HDR10 fallback and Nuvio account QR login remain unverified. See `VALIDATION.md`
+The user also confirmed stable Home, 4K Dolby Vision playback, seeking, pause/resume
+and visible English subtitles with the physical remote. P7 HDR10 fallback remains
+unverified. Fresh follow-up release QR approval reached the local server and loaded
+account addons. English audio default behavior is host-tested; physical confirmation
+on a newly started stream remains pending.
+See `VALIDATION.md`
 for the stable install's final checks.

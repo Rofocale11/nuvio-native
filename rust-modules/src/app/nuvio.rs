@@ -181,7 +181,7 @@ pub(crate) fn boot() {
     };
     handle.shim.probes.set_prober(prober());
     handle.shim.set_audio_codecs(plx_platform::devcaps::caps().audio.split(',').map(str::to_string).collect());
-    plx_base::local_server::set(handle.origin(), handle.token.clone());
+    plx_base::local_server::set(handle.origin(), handle.token.clone(), plx_pmsshim::MACHINE_ID.to_string());
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
     // A Nuvio sign-in (the QR screen) or a profile pick hands its addons over here.

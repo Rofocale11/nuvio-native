@@ -36,12 +36,13 @@ use super::registry::{word, AccountPreferenceReply, AppFx, PreferenceCmd, BAND};
 mod picker;
 pub use picker::{PickerPage, SHAPE as PICKER_SHAPE};
 
-pub const SHAPE: &str = "PreferencesV3{kind:u8,selection:u32,busy:bool,status:str,quality:u8,direct_play:u8,values:[str]}";
+pub const SHAPE: &str = "PreferencesV4{kind:u8,selection:u32,busy:bool,status:str,quality:u8,direct_play:u8,values:[str]}";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind { Playback, AudioSubtitles }
 impl PickerKind {
     fn title(self) -> &'static str { match self {
+        Self::RatingSource => plx_platform::i18n::msg::settings_ratings_title(),
         Self::Quality => plx_platform::i18n::msg::settings_playback_quality(), Self::DirectPlay => plx_platform::i18n::msg::settings_playback_direct_play(),
         Self::SubtitleSize => plx_platform::i18n::msg::settings_playback_subtitle_size(), Self::SubtitlePosition => plx_platform::i18n::msg::settings_playback_subtitle_position(),
         Self::NextEpisode => plx_platform::i18n::msg::settings_playback_next_episode(),
@@ -53,6 +54,7 @@ impl PickerKind {
     /// What this field's picker says about it under its title. The four account fields share the
     /// account note (it is about where those values are saved); each local one has its own.
     fn copy(self) -> &'static str { match self {
+        Self::RatingSource => plx_platform::i18n::msg::settings_ratings_copy(),
         Self::Quality => plx_platform::i18n::msg::settings_playback_quality_copy(),
         Self::DirectPlay => plx_platform::i18n::msg::settings_playback_direct_play_copy(),
         Self::SubtitleSize => plx_platform::i18n::msg::settings_playback_subtitle_size_copy(),
@@ -65,7 +67,7 @@ impl PickerKind {
     /// The field-list page this field belongs to.
     fn kind(self) -> Kind {
         match self {
-            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::NextEpisode | Self::DeckPress | Self::SkipInterval => Kind::Playback,
+            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::NextEpisode | Self::DeckPress | Self::SkipInterval | Self::RatingSource => Kind::Playback,
             Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => Kind::AudioSubtitles,
         }
     }
@@ -81,7 +83,7 @@ impl Kind {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Value { Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), Language(String), Mode(i64), Forced(i64) }
+enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), Language(String), Mode(i64), Forced(i64) }
 
 /// The hashed half of a transaction: what the page shows while a load or save is in flight.
 struct Io { busy: bool, status: String }
@@ -204,6 +206,7 @@ impl Txn {
     fn save_local(&mut self, io: &mut Io, value: Value, fx: &mut Effects<'_, InnerHost>) {
         let (reply, rx) = mpsc::channel();
         let command = match value {
+            Value::RatingSource(source) => PreferenceCmd::RatingSource { source, reply },
             Value::Quality(quality) => PreferenceCmd::Quality { quality, reply },
             Value::DirectPlay(mode) => PreferenceCmd::DirectPlay { mode, reply },
             Value::SubtitleSize(size) => PreferenceCmd::SubtitleSize { size, reply },
@@ -284,6 +287,7 @@ impl FormId for RowId {
             Self::Field(PickerKind::NextEpisode) => 4,
             Self::Field(PickerKind::SkipInterval) => 5,
             Self::Field(PickerKind::DeckPress) => 7,
+            Self::Field(PickerKind::RatingSource) => 8,
             Self::Retry => 6,
         })
     }
@@ -321,6 +325,7 @@ pub struct PreferencesPage {
     next_episode: NextEpisodeMode,
     deck_press: DeckPress,
     skip_interval: SkipInterval,
+    rating_source: plx_plex::plex::session::RatingSource,
 }
 impl PreferencesPage {
     pub fn new(entry: EntryId, kind: Kind) -> Self {
@@ -330,7 +335,7 @@ impl PreferencesPage {
             copy: String::new(), txn: Txn::new(false),
             look: (plx_media::route::subtitle_size(), plx_media::route::subtitle_position()),
             next_episode: plx_media::route::next_episode_mode(), deck_press: plx_media::route::deck_press(),
-            skip_interval: plx_media::route::skip_interval() };
+            skip_interval: plx_media::route::skip_interval(), rating_source: plx_plex::plex::nuvio::rating_source() };
         s.rebuild(None);
         s
     }
@@ -358,6 +363,7 @@ impl PreferencesPage {
         self.next_episode = plx_media::route::next_episode_mode();
         self.deck_press = plx_media::route::deck_press();
         self.skip_interval = plx_media::route::skip_interval();
+        self.rating_source = plx_plex::plex::nuvio::rating_source();
         self.copy = copy_text(Subject::Page(self.state.kind), &self.state.io.status, self.state.direct_play).into_owned();
         let inputs = FieldListInputs {
             kind: self.state.kind, quality: self.state.quality, direct_play: self.state.direct_play,
@@ -390,7 +396,7 @@ impl PreferencesPage {
 /// Which fields `kind`'s list shows: Audio & Subtitles has none until a snapshot has loaded.
 fn fields_of(inputs: &FieldListInputs<'_>) -> &'static [PickerKind] {
     match inputs.kind {
-        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval],
+        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::RatingSource],
         Kind::AudioSubtitles if inputs.prefs.is_some() => &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles],
         _ => &[],
     }
@@ -399,6 +405,7 @@ fn fields_of(inputs: &FieldListInputs<'_>) -> &'static [PickerKind] {
 /// loaded. Free rather than a page method so [`field_section`] needs no page and no globals.
 fn resolve_value(field: PickerKind, quality: Quality, direct_play: DirectPlayMode, prefs: Option<&AudioPreferences>) -> Value {
     match field {
+        PickerKind::RatingSource => Value::RatingSource(plx_plex::plex::nuvio::rating_source()),
         PickerKind::Quality => Value::Quality(quality),
         PickerKind::DirectPlay => Value::DirectPlay(direct_play),
         PickerKind::SubtitleSize => Value::SubtitleSize(plx_media::route::subtitle_size()),
@@ -416,6 +423,10 @@ fn resolve_value(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
 /// `PickerKind`'s picker options.
 fn field_options(field: PickerKind, quality: Quality, direct_play: DirectPlayMode, prefs: Option<&AudioPreferences>) -> Vec<(String, Value)> {
     match field {
+        PickerKind::RatingSource => vec![
+            (plx_platform::i18n::msg::settings_ratings_imdb().into(), Value::RatingSource(plx_plex::plex::session::RatingSource::Imdb)),
+            (plx_platform::i18n::msg::settings_ratings_tomatoes().into(), Value::RatingSource(plx_plex::plex::session::RatingSource::RottenTomatoes)),
+        ],
         PickerKind::Quality => plx_media::route::available_quality_ladder().iter()
             .map(|q| (q.label().into(), Value::Quality(*q))).collect(),
         PickerKind::DirectPlay => [DirectPlayMode::Auto, DirectPlayMode::Forced, DirectPlayMode::Disabled]
@@ -561,7 +572,8 @@ impl Machine<InnerHost> for PreferencesPage {
                     || self.look != (plx_media::route::subtitle_size(), plx_media::route::subtitle_position())
                     || self.next_episode != plx_media::route::next_episode_mode()
                     || self.deck_press != plx_media::route::deck_press()
-                    || self.skip_interval != plx_media::route::skip_interval() {
+                    || self.skip_interval != plx_media::route::skip_interval()
+                    || self.rating_source != plx_plex::plex::nuvio::rating_source() {
                     self.rebuild_keeping();
                     // An empty loading table had no engine seat. Give its first landing (or
                     // Retry row) one so OK works immediately, without moving an existing

@@ -145,6 +145,12 @@ pub struct MetaPreview {
     pub release_info: Option<String>,
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_rating: Option<String>,
+    /// Optional provider scores returned by metadata addons (MDBList's wire shapes).
+    pub ratings: serde_json::Value,
+    #[serde(rename = "mdbListRatings")]
+    pub mdb_list_ratings: serde_json::Value,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
+    pub rotten_tomatoes_rating: Option<String>,
     #[serde(deserialize_with = "crate::lenient::string_vec")]
     pub genres: Vec<String>,
 }
@@ -167,6 +173,12 @@ pub struct Meta {
     pub released: Option<String>,
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_rating: Option<String>,
+    /// Optional provider scores returned by metadata addons (MDBList's wire shapes).
+    pub ratings: serde_json::Value,
+    #[serde(rename = "mdbListRatings")]
+    pub mdb_list_ratings: serde_json::Value,
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
+    pub rotten_tomatoes_rating: Option<String>,
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub runtime: Option<String>,
     #[serde(deserialize_with = "crate::lenient::string_vec")]
