@@ -261,7 +261,7 @@ plx_screens = { path = "screens" }
 plx_stremio = { path = "stremio" }
 plx_pmsshim = { path = "pmsshim" }
 # safe pure-Rust JPEG/PNG decoders — replaces vendored stb_image.h (~8k lines C)
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 # raw socket/libc FFI for the stream module (correct constants + struct layouts)
 libc = "0.2"
 # XXH3-64 of every written frame of the demo-video dump (`src/dev/framedump.rs`, the `frames.tsv`
