@@ -1319,7 +1319,7 @@ mod upgrade_tests {
                 ..Default::default()
             },
             plx_platform::storage::state::Flavor::Stable,
-            "com.nuvionative.app.storage".into(),
+            "com.beb.plxnative.storage".into(),
         )
     }
 

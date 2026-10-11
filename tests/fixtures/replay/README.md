@@ -380,3 +380,12 @@ the recorded data state. The state shape changed from 6411129155501563480 to
 9159381185758612433. All three anchors were recorded again against the synthetic server
 and installed with `tools/plxnative-rec rerecord`. Their anchor flags remain set.
 Targets and Resolve both report SAME, with every difference counter at zero.
+
+The Nuvio stream picker adds its discovery/select state and displayed stream rows to the
+recorded Alternative Sources overlay. The state shape changed from 9159381185758612433
+to 6547080067755101788, and the old anchors were refused by the loader. All three were
+recorded again against the synthetic server with the existing 350 ms key interval,
+checked against the closed alphabet, and replayed before import. Targets and Resolve
+report SAME for all three, with every difference counter zero. `tools/plxnative-rec
+rerecord` preserved their anchor flags. The alphabet gains only the localized Streams
+button from `locales/en/browse.json`.

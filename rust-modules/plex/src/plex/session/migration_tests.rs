@@ -1210,7 +1210,7 @@ mod published_06 {
         plx_platform::storage::backend::Backend::new(
             Db8 { record, ..Default::default() },
             state::Flavor::Stable,
-            "com.nuvionative.app.storage".into(),
+            "com.beb.plxnative.storage".into(),
         )
     }
 
@@ -1314,7 +1314,7 @@ fn fallback_written_file_migrates_into_recovered_missing_db8() {
     let mut backend = plx_platform::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
-        "com.nuvionative.app.storage".into(),
+        "com.beb.plxnative.storage".into(),
     );
     let mut transport = |request| Ok(backend.dispatch(request));
     let result = persistence::bootstrap_with(

@@ -526,7 +526,15 @@ impl Client {
                 "X-Plex-Client-Profile-Extra",
                 &if forced { forced_direct_profile() } else { profile_extra(TranscodeDelivery::ProgressiveMkv) },
             );
-        self.get_json(&q.build())
+        if self.is_nuvio() {
+            // Addon discovery and a bounded FFmpeg probe precede the response. The ordinary
+            // bulk transport's 30-second silence limit is too short for a cold source.
+            match self.get_json_with_headers_until(&q.build(), &[],
+                std::time::Instant::now() + std::time::Duration::from_secs(120)) {
+                super::client::JsonDeadlineOutcome::Response { parsed, .. } => parsed,
+                _ => None,
+            }
+        } else { self.get_json(&q.build()) }
     }
 
     /// Register `spec` with the universal transcoder (the /decision GET — required before

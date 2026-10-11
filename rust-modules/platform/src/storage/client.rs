@@ -140,6 +140,24 @@ pub fn load() -> Result<Load, ClientError> {
     load_with(&mut NativeTransport)
 }
 
+/// Addon configuration in an independent object of the authenticated helper's private DB8 kind.
+/// Payloads contain credentials and must never be logged.
+pub fn load_nuvio() -> Result<Option<String>, ClientError> {
+    match transact(Request::LoadNuvio {})? {
+        Response::Nuvio { payload } => Ok(payload.map(|p| p.0)),
+        Response::Error { code } => Err(error(code)),
+        _ => Err(ClientError::Protocol),
+    }
+}
+
+pub fn save_nuvio(payload: String) -> Result<(), ClientError> {
+    match transact(Request::SaveNuvio { payload: wire::SecretString(payload.clone()) })? {
+        Response::Nuvio { payload: Some(stored) } if stored.0 == payload => Ok(()),
+        Response::Error { code } => Err(error(code)),
+        _ => Err(ClientError::Protocol),
+    }
+}
+
 /// Injectable external I/O boundary, shared by the shipping coordinator and host fault tests.
 pub trait Transport {
     fn transact(&mut self, request: Request) -> Result<Response, ClientError>;

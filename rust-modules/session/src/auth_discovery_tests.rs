@@ -2292,7 +2292,7 @@ fn a_refused_token_is_reported_as_authorization_not_as_silence() {
             last, attempts: 3, elapsed: Duration::from_secs(6), trigger: DiscoveryTrigger::Login,
         })).expect("a failure");
         assert_eq!(incident.kind, IncidentKind::Discovery(DiscoveryClass::Silent), "{last:?}");
-        assert!(message.contains("plex.tv"));
+        assert!(message.contains("Nuvio"));
     }
 }
 
@@ -2304,20 +2304,20 @@ fn terminal_discovery_copy_names_the_target_cause_retry_and_action() {
         last, attempts: 3, elapsed: Duration::from_secs(6), trigger: DiscoveryTrigger::Login,
     })).unwrap().0.into_owned();
     assert_eq!(message(failure(Some(6), plx_net::net::RequestError::Transport)),
-        "This TV couldn't find plex.tv, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
+        "This TV couldn't find Nuvio, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
     assert_eq!(message(failure(Some(28), plx_net::net::RequestError::TimedOut)),
-        "This TV couldn't reach plex.tv, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
+        "This TV couldn't reach Nuvio, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
     assert_eq!(message(failure(Some(60), plx_net::net::RequestError::Transport)),
-        "This TV couldn't make a secure connection to plex.tv. Check the TV's date and time, then try again.");
+        "This TV couldn't make a secure connection to Nuvio. Check the TV's date and time, then try again.");
     for evidence in [Ok(200), Ok(408), Ok(429), Ok(503)] {
         assert_eq!(message(evidence),
-            "plex.tv is having trouble right now, so your servers weren't checked. Try again in a few minutes.");
+            "Nuvio is having trouble right now, so your servers weren't checked. Try again in a few minutes.");
     }
     let servers = discovery_failure(&Discovery::ServersUnreachable {
         trigger: DiscoveryTrigger::Rediscover,
     }).unwrap().0;
     assert_eq!(servers,
-        "plex.tv listed your servers, but none of them answered. Make sure your Plex Media Server is on and online, then try again.");
+        "Nuvio listed your servers, but none of them answered. Make sure your Nuvio addons is on and online, then try again.");
 }
 
 #[test]
@@ -2353,7 +2353,7 @@ fn dns_copy_never_claims_that_a_plex_server_was_contacted() {
     let (caption, _) = discovery_failure(&Discovery::PlexTvFailed(PlexTvFailure {
         last, attempts: 3, elapsed: Duration::from_secs(6), trigger: DiscoveryTrigger::Login,
     })).unwrap();
-    assert!(caption.contains("plex.tv"));
+    assert!(caption.contains("Nuvio"));
     assert!(caption.contains("TV's internet connection"));
     assert!(!caption.contains("Plex server"), "{caption}");
 }
@@ -2893,7 +2893,7 @@ fn localized_discovery_retries_use_the_whole_sentence_and_belarusian_count_rules
         for text in [plx_platform::i18n::msg::browse_auth_plex_dns_retry_in(&be, count),
             plx_platform::i18n::msg::browse_auth_plex_connect_retry_in(&be, count)] {
             assert!(text.contains(phrase), "{text}");
-            assert!(text.contains("plex.tv") && text.contains("Праверце злучэнне"), "{text}");
+            assert!(text.contains("Nuvio") && text.contains("Праверце злучэнне"), "{text}");
             assert!(!text.contains("We tried"), "an English sentence fragment must never survive");
         }
     }

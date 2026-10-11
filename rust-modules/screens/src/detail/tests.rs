@@ -2287,6 +2287,25 @@ fn play_item(effects: &[plx_machine::machine::Stamped<TestHost>]) -> Option<(&Pl
 }
 
 #[test]
+fn a_catalog_movie_without_a_part_plays_its_loaded_detail() {
+    let _guard = install(Detail {
+        sid: ServerId::UNSET, rk: "movie".into(), kind: "movie".into(),
+        title: "Movie".into(), part: "/library/parts/42/1/file.mkv".into(),
+        vcodec: "hevc".into(), acodec: "eac3".into(), ..Default::default()
+    });
+    let mut screen = bare(&_guard, ServerId::UNSET, "movie");
+    screen.selected = Some(plx_data::pms::PmsMovie {
+        rk: "movie".into(), title: "Movie".into(), ..Default::default()
+    });
+    let (_, effects) = step(&mut screen, &ScreenEvent::Activate(hero::ELEM_PLAY), Some(hero::ELEM_PLAY));
+    match play_item(&effects).unwrap() {
+        (PlayIntent::Item { part, .. }, _) => assert_eq!(part, "/library/parts/42/1/file.mkv"),
+        _ => panic!("a catalog row has no playable part; use the loaded detail"),
+    }
+    clear();
+}
+
+#[test]
 fn a_movie_trailer_disc_plays_the_extra_from_the_start() {
     let extra = trailer_extra();
     let _guard = install(Detail {

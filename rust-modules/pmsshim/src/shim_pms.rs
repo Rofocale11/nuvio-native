@@ -720,7 +720,14 @@ impl Shim {
                     return refuse(why);
                 }
             }
+            None if self.probes.has_prober() => return refuse("Streams are still being discovered. Try again or choose another stream.".into()),
             None => {}
+        }
+        // Return the chosen Media first: the native route consumes this response as the
+        // authoritative codec/track description, including an explicit non-leading choice.
+        if let Some(ms) = row["Media"].as_array_mut() {
+            if index >= ms.len() { return refuse("This stream is no longer available. Choose another stream.".into()); }
+            ms.swap(0, index);
         }
         if let Some(ms) = row["Media"].as_array_mut() {
             for m in ms.iter_mut() {
@@ -980,7 +987,7 @@ impl Shim {
             (_, ["nuvio", "streams"]) => {
                 let rk = req.q("ratingKey").and_then(|v| v.parse().ok()).unwrap_or(-1);
                 let Some(ident) = self.keys.ident(rk) else { return Response::not_found() };
-                let (ranked, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline);
+                let (ranked, _, _) = self.ranked(rk, &ident, None, DETAIL_WAIT);
                 let done = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).is_some_and(|s| s.state.lock().map(|g| g.done).unwrap_or(true));
                 Response::json(&json!({"ratingKey": rk, "complete": done,
                     "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>()}))
@@ -990,7 +997,9 @@ impl Shim {
                 let idx: Option<usize> = req.q("index").and_then(|v| v.parse().ok());
                 match (self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk), idx) {
                     (Some(slot), Some(i)) => {
-                        slot.state.lock().unwrap_or_else(|e| e.into_inner()).selected = Some(i);
+                        let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+                        if i >= state.streams.len() { return Response::json_status(404, &json!({"ok": false})); }
+                        state.selected = Some(i);
                         Response::json(&json!({"ok": true}))
                     }
                     _ => Response::json_status(404, &json!({"ok": false})),
@@ -1155,12 +1164,21 @@ impl Shim {
     }
 
     fn photo(&self, req: &Request) -> Response {
-        let Some(url) = req.q("url").filter(|u| u.starts_with("http://") || u.starts_with("https://")) else {
-            return Response::not_found();
+        let Some(source) = req.q("url") else { return Response::not_found(); };
+        // PMS artwork callers may send an absolute CDN URL or the item's local art path.
+        let local = source.split('?').next().unwrap_or(source);
+        let pieces: Vec<_> = local.trim_matches('/').split('/').collect();
+        let resolved = match pieces.as_slice() {
+            ["library", "metadata", rk, kind @ ("thumb" | "art" | "clearLogo")] =>
+                rk.parse().ok().and_then(|rk| self.row(rk)).and_then(|row|
+                    row[*kind].as_str().filter(|s| !s.is_empty()).map(str::to_string)),
+            _ => None,
         };
+        let url = resolved.as_deref().unwrap_or(source);
+        if !(url.starts_with("http://") || url.starts_with("https://")) { return Response::not_found(); }
         let width: u32 = req.q("width").and_then(|v| v.parse().ok()).unwrap_or(0);
         let height: u32 = req.q("height").and_then(|v| v.parse().ok()).unwrap_or(0);
-        let sized = sized_image_url(url, width.max(height * 2 / 3));
+        let sized = sized_image_url(url, width.max(height.saturating_mul(2) / 3));
         match plx_net::net::request(&sized, &[], "GET", None, plx_net::net::API, true, Some(12 << 20), None) {
             Some(r) if r.ok() => Response::bytes(200, sniff_image(&r.body), r.body),
             Some(r) => Response::bytes(r.status.max(400), "text/plain", Vec::new()),
@@ -1223,4 +1241,82 @@ fn _assert_send_sync() {
     fn f<T: Send + Sync>() {}
     f::<Shim>();
     let _ = now_secs;
+}
+
+#[cfg(test)]
+mod playback_regressions {
+    use super::*;
+
+    #[test]
+    fn an_inflight_stream_list_cannot_direct_play_a_placeholder() {
+        let shim = Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt1254207".into() });
+        shim.streams.lock().unwrap().insert(rk, Arc::new(StreamSlot {
+            started: Instant::now() - Duration::from_secs(90),
+            state: Mutex::new(SlotState::default()), cv: Condvar::new(),
+        }));
+        shim.probes.set_prober(Arc::new(|_, _| panic!("no stream exists to probe")));
+        let request = Request { method: "GET".into(), path: "/video/:/transcode/universal/decision".into(),
+            query: HashMap::from([("path".into(), format!("/library/metadata/{rk}"))]),
+            headers: HashMap::new(), body: Vec::new() };
+        let response = shim.handle(&request);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["MediaContainer"]["generalDecisionCode"], 2000);
+    }
+    #[test]
+    fn decision_carries_probed_hevc_dovi_tracks_and_refuses_missing_selection() {
+        let shim=Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend),Config::default()));
+        let rk=shim.keys.key_of(&Ident::Title {type_:"movie".into(),id:"tt1254207".into()});
+        shim.streams.lock().unwrap().insert(rk,Arc::new(StreamSlot {
+            started:Instant::now(),state:Mutex::new(SlotState {
+                streams:vec![Stream {url:Some("https://example.invalid/media.mkv".into()),..Default::default()}],
+                done:true,..Default::default()}),cv:Condvar::new()}));
+        shim.probes.set_prober(Arc::new(|_,_| Ok(crate::shim_probe::ProbeInfo {
+            container:"mkv".into(),duration_ms:90000,size:1000,video_decodable:true,
+            video:Some(crate::shim_probe::Video {codec:"hevc".into(),width:3840,height:2160,fps:23.976,
+                dovi:Some(crate::shim_probe::Dovi {profile:8,level:6,bl_compat:1,rpu:true,bl:true,..Default::default()}),
+                ..Default::default()}),
+            audio:vec![crate::shim_probe::Audio {codec:"eac3".into(),channels:6,decodable:true,..Default::default()}],
+            subtitles:vec![crate::shim_probe::Sub {codec:"subrip".into(),language:"eng".into(),..Default::default()}],
+        })));
+        let mut request=Request {method:"GET".into(),path:"/video/:/transcode/universal/decision".into(),
+            query:HashMap::from([("path".into(),format!("/library/metadata/{rk}"))]),headers:HashMap::new(),body:vec![]};
+        let response=shim.handle(&request);
+        let body:Value=serde_json::from_slice(&response.body).unwrap();
+        let media=&body["MediaContainer"]["Metadata"][0]["Media"][0];
+        assert_eq!(media["videoCodec"],"hevc");
+        assert_eq!(media["audioCodec"],"eac3");
+        assert_eq!(media["Part"][0]["Stream"][0]["DOVIProfile"],8);
+        assert_eq!(media["Part"][0]["Stream"].as_array().unwrap().len(),3);
+        request.query.insert("mediaIndex".into(),"99".into());
+        let response=shim.handle(&request);
+        let body:Value=serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["MediaContainer"]["generalDecisionCode"],2000);
+    }
+
+    #[test]
+    fn photo_endpoint_passes_through_source_image_bytes() {
+        use std::io::{Read,Write};
+        plx_net::net::global_init();
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr=listener.local_addr().unwrap();
+        let image=b"\x89PNG\r\n\x1a\nfixture";
+        let worker=std::thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buffer=[0;4096]; let _=stream.read(&mut buffer).unwrap();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",image.len()).unwrap();
+            stream.write_all(image).unwrap();
+        });
+        let shim=Shim::new(Arc::new(crate::shim_fake::FakeBackend),Config::default());
+        let request=Request {method:"GET".into(),path:"/photo/:/transcode".into(),
+            query:HashMap::from([("url".into(),format!("http://{addr}/poster.png")),
+                ("height".into(),u32::MAX.to_string())]),headers:HashMap::new(),body:vec![]};
+        let response=shim.photo(&request);
+        assert_eq!(response.status,200);
+        assert_eq!(response.content_type,"image/png");
+        assert_eq!(response.body,image);
+        worker.join().unwrap();
+    }
+
 }

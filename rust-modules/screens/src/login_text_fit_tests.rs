@@ -114,7 +114,7 @@ fn the_failed_reason_names_the_account_or_keeps_the_caption() {
     let _guard = language_on_this_thread_for_test(Preference::En);
     let caption = msg::browse_auth_no_servers();
     assert_eq!(super::failed_reason(caption, Some("alexandra"), &ShippedMeasure),
-        "Signed in as alexandra.\nThis Plex account has no server yet.");
+        "Signed in as alexandra.\nThis Nuvio account has no server yet.");
     for none in [None, Some(""), Some("  \n ")] {
         assert_eq!(super::failed_reason(caption, none, &ShippedMeasure), caption, "{none:?}");
     }
@@ -161,7 +161,7 @@ fn the_signed_in_reason_names_the_account_on_one_line_for_every_name_length() {
         // Cut from the middle, both ends of the name kept, the period left alone.
         if language == Preference::En {
             assert_eq!(super::signed_in_reason("Maximilian.Wolfgang.Kowalczyk.MMWWMMWWMMWWMMWWAB", &ShippedMeasure).as_deref(),
-                Some("Signed in as Maximilian.Wolfgang.\u{2026}.MMWWMMWWMMWWMMWWAB.\nThis Plex account has no server yet."),
+                Some("Signed in as Maximilian.Wolfgang.\u{2026}.MMWWMMWWMMWWMMWWAB.\nThis Nuvio account has no server yet."),
                 "a 48-character name is cut in the middle, not before the sentence's period");
         }
         assert_eq!(super::signed_in_reason("", &ShippedMeasure), None);

@@ -105,7 +105,7 @@ use plx_ui::{theme, Rect};
 /// selected ROW is in it deliberately: this panel's UP/DOWN changes nothing else in the app, so
 /// without it a replay grades the panel opening and closing and nothing between.
 pub const SHAPE: [&str; 2] = [
-    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4]},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion}",
+    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4]},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion,streams:{mode:bool,pending:bool,error:bool,attempts:u32,rows:[{index:u32,label:str,detail:str}]}",
     TableView::MOTION_SHAPE,
 ];
 
@@ -370,18 +370,67 @@ pub struct AltSourcesScreen {
     rows: Vec<AltRow>,
     /// The table and what each row does, replaced together ([`form_for`]).
     pub form: FormTable<AltId, Action, Infallible>,
+    stream_choices: Vec<plx_plex::plex::nuvio::StreamChoice>,
+    stream_mailbox: std::sync::Arc<std::sync::Mutex<Option<StreamReply>>>,
+    stream_mode: bool,
+    stream_pending: bool,
+    stream_error: bool,
+    stream_attempts: u32,
+}
+
+enum StreamReply {
+    List(Option<plx_plex::plex::nuvio::StreamList>),
+    Selected(bool),
 }
 
 impl AltSourcesScreen {
     pub fn new(entry: EntryId, arg: AltSourcesArg, meta: plx_data::metadata::MetadataView<'_>) -> Self {
+        let stream_mode = plx_plex::plex::client_for(arg.sid).is_some_and(|c| c.is_nuvio());
         let mut screen = Self {
             entry,
             arg,
             rows: Vec::new(),
             form: FormTable::new(plx_ui::table_screen::BAND_BASE),
+            stream_choices: Vec::new(),
+            stream_mailbox: Default::default(),
+            stream_mode,
+            stream_pending: false,
+            stream_error: false,
+            stream_attempts: 0,
         };
+        if screen.stream_mode { screen.request_streams(); }
         screen.rebuild(Sel::OnTheCopyYouAreOn, meta);
         screen
+    }
+
+    fn request_streams(&mut self) {
+        self.stream_attempts += 1;
+        self.stream_pending = true;
+        let (sid, rk, mailbox) = (self.arg.sid, self.arg.rk.clone(), self.stream_mailbox.clone());
+        let delay = self.stream_attempts > 1;
+        let job = plx_base::task::spawn("nuvio-stream-list", move || {
+            if delay { std::thread::sleep(std::time::Duration::from_millis(500)); }
+            let list = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_streams(&rk));
+            *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamReply::List(list));
+            plx_machine::idle::invalidate();
+        });
+        if job.is_none() { self.stream_pending = false; self.stream_error = true; }
+    }
+
+    fn stream_form(&self) -> Form<AltId, Action, Infallible> {
+        // placeholder-exempt: this declares rows; draw() counts the visible waiting caption.
+        let mut section = FormSection::new("");
+        for choice in &self.stream_choices {
+            let rk = choice.index.to_string();
+            section = section.item_keyed(AltId { sid: self.arg.sid, rk: rk.clone(), nth: 0 },
+                RowKey(choice.index as u32), RowKind::Choice,
+                Action::Open { sid: self.arg.sid, rk }, plx_appkit::source_list::stream_row(choice));
+        }
+        if self.stream_choices.is_empty() || self.stream_error {
+            section = section.note(if self.stream_error { plx_platform::i18n::msg::browse_streams_failed() }
+                else if self.stream_pending { plx_platform::i18n::msg::browse_streams_loading() } else { plx_platform::i18n::msg::browse_streams_empty() });
+        }
+        Form::new().section(section)
     }
 
     /// The rows the store would produce right now, marked against **the server the open PAGE
@@ -402,6 +451,7 @@ impl AltSourcesScreen {
 
     /// Materialise the store into the table, when and only when the drawn content would differ.
     fn refresh(&mut self, meta: plx_data::metadata::MetadataView<'_>) -> bool {
+        if self.stream_mode { return false; }
         let next = self.live_rows(meta);
         if next == self.rows {
             return false;
@@ -415,7 +465,7 @@ impl AltSourcesScreen {
         if matches!(sel_mode, Sel::OnTheCopyYouAreOn) {
             self.rows = self.live_rows(meta);
         }
-        let form = form_for(&self.rows, self.arg.sid, &self.arg.rk);
+        let form = if self.stream_mode { self.stream_form() } else { form_for(&self.rows, self.arg.sid, &self.arg.rk) };
         // rows carry a sub-line — the track menu's size class, not the account popover's
         self.form.table.compact = false;
         match sel_mode {
@@ -449,6 +499,17 @@ impl AltSourcesScreen {
     /// which need not be the row the cursor was already resting on — the same distinction
     /// `AccountMenuScreen::activate` draws.
     fn commit<H: AppLike>(&mut self, elem: u32, fx: &mut Effects<'_, H>) {
+        if self.stream_mode {
+            if self.stream_pending || !self.stream_choices.iter().any(|s| s.index == elem as usize) { return; }
+            self.stream_pending = true;
+            let (sid, rk, mailbox) = (self.arg.sid, self.arg.rk.clone(), self.stream_mailbox.clone());
+            if plx_base::task::spawn("nuvio-stream-select", move || {
+                let ok = plx_plex::plex::client_for(sid).is_some_and(|c| c.nuvio_select(&rk, elem as usize));
+                *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamReply::Selected(ok));
+                plx_machine::idle::invalidate();
+            }).is_none() { self.stream_pending = false; self.stream_error = true; }
+            return;
+        }
         let action = match self.form.index_of_key(RowKey(elem)).and_then(|i| self.form.activate(i)) {
             Some(plx_ui::form::Activation::Action(action)) => action,
             _ => Action::None,
@@ -483,6 +544,30 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                 Handled::Yes
             }
             ScreenEvent::Tick(tick) => {
+                let reply = self.stream_mailbox.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(reply) = reply {
+                    self.stream_pending = false;
+                    match reply {
+                        StreamReply::List(list) => {
+                            self.stream_error = list.is_none();
+                            if let Some(list) = list {
+                                self.stream_choices = list.streams;
+                                if !list.complete && self.stream_attempts < 60 { self.request_streams(); }
+                            }
+                            self.rebuild(Sel::Keep, H::metadata(cx));
+                        }
+                        StreamReply::Selected(true) => {
+                            self.dismiss(fx);
+                            fx.push(Fx::Deliver(MachineId::Instance(self.arg.host),
+                                Delivery::Screen(ScreenEvent::App(AppMsg::NuvioStreamSelected))));
+                        }
+                        StreamReply::Selected(false) => {
+                            self.stream_error = true;
+                            self.rebuild(Sel::Keep, H::metadata(cx));
+                        }
+                    }
+                    fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
+                }
                 // Re-derive the drawn selection from the engine's own tracked focus every tick,
                 // exactly as `AccountMenuScreen::step` does — `FocusMoved` already keeps the two
                 // in step, this is the belt to its suspenders for a focus change this screen was
@@ -622,6 +707,12 @@ impl LogicalState for AltSourcesScreen {
         }
         c.u32(self.form.table.sel as u32);
         self.form.table.write_motion(c);
+        c.bool(self.stream_mode).bool(self.stream_pending).bool(self.stream_error).u32(self.stream_attempts);
+        c.seq(self.stream_choices.len());
+        for choice in &self.stream_choices {
+            let row = plx_appkit::source_list::stream_row(choice);
+            c.u32(choice.index as u32).str(&row.label).str(&row.detail);
+        }
     }
     fn probe(&self, out: &mut String) {
         out.push_str("alt");
@@ -661,6 +752,9 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Screen<H> 
         let appear = f.page_alpha;
         let r = self.frame(f.measure);
         let p = f.painter.alpha(appear).translate(0.0, RISE * (1.0 - appear));
+        if self.stream_mode && self.stream_pending && self.stream_choices.is_empty() {
+            plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::WorkingReadout, &self.arg.rk);
+        }
         let measure = f.measure;
         // Named for `/tmp/plxnative-cpuprof` beside the page's own phases, so a slow frame while
         // this panel is up can be read as the PANEL or as the host under it.

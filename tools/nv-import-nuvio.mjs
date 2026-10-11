@@ -5,7 +5,7 @@
 //
 // Nuvio must be RUNNING on the TV (Developer Mode exposes its WebView on DevTools port 9998). This
 // reads — never writes — the active profile's per-profile localStorage keys and pushes them, raw,
-// to /tmp/<appid>/nuvio-import.json (or /tmp/nuvio-import.json for the stable id); Nuvio Native
+// to <runtime>/nuvio-import/nuvio-import.json; Nuvio Native
 // consumes that file at its next launch, stores it in its own data, and deletes it.
 //
 // Addon URLs can embed debrid credentials, so nothing here prints them: only hosts.
@@ -43,15 +43,22 @@ if (out) {
   if (rest.includes("--no-push")) process.exit(0);
 }
 const rundir = appid.split(".").length === 3 ? "/tmp" : `/tmp/${appid}`;
-const dest = `${rundir}/nuvio-import.json`;
+const handoff = `${rundir}/nuvio-import`;
+const dest = `${handoff}/nuvio-import.json`;
 // Developer Mode profiles do not support `ares-push`, so the file travels as base64 chunks through
 // `ares-novacom --run` (the sanctioned channel) and is decoded on the set. The app runs under a
-// different uid in the same group (5000) as the dev-mode shell, hence 640.
+// different uid in the same group (5000) as the dev-mode shell. Directory mode 770
+// permits unlink after DB8 verification; stable's sticky /tmp does not. Files stay 640.
 const b64 = Buffer.from(JSON.stringify(payload)).toString("base64");
-const run = (cmd) => execFileSync("ares-novacom", ["--device", device, "--run", cmd], { stdio: "ignore" });
-run(`mkdir -p ${rundir} && umask 027 && : > ${dest}.b64`);
+const run = (cmd) => {
+  try { execFileSync("ares-novacom", ["--device", device, "--run", cmd], { stdio: "ignore" }); }
+  catch { console.error("addon transfer failed; private command details suppressed"); process.exit(1); }
+};
+run(`umask 027 && mkdir -p ${handoff} && chmod 770 ${handoff} && : > ${dest}.b64`);
 for (let i = 0; i < b64.length; i += 60000) run(`printf %s '${b64.slice(i, i + 60000)}' >> ${dest}.b64`);
 run(`base64 -d ${dest}.b64 > ${dest}.tmp && rm -f ${dest}.b64 && chmod 640 ${dest}.tmp && mv ${dest}.tmp ${dest}`);
-console.log(`pushed ${list.length} addons from Nuvio profile ${profileId} to ${rundir}/nuvio-import.json:`);
+// Retire an old dev-owned root handoff only after its replacement is ready to consume.
+run(`rm -f ${rundir}/nuvio-import.json`);
+console.log(`pushed ${list.length} addons from Nuvio profile ${profileId} to ${dest}:`);
 for (const u of list) { try { console.log("  -", new URL(String(u)).host); } catch { console.log("  - (unparseable)"); } }
 console.log(`relaunch ${appid} to apply.`);

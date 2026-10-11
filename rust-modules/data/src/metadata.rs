@@ -2474,6 +2474,11 @@ pub fn fetch_playing_item(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Pla
         return None;
     }
     let it = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(rk));
+    playing_item_from_metadata(sid, rk, it.as_ref())
+}
+
+/// Interpret the same metadata shape from an authoritative playback decision.
+pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: Option<&plx_plex::plex::Metadata>) -> Option<PlayingItem> {
     // Markers and chapters hang off the ITEM, streams off its first Part — so a part-less response
     // still yields both of those instead of discarding all three. `Client::metadata` already sends
     // `includeChapters=1` (plex/library.rs), so the Chapter[] is on the wire either way: taking it

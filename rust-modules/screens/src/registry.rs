@@ -1082,6 +1082,7 @@ pub enum AppMsg {
     /// the destination and the PAGE navigates, which is `LibraryMenu`'s shape (`LibrarySelect`) and
     /// what keeps "what a press means on the Detail page" in one place instead of two.
     AltSourceOpen(ContentArg),
+    NuvioStreamSelected,
 }
 
 /// What the consent machine is told (§2.3): a person's answer to both questions at once.
@@ -2087,7 +2088,7 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Person adopts `cards::Stack` (cards-stack PR 5): its logical state gains the stack's motion canon
 // (`stack:Stack{scroll,target,sections}`), the same as Collection's; the previous pin was
 // 0xbc1d_d51d_5b11_1273.
-const SCREEN_SHAPES_PIN: u64 = 0xdb39_f424_a0be_5fd2;
+const SCREEN_SHAPES_PIN: u64 = 0xf541c16b15ec999f;
 
 #[cfg(test)]
 mod arg_tests {
