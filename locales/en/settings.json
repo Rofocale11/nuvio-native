@@ -1248,7 +1248,7 @@
     "description": "Nuvio rating provider preference."
   },
   "settings.ratings.copy": {
-    "value": "Choose IMDb or Rotten Tomatoes. Scores appear when your metadata addon supplies them.",
+    "value": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
     "description": "Nuvio rating provider preference."
   },
   "settings.ratings.imdb": {

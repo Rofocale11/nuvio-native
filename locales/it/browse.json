@@ -278,5 +278,13 @@
   "browse.clock.notice_year": "L'orologio della TV sembra errato ({year}). Connessione stabilita tramite la chiave memorizzata.",
   "browse.clock.notice": "L'orologio della TV sembra errato. Connessione stabilita tramite la chiave memorizzata.",
   "browse.clock.no_key": "L'orologio di questa TV sembra errato. Collega la TV a Internet una volta, poi riprova.",
-  "browse.clock.key_changed": "La chiave del tuo server è cambiata. Collega la TV a Internet una volta per consentire all'app di verificarla di nuovo."
+  "browse.clock.key_changed": "La chiave del tuo server è cambiata. Collega la TV a Internet una volta per consentire all'app di verificarla di nuovo.",
+  "browse.streams.loading": "Ricerca dei flussi…",
+  "browse.streams.empty": "Nessun flusso riproducibile trovato.",
+  "browse.streams.failed": "Impossibile caricare i flussi. Chiudi e riprova.",
+  "browse.list.add": "Aggiungi alla mia lista",
+  "browse.list.remove": "Rimuovi dalla mia lista",
+  "browse.list.saving": "Sincronizzazione della lista…",
+  "browse.list.retry": "Riprova la lista",
+  "browse.list.signin": "Accedi per usare la mia lista"
 }

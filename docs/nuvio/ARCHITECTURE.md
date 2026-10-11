@@ -56,8 +56,16 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   still run. Remote HTTP resources do not gain this exception.
 - Rating-source preference lives in the native canonical session record; the shim
   retains supplied IMDb and Rotten Tomatoes scores so cached details can switch
-  providers. It does not fetch a new ratings service or replace a missing RT score
-  with IMDb.
+  providers. It does not replace a missing RT detail score with IMDb. BetterPosters
+  image URLs request RT directly; these baked-in poster scores are independent of
+  the native detail-score preference. Original artwork is retained as a fetch fallback.
+- My List uses Nuvio's `sync_pull_library`, `sync_push_library_items` and
+  `sync_delete_library_items` RPCs. Writes contain one title and the active profile,
+  never a whole-list replacement. The account context serializes profile changes and
+  mutations, caches reads for 60 seconds and confirms each write with a fresh pull.
+  The selected profile is retained with the backend session. The UI uses
+  `/nuvio/library`, runs requests on a worker and refreshes Home after a confirmed
+  reply; the shelf pages through `/hubs/nuvio/list`.
 - Watch state / progress: stored locally by the shim (the app already reports timeline to "the
   server"). Developer Mode's writable-directory fallback is `/tmp`, so this state
   and the key table are not yet durable across TV reboots.

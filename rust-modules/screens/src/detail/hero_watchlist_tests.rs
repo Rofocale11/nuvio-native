@@ -13,7 +13,7 @@ fn sets() -> Vec<HeroSet> {
         for restart in [false, true] {
             for trailer in [false, true] {
                 for alt in [false, true] {
-                    v.push(HeroSet { watchlist: true, restart, trailer, alt, mark });
+                    v.push(HeroSet { watchlist: true, list: false, restart, trailer, alt, mark });
                 }
             }
         }
@@ -40,11 +40,39 @@ fn the_disc_is_second_after_play_in_every_row() {
     }
 }
 
+#[test]
+fn my_list_and_watchlist_controls_fit_together() {
+    let s = HeroSet {
+        watchlist: true,
+        list: true,
+        restart: true,
+        trailer: true,
+        alt: true,
+        mark: PosterMark::None,
+    };
+    let (controls, n) = hero_ctls(s);
+    assert_eq!(n, MAX_CTLS);
+    assert!(controls[..n].contains(&HeroCtl::Watchlist));
+    assert!(controls[..n].contains(&HeroCtl::MyList));
+
+    let widths = HeroWidths {
+        list: 190.0,
+        pill: 220.0,
+        alt: 250.0,
+        disc: [CD; 3],
+    };
+    for i in 1..n {
+        let previous = hero_btn_rect_at(s, i - 1, 0.0, widths);
+        let current = hero_btn_rect_at(s, i, 0.0, widths);
+        assert_eq!(current.x, previous.x + previous.w + CGAP);
+    }
+}
+
 /// Focus moves by index: Play to the disc to whatever follows, and back; the identity survives a
 /// membership flip because it is one elem for both faces.
 #[test]
 fn focus_walks_play_then_disc_then_the_rest() {
-    let s = HeroSet { watchlist: true, restart: true, trailer: false, alt: false, mark: PosterMark::None };
+    let s = HeroSet { watchlist: true, list: false, restart: true, trailer: false, alt: false, mark: PosterMark::None };
     assert_eq!(ctl_at(s, 0), Some(HeroCtl::Play));
     assert_eq!(ctl_at(s, 1), Some(HeroCtl::Watchlist));
     assert_eq!(ctl_at(s, 2), Some(HeroCtl::Restart));
@@ -58,6 +86,7 @@ fn the_elem_id_is_fresh_in_the_hero_range_and_round_trips() {
     let all = [
         ELEM_PLAY, ELEM_RESTART, ELEM_ALT, ELEM_MARK_WATCHED, ELEM_MARK_UNWATCHED, ELEM_TRAILER,
         ELEM_WATCHLIST,
+        ELEM_MY_LIST,
     ];
     let mut seen = std::collections::BTreeSet::new();
     for e in all {
@@ -87,8 +116,8 @@ fn the_disc_has_no_label_and_never_widens() {
     for named in [false, true] {
         assert!(disc_verb(HeroCtl::Watchlist, named).is_none());
     }
-    let s = HeroSet { watchlist: true, restart: true, trailer: true, alt: true, mark: PosterMark::None };
-    let widths = HeroWidths { pill: 236.0, alt: 300.0, disc: [CD + 90.0, CD + 60.0, CD + 120.0] };
+    let s = HeroSet { watchlist: true, list: false, restart: true, trailer: true, alt: true, mark: PosterMark::None };
+    let widths = HeroWidths { list: 0.0, pill: 236.0, alt: 300.0, disc: [CD + 90.0, CD + 60.0, CD + 120.0] };
     let r = hero_btn_rect_at(s, 1, 0.0, widths);
     assert_eq!((r.w, r.h), (CD, CD));
     let play = hero_btn_rect_at(s, 0, 0.0, widths);

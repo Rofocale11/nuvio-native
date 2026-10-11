@@ -111,6 +111,10 @@ fn bare(_guard: &plx_base::testlock::Serial, sid: ServerId, rk: &str) -> DetailS
 /// card-conformance matrix runs every harness inside `run_all`'s guard, `cards_harness`).
 pub(super) fn bare_held(sid: ServerId, rk: &str) -> DetailScreen {
     let mut screen = DetailScreen {
+        list_state: None,
+        list_pending: false,
+        list_error: false,
+        list_mailbox: Default::default(),
         entry: EntryId(7),
         sid,
         rk: rk.into(),
@@ -1235,6 +1239,7 @@ fn hero_focus_follows_its_control_when_the_set_grows_under_it() {
 fn hero_focus_survives_a_control_appearing_in_the_middle_of_the_row() {
     let before = hero::HeroSet {
         watchlist: true,
+        list: false,
         restart: true,
         trailer: false,
         alt: false,
@@ -1242,6 +1247,7 @@ fn hero_focus_survives_a_control_appearing_in_the_middle_of_the_row() {
     };
     let after = hero::HeroSet {
         watchlist: true,
+        list: false,
         alt: true,
         ..before
     };
@@ -1400,6 +1406,7 @@ fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
     let y = 812.0;
     let set = hero::HeroSet {
         watchlist: true,
+        list: false,
         restart: true,
         trailer: false,
         alt: false,
@@ -1410,6 +1417,7 @@ fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
     for unfurl in [0.2, 0.6, 1.0] {
         let disc = hero::disc_caps_at(set, 230.0, 0.0, [0.0, 0.0, unfurl], [201.0, 0.0, 267.0]);
         let widths = hero::HeroWidths {
+            list: 0.0,
             pill: 230.0,
             alt: 0.0,
             disc,
@@ -5310,4 +5318,44 @@ fn the_hold_hint_over_an_episode_still_waits_while_the_season_loads() {
     plx_data::metadata::set_season_loading_for_test(test_store().adapter_ref(), false);
     assert!(hinted(&screen), "the hint is back once the season has landed");
     clear();
+}
+
+#[test]
+fn my_list_is_nuvio_only_and_failed_sync_does_not_claim_success() {
+    let sid = ServerId::UNSET;
+    let guard = install(Detail { sid, rk:"list-test".into(), guid:"nuvio://movie/tt0133093".into(), ..Default::default() });
+    let mut screen = bare(&guard,sid,"list-test");
+    assert!(screen.hero_set(test_store().view()).list);
+    screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:false });
+    screen.list_pending = true;
+    *screen.list_mailbox.lock().unwrap() = Some(None);
+    step(&mut screen,&ScreenEvent::Tick(Tick { ms:16, dt_us:16_000 }),None);
+    assert!(screen.list_error);
+    assert!(!screen.list_pending);
+    assert_eq!(screen.list_label(),plx_platform::i18n::msg::browse_list_retry_c());
+    *screen.list_mailbox.lock().unwrap() = Some(Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:true }));
+    let (_,effects) = step(&mut screen,&ScreenEvent::Tick(Tick { ms:32, dt_us:16_000 }),None);
+    assert_eq!(screen.list_label(),plx_platform::i18n::msg::browse_list_remove_c());
+    assert!(effects.iter().any(|e| matches!(e.fx,Fx::App(AppFx::Store(StoreId::Hubs,StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))))));
+    screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:false,saved:false });
+    let (_,effects) = step(&mut screen,&ScreenEvent::Activate(hero::ELEM_MY_LIST),None);
+    assert!(effects.iter().any(|e| matches!(e.fx,Fx::App(AppFx::Loop(crate::registry::LoopReq::AccountSignIn)))));
+    plx_data::metadata::set_current_for_test(test_store().state_mut(),Some(Detail { sid,rk:"list-test".into(),guid:"plex://movie/test".into(),..Default::default() }));
+    assert!(!screen.hero_set(test_store().view()).list);
+    clear();
+}
+
+#[test]
+fn my_list_button_fits_beside_streams_in_every_language() {
+    let measure = plx_ui::fixture::FixtureMeasure;
+    for language in plx_platform::i18n::SHIPPED {
+        let _guard = plx_platform::i18n::language_on_this_thread_for_test(language);
+        for restart in [false,true] {
+            let set = hero::HeroSet { list:true,restart,alt:true,..Default::default() };
+            let widths = hero::hero_widths(&measure,set,restart,[1.0;3],false);
+            let (_,n) = hero::hero_ctls(set);
+            let last = hero::hero_btn_rect_at(set,n-1,0.0,widths);
+            assert!(last.x+last.w < plx_ui::consts::SCR_W-plx_ui::consts::MARGIN_X-plx_ui::detail_layout::PEOPLE_W,"{} My List overlaps people: end={} list={} play={} streams={}",language.tag(),last.x+last.w,widths.list,widths.pill,widths.alt);
+        }
+    }
 }

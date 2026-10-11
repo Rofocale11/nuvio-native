@@ -54,6 +54,10 @@ impl crate::registry::MetadataLike for TestHost {
 // container lifecycle seams, without requiring a configured server or a graphics context.
 fn body(entry: EntryId, rk: &str) -> DetailScreen {
     DetailScreen {
+        list_state: None,
+        list_pending: false,
+        list_error: false,
+        list_mailbox: Default::default(),
         entry, sid: ServerId::UNSET, rk: rk.into(), pending_season: None,
         keys: vec![], next_elem: FIRST_ITEM_ELEM, key_by_local: Default::default(),
         local_by_key: Default::default(), prev_by_key: Default::default(), gone: Default::default(), return_pending: false,

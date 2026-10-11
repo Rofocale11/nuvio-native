@@ -278,5 +278,13 @@
   "browse.clock.notice_year": "O relógio do televisor parece errado ({year}). Ligado com a chave memorizada.",
   "browse.clock.notice": "O relógio do televisor parece errado. Ligado com a chave memorizada.",
   "browse.clock.no_key": "O relógio deste televisor parece errado. Ligue o televisor à Internet uma vez e tente novamente.",
-  "browse.clock.key_changed": "A chave do seu servidor mudou. Ligue o televisor à Internet uma vez para que a app a possa verificar novamente."
+  "browse.clock.key_changed": "A chave do seu servidor mudou. Ligue o televisor à Internet uma vez para que a app a possa verificar novamente.",
+  "browse.streams.loading": "A procurar streams…",
+  "browse.streams.empty": "Nenhum stream reproduzível encontrado.",
+  "browse.streams.failed": "Não foi possível carregar os streams. Feche e tente novamente.",
+  "browse.list.add": "Adicionar à minha lista",
+  "browse.list.remove": "Remover da minha lista",
+  "browse.list.saving": "A sincronizar a minha lista…",
+  "browse.list.retry": "Tentar novamente a minha lista",
+  "browse.list.signin": "Inicie sessão para usar a minha lista"
 }

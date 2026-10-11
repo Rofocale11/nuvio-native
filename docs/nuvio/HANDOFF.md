@@ -46,7 +46,15 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
   file default or English commentary. Explicit audio selection still takes precedence.
 - Settings → Playback → Rating source offers IMDb or Rotten Tomatoes. The preference
   uses the canonical session/DB8 record and updates cached detail presentation. Rotten
-  Tomatoes scores must be supplied by a metadata addon; absent scores remain absent.
+  Tomatoes detail scores must be supplied by a metadata addon; absent scores remain absent.
+- BetterPosters (`btttr.cc`) supplies posters for IMDb movie/series identities across
+  Home, search, My List and detail metadata. Posters request Rotten Tomatoes scores
+  (`rs=RT`); non-IMDb titles retain their addon artwork. The image proxy falls back
+  to the original image when the poster provider fails.
+- Movie/show details have Add to My List / Remove from My List. The active Nuvio
+  account profile owns the list; individual item RPCs preserve other devices' titles.
+  A fresh pull confirms each mutation before the button updates. Home has a paged
+  My List shelf. Signed-out users can open login from the button; errors offer Retry.
 - Diagnostic redirect logs omit private URL paths, and the TV helper redacts URLs.
 
 ## Verified on debug TV
@@ -78,8 +86,8 @@ pending; do not treat the stream probe as proof of playback.
   `discovery_insecure_only`. A host regression reproduces that failure and passes
   with the registered-shim fix. Fresh stable approval reached the server and loaded
   account addons.
-- Rotten Tomatoes availability depends on addon metadata. No MDBList provider was
-  configured as part of this work.
+- Rotten Tomatoes on posters comes from BetterPosters. Separate detail scores depend
+  on addon metadata. The user chose poster ratings for now; no MDBList key was added.
 - The account backend session file remains in the Developer Mode runtime directory;
   addon configuration and native preference persistence are separate DB8 records.
 - Torrents require a configured Stremio-compatible server or explicit local scanning.

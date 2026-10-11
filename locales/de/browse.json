@@ -266,5 +266,13 @@
   "browse.clock.notice_year": "TV-Uhr scheint falsch zu gehen ({year}). Über den gespeicherten Schlüssel verbunden.",
   "browse.clock.notice": "TV-Uhr scheint falsch zu gehen. Über den gespeicherten Schlüssel verbunden.",
   "browse.clock.no_key": "Die Uhr dieses Fernsehers scheint falsch zu gehen. Verbinde den Fernseher einmal mit dem Internet und versuche es erneut.",
-  "browse.clock.key_changed": "Der Schlüssel deines Servers hat sich geändert. Verbinde den Fernseher einmal mit dem Internet, damit die App ihn neu prüfen kann."
+  "browse.clock.key_changed": "Der Schlüssel deines Servers hat sich geändert. Verbinde den Fernseher einmal mit dem Internet, damit die App ihn neu prüfen kann.",
+  "browse.streams.loading": "Streams werden gesucht…",
+  "browse.streams.empty": "Keine abspielbaren Streams gefunden.",
+  "browse.streams.failed": "Streams konnten nicht geladen werden. Schließen und erneut versuchen.",
+  "browse.list.add": "Zu meiner Liste hinzufügen",
+  "browse.list.remove": "Aus meiner Liste entfernen",
+  "browse.list.saving": "Meine Liste wird synchronisiert…",
+  "browse.list.retry": "Meine Liste erneut versuchen",
+  "browse.list.signin": "Für meine Liste anmelden"
 }

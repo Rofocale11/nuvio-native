@@ -300,5 +300,9 @@
   "settings.consent.placeholder.random_id": "zufällige ID",
   "settings.consent.placeholder.project_key": "Projektschlüssel",
   "settings.consent.placeholder.app_version": "App-Version",
-  "settings.consent.placeholder.webos_codename_short": "webOS-Codename"
+  "settings.consent.placeholder.webos_codename_short": "webOS-Codename",
+  "settings.ratings.title": "Bewertungsquelle",
+  "settings.ratings.copy": "Poster verwenden BetterPosters mit Rotten-Tomatoes-Bewertungen. Diese Einstellung ändert Detailbewertungen, wenn dein Metadaten-Addon sie bereitstellt.",
+  "settings.ratings.imdb": "IMDb",
+  "settings.ratings.tomatoes": "Rotten Tomatoes"
 }

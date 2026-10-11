@@ -266,5 +266,13 @@
   "browse.clock.notice_year": "A TV órája hibásnak tűnik ({year}). A kapcsolat a mentett kulccsal létrejött.",
   "browse.clock.notice": "A TV órája hibásnak tűnik. A kapcsolat a mentett kulccsal létrejött.",
   "browse.clock.no_key": "A TV órája hibásnak tűnik. Csatlakoztassa egyszer a TV-t az internethez, majd próbálja újra.",
-  "browse.clock.key_changed": "A szerver kulcsa megváltozott. Csatlakoztassa egyszer a TV-t az internethez, hogy az alkalmazás újra ellenőrizhesse."
+  "browse.clock.key_changed": "A szerver kulcsa megváltozott. Csatlakoztassa egyszer a TV-t az internethez, hogy az alkalmazás újra ellenőrizhesse.",
+  "browse.streams.loading": "Adatfolyamok keresése…",
+  "browse.streams.empty": "Nem található lejátszható adatfolyam.",
+  "browse.streams.failed": "Nem sikerült betölteni az adatfolyamokat. Zárja be, majd próbálja újra.",
+  "browse.list.add": "Hozzáadás a listámhoz",
+  "browse.list.remove": "Eltávolítás a listámról",
+  "browse.list.saving": "Lista szinkronizálása…",
+  "browse.list.retry": "Lista újrapróbálása",
+  "browse.list.signin": "Jelentkezzen be a listához"
 }

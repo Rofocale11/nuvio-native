@@ -300,5 +300,9 @@
   "settings.consent.placeholder.random_id": "véletlenszerű azonosító",
   "settings.consent.placeholder.project_key": "projektkulcs",
   "settings.consent.placeholder.app_version": "alkalmazásverzió",
-  "settings.consent.placeholder.webos_codename_short": "webOS-kódnév"
+  "settings.consent.placeholder.webos_codename_short": "webOS-kódnév",
+  "settings.ratings.title": "Értékelések forrása",
+  "settings.ratings.copy": "A poszterek BetterPosters-adatokat és Rotten Tomatoes-értékeléseket használnak. Ez a beállítás módosítja az adatbővítő által megadott részletes értékeléseket.",
+  "settings.ratings.imdb": "IMDb",
+  "settings.ratings.tomatoes": "Rotten Tomatoes"
 }

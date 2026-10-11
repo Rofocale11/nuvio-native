@@ -303,5 +303,9 @@
   "settings.playback.hdr_overlay.full": "100%",
   "settings.playback.hdr_overlay.three_quarters": "75%",
   "settings.playback.hdr_overlay.half": "50%",
-  "settings.playback.hdr_overlay.copy": "Quão brilhantes são os controlos e as legendas do leitor em HDR e Dolby Vision, quando o televisor os mostra muito mais brilhantes. Reduza se encandearem. 100% deixa-os como estão."
+  "settings.playback.hdr_overlay.copy": "Quão brilhantes são os controlos e as legendas do leitor em HDR e Dolby Vision, quando o televisor os mostra muito mais brilhantes. Reduza se encandearem. 100% deixa-os como estão.",
+  "settings.ratings.title": "Fonte das avaliações",
+  "settings.ratings.copy": "Os cartazes usam BetterPosters com pontuações do Rotten Tomatoes. Esta definição altera as avaliações dos detalhes quando fornecidas pelo addon de metadados.",
+  "settings.ratings.imdb": "IMDb",
+  "settings.ratings.tomatoes": "Rotten Tomatoes"
 }

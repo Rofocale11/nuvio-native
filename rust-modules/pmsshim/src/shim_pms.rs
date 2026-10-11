@@ -67,6 +67,7 @@ pub struct Shim {
     catalog_list: Mutex<Option<(Instant, Vec<CatalogInfo>)>>,
     streams: Mutex<HashMap<i64, Arc<StreamSlot>>>,
     sub_urls: Mutex<HashMap<i64, String>>,
+    poster_fallbacks: Mutex<HashMap<String, String>>,
     next_sub: AtomicI64,
     permits: (Mutex<usize>, Condvar),
     /// Real stream metadata from the app's FFmpeg (installed at boot; absent on the host bin).
@@ -222,6 +223,7 @@ impl Shim {
             catalog_list: Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
             sub_urls: Mutex::new(HashMap::new()),
+            poster_fallbacks: Mutex::new(HashMap::new()),
             next_sub: AtomicI64::new(900_000_000),
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
             probes: crate::shim_probe::ProbeCache::default(),
@@ -256,6 +258,7 @@ impl Shim {
     /// Drop every cache that depends on the addon set (after Settings changed it).
     pub fn addons_changed(&self) {
         self.metas.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.poster_fallbacks.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.catalogs.lock().unwrap_or_else(|e| e.into_inner()).clear();
         *self.catalog_list.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.streams.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -466,6 +469,7 @@ impl Shim {
         let rk = self.keys.key_of(&Ident::Title { type_: p.type_.clone(), id: p.id.clone() });
         let series = is_series(&p.type_);
         let section = if series { SECTION_SHOWS } else { SECTION_MOVIES };
+        let poster = self.poster_url(&p.id, p.poster.as_deref());
         let mut row = json!({
             "ratingKey": rk.to_string(), "key": format!("/library/metadata/{rk}"),
             "guid": format!("nuvio://{}/{}", p.type_, p.id),
@@ -474,7 +478,7 @@ impl Shim {
             "librarySectionID": section, "librarySectionTitle": if series { "TV Shows" } else { "Movies" },
             "librarySectionKey": format!("/library/sections/{section}"),
             "summary": p.description.clone().unwrap_or_default(),
-            "thumb": p.poster.clone().unwrap_or_default(),
+            "thumb": poster,
             "art": p.background.clone().unwrap_or_default(),
             "addedAt": 0, "updatedAt": 0,
             "Genre": tags(&p.genres, false),
@@ -760,6 +764,16 @@ impl Shim {
 
     // ---- hubs ------------------------------------------------------------------------------
 
+    fn poster_url(&self, id: &str, original: Option<&str>) -> String {
+        let poster = self.backend.poster(id, original).unwrap_or_default();
+        if let Some(original) = original.filter(|u| *u != poster) {
+            let mut fallbacks = self.poster_fallbacks.lock().unwrap_or_else(|e| e.into_inner());
+            if fallbacks.len() >= 4096 { fallbacks.clear(); }
+            fallbacks.insert(poster.clone(), original.to_string());
+        }
+        poster
+    }
+
     fn continue_rows(&self, section: Option<i64>) -> Vec<Value> {
         self.watch
             .in_progress()
@@ -773,7 +787,10 @@ impl Shim {
                 if w.duration_ms > 0 {
                     row["duration"] = json!(w.duration_ms);
                 }
-                let _ = rk;
+                if let Some(ident) = self.keys.ident(rk) {
+                    let id = match ident { Ident::Title { id, .. } => id, Ident::Season { series, .. } | Ident::Episode { series, .. } => series };
+                    row["thumb"] = json!(self.poster_url(&id, row["thumb"].as_str()));
+                }
                 Some(row)
             })
             .collect()
@@ -783,6 +800,33 @@ impl Shim {
         let rows: Vec<Value> = self.continue_rows(section).into_iter().take(count).collect();
         json!({"title": "Continue Watching", "type": "mixed", "hubIdentifier": "home.continue",
                "key": "/hubs/continueWatching", "size": rows.len(), "more": false, "Metadata": rows})
+    }
+
+    fn saved_hub(&self, count: usize) -> Option<Value> {
+        let items = self.account.saved_library(false).ok()?;
+        let rows: Vec<_> = items.iter().take(count).map(|p| { let mut row = self.preview_row(p); row["librarySectionTitle"] = json!(""); row }).collect();
+        if rows.is_empty() { return None; }
+        Some(json!({"title":"My List","type":"mixed","hubIdentifier":"movie.recentlyadded.nuvio-list",
+            "key":"/hubs/nuvio/list","size":rows.len(),"totalSize":items.len(),"more":items.len()>rows.len(),"Metadata":rows}))
+    }
+
+    fn saved_item(&self, req: &Request) -> Response {
+        let Some(Ident::Title { type_, id }) = req.q("ratingKey").and_then(|v| v.parse().ok()).and_then(|rk| self.keys.ident(rk)) else { return Response::json_status(400,&json!({"error":"invalid title"})); };
+        if !self.account.signed_in() { return Response::json(&json!({"signedIn":false,"saved":false})); }
+        let result = (|| {
+            if req.method == "POST" {
+                let saved = match req.q("saved") { Some("1") => true, Some("0") => false, _ => return Err(plx_stremio::model::Error::Status(400)) };
+                let meta = self.meta(&type_, &id).ok_or(plx_stremio::model::Error::Status(404))?;
+                self.account.set_saved(&meta, saved)?;
+            }
+            let items = self.account.saved_library(req.method != "POST")?;
+            Ok(items.iter().any(|p| p.type_ == type_ && p.id == id))
+        })();
+        match result {
+            Ok(saved) => Response::json(&json!({"signedIn":true,"saved":saved})),
+            Err(plx_stremio::model::Error::Status(400)) => Response::json_status(400,&json!({"error":"invalid request"})),
+            Err(_) => Response::json_status(503,&json!({"error":"My List could not sync. Try again."})),
+        }
     }
 
     /// `pageable`: Home's hubs use the per-library "recently added" identifier family, the only
@@ -859,6 +903,7 @@ impl Shim {
     pub fn warm(self: &Arc<Self>) {
         let me = self.clone();
         let _ = std::thread::Builder::new().name("pmsshim-warm".into()).spawn(move || {
+            let _ = me.account.saved_library(false);
             let _ = me.catalog_hubs(|_| true, 12, true, Duration::from_secs(60));
         });
     }
@@ -916,6 +961,7 @@ impl Shim {
                 if req.q("excludeContinueWatching") == Some("1") {
                     hubs.clear();
                 }
+                if let Some(list) = self.saved_hub(count) { hubs.push(list); }
                 hubs.extend(self.catalog_hubs(|_| true, count, true, HUBS_BUDGET));
                 Response::json(&container(json!({"Hub": hubs})))
             }
@@ -935,6 +981,17 @@ impl Shim {
                 hubs.extend(self.catalog_hubs(|c| (section == SECTION_SHOWS) == is_series(&c.type_), count, false, HUBS_BUDGET));
                 Response::json(&container(json!({"Hub": hubs})))
             }
+            (_, ["hubs", "nuvio", "list"]) => {
+                let (start, size) = page_params(req);
+                match self.account.saved_library(true) {
+                    Ok(items) => {
+                        let rows: Vec<_> = items.iter().skip(start).take(size.unwrap_or(50)).map(|p| self.preview_row(p)).collect();
+                        Response::json(&container(json!({"Metadata":rows,"totalSize":items.len(),"offset":start})))
+                    }
+                    Err(_) => Response::json_status(503,&container(json!({"error":"My List is unavailable"}))),
+                }
+            }
+            ("GET" | "POST", ["nuvio", "library"]) => self.saved_item(req),
             (_, ["hubs", "nuvio", i]) => {
                 let (start, size) = page_params(req);
                 let cat = i.parse::<usize>().ok().and_then(|i| self.catalog_list().into_iter().nth(i));
@@ -1191,11 +1248,17 @@ impl Shim {
         let width: u32 = req.q("width").and_then(|v| v.parse().ok()).unwrap_or(0);
         let height: u32 = req.q("height").and_then(|v| v.parse().ok()).unwrap_or(0);
         let sized = sized_image_url(url, width.max(height.saturating_mul(2) / 3));
-        match plx_net::net::request(&sized, &[], "GET", None, plx_net::net::API, true, Some(12 << 20), None) {
-            Some(r) if r.ok() => Response::bytes(200, sniff_image(&r.body), r.body),
-            Some(r) => Response::bytes(r.status.max(400), "text/plain", Vec::new()),
-            None => Response::bytes(502, "text/plain", Vec::new()),
+        let fallback = self.poster_fallbacks.lock().unwrap_or_else(|e| e.into_inner()).get(url).cloned();
+        let mut urls = vec![sized];
+        if let Some(original) = fallback { urls.push(sized_image_url(&original, width.max(height.saturating_mul(2) / 3))); }
+        let mut status = 502;
+        for url in urls {
+            if let Some(r) = plx_net::net::request(&url, &[], "GET", None, plx_net::net::API, true, Some(12 << 20), None) {
+                if r.ok() && !r.body.is_empty() { return Response::bytes(200, sniff_image(&r.body), r.body); }
+                status = r.status.max(400);
+            }
         }
+        Response::bytes(status, "text/plain", Vec::new())
     }
 }
 
@@ -1327,6 +1390,32 @@ mod playback_regressions {
         let response=shim.photo(&request);
         assert_eq!(response.status,200);
         assert_eq!(response.content_type,"image/png");
+        assert_eq!(response.body,image);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_failed_poster_provider_falls_back_to_the_original_artwork() {
+        use std::io::{Read,Write};
+        plx_net::net::global_init();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let image = b"\x89PNG\r\n\x1a\noriginal";
+        let worker = std::thread::spawn(move || {
+            for status in [503,200] {
+                let (mut stream,_) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut buffer = [0;4096]; let _ = stream.read(&mut buffer).unwrap();
+                let body: &[u8] = if status == 200 { image } else { b"" };
+                write!(stream,"HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let shim = Shim::new(Arc::new(crate::shim_fake::FakeBackend),Config::default());
+        let provider = format!("http://{addr}/provider");
+        shim.poster_fallbacks.lock().unwrap().insert(provider.clone(),format!("http://{addr}/original"));
+        let response = shim.photo(&Request { method:"GET".into(),path:"/photo/:/transcode".into(),query:HashMap::from([("url".into(),provider)]),headers:HashMap::new(),body:vec![] });
+        assert_eq!(response.status,200);
         assert_eq!(response.body,image);
         worker.join().unwrap();
     }
