@@ -45,3 +45,11 @@ impl Client {
             .is_some_and(|v| v["ok"] == true)
     }
 }
+
+/// Read the durable installation preference through the session cache.
+pub fn rating_source() -> super::session::RatingSource { super::session::peek().rating_source() }
+/// Called on the storage worker; publish only a verified DB8/file write.
+pub fn set_rating_source(source: super::session::RatingSource) -> bool {
+    super::session::update_with_outcome(|s| Some(s.with_rating_source(source)))
+        .is_some_and(|write| matches!(write.classify(), super::session::async_persistence::CompletionOutcome::Durable(_)))
+}

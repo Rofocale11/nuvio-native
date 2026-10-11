@@ -11,11 +11,11 @@
 use super::prefs::{Descriptor, Fallback, ListRow, Parse, ProfileMemory, Row, Scope, Setting, SettingsWrite, DESCRIPTORS};
 use super::prefs::{AudioEnhancementsPref, AutoSignInPref, DeckPressPref, UnderPostersPref, DirectPlayModePref, LastHeroBlurPref,
     LastLibraryRow, LibraryViewsRow, NextEpisodeModePref, PlaintextConsentRow, QualityPref, ServerKeyPinsRow,
-    HdrOverlayBrightnessPref, SkipIntervalPref, SubtitleOffsetsPref, SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref,
+    HdrOverlayBrightnessPref, RatingSourcePref, SkipIntervalPref, SubtitleOffsetsPref, SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref,
     HoldHintTaughtPref, TrailerAutoplayPref, UiResolutionPref};
 use super::{
     CanonicalSessionPreferences, DeckPress, UnderPosters, UnderPostersDetails, DirectPlayMode, LastLibrary, LibraryViews, NextEpisodeMode,
-    PlaintextChoice, PlaintextConsent, PlaybackQuality, Preferences, ServerKeyPin, Session, SkipInterval,
+    PlaintextChoice, PlaintextConsent, PlaybackQuality, Preferences, RatingSource, ServerKeyPin, Session, SkipInterval,
     HdrOverlayBrightness, HoldHintTaught, SubtitleOffsetEntry, SubtitlePosition, SubtitleSize, SubtitleTone, UiResolution,
 };
 use serde::de::{self, Deserializer, Visitor};
@@ -113,19 +113,20 @@ fn every_marker_names_its_own_field() {
     check_row::<DeckPressPref>(DeckPress::Play);
     check_row::<UnderPostersPref>(UnderPosters { title: true, details: UnderPostersDetails::Genre });
     check_row::<AudioEnhancementsPref>(crate::plex::AudioEnhancements { boost_dialog: true, normalize_loudness: false });
+    check_row::<RatingSourcePref>(RatingSource::RottenTomatoes);
     // A5: the remaining `Copy` rows.
     check_row::<AutoSignInPref>(true);
     check_row::<TrailerAutoplayPref>(true);
     check_row::<LastHeroBlurPref>(Some([[0.5, 0.25, 0.125]; 4]));
     check_row::<UiResolutionPref>(UiResolution::Hd720);
     check_row::<HoldHintTaughtPref>(HoldHintTaught { card: true, pill: false });
-    // The table lists exactly these sixteen `Setting` rows, the four list rows below, the two
+    // The table lists exactly these seventeen `Setting` rows, the four list rows below, the two
     // memory-door rows (`TrackMemoryPref`, whose field check is
     // `track_memory_tests::the_list_row_names_its_own_field`, and `SubtitleOffsetsPref`, checked by
     // `the_subtitle_offsets_row_names_its_own_field`) and the per-profile record list
     // (`ProfilePrefsPref`, `profile_prefs_tests::nothing_picked_serializes_to_no_key`): a row needs
     // its line in one of the four places.
-    assert_eq!(DESCRIPTORS.len(), 16 + 4 + 2 + 1);
+    assert_eq!(DESCRIPTORS.len(), 17 + 4 + 2 + 1);
 }
 
 /// The list rows do what `check_row` proves for the `Copy` ones: the marker names its own field

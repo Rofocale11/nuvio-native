@@ -50,6 +50,14 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   (`<server>/<infoHash>/<fileIdx>`) when one is configured; debrid-resolved HTTP links from
   Torrentio/AIOStreams play directly. Local server scanning is off by default and
   requires `enableTorrents`; a configured `torrentServer` can be used directly.
+- Release discovery permits plaintext credentials for the registered in-process shim
+  only when its origin, token and machine identity match the boot registration and
+  its address is literal loopback. Identity probing and authenticated library admission
+  still run. Remote HTTP resources do not gain this exception.
+- Rating-source preference lives in the native canonical session record; the shim
+  retains supplied IMDb and Rotten Tomatoes scores so cached details can switch
+  providers. It does not fetch a new ratings service or replace a missing RT score
+  with IMDb.
 - Watch state / progress: stored locally by the shim (the app already reports timeline to "the
   server"). Developer Mode's writable-directory fallback is `/tmp`, so this state
   and the key table are not yet durable across TV reboots.

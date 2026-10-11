@@ -96,6 +96,7 @@ pub enum PreferenceCmd {
     /// One live player setting's pick (`plx_media::route::Choice`): the app writes it through the
     /// media door, and `reply` learns whether the write was durable.
     Choose(plx_media::route::Choice, std::sync::mpsc::Sender<bool>),
+    RatingSource { source: plx_plex::plex::session::RatingSource, reply: std::sync::mpsc::Sender<bool> },
     Language { language: plx_platform::i18n::Preference, reply: std::sync::mpsc::Sender<bool> },
     /// The Interface resolution picked in its picker: install-wide, applied at the next launch. The
     /// app writes it through the session; `reply` learns whether the write was durable.
@@ -2553,6 +2554,7 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // `(row:u32,sp:..,card:Option<u32>)`, in write order; the Collection and Watchlist grids name
 // `bands` symbolically, so their shape strings did not change. One bump; the three replay fixtures
 // were re-recorded against it; the previous pin was 0x0803_2f8d_c828_6d70.
+// Nuvio rating source adds a Playback field and picker option vocabulary.
 const SCREEN_SHAPES_PIN: u64 = 0x6b71_df9e_04db_2b76;
 
 #[cfg(test)]

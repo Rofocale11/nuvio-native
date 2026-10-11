@@ -91,7 +91,7 @@ pub struct Candidate {
     /// was built with? TLS always; plaintext only under
     /// [`CredentialPolicy::AllowPlaintext`](super::origin::CredentialPolicy::AllowPlaintext) —
     /// [`CredentialPolicy::may_carry_credential`](super::origin::CredentialPolicy::may_carry_credential)'s
-    /// answer, computed once here rather than re-derived by every consumer. This is the POLICY half
+    /// answer, plus the exact registered in-process shim, computed once here rather than re-derived by every consumer. This is the POLICY half
     /// only: a consented plaintext grant (`super::grant`) is never known at synthesis — the race
     /// holds an ineligible-but-verified answer aside as `Reach::InsecureOnly`, and
     /// `auth::settle_plaintext` turns it into a reached origin exactly when a grant is minted for it.
@@ -427,6 +427,14 @@ fn is_numeric_address(a: &str) -> bool {
 /// verified-but-ineligible answer is still evidence the server is alive on that address; see the
 /// field's own doc and `auth.rs`'s race semantics for what that answer is allowed to mean.
 pub fn candidates(res: &Resource, policy: CredentialPolicy) -> Vec<Candidate> {
+    candidates_with_local(res, policy, plx_base::local_server::get())
+}
+
+fn candidates_with_local(
+    res: &Resource,
+    policy: CredentialPolicy,
+    local: Option<&plx_base::local_server::LocalServer>,
+) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     for c in res.connections.iter().filter(|c| is_usable(c)) {
         let location = tier(c);
@@ -438,6 +446,15 @@ pub fn candidates(res: &Resource, policy: CredentialPolicy) -> Vec<Candidate> {
             if out.iter().any(|e| e.url == url) {
                 return; // plex.tv can advertise the same origin twice; a probe slot is not free
             }
+            // Only the server started by this process may bypass release's remote-HTTP gate.
+            // A loopback address by itself is not proof: bind its origin, token and identity.
+            let registered_local = local.is_some_and(|local| {
+                res.owned
+                    && local.origin == url
+                    && local.token == res.access_token
+                    && local.machine_id == res.client_identifier
+                    && Origin::parse(&url).is_some_and(|origin| super::origin::is_loopback(&origin))
+            });
             out.push(Candidate {
                 url,
                 scheme,
@@ -446,7 +463,8 @@ pub fn candidates(res: &Resource, policy: CredentialPolicy) -> Vec<Candidate> {
                 port: c.port,
                 ipv6,
                 credential_eligible: scheme == Scheme::Https
-                    || policy == CredentialPolicy::AllowPlaintext,
+                    || policy == CredentialPolicy::AllowPlaintext
+                    || registered_local,
             });
         };
         let unmatched_shared_lan = c.local && !res.owned && !res.public_address_matches;
@@ -1086,6 +1104,42 @@ mod tests {
     /// addresses and identifiers are stand-ins, the arrangement of flags is not.
     fn parse(json: &str) -> Resource {
         serde_json::from_str(json).expect("fixture parses")
+    }
+
+    #[test]
+    fn release_discovery_admits_its_registered_in_process_shim() {
+        let mut res = parse(r#"{"name":"Nuvio","clientIdentifier":"nuvio-local-test","provides":"server","owned":true,"accessToken":"local-test-token","connections":[{"protocol":"http","address":"127.0.0.1","port":32420,"uri":"http://127.0.0.1:32420","local":true}]}"#);
+        let local = plx_base::local_server::LocalServer {
+            origin: "http://127.0.0.1:32420".into(),
+            token: "local-test-token".into(),
+            machine_id: "nuvio-local-test".into(),
+        };
+        let eligible = |res: &Resource, local| {
+            candidates_with_local(res, CredentialPolicy::HttpsOnly, local)
+                .iter().any(|c| c.credential_eligible)
+        };
+        assert!(eligible(&res, Some(&local)));
+        assert!(!eligible(&res, None));
+        res.access_token = "another-token".into();
+        assert!(!eligible(&res, Some(&local)));
+        res.access_token = "local-test-token".into();
+        res.client_identifier = "another-server".into();
+        assert!(!eligible(&res, Some(&local)));
+        res.client_identifier = "nuvio-local-test".into();
+        res.owned = false;
+        assert!(!eligible(&res, Some(&local)));
+        res.owned = true;
+        let wrong_port = plx_base::local_server::LocalServer {
+            origin: "http://127.0.0.1:32421".into(), ..local.clone()
+        };
+        assert!(!eligible(&res, Some(&wrong_port)));
+        // A falsely registered LAN server still cannot take the in-process exception.
+        res.connections[0].uri = "http://192.0.2.1:32420".into();
+        res.connections[0].address = "192.0.2.1".into();
+        let remote = plx_base::local_server::LocalServer {
+            origin: "http://192.0.2.1:32420".into(), ..local.clone()
+        };
+        assert!(!eligible(&res, Some(&remote)));
     }
 
     /// The real share: three advertised connections, exactly one of which works from here.

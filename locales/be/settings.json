@@ -306,5 +306,9 @@
   "settings.consent.placeholder.random_id": "выпадковы id",
   "settings.consent.placeholder.project_key": "ключ праекта",
   "settings.consent.placeholder.app_version": "версія праграмы",
-  "settings.consent.placeholder.webos_codename_short": "кодавая назва webOS"
+  "settings.consent.placeholder.webos_codename_short": "кодавая назва webOS",
+  "settings.ratings.title": "Крыніца ацэнак",
+  "settings.ratings.copy": "Выберыце IMDb або Rotten Tomatoes. Ацэнкі з’яўляюцца, калі іх падае дадатак метаданых.",
+  "settings.ratings.imdb": "IMDb",
+  "settings.ratings.tomatoes": "Rotten Tomatoes"
 }

@@ -37,8 +37,9 @@
 //! ([`SubtitleOffsetsPref`]).
 use super::{
     DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NextEpisodeMode, OpaqueExtensions, PlaintextConsent,
-    HoldHintTaught, PlaybackQuality, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets, SubtitlePosition,
-    SubtitleSize, SubtitleTone, UiResolution, UnderPosters,
+    HoldHintTaught, PlaybackQuality, RatingSource, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets,
+    SubtitlePosition, SubtitleSize, SubtitleTone, UiResolution, UnderPosters, de_soft_rating_source,
+    is_default_rating_source,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -146,6 +147,9 @@ pub struct Preferences {
     /// credentials.
     #[serde(default, deserialize_with = "de_soft_audio_enhancements", skip_serializing_if = "crate::plex::AudioEnhancements::is_none")]
     pub audio_enhancements: crate::plex::AudioEnhancements,
+    /// The score provider shown for Nuvio metadata. Missing scores stay absent.
+    #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
+    pub rating_source: RatingSource,
 
     // ---- A5: the rest of the preference keys, in the order the legacy file always wrote them ----
     //
@@ -346,6 +350,7 @@ pub struct Preferences {
 }
 
 /// How long a setting's value lives, and who owns the write. `auto_sign_in`, `ui_resolution`,
+/// `rating_source`,
 /// `hold_hint_taught` and `last_hero_blur` are `Install`; the two lists sign-out clears are `Account`; the ten player
 /// scalars, the hero trailer autoplay switch (each with its install-wide key as the [`Fallback`]) and
 /// the library lists are `Profile`;
@@ -504,6 +509,8 @@ setting!(SubtitlePositionPref: SubtitlePosition = subtitle_position, "subtitle_p
     account false, live true, settings Some(SettingsWrite::Optimistic), parse Soft);
 setting!(HdrOverlayBrightnessPref: HdrOverlayBrightness = hdr_overlay_brightness, "hdr_overlay_brightness",
     Profile fallback LegacyInstallKey, account false, live true, settings Some(SettingsWrite::Optimistic), parse Soft);
+setting!(RatingSourcePref: RatingSource = rating_source, "rating_source", Install,
+    account false, live false, settings Some(SettingsWrite::Confirm), parse Soft);
 // Tone and enhancements have no Settings row: the player panel is their only writer.
 setting!(SubtitleTonePref: SubtitleTone = subtitle_tone, "subtitle_tone", Profile fallback LegacyInstallKey,
     account false, live true, settings None, parse Soft);
@@ -608,6 +615,7 @@ pub const DESCRIPTORS: &[Descriptor] = &[
     Descriptor::of::<DeckPressPref>(),
     Descriptor::of::<UnderPostersPref>(),
     Descriptor::of::<AudioEnhancementsPref>(),
+    Descriptor::of::<RatingSourcePref>(),
     // A5: the remaining keys.
     Descriptor::of::<AutoSignInPref>(),
     Descriptor::of::<TrailerAutoplayPref>(),
@@ -1383,4 +1391,3 @@ where
     };
     Ok(serde_json::from_value::<crate::plex::AudioEnhancements>(v).unwrap_or(crate::plex::AudioEnhancements::NONE))
 }
-

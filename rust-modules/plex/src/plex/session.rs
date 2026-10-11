@@ -52,7 +52,8 @@ use super::probe::Location;
 pub use prefs::{HoldHintTaughtPref, effective, own_prefs, persist_profile_pref, put_own, stored_effective, tenure, AudioEnhancementsPref,
     DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsPref,
     ProfilePrefsRecord, ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipIntervalPref,
-    SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref, UiResolutionPref, UnderPostersPref};
+    RatingSourcePref, SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref, UiResolutionPref,
+    UnderPostersPref};
 use prefs::ProfileMemory;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1449,6 +1450,19 @@ impl HdrOverlayBrightness {
         (self.factor() * 100.0).round() as i64
     }
 }
+/// The score provider shown by Nuvio Native. Missing scores stay absent.
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RatingSource {
+    #[default]
+    Imdb,
+    RottenTomatoes,
+}
+fn de_soft_rating_source<'de, D: serde::Deserializer<'de>>(d: D) -> Result<RatingSource, D::Error> {
+    let value = Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+fn is_default_rating_source(source: &RatingSource) -> bool { *source == RatingSource::Imdb }
 
 /// One profile's search history.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -2450,6 +2464,11 @@ impl Session {
 
     pub fn skip_interval(&self) -> SkipInterval {
         self.prefs.skip_interval
+    }
+
+    pub fn rating_source(&self) -> RatingSource { self.prefs.rating_source }
+    pub fn with_rating_source(&self, source: RatingSource) -> Self {
+        let mut next = self.clone(); next.prefs.rating_source = source; next
     }
 
     pub fn deck_press(&self) -> DeckPress {
@@ -6225,5 +6244,20 @@ mod server_key_pin_tests {
         plx_base::storage_worker::drain_for_test();
         let _ = peek();
         assert_eq!(plx_net::net::keypin::pin_for_test(&key), None, "the late probe did not repopulate it");
+    }
+}
+
+#[cfg(test)]
+mod rating_source_tests {
+    use super::*;
+    #[test]
+    fn rating_preference_survives_the_public_private_db8_split() {
+        let session = Session::default().with_rating_source(RatingSource::RottenTomatoes);
+        let (public, protected) = split_canonical(&session).unwrap();
+        assert_eq!(join_canonical(&public, &protected).unwrap().rating_source(), RatingSource::RottenTomatoes);
+        assert_eq!(public_session(&public).rating_source(), RatingSource::RottenTomatoes);
+        assert!(!serde_json::to_string(&Session::default()).unwrap().contains("rating_source"));
+        let unknown: Session = serde_json::from_value(serde_json::json!({"rating_source":"future"})).unwrap();
+        assert_eq!(unknown.rating_source(), RatingSource::Imdb);
     }
 }

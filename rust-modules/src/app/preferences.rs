@@ -52,6 +52,12 @@ pub(super) fn execute(command: PreferenceCmd) {
         }
         // Every live setting saves through the one write door, in `choose_setting`.
         PreferenceCmd::Choose(choice, reply) => choose_setting(choice, reply),
+        PreferenceCmd::RatingSource { source, reply } => {
+            let _ = plx_base::storage_worker::submit_retained(move || {
+                let _ = reply.send(plx_plex::plex::nuvio::set_rating_source(source));
+                plx_machine::idle::invalidate();
+            });
+        }
         PreferenceCmd::UiResolution { mode, reply } => {
             let _ = plx_base::storage_worker::submit_retained(move || {
                 let _ = reply.send(plx_plex::plex::session::set_ui_resolution(mode));

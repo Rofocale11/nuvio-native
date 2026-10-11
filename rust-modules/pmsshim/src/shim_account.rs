@@ -148,7 +148,10 @@ impl Account {
                 Response::json_status(201, &json!({"id": id, "code": code, "expiresIn": 600, "authToken": null, "qr": ""}))
             }
             // The login screen reads a failure as "can't reach the service" and offers Retry.
-            Err(_) => Response::json_status(503, &json!({"error": "Nuvio sign-in is unavailable"})),
+            Err(error) => {
+                log_failure("start", &error);
+                Response::json_status(503, &json!({"error": "Nuvio sign-in is unavailable"}))
+            },
         }
     }
 
@@ -180,7 +183,12 @@ impl Account {
                 self.load_profile(None);
                 Response::json(&json!({"id": id, "code": login.user_code, "authToken": self.token}))
             }
-            Ok(None) | Err(_) => Response::json(&json!({"id": id, "code": login.user_code, "authToken": null})),
+            Ok(None) => Response::json(&json!({"id": id, "code": login.user_code, "authToken": null})),
+            Err(error) => {
+                log_failure("poll", &error);
+                let status = match &error { plx_stremio::model::Error::Parse(s) if matches!(s.as_str(), "login expired" | "login cancelled" | "login used") => 404, _ => 503 };
+                Response::json_status(status, &json!({"error": "Nuvio sign-in could not finish"}))
+            },
         }
     }
 
@@ -277,4 +285,10 @@ mod tests {
         let png = super::qr_png("https://example.invalid/tv?code=ABCD").unwrap();
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
     }
+}
+
+fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
+    let category = match error { plx_stremio::model::Error::Network => "network", plx_stremio::model::Error::Status(_) => "http", plx_stremio::model::Error::Parse(_) => "response", plx_stremio::model::Error::NoAddon => "addon" };
+    let status = match error { plx_stremio::model::Error::Status(s) => *s, _ => 0 };
+    plx_stremio::nuvio::log_account_event(&format!("nuvio account: {stage} failed category={category} status={status}"));
 }

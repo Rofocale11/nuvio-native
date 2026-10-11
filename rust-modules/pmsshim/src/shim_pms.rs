@@ -486,6 +486,16 @@ impl Shim {
             row["audienceRating"] = json!(r);
             row["audienceRatingImage"] = json!("imdb://image.rating");
         }
+        if let Some(score) = tomato_score(p) {
+            let image = if score >= 60.0 { "rottentomatoes://image.rating.ripe" } else { "rottentomatoes://image.rating.rotten" };
+            row["rating"] = json!(score / 10.0);
+            row["ratingImage"] = json!(image);
+            let mut ratings = vec![json!({"type": "critic", "value": score / 10.0, "image": image})];
+            if let Some(imdb) = rating_of(p.imdb_rating.as_deref()) {
+                ratings.push(json!({"type": "audience", "value": imdb, "image": "imdb://image.rating"}));
+            }
+            row["Rating"] = json!(ratings);
+        }
         if !series {
             self.watch_fields(&mut row, rk);
         }
@@ -503,6 +513,8 @@ impl Shim {
             description: m.description.clone(),
             release_info: m.release_info.clone(),
             imdb_rating: m.imdb_rating.clone(),
+            ratings: m.ratings.clone(), mdb_list_ratings: m.mdb_list_ratings.clone(),
+            rotten_tomatoes_rating: m.rotten_tomatoes_rating.clone(),
             genres: m.genres.clone(),
         };
         let mut row = self.preview_row(&p);
@@ -1319,4 +1331,34 @@ mod playback_regressions {
         worker.join().unwrap();
     }
 
+}
+
+/// Preserve the source's percent scale, and reject missing/invalid scores.
+fn tomato_score(meta: &MetaPreview) -> Option<f64> {
+    fn percent(v: &Value) -> Option<f64> {
+        let score = v.as_f64().or_else(|| v.as_str()?.trim().trim_end_matches('%').parse().ok())?;
+        (score.is_finite() && (0.0..=100.0).contains(&score)).then_some(score)
+    }
+    meta.rotten_tomatoes_rating.as_deref().and_then(|v| percent(&json!(v)))
+        .or_else(|| percent(&meta.mdb_list_ratings["tomatoes"]))
+        .or_else(|| meta.ratings.as_array()?.iter().find_map(|r| {
+            let source = r["source"].as_str()?.to_ascii_lowercase();
+            matches!(source.as_str(), "tomatoes" | "rottentomatoes" | "rotten tomatoes")
+                .then(|| percent(&r["value"])).flatten()
+        }))
+}
+
+#[cfg(test)]
+mod rating_tests {
+    use super::*;
+    #[test]
+    fn metadata_provider_tomato_scores_keep_percent_units() {
+        let m: MetaPreview = serde_json::from_value(json!({"ratings":[{"source":"tomatoes","value":94}]})).unwrap();
+        assert_eq!(tomato_score(&m), Some(94.0));
+        let m: MetaPreview = serde_json::from_value(json!({"mdbListRatings":{"tomatoes":"63%"}})).unwrap();
+        assert_eq!(tomato_score(&m), Some(63.0));
+        assert_eq!(tomato_score(&MetaPreview::default()), None);
+        let m: MetaPreview = serde_json::from_value(json!({"rottenTomatoesRating":101})).unwrap();
+        assert_eq!(tomato_score(&m), None);
+    }
 }

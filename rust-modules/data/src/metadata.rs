@@ -1753,6 +1753,24 @@ pub struct Detail {
     #[serde(default)]
     pub trailer_rk: String,
 }
+impl Detail {
+    /// Choose at presentation time so cached details reflect a changed preference immediately.
+    pub fn shown_ratings(&self) -> &[Rating] {
+        if !self.guid.starts_with("nuvio://") { return &self.ratings; }
+        self.ratings_for_source(plx_plex::plex::nuvio::rating_source())
+    }
+    fn ratings_for_source(&self, source: plx_plex::plex::session::RatingSource) -> &[Rating] {
+        let accepts = |r: &Rating| match source {
+            plx_plex::plex::session::RatingSource::Imdb => r.art == RatingArt::Imdb,
+            plx_plex::plex::session::RatingSource::RottenTomatoes => matches!(r.art, RatingArt::TomatoFresh | RatingArt::TomatoCertified | RatingArt::TomatoRotten),
+        };
+        match self.ratings.iter().position(accepts) {
+            Some(i) => &self.ratings[i..i + 1],
+            None => &[],
+        }
+    }
+}
+
 
 impl Detail {
     /// **Does this item have a FILE of its own?** — the rule behind the *Track information* sheet
@@ -6173,5 +6191,24 @@ mod alt_runtime_tests {
         for k in ["show", "season", "artist", "album", "collection"] {
             assert!(!has_runtime(k), "{k}");
         }
+    }
+}
+
+#[cfg(test)]
+mod nuvio_rating_preference_tests {
+    use super::*;
+
+    #[test]
+    fn a_cached_detail_can_switch_provider_without_substituting_imdb() {
+        let mut detail = Detail::default();
+        detail.guid = "nuvio://movie/tt1".into();
+        detail.ratings = vec![
+            Rating { art: RatingArt::Imdb, value: 8.1, critic: false },
+            Rating { art: RatingArt::TomatoFresh, value: 9.4, critic: true },
+        ];
+        assert_eq!(detail.ratings_for_source(plx_plex::plex::session::RatingSource::Imdb)[0].art, RatingArt::Imdb);
+        assert_eq!(detail.ratings_for_source(plx_plex::plex::session::RatingSource::RottenTomatoes)[0].value, 9.4);
+        detail.ratings.truncate(1);
+        assert!(detail.ratings_for_source(plx_plex::plex::session::RatingSource::RottenTomatoes).is_empty());
     }
 }
