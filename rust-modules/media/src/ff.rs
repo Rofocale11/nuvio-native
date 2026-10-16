@@ -9047,7 +9047,17 @@ pub fn demux(
                 } else {
                     None
                 };
+                let dts_audio = ai >= 0 && std::ffi::CStr::from_ptr(avcodec_get_name(
+                    (*stream_codecpar(*streams.add(ai as usize))).codec_id
+                )).to_bytes() == b"dts";
+                if dts_audio {
+                    crate::player::log("ff: DTS core extraction on (DTS-HD extensions discarded)");
+                }
+                // FORK (RichiL10): FLAC and native PCM go through the PCM lane in the format the
+                // Load declared (`ff_pcm.rs`); Opus is fed as-is with its declared opusInfo.
                 let mut pcm_lane: Option<PcmLane> = None;
+                // FORK (RichiL10): ...and the tracks the Load declared as encode-lane AC3 go
+                // through the AC3 encode lane instead (`ff_enc.rs`).
                 let mut enc_lane: Option<EncLane> = None;
                 if ai >= 0 {
                     let acp = stream_codecpar(*streams.add(ai as usize));
@@ -9055,18 +9065,6 @@ pub fn demux(
                         Some(spec) => EncLane::open(acp, spec).map(|lane| enc_lane = Some(lane)),
                         None => PcmLane::open(acp, pcm::declared()).map(|lane| pcm_lane = lane),
                     };
-                    // ... rest of the block as it was
-                }
-                
-                // The legacy DTS core path only when the encoder was NOT opened for this stream.
-                let dts_audio = ai >= 0
-                    && std::ffi::CStr::from_ptr(avcodec_get_name(
-                        (*stream_codecpar(*streams.add(ai as usize))).codec_id
-                    )).to_bytes() == b"dts"
-                    && enc_lane.is_none();
-                if dts_audio {
-                    crate::player::log("ff: DTS core extraction on (DTS-HD extensions discarded)");
-                }
                     if let Err(why) = opened {
                         let which = if enc::declared().is_some() { "encode" } else { "PCM" };
                         crate::player::log(&format!("ff: {which} lane refused: {why}; refusing audio feed"));
