@@ -197,9 +197,9 @@ set -- "$@" \
   --disable-autodetect \
   --enable-zlib \
   --enable-demuxer=matroska,mov,mpegts,h264,hevc \
-  --enable-parser=h264,hevc,aac,ac3,dvdsub,dvbsub,mlp \
+  --enable-parser=h264,hevc,aac,ac3,dvdsub,dvbsub,mlp,dca \
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
-  --enable-decoder=pgssub,dvdsub,dvbsub,ass,srt,subrip,text,mov_text,webvtt,flac,truehd,mlp \
+  --enable-decoder=pgssub,dvdsub,dvbsub,ass,srt,subrip,text,mov_text,webvtt,flac,truehd,mlp,dca \
   --enable-encoder=ac3_fixed \
   --enable-protocol=file
 
