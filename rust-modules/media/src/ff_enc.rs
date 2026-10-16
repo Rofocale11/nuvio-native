@@ -549,7 +549,7 @@ pub(super) struct EncLane {
 impl EncLane {
     /// The codecs the lane takes (FFmpeg names).
     pub(super) fn takes(name: &str) -> bool {
-        matches!(name, "flac" | "truehd" | "mlp") || SrcFmt::from_pcm_codec(name).is_some()
+        matches!(name, "flac" | "truehd" | "mlp" | "dts") || SrcFmt::from_pcm_codec(name).is_some()
     }
 
     /// Open the lane for the stream the Load declared as encode-lane AC3. `Err(reason)`: it
@@ -917,7 +917,7 @@ mod tests {
         let _ffmpeg = super::super::image_subtitle_tests::bind_host_ffmpeg();
         let dir = std::path::PathBuf::from(std::env::var_os("PLX_ENC_FIXTURES").expect("PLX_ENC_FIXTURES"));
         let mut ran = 0;
-        for name in ["flac71.mkv", "flac51.mkv", "truehd.mkv"] {
+        for name in ["flac71.mkv", "flac51.mkv", "truehd.mkv", "dts51.mkv"] {
             let path = dir.join(name);
             if !path.exists() {
                 eprintln!("skip {name}: not generated");
