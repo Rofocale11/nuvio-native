@@ -266,6 +266,7 @@ impl Caps {
             c @ ("flac" | "pcm") => {
                 self.audio_has(c) && (3..=8).contains(&channels) && !self.pcm_lane_admits(c, channels)
             }
+            "dts" => self.audio_has("dts"),
             _ => false,
         }
     }
@@ -284,7 +285,7 @@ impl Caps {
     /// [`Caps::audio`] (TrueHD and MLP, which no television table lists). Empty when it is off.
     pub fn enc_lane_profile_codecs(&self, encode: bool) -> &'static [&'static str] {
         if encode && self.enc_sink_ok() {
-            &["truehd", "mlp"]
+            &["truehd", "mlp" "dts"]
         } else {
             &[]
         }
@@ -304,7 +305,7 @@ impl Caps {
     pub fn profile_channel_limit_with(&self, codec: &str, encode: bool) -> Option<u32> {
         let codec = dp_audio_key(codec);
         if encode && self.enc_sink_ok() {
-            if matches!(codec, "truehd" | "mlp") || (matches!(codec, "flac" | "pcm") && self.audio_has(codec)) {
+            if matches!(codec, "truehd" | "mlp" "dts") || (matches!(codec, "flac" | "pcm") && self.audio_has(codec)) {
                 return Some(8);
             }
         }
