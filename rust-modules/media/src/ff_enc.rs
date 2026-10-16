@@ -549,7 +549,7 @@ pub(super) struct EncLane {
 impl EncLane {
     /// The codecs the lane takes (FFmpeg names).
     pub(super) fn takes(name: &str) -> bool {
-        matches!(name, "flac" | "truehd" | "mlp") || SrcFmt::from_pcm_codec(name).is_some()
+        matches!(name, "flac" | "truehd" | "mlp" | "dts") || SrcFmt::from_pcm_codec(name).is_some()
     }
 
     /// Open the lane for the stream the Load declared as encode-lane AC3. `Err(reason)`: it
