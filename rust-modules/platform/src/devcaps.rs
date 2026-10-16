@@ -1195,6 +1195,7 @@ mod tests {
         assert_eq!(c.profile_channel_limit_with("pcm", false), Some(2));
         assert_eq!(c.profile_channel_limit_with("opus", false), Some(6));
         assert_eq!(c.profile_channel_limit_with("truehd", false), None);
+        assert_eq!(c.profile_channel_limit_with("dts", true), Some(8));
     }
 
     /// FORK (RichiL10): the AC3 encode lane on the B4. FLAC/PCM the PCM lane cannot declare and
@@ -1220,7 +1221,7 @@ mod tests {
         assert_eq!(c.audio_lane("truehd", 8, 96_000, true), None);
         assert_eq!(c.audio_lane("flac", 8, 48_000, false), None);
         assert_eq!(c.audio_lane("ac3", 6, 48_000, true), None);
-        assert_eq!(c.audio_lane("dca-ma", 8, 48_000, true), None, "DTS-HD keeps its core lane");
+        assert_eq!(c.audio_lane("dca-ma", 8, 48_000, true), Some(AudioLane::Ac3Encode));
         // more than 8 channels is no lane at all; neither is a codec the TV decodes itself
         assert!(!on("flac", 9, 48_000) && !on("vorbis", 6, 48_000));
         assert!(on("eac3", 8, 48_000) && on("ac3", 6, 48_000));
