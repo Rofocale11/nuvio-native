@@ -93,6 +93,54 @@ fn step(
     (handled, out, present.peek(0))
 }
 
+/// Pop `key`'s card the way a deliberate move does: the move, then `frames` ticks with the card
+/// focused (the page must already be on the shelves, `snap` at 1).
+fn pop_card(s: &mut HomeScreen, view: HubsView<'_>, key: FocusKey<u32>, frames: u32) {
+    step(s, view, Some(key), &ScreenEvent::FocusMoved { from: None, to: key, by: By::Dir });
+    for frame in 0..frames {
+        step(s, view, Some(key), &ScreenEvent::Tick(Tick { ms: frame * 16, dt_us: 16_667 }));
+    }
+}
+
+/// The live pop scale of the card at (`row`, `col`), no press.
+fn pop_of(s: &HomeScreen, view: HubsView<'_>, focus: Option<FocusKey<u32>>, row: usize, col: usize) -> f32 {
+    let elem = s.rows[row].elems[col];
+    s.grid.shelves[row].scale_of(&cx(view, focus), &s.cards(view, row), &elem).unwrap()
+}
+
+/// The rect the shelf paints card (`row`, `col`) at: `place(.., At::Drawn)`.
+fn drawn_rect(s: &HomeScreen, view: HubsView<'_>, focus: Option<FocusKey<u32>>, row: usize, col: usize) -> Rect {
+    Focusable::<TestHost>::place(s, &s.rows[row].elems[col], &cx(view, focus), At::Drawn).unwrap().rect
+}
+
+impl HomeScreen {
+    /// Pop the first card of shelf 0 by feeding the shelf itself a deliberate move and a few
+    /// ticks, leaving every other part of the screen untouched.
+    fn pop_shelf_for_test(&mut self, view: HubsView<'_>) {
+        let key = first_card(self);
+        let context = cx(view, Some(key));
+        let mut shelves = std::mem::take(&mut self.grid.shelves);
+        let src = self.cards(view, 0);
+        let mut out = Vec::new();
+        let mut present = plx_machine::present::Present::new();
+        let mut fx = Effects::new(&mut out, plx_machine::machine::MachineId::Instance(InstanceId(9)), &mut present);
+        shelves[0].on(&ScreenEvent::FocusMoved { from: None, to: key, by: By::Dir }, &context, &src, &mut fx);
+        for frame in 0..3 {
+            shelves[0].on(&ScreenEvent::Tick(Tick { ms: frame * 16, dt_us: 16_667 }), &context, &src, &mut fx);
+        }
+        drop(src);
+        self.grid.shelves = shelves;
+    }
+
+    /// `update_grid` with a throwaway effect sink and a tick of `dt` seconds.
+    fn update_grid_for_test(&mut self, view: HubsView<'_>, cx: &Cx<'_, TestHost>, dt: f32) {
+        let mut out = Vec::new();
+        let mut present = plx_machine::present::Present::new();
+        let mut fx = Effects::new(&mut out, plx_machine::machine::MachineId::Instance(InstanceId(9)), &mut present);
+        self.update_grid(view, cx, &mut fx, Tick { ms: 0, dt_us: (dt * 1_000_000.0).round() as u32 });
+    }
+}
+
 fn first_card(s: &HomeScreen) -> FocusKey<u32> {
     FocusKey {
         entry: s.entry,
@@ -404,9 +452,9 @@ fn a_failed_home_ignores_a_clock_fact_about_another_server() {
 
 // The observer consumes the same final geometry as widgets::card; the screen
 // supplies no independent motion signal that could omit one of these terms.
-fn observe_card(h: &mut plx_ui::card_motion::History, s: &HomeScreen, ms: u32) -> plx_ui::card_motion::Verdict {
+fn observe_card(h: &mut plx_ui::card_motion::History, s: &HomeScreen, view: HubsView<'_>, ms: u32) -> plx_ui::card_motion::Verdict {
     h.begin();
-    h.observe(plx_ui::card_motion::Identity { owner: 1, asset: 1 }, s.drawn_card_geometry(0, 0, 1.0).0, ms)
+    h.observe(plx_ui::card_motion::Identity { owner: 1, asset: 1 }, drawn_rect(s, view, None, 0, 0), ms)
 }
 
 #[test]
@@ -421,12 +469,12 @@ fn a_retained_shelf_offset_makes_the_late_dive_read_as_fast() {
         let mut s = screen(snapshot.view());
         s.snap.jump(0.9);
         s.snap_target = 1.0;
-        s.grid.shelves[0].restore_scroll(offset, card_row::MAX_ROW_ITEMS, &RowStyle::HOME);
+        s.grid.shelves[0].restore_scroll(offset, ui_cards::MAX_ROW_ITEMS);
         s.layout_grid();
         let mut h = History::default();
-        assert_eq!(observe_card(&mut h, &s, 0), Verdict::Unknown);
+        assert_eq!(observe_card(&mut h, &s, snapshot.view(), 0), Verdict::Unknown);
         step(&mut s, snapshot.view(), None, &ScreenEvent::Tick(Tick { ms: 16, dt_us: 16_667 }));
-        observe_card(&mut h, &s, 16)
+        observe_card(&mut h, &s, snapshot.view(), 16)
     };
     assert_eq!(late_dive_frame(0.0), Verdict::Settled, "vertical late-dive control is under 120px/s");
     assert_eq!(late_dive_frame(4000.0), Verdict::Moving, "the retained-offset product moves the card fast");
@@ -445,14 +493,14 @@ fn the_hero_to_grid_dive_is_observed_from_card_placement_and_then_settles() {
     s.snap.jump(0.0);
     s.snap_target = 1.0;
     s.layout_grid();
-    observe_card(&mut h, &s, 0);
+    observe_card(&mut h, &s, snapshot.view(), 0);
     step(&mut s, snapshot.view(), None, &ScreenEvent::Tick(Tick { ms: 16, dt_us: 16_667 }));
     assert!(s.snap.vel.abs() < 10.0, "the spring remains a dimensionless fraction");
-    assert_eq!(observe_card(&mut h, &s, 16), Verdict::Moving);
+    assert_eq!(observe_card(&mut h, &s, snapshot.view(), 16), Verdict::Moving);
     let mut last = Verdict::Unknown;
     for i in 2..602 {
         step(&mut s, snapshot.view(), None, &ScreenEvent::Tick(Tick { ms: i * 16, dt_us: 16_667 }));
-        last = observe_card(&mut h, &s, i * 16);
+        last = observe_card(&mut h, &s, snapshot.view(), i * 16);
     }
     assert_eq!(last, Verdict::Settled);
 }
@@ -589,18 +637,19 @@ fn drawn_card_geometry_includes_press_but_its_rest_anchor_does_not() {
     let snapshot = plx_data::pms::hubs_snapshot(&state);
     let mut s = screen(snapshot.view());
     s.snap.jump(1.0);
-    for _ in 0..80 { s.grid.shelves[0].update(3, Some(0), &RowStyle::HOME, 0.016); }
-    s.layout_grid();
     let key = first_card(&s);
+    pop_card(&mut s, snapshot.view(), key, 80);
+    s.layout_grid();
     for press in [0.93, 1.0, 1.025] {
         let mut context = cx(snapshot.view(), Some(key));
         context.press.scale = press;
+        context.press.owner = Some(key);
         let placed = Focusable::<TestHost>::place(&s, &key.elem, &context, At::Drawn).unwrap();
-        assert!((placed.rect.w - CARD_W * s.grid.shelves[0].scale(0) * press).abs() < 0.01);
+        assert!((placed.rect.w - CARD_W * pop_of(&s, snapshot.view(), Some(key), 0, 0) * press).abs() < 0.01);
         assert!((placed.rest_rect.w - CARD_W * RowStyle::HOME.focus_scale).abs() < 0.01);
         context.press = PressRead::default();
         let opener = s.focused_rect(Some(key), &context, At::Drawn).unwrap();
-        assert!((opener.w - CARD_W * s.grid.shelves[0].scale(0)).abs() < 0.01);
+        assert!((opener.w - CARD_W * pop_of(&s, snapshot.view(), Some(key), 0, 0)).abs() < 0.01);
     }
 }
 
@@ -962,7 +1011,7 @@ fn the_continue_watching_caption_promises_time_left_only_when_the_bar_is_drawn()
             "offset {} is not in progress",
             m.resume_ms
         );
-        let cap = card_row::focused_caption(&tile_facts::of(&m), true).expect("a Continue Watching episode always captions");
+        let cap = ui_cards::focused_caption(&tile_facts::of(&m), true).expect("a Continue Watching episode always captions");
         assert!(
             !cap.to_str().unwrap().contains("left"),
             "offset {}: no bar, so the caption must not promise time remaining ({cap:?})",
@@ -975,7 +1024,7 @@ fn the_continue_watching_caption_promises_time_left_only_when_the_bar_is_drawn()
         "20 minutes into 45 IS in progress"
     );
     assert_eq!(
-        card_row::focused_caption(&tile_facts::of(&mid), true).unwrap().to_str().unwrap(),
+        ui_cards::focused_caption(&tile_facts::of(&mid), true).unwrap().to_str().unwrap(),
         "Laura \u{00b7} 25 min left"
     );
 }
@@ -988,7 +1037,7 @@ fn top_band_bottom() -> f32 {
 }
 fn heading_top(row: usize, focus_row: usize, scroll: f32) -> f32 {
     let lift = if row == focus_row {
-        card_row::heading_lift_max(&RowStyle::HOME)
+        ui_cards::heading_lift_max(&RowStyle::HOME)
     } else {
         0.0
     };
@@ -999,7 +1048,7 @@ fn heading_top(row: usize, focus_row: usize, scroll: f32) -> f32 {
 }
 fn settled_scroll(rows: usize, focus_row: usize, current: f32) -> f32 {
     let (lo, hi) = row_reveal_band(shelf_top_settled(focus_row, focus_row));
-    card_row::reveal(current, lo, hi, grid_max_scroll(rows))
+    ui_cards::reveal(current, lo, hi, grid_max_scroll(rows))
 }
 fn from_below(rows: usize) -> f32 {
     grid_max_scroll(rows) + ROW_PITCH
@@ -1040,7 +1089,7 @@ fn every_settled_row_keeps_its_focused_label_block_above_the_overscan_bottom() {
                 settled_scroll(rows, focus_row, from_below(rows)),
             ] {
                 let row_y = GRID_TOP_Y + shelf_top_settled(focus_row, focus_row) - scroll;
-                assert!(row_y + CARD_DY + CARD_H + card_row::UNDER_LABEL_H <= SCR_H - MARGIN_Y);
+                assert!(row_y + CARD_DY + CARD_H + ui_cards::UNDER_LABEL_H <= SCR_H - MARGIN_Y);
             }
         }
     }
@@ -1068,7 +1117,7 @@ fn width_of(text: &str, size: i32, bold: i32) -> f32 {
 }
 fn heading_flow(title: &str, source: &str) -> (f32, Vec<Run>) {
     let mut runs = Vec::new();
-    let width = card_row::heading_flow(title, source, |text, dx, size, bold, ink| {
+    let width = ui_cards::heading_flow(title, source, |text, dx, size, bold, ink| {
         runs.push(Run {
             text: text.into(),
             dx,
@@ -1510,38 +1559,48 @@ fn the_home_census_covers_input_motion_and_current_projection() {
     plx_data::pms::seed_for_test(&mut state, &adapter, 3, plx_data::pms::HubState::Ready);
     let snapshot = plx_data::pms::hubs_snapshot(&state);
     let baseline = screen(snapshot.view()).hash();
-    let changes: &[fn(&mut HomeScreen)] = &[
-        |s| s.snap.vel = 1.0,
-        |s| s.hero_slide.pos = 0.4,
-        |s| s.hero_slide.vel = 1.0,
-        |s| s.hero_dir = -1.0,
-        |s| s.outgoing = Some((plx_plex::plex::ServerId::UNSET, "old".into())),
-        |s| s.grid.scroll_y.vel = 1.0,
-        |s| s.grid.scroll_target = 100.0,
-        |s| s.rows[0].elems.swap(0, 1),
-        |s| Arc::make_mut(&mut s.items)[0].last_row += 1,
-        |s| Arc::make_mut(&mut s.items)[0].last_col += 1,
-        |s| s.projected_generation = None,
-        |s| s.hero_pop.step(Some(0), 0.016),
-        |s| s.grid.shelves[0].update(3, Some(1), &RowStyle::HOME, 0.016),
+    let changes: &[fn(&mut HomeScreen, HubsView<'_>)] = &[
+        |s, _| s.snap.vel = 1.0,
+        |s, _| s.hero_slide.pos = 0.4,
+        |s, _| s.hero_slide.vel = 1.0,
+        |s, _| s.hero_dir = -1.0,
+        |s, _| s.outgoing = Some((plx_plex::plex::ServerId::UNSET, "old".into())),
+        |s, _| s.grid.scroll_y.vel = 1.0,
+        |s, _| s.grid.scroll_target = 100.0,
+        |s, _| s.rows[0].elems.swap(0, 1),
+        |s, _| Arc::make_mut(&mut s.items)[0].last_row += 1,
+        |s, _| Arc::make_mut(&mut s.items)[0].last_col += 1,
+        |s, _| s.projected_generation = None,
+        |s, _| s.hero_pop.step(Some(0), 0.016),
+        |s, _| s.grid.shelves[0].set_base_y(1.0),
+        // a pop spring (and the focus it follows) moved by the shelf's own events
+        |s, v| { s.snap.jump(1.0); s.pop_shelf_for_test(v) },
     ];
     for (i, change) in changes.iter().enumerate() {
         let mut s = screen(snapshot.view());
-        change(&mut s);
+        change(&mut s, snapshot.view());
         assert_ne!(s.hash(), baseline, "census omitted input-state variation {i}");
     }
+    // The pop and scroll springs are hashed through the shelf itself: with the page on the shelves,
+    // popping one card moves its canon bytes and nothing else is touched.
+    let shelf_canon = |s: &HomeScreen| { let mut c = Canon::new(); s.grid.shelves[0].write(&mut c); c.finish() };
+    let mut popped = screen(snapshot.view());
+    popped.snap.jump(1.0);
+    let rest = shelf_canon(&popped);
+    popped.pop_shelf_for_test(snapshot.view());
+    assert_ne!(shelf_canon(&popped), rest, "a pop spring is part of the canon");
     // These extents are part of SHAPE, not merely runtime sequence lengths.
     assert_eq!(HERO_NBTN, 2);
-    assert_eq!(plx_ui::card_row::MAX_ROW_ITEMS, 24);
+    assert_eq!(plx_ui::cards::MAX_ROW_ITEMS, 24);
 }
 
 /// `person` and `search` cap their shelves at the data layer's `pms::MAX_SHELF_ITEMS`; the card row
-/// that draws them owns `ui::card_row::MAX_ROW_ITEMS` springs. The data layer cannot name `ui` and
+/// that draws them owns `ui::cards::MAX_ROW_ITEMS` springs. The data layer cannot name `ui` and
 /// `ui` cannot name the data layer, so there are two constants for one number and this is the only
 /// place that sees both.
 #[test]
 fn the_data_shelf_cap_is_the_card_rows_capacity() {
-    assert_eq!(plx_data::pms::MAX_SHELF_ITEMS, plx_ui::card_row::MAX_ROW_ITEMS);
+    assert_eq!(plx_data::pms::MAX_SHELF_ITEMS, plx_ui::cards::MAX_ROW_ITEMS);
 }
 
 #[test]
@@ -1574,6 +1633,102 @@ fn an_explicit_hero_reseat_keeps_the_fold_animation_unlike_page_restoration() {
     assert_eq!(s.snap.pos, 1.0, "fresh reseating still animates the door");
 }
 
+/// A restore arrives already popped, whether or not the page idled at the hero first: the shelves
+/// slept through those ticks, and the wake must not turn the restore into a deliberate arrival.
+#[test]
+fn restore_after_n_idle_ticks_at_the_hero_arrives_popped() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 3, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let view = snapshot.view();
+    let full = RowStyle::HOME.focus_scale;
+    for idle in [0, 3] {
+        let mut s = screen(view);
+        s.restore_reveal = true;
+        let hero = FocusKey { entry: s.entry, elem: HERO_PLAY_ELEM };
+        for frame in 0..idle {
+            step(&mut s, view, Some(hero), &ScreenEvent::Tick(Tick { ms: frame * 16, dt_us: 16_667 }));
+        }
+        let card = first_card(&s);
+        step(&mut s, view, Some(card), &ScreenEvent::FocusMoved {
+            from: Some(hero), to: card, by: By::Restore,
+        });
+        assert_eq!(s.snap.pos, 1.0, "the restore reveal opens on the shelves");
+        step(&mut s, view, Some(card), &ScreenEvent::Tick(Tick { ms: 100, dt_us: 16_667 }));
+        assert_eq!(pop_of(&s, view, Some(card), 0, 0), full, "{idle} idle ticks: the restored card is popped at once");
+    }
+}
+
+/// The dive from the hero by a deliberate move still grows the card from rest when the shelves
+/// wake, after the same idle ticks.
+#[test]
+fn a_deliberate_dive_after_idle_ticks_at_the_hero_grows_from_rest() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 3, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let view = snapshot.view();
+    let full = RowStyle::HOME.focus_scale;
+    let mut s = screen(view);
+    let hero = FocusKey { entry: s.entry, elem: HERO_PLAY_ELEM };
+    for frame in 0..3 {
+        step(&mut s, view, Some(hero), &ScreenEvent::Tick(Tick { ms: frame * 16, dt_us: 16_667 }));
+    }
+    let card = first_card(&s);
+    step(&mut s, view, Some(card), &ScreenEvent::FocusMoved { from: Some(hero), to: card, by: By::Dir });
+    let mut first_awake = None;
+    for frame in 0..120 {
+        step(&mut s, view, Some(card), &ScreenEvent::Tick(Tick { ms: 100 + frame * 16, dt_us: 16_667 }));
+        if s.snap.pos > 0.5 {
+            first_awake = Some(pop_of(&s, view, Some(card), 0, 0));
+            break;
+        }
+    }
+    let first = first_awake.expect("the dive reaches the shelves");
+    assert!(first > 1.0 && first < full - 0.02, "the pop grows from rest: {first}");
+}
+
+/// A landing the row cannot honour: the focused card moves from column 1 to column 6 of an
+/// 8-card row. The scroll lands at the row's end, never outside [0, max] on any frame, the pop
+/// follows the element, and no other tile is lifted.
+#[test]
+fn a_landing_the_row_cannot_honour_clamps_the_scroll_and_the_pop_follows() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_grid_for_test(&mut state, &adapter, 1, 8);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    s.snap.jump(1.0);
+    s.snap_target = 1.0;
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[1] };
+    pop_card(&mut s, snapshot.view(), key, 120);
+    let max = RowStyle::HOME.max_scroll(8);
+    assert!(max > 0.0);
+    plx_data::pms::reverse_test_shelves(&mut state);
+    let landed = plx_data::pms::hubs_snapshot(&state);
+    let view = landed.view();
+    s.sync_catalog(&cx(view, Some(key)));
+    assert_eq!(s.rows[0].elems.iter().position(|&e| e == key.elem), Some(6), "the card moved to column 6");
+    for frame in 0..40 {
+        step(&mut s, view, Some(key), &ScreenEvent::Tick(Tick { ms: 5_000 + frame * 16, dt_us: 16_667 }));
+        let scroll = s.grid.shelves[0].scroll();
+        assert!((0.0..=max).contains(&scroll), "frame {frame}: scroll {scroll} outside [0, {max}]");
+        for col in 0..8 {
+            let pop = pop_of(&s, view, Some(key), 0, col);
+            if col == 6 {
+                assert!(pop > 1.05, "frame {frame}: the pop follows the element, {pop}");
+            } else {
+                assert!((pop - 1.0).abs() < 0.001, "frame {frame}: column {col} is lifted, {pop}");
+            }
+        }
+    }
+    assert!((s.grid.shelves[0].scroll() - max).abs() < 0.5, "the scroll lands at the row's end");
+}
+
 #[test]
 fn shelf_viewports_follow_identity_across_a_catalog_reorder() {
     let _guard = plx_base::testlock::serial();
@@ -1583,13 +1738,13 @@ fn shelf_viewports_follow_identity_across_a_catalog_reorder() {
     let snapshot = plx_data::pms::hubs_snapshot(&state);
     let mut s = screen(snapshot.view());
     let identity = s.rows[0].identity.clone();
-    s.grid.shelves[0].restore_scroll(900.0, 24, &RowStyle::HOME);
+    s.grid.shelves[0].restore_scroll(900.0, 24);
     plx_data::pms::reverse_test_hubs(&mut state);
     let changed = plx_data::pms::hubs_snapshot(&state);
     s.sync_catalog(&cx(changed.view(), None));
     assert_eq!(s.rows[1].identity, identity);
-    assert_eq!(s.grid.shelves[1].scroll_x(), 900.0);
-    assert_eq!(s.grid.shelves[0].scroll_x(), 0.0);
+    assert_eq!(s.grid.shelves[1].scroll(), 900.0);
+    assert_eq!(s.grid.shelves[0].scroll(), 0.0);
 }
 
 #[test]
@@ -1603,16 +1758,16 @@ fn the_grid_holds_one_motion_row_per_published_row() {
     assert_eq!(s.rows.len(), 5);
     assert_eq!(s.grid.shelves.len(), s.rows.len());
     let kept = s.rows[1].identity.clone();
-    s.grid.shelves[1].restore_scroll(900.0, 24, &RowStyle::HOME);
+    s.grid.shelves[1].restore_scroll(900.0, 24);
     plx_data::pms::seed_grid_for_test(&mut state, &adapter, 3, 24);
     let three = plx_data::pms::hubs_snapshot(&state);
     s.sync_catalog(&cx(three.view(), None));
     assert_eq!(s.rows.len(), 3);
     assert_eq!(s.grid.shelves.len(), 3, "the grid shrinks with the published rows");
     assert_eq!(s.rows[1].identity, kept);
-    assert_eq!(s.grid.shelves[1].scroll_x(), 900.0, "a surviving row keeps its motion");
-    assert_eq!(s.grid.shelves[0].scroll_x(), 0.0);
-    assert_eq!(s.grid.shelf(9).scroll_x(), 0.0, "a stale row index reads a resting row");
+    assert_eq!(s.grid.shelves[1].scroll(), 900.0, "a surviving row keeps its motion");
+    assert_eq!(s.grid.shelves[0].scroll(), 0.0);
+    assert_eq!(s.grid.scroll_x(9), 0.0, "a stale row index reads a resting row");
 }
 
 #[test]
@@ -1623,7 +1778,7 @@ fn an_empty_loading_publication_does_not_consume_restored_viewports() {
     plx_data::pms::seed_grid_for_test(&mut state, &adapter, 2, 24);
     let snapshot = plx_data::pms::hubs_snapshot(&state);
     let mut original = screen(snapshot.view());
-    original.grid.shelves[1].restore_scroll(900.0, 24, &RowStyle::HOME);
+    original.grid.shelves[1].restore_scroll(900.0, 24);
     let PageMemory::Home(memory) = <HomeScreen as Screen<TestHost>>::memory(&original) else { unreachable!() };
     plx_data::pms::seed_for_test(&mut state, &adapter, 0, plx_data::pms::HubState::Loading);
     let loading = plx_data::pms::hubs_snapshot(&state);
@@ -1637,7 +1792,7 @@ fn an_empty_loading_publication_does_not_consume_restored_viewports() {
     plx_data::pms::seed_grid_for_test(&mut state, &adapter, 2, 24);
     let ready = plx_data::pms::hubs_snapshot(&state);
     restored.sync_catalog(&cx(ready.view(), None));
-    assert_eq!(restored.grid.shelves[1].scroll_x(), 900.0);
+    assert_eq!(restored.grid.shelves[1].scroll(), 900.0);
 }
 
 #[test]
@@ -1776,10 +1931,10 @@ fn a_partially_visible_focused_row_allows_hover_to_its_neighbors_only() {
     let snapshot = plx_data::pms::hubs_snapshot(&state);
     let mut s = screen(snapshot.view());
     s.snap.jump(1.0);
-    s.grid.shelves[0].update(2, Some(0), &RowStyle::HOME, 1.0);
-    s.layout_grid();
-    s.grid.shelves[0].base_y = -20.0;
     let first = first_card(&s);
+    pop_card(&mut s, snapshot.view(), first, 80);
+    s.layout_grid();
+    s.grid.shelves[0].set_base_y(-20.0);
     let neighbor = s.rows[0].elems[1];
     for (focus, expected) in [(Some(first), Hover::Focus), (None, Hover::OnlyIfFocused)] {
         let context = cx(snapshot.view(), focus);
@@ -1803,7 +1958,7 @@ fn drawn_stops_feed_the_real_hit_map_with_scoped_card_keys() {
     let card = first_card(&s);
     s.snap.jump(1.0);
     s.snap_target = 1.0;
-    s.grid.shelves[0].update(2, Some(0), &RowStyle::HOME, 1.0);
+    pop_card(&mut s, snapshot.view(), card, 80);
     s.layout_grid();
     let context = cx(snapshot.view(), Some(card));
     let mut frame = DrawFrame::new(&context, Painter::root());
@@ -2089,6 +2244,69 @@ fn addressed_item_menu_uses_the_current_owned_grid_item() {
         &out,
         |req| matches!(req, HomeReq::ItemMenu { rk, .. } if rk == "1")
     ));
+}
+
+/// The item-menu opener asks the page for its focused card (`Screen::focused_card`) instead of
+/// downcasting to Home: a grid card names the item the seeded hubs put there (a Continue Watching
+/// press and its menu are account-affecting) and the rect the page places it at; the hero, which is
+/// not a card, names none. Pinned at rest and during the hero-to-grid dive (`snap` <= 0.5).
+#[test]
+fn the_focused_card_is_the_grid_item_and_the_rect_the_opener_measured_before() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 2, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    // The seeded hubs are one shelf of two items, rating keys "1" and "2" on the unset server.
+    assert_eq!(s.rows[0].elems.len(), 2);
+    for snap in [1.0, 0.5, 0.2] {
+        s.snap.jump(snap);
+        s.layout_grid();
+        for (col, rk) in ["1", "2"].into_iter().enumerate() {
+            let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[col] };
+            let context = cx(snapshot.view(), Some(key));
+            let card = Screen::<TestHost>::focused_card(&s, &context, Some(key), Some(At::Drawn))
+                .unwrap_or_else(|| panic!("col {col} at snap {snap} is a focused card"));
+            let item = card.item.downcast_ref::<PmsMovie>().unwrap();
+            assert_eq!((item.sid, item.rk.as_str()), (plx_plex::plex::ServerId::UNSET, rk), "col {col} at snap {snap}");
+            let placed = Focusable::<TestHost>::place(&s, &key.elem, &context, At::Drawn).unwrap();
+            assert_eq!(card.rect, Some(placed.rect), "col {col} at snap {snap}");
+            assert!(card.rect.is_some() && card.rest_rect.is_some());
+            assert_eq!(Screen::<TestHost>::focused_card_rect(&s, &context, Some(key), At::Drawn), Some(placed.rect));
+            assert!(Screen::<TestHost>::focused_card(&s, &context, Some(key), None).unwrap().rect.is_none());
+        }
+    }
+    let first = first_card(&s);
+    let foreign = FocusKey { entry: EntryId(s.entry.0 + 100), elem: first.elem };
+    assert!(Screen::<TestHost>::focused_card(&s, &cx(snapshot.view(), Some(foreign)), Some(foreign), Some(At::Drawn)).is_none());
+    let hero = FocusKey { entry: s.entry, elem: 0 };
+    let context = cx(snapshot.view(), Some(hero));
+    assert!(Screen::<TestHost>::focused_card_rect(&s, &context, Some(hero), At::Drawn).is_none());
+    assert!(Screen::<TestHost>::focused_card(&s, &context, Some(hero), Some(At::Drawn)).is_none());
+}
+
+/// The opener only anchors a menu, so it must not need the item to resolve: a hubs snapshot that
+/// shrank between the hold and the request drain leaves the card where it was drawn, and
+/// `focused_card_rect` still answers its rect (the item-resolving `focused_card` does not).
+#[test]
+fn the_opener_rect_survives_a_hubs_snapshot_that_shrank_after_the_hold() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 2, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    s.snap.jump(1.0);
+    s.layout_grid();
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[1] };
+    let held = Focusable::<TestHost>::place(&s, &key.elem, &cx(snapshot.view(), Some(key)), At::Drawn).unwrap().rect;
+    plx_data::pms::seed_for_test(&mut state, &adapter, 1, plx_data::pms::HubState::Ready);
+    let shrunk = plx_data::pms::hubs_snapshot(&state);
+    let context = cx(shrunk.view(), Some(key));
+    assert!(s.focused_item(Some(key), &context).is_none(), "the second card is gone from the snapshot");
+    assert!(Screen::<TestHost>::focused_card(&s, &context, Some(key), Some(At::Drawn)).is_none());
+    assert_eq!(Screen::<TestHost>::focused_card_rect(&s, &context, Some(key), At::Drawn), Some(held));
 }
 
 #[test]
@@ -2575,17 +2793,19 @@ fn a_shelf_heading_on_screen_is_drawn_while_its_cards_are_still_below_the_edge()
     let drawn = |s: &HomeScreen| {
         plx_gfx::text::capture_text_runs_for_test(|| {
             let env = s.env(0.0);
-            s.draw_grid(view, &env, Painter::recording(), 1.0, None, None, &FixtureMeasure);
+            let context = cx(view, None);
+            let frame = DrawFrame::new(&context, Painter::recording());
+            s.draw_grid(&frame, view, &env, Painter::recording(), None);
         })
         .iter()
         .any(|run| run.contains(title.as_str()))
     };
     // Cards 4px under the bottom edge; the heading's line is well inside the screen.
-    s.grid.shelves[0].base_y = SCR_H + 4.0;
-    assert!(heading_y(s.grid.shelves[0].base_y, s.grid.shelves[0].lift()) < SCR_H - 20.0);
+    s.grid.shelves[0].set_base_y(SCR_H + 4.0);
+    assert!(heading_y(s.grid.base_y(0), s.grid.lift(0)) < SCR_H - 20.0);
     assert!(drawn(&s), "the heading above an off-screen card row must still be drawn");
     // …and a shelf whose heading has not reached the edge yet is still culled.
-    s.grid.shelves[0].base_y = SCR_H + TITLE_DY + 4.0;
+    s.grid.shelves[0].set_base_y(SCR_H + TITLE_DY + 4.0);
     assert!(!drawn(&s), "a shelf entirely below the screen draws nothing");
 }
 
@@ -2938,8 +3158,8 @@ fn assert_shelves_laid_out(s: &HomeScreen) {
     let mut flow = 0.0;
     for (row, shelf) in s.grid.shelves.iter().enumerate() {
         let want = top + flow - s.grid.scroll_y.pos * s.snap.pos;
-        assert_eq!(shelf.base_y, want, "row {row} is not where the layout puts it");
-        flow += card_row::ROW_PITCH_FIXED + shelf.under_band();
+        assert_eq!(shelf.base_y(), want, "row {row} is not where the layout puts it");
+        flow += ui_cards::ROW_PITCH_FIXED + shelf.under_band();
     }
 }
 
@@ -2957,7 +3177,7 @@ fn a_catalog_landing_on_an_event_is_laid_out_before_any_tick() {
     step(&mut s, first.view(), None, &ScreenEvent::Mount);
     assert_eq!(s.grid.shelves.len(), 3);
     assert_shelves_laid_out(&s);
-    assert_eq!(s.grid.shelves[0].base_y, PEEK_Y, "the billboard shows the first row as a peek");
+    assert_eq!(s.grid.shelves[0].base_y(), PEEK_Y, "the billboard shows the first row as a peek");
 
     plx_data::pms::seed_grid_for_test(&mut state, &adapter, 5, 4);
     let wider = plx_data::pms::hubs_snapshot(&state);
@@ -3063,8 +3283,8 @@ fn stops_are_recorded_only_for_rows_on_screen_or_focused() {
     s.layout_grid();
     let on_screen = |s: &HomeScreen, row: usize| {
         let shelf = &s.grid.shelves[row];
-        let top = heading_y(shelf.base_y, shelf.lift());
-        on_axis(top, shelf.base_y + CARD_H + shelf.under_band() - top, SCR_H, 0.0)
+        let top = heading_y(shelf.base_y(), shelf.heading_lift());
+        on_axis(top, shelf.base_y() + CARD_H + shelf.under_band() - top, SCR_H, 0.0)
     };
     let visible: Vec<usize> = (0..s.rows.len()).filter(|&r| on_screen(&s, r)).collect();
     assert!(!visible.is_empty() && visible.len() < s.rows.len(), "the fixture must straddle the screen edge");
@@ -3238,17 +3458,17 @@ fn walking_focus_down_leaves_every_released_row_at_exact_rest() {
     for row in 0..rows {
         let context = cx(snapshot.view(), Some(FocusKey { entry: EntryId(7), elem: s.rows[row].elems[0] }));
         for _ in 0..30 {
-            s.update_grid(snapshot.view(), &context, dt);
+            s.update_grid_for_test(snapshot.view(), &context, dt);
         }
     }
     let context = cx(snapshot.view(), Some(FocusKey { entry: EntryId(7), elem: s.rows[rows - 1].elems[0] }));
     for _ in 0..120 {
-        s.update_grid(snapshot.view(), &context, dt);
+        s.update_grid_for_test(snapshot.view(), &context, dt);
     }
     for row in 0..rows - 1 {
-        assert!(s.grid.shelves[row].at_exact_rest(), "row {row} never parked");
+        assert!(s.grid.shelves[row].at_rest(), "row {row} never parked");
     }
-    assert!(!s.grid.shelves[rows - 1].at_exact_rest(), "the focused row is live");
+    assert!(!s.grid.shelves[rows - 1].at_rest(), "the focused row is live");
 }
 
 #[test]
@@ -3473,4 +3693,253 @@ fn the_hint_does_not_stand_up_by_itself_while_the_screenshot_clocks_are_held() {
         assert!(s.hold_hint.visible(), "a real hold is input and still shows it");
         plx_machine::motion::hold_phase_clocks(None);
     });
+}
+
+/// Home's focus groups are what the focus engine's remembered cursors and the stored session are
+/// keyed on: moving a row onto `cards::Shelf` does not renumber them, reorder them or change where
+/// a fresh page puts focus.
+#[test]
+fn the_focus_groups_and_the_first_focus_keep_their_ids_and_order() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_grid_for_test(&mut state, &adapter, 3, 4);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let s = screen(snapshot.view());
+    let mut groups = Vec::new();
+    Focusable::<TestHost>::groups(&s, &cx(snapshot.view(), None), &mut groups);
+    let ids: Vec<u32> = groups.iter().map(|g| g.id.0).collect();
+    assert_eq!(ids, [0, FIRST_HUB_GROUP, FIRST_HUB_GROUP + 1, FIRST_HUB_GROUP + 2], "hero, then one group per row in order");
+    assert_eq!(groups[0].seat, Seat::First, "a fresh page opens on the hero");
+    let first = s.rows[0].elems[0];
+    assert_eq!(first, FIRST_ITEM_ELEM, "the first card keeps the first element id");
+    assert_eq!(s.rows[0].elems.iter().map(|e| e - FIRST_ITEM_ELEM).collect::<Vec<_>>(), [0, 1, 2, 3]);
+    assert_eq!(
+        Focusable::<TestHost>::group_of(&s, &first, &cx(snapshot.view(), None)),
+        Some(GroupId(FIRST_HUB_GROUP))
+    );
+    let from = Placed { rect: Rect::new(0.0, 0.0, 10.0, 10.0), rest_rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+        clip: Rect::FULL, index: Some(0) };
+    assert_eq!(
+        Focusable::<TestHost>::seat(&s, GroupId(FIRST_HUB_GROUP), from, &cx(snapshot.view(), None)).elem,
+        first
+    );
+}
+
+fn drawn_stops(s: &mut HomeScreen, context: &Cx<'_, TestHost>) -> Vec<Stop<u32>> {
+    let mut f = DrawFrame::new(context, Painter::recording());
+    plx_ui::screen::record_stops_while_recording(|| {
+        plx_gfx::gfx::without_frame_clear(|| Screen::<TestHost>::draw(s, &mut f));
+    });
+    f.into_stops()
+}
+
+/// **The pointer's rect is the rect the screen's own `draw` registers**, for every card of every
+/// row on screen (plain headings and a promoted collection's linked heading alike), popped or not,
+/// and mid-press: the stops come out of the real `Screen::draw`, not a re-derivation, and equal
+/// what `place(.., At::Drawn)` reports.
+#[test]
+fn every_shelf_cards_stop_from_the_real_draw_is_the_placed_rect() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    let snapshot = collection_home(&mut state, &adapter);
+    let mut s = screen(snapshot.view());
+    on_grid(&mut s);
+    let key = FocusKey { entry: s.entry, elem: s.rows[1].elems[1] };
+    pop_card(&mut s, snapshot.view(), key, 80);
+    for press in [1.0, 0.93] {
+        let mut context = cx(snapshot.view(), Some(key));
+        context.press.scale = press;
+        let stops = drawn_stops(&mut s, &context);
+        let mut checked = 0;
+        for row in 0..s.rows.len() {
+            if !s.shelf_on_screen(row) {
+                continue;
+            }
+            for &elem in &s.rows[row].elems {
+                let Some(stop) = stops.iter().find(|stop| stop.key.elem == elem) else { continue };
+                let placed = Focusable::<TestHost>::place(&s, &elem, &context, At::Drawn).unwrap();
+                assert_eq!((stop.rect.x, stop.rect.y, stop.rect.w, stop.rect.h),
+                    (placed.rect.x, placed.rect.y, placed.rect.w, placed.rect.h), "row {row} elem {elem}, press {press}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "the stops under test are the page's, not an empty set: {checked}");
+        let popped = stops.iter().find(|stop| stop.key == key).unwrap();
+        assert!(popped.rect.w > CARD_W, "the focused card's stop is its popped rect");
+    }
+}
+
+#[test]
+fn a_recent_page_keeps_the_focused_card_and_its_drawn_position() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 0, 24, true);
+    let old = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(old.view());
+    s.snap.pos = 1.0;
+    s.snap_target = 1.0;
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[18] };
+    pop_card(&mut s, old.view(), key, 90);
+    let before = drawn_rect(&s, old.view(), Some(key), 0, 18);
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 12, 24, true);
+    let next = plx_data::pms::hubs_snapshot(&state);
+    step(&mut s, next.view(), Some(key), &ScreenEvent::StoreChanged(StoreId::Hubs.ord(), next.view().generation));
+    step(&mut s, next.view(), Some(key), &ScreenEvent::Tick(Tick { ms: 1600, dt_us: 16_667 }));
+    assert_eq!(s.rows[0].elems[6], key.elem);
+    assert_eq!(s.focused_item(Some(key), &cx(next.view(), Some(key))).unwrap().rk, "19");
+    let after = drawn_rect(&s, next.view(), Some(key), 0, 6);
+    assert!((after.x - before.x).abs() < 0.1);
+    assert!((after.y - before.y).abs() < 0.1);
+    assert!((after.w - before.w).abs() < 0.1);
+}
+
+#[test]
+fn recent_rows_request_pages_only_when_the_shelves_are_visible() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 0, 12, true);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    let is_page = |out: &[Stamped<TestHost>]| out.iter().any(|fx|
+        matches!(fx.fx, Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::Page { .. })))));
+    let tick = ScreenEvent::Tick(Tick { ms: 16, dt_us: 0 });
+    let focus = Some(FocusKey { entry: s.entry, elem: s.rows[0].elems[6] });
+    assert!(!is_page(&step(&mut s, snapshot.view(), focus, &tick).1));
+    s.snap.pos = 1.0;
+    s.snap_target = 1.0;
+    s.grid.scroll_y.pos = 10000.0;
+    s.layout_grid();
+    assert!(!is_page(&step(&mut s, snapshot.view(), focus, &tick).1));
+    s.grid.scroll_y.pos = 0.0;
+    s.layout_grid();
+    assert!(is_page(&step(&mut s, snapshot.view(), focus, &tick).1));
+}
+
+#[test]
+fn returning_to_a_previous_recent_page_does_not_load_the_next_page_again() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 12, 24, true);
+    let old = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(old.view());
+    s.snap.pos = 1.0;
+    s.snap_target = 1.0;
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[5] };
+    pop_card(&mut s, old.view(), key, 90);
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 0, 24, true);
+    let next = plx_data::pms::hubs_snapshot(&state);
+    step(&mut s, next.view(), Some(key), &ScreenEvent::StoreChanged(StoreId::Hubs.ord(), next.view().generation));
+    assert_eq!(s.rows[0].elems[17], key.elem);
+    for frame in 0..90 {
+        let (_, out, _) = step(&mut s, next.view(), Some(key),
+            &ScreenEvent::Tick(Tick { ms: 1600 + frame * 17, dt_us: 16_667 }));
+        assert!(!out.iter().any(|fx| matches!(fx.fx,
+            Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::Page { .. }))))));
+    }
+}
+
+#[test]
+fn a_pending_backward_page_is_requested_once_across_many_ticks() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 12, 24, true);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    s.snap.pos = 1.0;
+    s.snap_target = 1.0;
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[5] };
+    let mut requests = 0;
+    for frame in 0..90 {
+        let (_, out, _) = step(&mut s, snapshot.view(), Some(key),
+            &ScreenEvent::Tick(Tick { ms: frame * 17, dt_us: 16_667 }));
+        requests += out.iter().filter(|fx| matches!(fx.fx,
+            Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::Page { before: true, .. }))))).count();
+    }
+    assert_eq!(requests, 1);
+}
+
+#[test]
+fn leaving_a_backward_page_edge_allows_a_new_request_on_return() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 12, 24, true);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    s.snap.pos = 1.0;
+    s.snap_target = 1.0;
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[5] };
+    let away = FocusKey { entry: s.entry, elem: s.rows[0].elems[12] };
+    let mut requests = 0;
+    for (frame, current) in [key, key, away, key, key].into_iter().enumerate() {
+        let (_, out, _) = step(&mut s, snapshot.view(), Some(current),
+            &ScreenEvent::Tick(Tick { ms: frame as u32 * 17, dt_us: 16_667 }));
+        requests += out.iter().filter(|fx| matches!(fx.fx,
+            Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::Page { before: true, .. }))))).count();
+    }
+    assert_eq!(requests, 2);
+}
+
+#[test]
+fn covering_home_cancels_its_page_even_after_focus_has_left_the_entry() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 12, 24, true);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    s.snap.pos = 1.0;
+    s.snap_target = 1.0;
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[5] };
+    step(&mut s, snapshot.view(), Some(key), &ScreenEvent::Tick(Tick { ms: 0, dt_us: 16_667 }));
+    let (_, out, _) = step(&mut s, snapshot.view(), None, &ScreenEvent::Cover);
+    assert_eq!(out.iter().filter(|fx| matches!(fx.fx,
+        Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::CancelPage { .. }))))).count(),1);
+    step(&mut s, snapshot.view(), Some(key), &ScreenEvent::Uncover);
+    let (_, out, _) = step(&mut s, snapshot.view(), Some(key), &ScreenEvent::Tick(Tick { ms: 1000, dt_us: 16_667 }));
+    assert_eq!(out.iter().filter(|fx| matches!(fx.fx,
+        Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::Page { before: true, .. }))))).count(),1);
+}
+
+fn page_requests(out: &[Stamped<TestHost>]) -> usize {
+    out.iter().filter(|fx| matches!(fx.fx,
+        Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::Page { .. }))))).count()
+}
+
+// A page the store gave up on leaves no store change behind, so the row's once-per-edge latch is
+// still set when the owner presses again. A focus move or an at-edge press on that row re-asks.
+#[test]
+fn a_row_whose_page_was_given_up_asks_again_on_the_next_focus_move_or_edge_press() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 12, 24, true);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    s.snap.pos = 1.0;
+    s.snap_target = 1.0;
+    let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[5] };
+    let next = FocusKey { entry: s.entry, elem: s.rows[0].elems[4] };
+    let tick = |ms| ScreenEvent::Tick(Tick { ms, dt_us: 16_667 });
+    let mut requests = page_requests(&step(&mut s, snapshot.view(), Some(key), &tick(0)).1);
+    requests += page_requests(&step(&mut s, snapshot.view(), Some(key), &tick(17)).1);
+    assert_eq!(requests, 1, "the latch holds while nothing changed");
+    step(&mut s, snapshot.view(), Some(next), &ScreenEvent::FocusMoved { from: Some(key), to: next, by: By::Dir });
+    requests += page_requests(&step(&mut s, snapshot.view(), Some(next), &tick(34)).1);
+    requests += page_requests(&step(&mut s, snapshot.view(), Some(next), &tick(51)).1);
+    assert_eq!(requests, 2, "a focus move on the same row asks once more");
+    step(&mut s, snapshot.view(), Some(next), &ScreenEvent::Input(InputEvent {
+        at: Tick::default(),
+        source: Source::Sdl,
+        kind: InputKind::Key { key: Key::Left, sym: 0, wcode: 0, edge: Edge::Down, at_edge: true },
+    }));
+    requests += page_requests(&step(&mut s, snapshot.view(), Some(next), &tick(68)).1);
+    requests += page_requests(&step(&mut s, snapshot.view(), Some(next), &tick(85)).1);
+    assert_eq!(requests, 3, "an edge press asks once more");
 }

@@ -1,4 +1,15 @@
-# PlxNative
+# Nuvio Native
+
+A native LG webOS client for Stremio/Nuvio addons, maintained by [Chris](https://github.com/current).
+This is a fork of [PlxNative](https://github.com/GLinnik21/plx-native); its upstream authors and GPL license are retained.
+
+See [the Nuvio handoff](docs/nuvio/HANDOFF.md), [architecture](docs/nuvio/ARCHITECTURE.md),
+[playback](docs/nuvio/PLAYBACK.md), and [validation](docs/nuvio/VALIDATION.md) for this fork's build and TV instructions.
+The native debug and stable app IDs are `com.nuvionative.app.debug` and `com.nuvionative.app`.
+
+The following documentation describes the upstream Plex client and may not apply to the Nuvio addon backend.
+
+## Upstream PlxNative
 
 A fast, unofficial [Plex](https://www.plex.tv/) client for LG webOS televisions. Native, not a web
 page — the interface is drawn straight on the GPU at 60 fps, and video plays on the TV's own decoder.
@@ -54,17 +65,20 @@ itself. (In this capture the frame under it was decoded by the simulator.)
 - **Sign in on the TV** with an on-screen QR code and pick a Plex Home profile.
 - **Browse and search your libraries** — on your own servers and on ones shared with you. Your
   servers' libraries, that is, not Plex's catalogue or Watchlist.
-- **Direct play** H.264 and HEVC — 4K, 10-bit, Dolby Vision profiles 5 and 8, E-AC-3 Atmos —
-  decided against your television's own codec table where it publishes one. Anything else the
-  server transcodes, and you can switch a playback to Auto to follow a link whose speed changes.
+- **Direct play** H.264 and HEVC — 4K, 10-bit, Dolby Vision profiles 5 and 8, E-AC-3 Atmos, and AV1 or 8-bit VP9
+  on televisions whose codec table lists that decoder — decided against your television's own
+  codec table where it publishes one. Anything else the server transcodes, and you can switch a
+  playback to Auto to follow a link whose speed changes.
 - **Everything you expect while watching**: resume, seek and scrub, chapters, audio and subtitle
   tracks (including image subtitles), Skip Intro, Skip Credits, Up Next with auto-advance, and
   progress reported back to your server.
 
 ## Will it work on my television?
 
-**It needs webOS 4.0 or newer**; older firmware won't start — you'd get a tile that does nothing.
-Past that, it most likely will. I develop and test on a 2019 set, and opt-in usage reports show
+**It needs webOS 4.0 or newer**, with one tested exception: a 2016 set on **webOS 3.4.3** signs
+in, browses, searches and plays (direct play, transcodes, subtitles and seeking) through Developer
+Mode. Other 3.x releases are untested, and anything older than 3.4 is unknown. Past that, it most
+likely will. I develop and test on a 2019 set, and opt-in usage reports show
 video playing on sets from 2018 through the newest, on webOS 11 — both direct play and server
 transcodes, Developer Mode installs included.
 
@@ -74,6 +88,7 @@ transcodes, Developer Mode installs included.
 |---|---|
 | **Some 2019 sets on LG's k5lp or k3lp chip**, installed through Developer Mode | Video won't play. On these sets LG's Developer Mode sandbox can withhold a device the video path needs — Kodi and Moonlight hit the same wall. The app checks for it and says so instead of crashing; other sets on the same chip play normally. On a rooted TV with Homebrew Channel, the failure screen offers **Repair**, which applies the Homebrew Channel fix to the sandbox (one owner fixed it this way from a root shell; the button itself hasn't been run on an affected set yet). Without root there is no fix. |
 | **2018 sets on firmware that reports platform release 3.9.3** | Sign-in and browsing work, but video has never been seen to start on one, and no error is reported either: [#249](https://github.com/GLinnik21/plx-native/issues/249). |
+| **webOS 3.x** | Seeking restarts the stream at the new position instead of jumping in place, so each seek takes a moment longer. In-place seek depends on the internal layout of LG's 4.x media player, and on 3.4 that layout differs. |
 | **Sets on LG's k6hp chip** | A crash seen in opt-in crash reports and not reproduced here, because I have no such set: [#174](https://github.com/GLinnik21/plx-native/issues/174). |
 
 ### Rooted or not
@@ -84,7 +99,7 @@ installed through it ([how to keep them](docs/install-and-verify.md#important-de
 A rooted TV with Homebrew Channel has no expiry.
 
 If something goes wrong, check [Troubleshooting](docs/troubleshooting.md) first, then
-[tell me what happened](https://github.com/GLinnik21/plx-native/issues) — and if you own one of the
+[tell me what happened](https://github.com/GLinnik21/plx-native/issues/new/choose) — and if you own one of the
 sets above, it working is as useful a report as it failing.
 
 ## Installing
@@ -169,8 +184,9 @@ If that fits, it's genuinely nice to use. If it doesn't, the official app will s
 
 Issues and pull requests are welcome, especially from anyone whose television or library differs
 from mine — [**docs/building.md**](docs/building.md) is the build and the test loop, and says what
-hardware I most need help with. Security issues go through [`SECURITY.md`](SECURITY.md) rather than
-a public issue.
+hardware I most need help with. Feature ideas go to [Discussions >
+Ideas](https://github.com/GLinnik21/plx-native/discussions/categories/ideas). Security issues go
+through [`SECURITY.md`](SECURITY.md) rather than a public issue.
 
 ## Acknowledgements
 

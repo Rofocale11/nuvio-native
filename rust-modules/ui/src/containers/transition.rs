@@ -18,7 +18,10 @@
 //!   held while the destination reports layout motion (springs outside `idle::decorative`, read
 //!   through `idle::page_layout_moving`) or first-frame resource work; decorative springs such as
 //!   Home's wash dissolve, hero art reveal and hero focus pop still wake the present gate but do
-//!   not hold the snapshot. At visual quiescence the dispatcher takes one full-alpha replacement capture off-screen, presents that
+//!   not hold the snapshot. That layout-motion hold is the product's: in a frame dump no image is ever held
+//!   (`PageImage::step_filmed`: the dip RE-CAPTURES the page every frame and the page is live the
+//!   frame it ends), so the destination's own springs are filmed live under the dip. At visual quiescence the dispatcher takes one
+//!   full-alpha replacement capture off-screen, presents that
 //!   image, then switches to identical live output on the following frame. No VISIBLE frame draws a live
 //!   page under a full-screen image. [`PAGE_QUIESCENCE_HOLD_MAX_MS`] bounds a page that never
 //!   settles. Screen/input/lifecycle state continues ticking behind the held image.
@@ -26,7 +29,10 @@
 //!   k=200 spring carries the incoming level in from −0.35 and the outgoing one out to +0.22 (in
 //!   fractions of the width).
 //!
-//! Motion and image policy are pure: no static, no clock but the frame tick, no GL. The
+//! Motion and image policy are pure: no static, no clock but the frame tick, no GL. The one fact they
+//! read besides the tick is the frame dump's: `PageDip::tick` and `PageImage::plan` read
+//! `plx_gfx::dump::held_repeat` (a held repeat is not a frame of the film), and `PageImage::plan`
+//! reads `plx_gfx::dump::armed` (a dump films a pushed page live, never as a held image). The
 //! [`PageSnapshot`] backend borrows the modal host's ONE FrameCache; a modal or video plane takes
 //! precedence and capture failure falls back to live rendering. RoutePush still draws both levels
 //! live: it cannot share one image across two simultaneously visible pages.
@@ -210,9 +216,14 @@ impl Transition for PageDip {
                 }
             }
             DipPhase::Hold => {
-                // exactly one frame: a route gates no fetch (every screen owns its own data wait)
+                // exactly one frame: a route gates no fetch (every screen owns its own data wait).
+                // One FRAME, not one tick call: a frame dump repeats an iteration at the same
+                // virtual time while debt clears (`plx_gfx::dump::held_repeat`), and a repeat must
+                // not spend the floor frame.
                 self.t = 0.0;
-                self.phase = DipPhase::In;
+                if !plx_gfx::dump::held_repeat() {
+                    self.phase = DipPhase::In;
+                }
                 false
             }
             DipPhase::In => {
@@ -326,6 +337,11 @@ pub struct PageImage {
     entry: Option<plx_machine::machine::EntryId>,
     settle_since: Option<u32>,
     replacement_ready: bool,
+    /// The paint the last [`PageImage::plan`] step returned: what a frame dump's held repeat of
+    /// the same virtual frame gets back instead of a further step. Only in the builds that can
+    /// have a held repeat (the dev instruments and tests); a shipping struct does not carry it.
+    #[cfg(any(feature = "devtriggers", feature = "test-support", test))]
+    last: Option<PagePaint>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -354,7 +370,63 @@ impl PageImage {
         self.entry = Some(entry);
         self.replacement_ready = true;
     }
+    /// One planning step per FRAME. In a frame dump ([`plx_gfx::dump::held_repeat`]) an iteration
+    /// that repeats the same virtual frame returns the paint the first iteration returned instead
+    /// of stepping: a capture frame with debt re-captures on every repeat until it is clean (and
+    /// is written as a capture frame), and (in the product) a replacement capture is not left for `Live` by a hold.
+    /// Without that the state advanced once per ITERATION, so the number of holds decided which of
+    /// two near-identical frames (the replacement capture differs from the live draw by 1/255 on
+    /// a few pixels) a written frame showed. Outside the simulator `held_repeat()` is a constant
+    /// `false` and this is the state machine alone.
     pub fn plan(
+        &mut self,
+        entry: plx_machine::machine::EntryId,
+        active: bool,
+        alpha: f32,
+        ms: u32,
+        valid: bool,
+        quiescent: bool,
+    ) -> PagePaint {
+        #[cfg(any(feature = "devtriggers", feature = "test-support", test))]
+        if plx_gfx::dump::held_repeat() {
+            if let Some(paint) = self.last {
+                return paint;
+            }
+        }
+        let paint = if plx_gfx::dump::armed() {
+            self.step_filmed(active)
+        } else {
+            self.step(entry, active, alpha, ms, valid, quiescent)
+        };
+        #[cfg(any(feature = "devtriggers", feature = "test-support", test))]
+        {
+            self.last = Some(paint);
+        }
+        paint
+    }
+
+    /// **The frame dump's plan: a page is filmed live under the dip, never as a held image.** Every
+    /// frame the dip is in flight RE-CAPTURES the top page (a live draw at full alpha into the
+    /// snapshot, composed at the dip's alpha, which is compositing-stable at a fixed alpha and what
+    /// the two capture frames of the product already do), so what is on screen under the dip is
+    /// always the page's layout AS IT IS that frame, and the destination's own entrance springs
+    /// (the Library's card pop, its label band, the caption) play while it fades in; the frame the
+    /// dip ends the page is simply live, with nothing to hand over. The product instead freezes the
+    /// image captured at the floor through the In half and past it while the layout moves, which
+    /// films as a cut from the layout at mount to the layout mid-flight. Pure: `plan` picks it
+    /// under [`plx_gfx::dump::armed`] (a constant `false` on the television).
+    fn step_filmed(&mut self, active: bool) -> PagePaint {
+        if active {
+            self.settle_since = None;
+            self.replacement_ready = false;
+            PagePaint::Capture
+        } else {
+            *self = Self::default();
+            PagePaint::Live
+        }
+    }
+
+    fn step(
         &mut self,
         entry: plx_machine::machine::EntryId,
         active: bool,
@@ -637,6 +709,118 @@ mod page_image_tests {
             image.plan(EntryId(2), true, 0.8, 266, true, false),
             PagePaint::Capture
         );
+    }
+
+    /// A frame dump repeats an iteration at the same virtual time while debt clears. The image's
+    /// plan must give the same paint on every repeat (a capture frame re-captures until clean), so
+    /// the number of repeats cannot decide which state a written frame shows.
+    #[test]
+    fn a_held_repeat_replans_the_same_paint_and_a_new_frame_steps_on() {
+        let entry = EntryId(7);
+        let mut image = PageImage::default();
+        // frame 1: the dip's capture frame
+        assert_eq!(image.plan(entry, true, 0.5, 100, false, false), PagePaint::Capture);
+        image.captured(entry);
+        // repeats of frame 1 (debt on the capture): the same Capture, however many
+        {
+            let _repeat = plx_gfx::dump::HeldRepeat::new();
+            for _ in 0..3 {
+                assert_eq!(image.plan(entry, true, 0.5, 100, true, false), PagePaint::Capture);
+                image.captured(entry);
+            }
+        }
+        // frame 2: not a repeat, so the state machine steps to the held image
+        assert_eq!(image.plan(entry, true, 0.5, 117, true, false), PagePaint::Held(0.5));
+        // the replacement capture: repeats re-capture, the next frame goes live
+        assert_eq!(image.plan(entry, false, 1.0, 900, true, true), PagePaint::ReplacementCapture);
+        image.replacement_captured(entry);
+        {
+            let _repeat = plx_gfx::dump::HeldRepeat::new();
+            assert_eq!(image.plan(entry, false, 1.0, 900, true, true), PagePaint::ReplacementCapture);
+            image.replacement_captured(entry);
+        }
+        assert_eq!(image.plan(entry, false, 1.0, 917, true, true), PagePaint::Live);
+    }
+
+    /// The dump's rule on its pure twin (no switch armed): while the dip is in flight the page is
+    /// re-captured EVERY frame, however long the image has already been valid for this entry, and
+    /// the frame the dip ends it is live with the image forgotten. There is no `Held` and no
+    /// replacement capture to hand over to.
+    #[test]
+    fn a_filmed_page_is_recaptured_every_frame_of_the_dip_and_live_after_it() {
+        let entry = EntryId(3);
+        let mut image = PageImage::default();
+        for frame in 0..20 {
+            assert_eq!(image.step_filmed(true), PagePaint::Capture, "frame {frame}");
+            image.captured(entry);
+            assert!(image.is_held());
+        }
+        assert_eq!(image.step_filmed(false), PagePaint::Live);
+        assert!(!image.is_held(), "the image is forgotten with the dip");
+        assert_eq!(image.step_filmed(false), PagePaint::Live);
+    }
+
+    /// The same through `plan` with the switch armed: a whole push, Out, floor and In, plays as
+    /// captures (never a frozen image), then live; the product's `plan` holds the floor's image
+    /// through the In half and hands over by a replacement capture.
+    #[test]
+    fn armed_a_whole_push_is_filmed_live_and_the_product_holds_its_image() {
+        let _g = plx_base::testlock::serial();
+        let run = |armed: bool| {
+            let _armed = armed.then(plx_gfx::dump::Armed::new);
+            let mut image = PageImage::default();
+            let mut dip = PageDip::new();
+            let mut entry = EntryId(1);
+            dip.request(true);
+            let mut present = plx_machine::present::Present::new();
+            let mut paints = Vec::new();
+            for i in 0..30u32 {
+                let tick = Tick { ms: i * 16, dt_us: 16_667 };
+                if dip.tick(tick, &mut PresentHandle::of(&mut present)) {
+                    entry = EntryId(2);
+                }
+                let paint = image.plan(entry, dip.in_flight(), dip.page_alpha(), i * 16, true, true);
+                match paint {
+                    PagePaint::Capture => image.captured(entry),
+                    PagePaint::ReplacementCapture => image.replacement_captured(entry),
+                    _ => {}
+                }
+                paints.push(paint);
+            }
+            paints
+        };
+        let filmed = run(true);
+        assert!(!plx_gfx::dump::armed(), "the guard disarms");
+        let live_from = filmed.iter().position(|p| *p == PagePaint::Live).expect("the dip ends");
+        assert!(filmed[..live_from].iter().all(|p| *p == PagePaint::Capture), "{filmed:?}");
+        assert!(filmed[live_from..].iter().all(|p| *p == PagePaint::Live), "{filmed:?}");
+        assert!(live_from >= 10, "the dip played its Out, floor and In halves first: {live_from}");
+        let product = run(false);
+        assert!(product.iter().any(|p| matches!(p, PagePaint::Held(_))), "{product:?}");
+        assert!(product.contains(&PagePaint::ReplacementCapture), "{product:?}");
+    }
+
+    #[test]
+    fn a_held_repeat_leaves_the_dip_floor_for_the_next_frame() {
+        let mut dip = PageDip::new();
+        dip.request(true);
+        let mut present = plx_machine::present::Present::new();
+        let mut i = 0u32;
+        while !dip.tick(Tick { ms: i * 16, dt_us: if i == 0 { 0 } else { 16_667 } }, &mut PresentHandle::of(&mut present)) {
+            i += 1;
+            assert!(i < 40, "the dip never reached its floor");
+        }
+        assert_eq!((dip.phase_word(), dip.page_alpha()), ("hold", 0.0));
+        // repeats of the floor frame (dt 0) must not consume the one floor frame
+        {
+            let _repeat = plx_gfx::dump::HeldRepeat::new();
+            for _ in 0..4 {
+                dip.tick(Tick { ms: i * 16, dt_us: 0 }, &mut PresentHandle::of(&mut present));
+                assert_eq!((dip.phase_word(), dip.page_alpha()), ("hold", 0.0));
+            }
+        }
+        dip.tick(Tick { ms: i * 16 + 16, dt_us: 16_667 }, &mut PresentHandle::of(&mut present));
+        assert_eq!(dip.phase_word(), "in", "the first real frame after the floor starts the fade in");
     }
 
     #[test]

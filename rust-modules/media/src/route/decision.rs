@@ -161,8 +161,9 @@ pub struct PlaybackSession {
     ///
     /// It answers the one question the word "Original" is a claim about: false means the server
     /// MUST re-encode the pixels, whatever rung is picked and whatever the link does, so the
-    /// quality menu's Original row cannot deliver the original. AV1, VP9 and MPEG-2 are the cases;
-    /// see the `!video_dp` arm's own comment.
+    /// quality menu's Original row cannot deliver the original. MPEG-2 always, AV1 / VP9 unless
+    /// the device table lists that decoder (`devcaps::Caps::av1` / `vp9`) are the cases; see the
+    /// `!video_dp` arm's own comment.
     ///
     /// **Carried, because re-deriving it at draw time would be a second copy of the gate.** The
     /// menu is drawn from a different thread of control and a different set of facts than the
@@ -369,7 +370,13 @@ pub struct PlaybackSession {
     /// The next episode of the item now playing, or None (a movie, the last episode, or a queue
     /// that failed). Installed by [`apply_plan`]; [`request_play`] retires it the moment a new item
     /// resolves. Read through [`up_next`], which lends a `&'static`.
-    up_next: Option<UpNext>,
+    ///
+    /// Shared, not owned: [`publication`](Self::publication) copies the session every frame, and
+    /// the Up Next still is a card whose placement history is keyed by the address of this row's
+    /// `thumb` (`plx_ui::widgets::Art::motion_identity`). A deep copy gave the card a new identity
+    /// every frame, so a still that was not cached yet was declined for ever and the player
+    /// screen never came to rest.
+    up_next: Option<std::sync::Arc<UpNext>>,
     /// The whole queue behind the item now playing — the playing row included, in queue order,
     /// projected to `plex::QueueRow` ON THE RESOLVE WORKER (a `Metadata` row carries its entire
     /// Media/Part/Stream/Role tree; a show's queue is dozens of them, and this device is 32-bit).
@@ -5785,6 +5792,17 @@ impl ScrobbleJoin {
         self.changed.notify_all();
     }
 
+    /// Whether no stop report is still on its way to the server: no worker was ever reserved, the
+    /// last one has been joined, or its thread has returned. Never blocks, and never joins - the
+    /// frame loop asks this every frame while it waits to re-read what the stop committed.
+    fn settled(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.completed >= state.generation
+            || (!state.spawn_pending
+                && !state.joining
+                && state.handle.as_ref().is_some_and(|(_, handle)| handle.is_finished()))
+    }
+
     fn drain(&self) {
         loop {
             let (generation, handle) = {
@@ -5909,6 +5927,13 @@ impl Drop for TimelineStopCompletion {
 /// SDL thread.
 pub fn drain_scrobble() {
     SCROBBLE_JOIN.drain();
+}
+
+/// Whether the last [`scrobble_stop`] has finished posting (see [`ScrobbleJoin::settled`]): true
+/// once the server holds the resume point the stop reported, so a re-read of the item sees it.
+/// Non-blocking, unlike [`drain_scrobble`].
+pub fn scrobble_settled() -> bool {
+    SCROBBLE_JOIN.settled()
 }
 
 /// Seek within a LIVE TRANSCODE by restarting it at a time offset — a transcode has no byte-Cues,
@@ -6807,8 +6832,9 @@ fn apply_quality_choice(ps: &mut PlaybackSession, q: Quality) {
     // Link class cannot create a source candidate. Local normally needs no throughput proof, but
     // it still needs Original to be technically possible. `build_stream` records that fact as
     // `auto_original`: `None` means the source codec/container/audio combination already failed
-    // feasibility. Treating Local alone as sufficient here turns a fixed-rung AV1 transcode into
-    // progressive MKV when the user returns to Auto, so no HLS controller is rebuilt.
+    // feasibility. Treating Local alone as sufficient here turns a fixed-rung AV1 transcode (a set
+    // whose table lists no AV1 decoder, or a source over its row) into progressive MKV when the
+    // user returns to Auto, so no HLS controller is rebuilt.
     let original_feasible = ps.auto_original.is_some();
     let auto_original = q == Quality::Auto
         && original_feasible
@@ -7231,7 +7257,7 @@ pub(super) struct QueueInfo {
 /// only writer is what keeps that reference sound. A caller that STARTS the next episode must
 /// clone first: `request_play` clears this before the new plan lands.
 pub fn up_next(ps: &PlaybackSession) -> Option<&UpNext> {
-    ps.up_next.as_ref()
+    ps.up_next.as_deref()
 }
 
 /// The current playback's queue rows, in queue order, the row now playing among them — locate it
@@ -7407,7 +7433,7 @@ fn playback_preview_with_capability(
     let mode = direct_play_mode();
     if mode == DirectPlayMode::Forced {
         return (!part.is_empty() && part_is_streamable(part)
-            && video_feed_supported(vcodec, presentation)
+            && video_feed_supported(vcodec, presentation, plx_platform::devcaps::caps())
             && d.audio.iter().any(|a| audio_direct_plays(mode, &a.codec, a.channels)))
             .then_some(Preview::DirectPlay);
     }
@@ -8339,7 +8365,7 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             stream_immersive: plan.immersive,
             title,
             ctxline,
-            up_next: plan.up_next,
+            up_next: plan.up_next.map(std::sync::Arc::new),
             queue: plan.queue,
             // The frame tick is the MACHINE's, not the plan's: a landing replaces the session's
             // contents and must not rewind the stamp `Player::set_now` wrote this iteration.

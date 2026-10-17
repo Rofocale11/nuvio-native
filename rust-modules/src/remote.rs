@@ -127,6 +127,15 @@ impl Remote {
                 ));
                 return None;
             }
+            // Developer Mode's shell and the jailed app share a group, but the launch
+            // umask strips mkfifo's group write bit. Repair only our own FIFO, by fd.
+            let mut stat: libc::stat = std::mem::zeroed();
+            if libc::fstat(fd, &mut stat) == 0
+                && stat.st_uid == libc::geteuid()
+                && stat.st_mode & libc::S_IFMT == libc::S_IFIFO
+            {
+                libc::fchmod(fd, 0o660);
+            }
             Some(Remote {
                 fd,
                 buf: String::new(),

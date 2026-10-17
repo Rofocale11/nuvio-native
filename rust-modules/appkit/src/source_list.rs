@@ -29,6 +29,19 @@ use plx_ui::form::{Form, FormId, FormSection, RowKey, RowKind};
 use plx_ui::table::{Row, Section};
 use std::convert::Infallible;
 
+/// The same source row grammar for an addon stream: title, technical facts and size.
+pub fn stream_row(choice: &plx_plex::plex::nuvio::StreamChoice) -> Row {
+    let mut facts = Vec::new();
+    if let Some(codec) = &choice.video_codec { facts.push(codec.to_uppercase()); }
+    if choice.hdr.contains("DolbyVision") { facts.push("Dolby Vision".into()); }
+    else if choice.hdr != "None" && !choice.hdr.is_empty() { facts.push(choice.hdr.clone()); }
+    if let Some(codec) = &choice.audio_codec { facts.push(codec.to_uppercase()); }
+    if let Some(size) = choice.size_bytes { facts.push(format!("{:.1} GB", size as f64 / 1_000_000_000.0)); }
+    if let Some(rate) = choice.bitrate_kbps { facts.push(format!("{:.1} Mbps", rate as f64 / 1000.0)); }
+    if let Some(addon) = &choice.addon { facts.push(addon.clone()); }
+    Row::new(&choice.label).server_label().detail(facts.join(" · ")).server_detail()
+}
+
 /// The two levels of the Sources list — **one per surface now, and not swappable from either.**
 /// They were the two halves of one panel, exchanged by segmented pills at its top; see the module
 /// doc for why that control is gone.

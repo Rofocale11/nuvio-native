@@ -45,6 +45,7 @@ import struct
 import sys
 import tarfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -261,7 +262,7 @@ def telemetry_endpoints(binary: bytes) -> str:
                 "bytes to reach")
     parts = []
     for d in sorted({x.decode() for x in dsn}):
-        region = "EU" if ".de.sentry.io" in d else "**NOT the EU region**"
+        region = "EU" if (urlparse(d).hostname or "").endswith(".de.sentry.io") else "**NOT the EU region**"
         parts.append(f"Sentry `{d}` ({region})")
     for k in sorted({x.decode() for x in key}):
         parts.append(f"PostHog `{k}`")
@@ -384,7 +385,7 @@ def generate(args) -> str:
     rows = [
         row("flavour", f"`{app_id}` — "
             + ("the stable id, which is what users install"
-               if app_id == "com.beb.plxnative" else "**not the stable id**")),
+               if app_id == "com.nuvionative.app" else "**not the stable id**")),
         row("cargo features", f"`{args.build_config}`" if args.build_config
             else "not recorded in the assets — the dev-trigger row below is the same property, "
                  "measured on the bytes"),

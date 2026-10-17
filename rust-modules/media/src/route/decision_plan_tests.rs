@@ -6,6 +6,51 @@ use super::*;
 use super::test_support::*;
 use super::test_support::apply_plan;
 
+/// One bare GET to a mock PMS, answered and read to the end.
+fn ping(port: i32) {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", port as u16)).expect("connect");
+    socket.write_all(b"GET /library/metadata/1 HTTP/1.1\r\nHost: x\r\n\r\n").expect("send");
+    let mut answer = Vec::new();
+    let _ = socket.read_to_end(&mut answer);
+}
+
+/// **The mock PMS refuses to idle quietly.** A server told to expect more requests than the code
+/// under test makes used to sit out its whole deadline while the test held the serial lock (six
+/// tests spent 8 s each doing it). It now fails the test, naming the count it was promised and
+/// the requests it saw; a scenario whose count varies opts out with `exact = false`.
+#[test]
+fn a_mock_pms_that_never_sees_its_count_fails_the_test() {
+    let (port, rx, server) =
+        plan_pms_within(3, EMPTY_MC, std::time::Duration::from_millis(300), true);
+    ping(port);
+    let seen = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the server publishes what it saw");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let failure = server.join().expect_err("a short count must fail the test that joins the server");
+    let message = failure.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(message.contains("expect 3 requests and saw 1"), "{message}");
+}
+
+#[test]
+fn a_mock_pms_given_an_explicit_upper_bound_may_see_fewer() {
+    let (port, rx, server) =
+        plan_pms_within(3, EMPTY_MC, std::time::Duration::from_millis(300), false);
+    ping(port);
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).expect("published").len(), 1);
+    server.join().expect("an opted-out count is not a failure");
+}
+
+#[test]
+fn a_mock_pms_that_sees_exactly_its_count_stops_at_once_and_passes() {
+    let (port, rx, server) = plan_pms_within(2, EMPTY_MC, std::time::Duration::from_secs(30), true);
+    let started = std::time::Instant::now();
+    ping(port);
+    ping(port);
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).expect("published").len(), 2);
+    server.join().expect("the exact count passes");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "it must not wait for its deadline");
+}
+
 /// The identity round trip: `request_play`'s captured id reaches `cur_sid` unchanged, through
 /// `ResolveEnv` (the main-thread snapshot) and `Plan` (the worker's output).
 ///
@@ -1572,4 +1617,51 @@ fn selected_dvd_subtitle_names_subtitle_stream_id_on_mde() {
         plan.url
     );
     plx_plex::plex::reset_servers_for_test();
+}
+
+/// #584: a file whose only audio is DTS-HD MA must never direct-play on a television whose codec
+/// table has no DTS decoder, even though the server's MDE (which judged the profile, not the
+/// track the TV can feed) answers `directplay`. The server converts the audio on a video-copy
+/// remux instead; a direct play would build an audio sink for a stream the pipeline cannot decode
+/// and never start. Covers the codec spellings PMS uses, and an item whose tracks are not loaded
+/// yet (the Media-level audio codec alone names the audio).
+#[test]
+#[cfg(feature = "devtriggers")]
+fn an_undecodable_dts_only_file_does_not_direct_play_when_mde_says_it_may() {
+    use std::time::Duration;
+    for (codec, with_tracks) in [("dca", true), ("dts", true), ("dca", false), ("dts", false)] {
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        let _g = fresh_registry(&mut ps);
+        assert!(plx_net::net::global_init());
+        let (port, rx, server) = plan_pms_within(3, MDE_DIRECTPLAY, Duration::from_secs(3), false);
+        let sid = plx_plex::plex::register_for_test("dts-only", "127.0.0.1", port, "token", "dts-only-client");
+        let mut env = ResolveEnv::snapshot(&ps, plx_data::stores::metadata::MetadataStore::default().view(), sid, "rk-4k");
+        let tracks = if with_tracks {
+            vec![plx_data::metadata::Stream {
+                id: 29381,
+                index: 1,
+                lang_code: "eng".into(),
+                codec: codec.into(),
+                channels: 6,
+                default: true,
+                selected: true,
+                profile: "dts-hd ma".into(),
+                ..Default::default()
+            }]
+        } else {
+            Vec::new()
+        };
+        env.cached_item = Some(fourk_item(sid, tracks));
+        let plan = build_stream(
+            &plx_base::task::OffFrame::for_test(), "rk-4k", "/library/parts/36013/1/file.mkv", "hevc", codec, &env,
+        );
+        let requests = rx.recv_timeout(Duration::from_secs(15)).expect("PMS never saw the resolve");
+        server.join().unwrap();
+        assert!(
+            !plan.url.contains("/library/parts/"),
+            "{codec} (tracks loaded: {with_tracks}) must not direct-play: {} / {requests:?}",
+            plan.url
+        );
+        plx_plex::plex::reset_servers_for_test();
+    }
 }

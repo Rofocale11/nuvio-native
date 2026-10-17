@@ -54,9 +54,13 @@ impl crate::registry::MetadataLike for TestHost {
 // container lifecycle seams, without requiring a configured server or a graphics context.
 fn body(entry: EntryId, rk: &str) -> DetailScreen {
     DetailScreen {
+        list_state: None,
+        list_pending: false,
+        list_error: false,
+        list_mailbox: Default::default(),
         entry, sid: ServerId::UNSET, rk: rk.into(), pending_season: None,
         keys: vec![], next_elem: FIRST_ITEM_ELEM, key_by_local: Default::default(),
-        local_by_key: Default::default(), return_pending: false,
+        local_by_key: Default::default(), gone: Default::default(), return_pending: false,
         season_settle: 0.0,
         preview_dwell: 0.0,
         preview_promoted: false,
@@ -79,9 +83,9 @@ fn body(entry: EntryId, rk: &str) -> DetailScreen {
         episode_text_lift: [plx_ui::text_lift::TextLift::new(); EP_SCALE_MAX],
         about_card_lift: plx_ui::text_lift::TextLift::new(),
         about_lang_lift: plx_ui::text_lift::TextLift::new(),
-        related: CardRow::new(), collection: CardRow::new(),
-        extras: CardRow::new(),
-        cast: CardRow::new(), tabs: TabStrip::new(), season_pop: CtlPop::new(),
+        related: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::HOME), collection: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::HOME),
+        extras: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::EPISODE),
+        cast: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::CAST), tabs: TabStrip::new(), season_pop: CtlPop::new(),
         ctl_pop: CtlPop::new(), disc_unfurl: [Spring::at(0.0); 3],
         season_metrics: season::Metrics::new(), about_rows: about::Rows::new(),
         ground: AmbientWash::flat(theme::SURFACE_APP), selected: None, spin_ms: 0.0,
@@ -89,6 +93,7 @@ fn body(entry: EntryId, rk: &str) -> DetailScreen {
         layout: std::cell::Cell::new(None),
         layout_pinned: std::cell::Cell::new(false),
         spot_facts: SpotFacts::default(),
+        hold_hint: plx_ui::hold_hint::HoldHint::once_per_run(plx_ui::hold_hint::Kind::Detail),
     }
 }
 struct Mount;

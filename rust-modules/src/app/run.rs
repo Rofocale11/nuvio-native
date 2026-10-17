@@ -73,6 +73,10 @@ pub(crate) struct Frame {
     pub(crate) player: bool,
     /// This iteration draws and swaps (the present decision, spec §3.3 step 8).
     pub(crate) present: bool,
+    /// This iteration did NOT present only because a page capture is still in flight on the GPU
+    /// (`gfx::snapshot_pending`): the window was active, so the fence was the one reason. Pure
+    /// bookkeeping for the present-interval stamps and the bench; it never feeds a decision.
+    pub(crate) deferred: bool,
     /// The heartbeat's route word for this frame (`route_word`).
     pub(crate) rn: &'static str,
 }
@@ -86,6 +90,7 @@ impl Frame {
             underlay_moving: false,
             player: false,
             present: false,
+            deferred: false,
             rn: "",
         }
     }
@@ -133,6 +138,12 @@ pub(crate) unsafe fn run(app: &mut App) {
             for v in app.rec.replay_inputs() {
                 replay_inject(app, fr, &v);
             }
+        }
+        // The frame dump (`dev::framedump`) owns the clock and the placeholder count from here:
+        // it must run before anything reads `clock::now()`.
+        #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+        if crate::dev::framedump::requested() {
+            crate::dev::framedump::iteration_begin(app);
         }
         plx_platform::tv::window::pump_bus();
         plx_platform::tv::home::poll();
@@ -261,6 +272,7 @@ pub(crate) unsafe fn run(app: &mut App) {
         // dithers on every frame.)
         fr.underlay_moving |= tree_report.underlay_moving;
         if was_player && super::bridge::player(&app.pages).is_none() { restore_played_entry(app); }
+        refresh_after_playback(app);
         content_requests(app, fr);
         crate::dev::scenarios::advance_content_boot(app, fr);
         loop_requests(app);
@@ -309,7 +321,13 @@ fn clock_and_press(app: &mut App, fr: &mut Frame) {
     // phase below re-steps every spring, so the flag it leaves describes THIS frame, and
     // stamp `dt` so a spring's velocity can be judged as travel-this-frame rather than as
     // a bare units-per-second. The decision itself is taken just above `glViewport`.
-    plx_machine::idle::frame_begin(fr.dt);
+    // A dump's held repeat judges rest with its first pass's `dt` (`framedump::idle_dt`); the
+    // clock `now_ms` reads still advances by `fr.dt` alone.
+    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    let rest_dt = if crate::dev::framedump::active() { crate::dev::framedump::idle_dt(fr.dt) } else { fr.dt };
+    #[cfg(not(all(feature = "hostsim", feature = "devtriggers")))]
+    let rest_dt = fr.dt;
+    plx_machine::idle::frame_begin_judging_rest_with(fr.dt, rest_dt);
     // Is a page capture still in flight on the GPU, and is recorded text still warming? Latched
     // once, before the springs step, so the held appear spring and the present gate below read
     // the same answer — and, being the machine's speed rather than the inputs, recorded or
@@ -421,6 +439,15 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
         && app.window_activity.allow_present(
             plx_machine::idle::should_present(fr.now) || app.pages.budget.has_queued_work(),
         );
+    // Read-only: was the fence the only thing standing between this iteration and a present? An
+    // inactive window would not have presented either way. (`should_present` is deliberately not
+    // asked: it takes-and-clears the damage the deferred frame still needs.)
+    fr.deferred = !fr.present && plx_gfx::gfx::snapshot_pending() && app.window_activity.allow_present(true);
+    // A dump draws every iteration: a held repeat and a written frame alike are a draw.
+    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    if crate::dev::framedump::active() {
+        fr.present = true;
+    }
     app.rec.present(fr.present);
     if fr.present {
         app.window_activity.begin_present(fr.player);
@@ -430,12 +457,14 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
     // The render cache's upload step under the frame budget (§3.3 step 9, §10: "a frame that
     // does not present uploads nothing"). Two placement rules, both load-bearing:
     //
-    // * **Only on a presenting frame.** `GfxUploader::warm` is `gfx::warm_tex`, which DRAWS
-    //   a 1x1 quad to force residency; there is no GL scope to draw into on a frame that is
-    //   skipped wholesale.
-    // * **Before the draw, never after.** That quad goes into framebuffer 0, and the page's
-    //   own `frame_clear` overwrites the pixel. After the draw it would be a white pixel over
-    //   the finished picture — over FILM, on a player frame.
+    // * **Only on a presenting frame.** The spec's rule: a frame that is skipped wholesale
+    //   uploads nothing and the queue waits (`GfxUploader::warm` is `gfx::warm_tex`, which
+    //   also draws, so it wants the frame's GL state in place).
+    // * **Before the draw.** `warm_tex` draws into its own tiny offscreen target and never
+    //   touches framebuffer 0 (the first framebuffer-0 draw of a frame is where the back-buffer
+    //   wait lands, and it must stay with the page's `frame_clear`, not with this window), so
+    //   there is no pixel to show over the picture — film included — wherever it runs; it stays
+    //   here so the upload's cost is bounded by the budget and off the draw.
     if fr.present {
         // A Tracks/More page's text, recorded in `update` or, on the mount frame, in the overlay's
         // `prepare` (`PanelMotion::prewarm_text`), and uploaded here: `fr.present` already carries the window-activity gate, so a frame that
@@ -504,6 +533,11 @@ unsafe fn present_and_swap(
     wslg_frame_budget: Option<super::window_activity::WslgFrameBudget>,
 ) {
     if fr.present {
+        // The dump's full prewarm drain and pre-draw debt sample, after the takes and before the draw.
+        #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+        if crate::dev::framedump::active() {
+            crate::dev::framedump::pre_draw(app);
+        }
         // the glyph cache's frame serial (phase 11, text.rs's hot window): a drawn frame
         plx_gfx::text::begin_frame();
         // A finished underlay-field reduction is read HERE, before framebuffer 0 holds anything
@@ -529,8 +563,20 @@ unsafe fn present_and_swap(
             plx_media::player::sim_video::composite_under();
         }
         // Before the swap, never after: the back buffer is undefined once presented.
+        // A dump decides here whether this frame is written (`dev::framedump`); otherwise the
+        // ordinary screenshot seam.
+        #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+        let dumping = crate::dev::framedump::active();
+        #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+        if dumping && crate::dev::framedump::after_draw(app, _vx, _vy, _vw, _vh) {
+            app.running = false;
+        }
+        #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+        let screenshot_seam = !dumping;
+        #[cfg(all(feature = "hostsim", not(feature = "devtriggers")))]
+        let screenshot_seam = true;
         #[cfg(feature = "hostsim")]
-        if crate::shot::maybe_capture(_vx, _vy, _vw, _vh) {
+        if screenshot_seam && crate::shot::maybe_capture(_vx, _vy, _vw, _vh) {
             // The headless one-shot is done: finish this frame, then leave through the ordinary
             // shutdown rather than exiting from inside the frame (see `shot::maybe_capture`).
             app.running = false;
@@ -582,7 +628,14 @@ unsafe fn present_and_swap(
             budget.finish();
         }
     } else {
-        app.instr.skip_present_phases();
+        if fr.deferred {
+            // The fence held a present back: the panel kept the old picture for this iteration, so
+            // the next presented frame's interval must span it. An idle gap breaks the cadence; a
+            // deferral is part of it.
+            app.instr.defer_present_phases();
+        } else {
+            app.instr.skip_present_phases();
+        }
         // The one stretch of main-thread time nothing is waiting on: spend a bounded slice of it
         // opening the theme faces and loading their glyph metrics (`text::warm_fonts_idle`), so
         // a page's first layout does not pay for them inside a transition. A no-op once warm.
@@ -1873,6 +1926,8 @@ pub(crate) unsafe fn land_results(app: &mut App, fr: &mut Frame) {
         crate::dev::scenarios::deep_bench_tick(app, fr.now);
         // dev: /tmp/plxnative-herobench — `crate::dev::scenarios::hero_bench_tick`.
         crate::dev::scenarios::hero_bench_tick(app, fr.now);
+        // dev: /tmp/plxnative-holdbench — `crate::dev::scenarios::hold_bench_tick`.
+        crate::dev::scenarios::hold_bench_tick(app, fr.now);
 
         // ---- the page cross-fade's commit frame ------------------------------------------
         // Stepped UNCONDITIONALLY, never per-route: a fader only one screen advances is a fader
@@ -2533,7 +2588,7 @@ pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
         // dev: the stress-bench oscillators' own frame-time accumulator — right after Swap is
         // stamped (`present_and_swap`, just above this call in `run()`), the earliest point this
         // iteration's total is known. See `crate::dev::scenarios::bench_frame_tick`'s doc.
-        crate::dev::scenarios::bench_frame_tick(app, fr.present, fr.now);
+        crate::dev::scenarios::bench_frame_tick(app, fr.present, fr.deferred, fr.now);
         fr.rn = super::words::route_word(&app.route());
     let rn = fr.rn;
     if plx_gfx::text::take_measure_fault() && !app.measure_fault_logged {
@@ -3050,6 +3105,7 @@ mod lifecycle_regression_tests {
             menu_play_await: Default::default(),
             prev: Default::default(),
             refresh_hubs_at: Default::default(),
+            refresh_detail: None,
             plaintext_upgrade: Default::default(),
             ev: [0; 128],
             remote: Default::default(),
@@ -3122,6 +3178,7 @@ mod lifecycle_regression_tests {
                 modal_bench: Default::default(),
                 deep_bench: Default::default(),
                 hero_bench: Default::default(),
+                hold_bench: Default::default(),
                 dev: crate::dev::scenarios::DevFlags {
                     detail_osc: Default::default(),
                     home_osc: Default::default(),
@@ -4062,6 +4119,7 @@ mod lifecycle_regression_tests {
         if was_player && super::super::bridge::player(&app.pages).is_none() {
             restore_played_entry(app);
         }
+        refresh_after_playback(app);
         content_requests(app, &fr);
         loop_requests(app);
         unsafe { update(app, &mut fr); }
@@ -4156,6 +4214,107 @@ mod lifecycle_regression_tests {
         assert_eq!(app.pages.input.press.scale(), 1.0);
     }
 
+    /// What `hold_bench_tick` put on the input queue in one frame: `(ok_down, ok_up, back, direction)`
+    /// counts, plus whether an item menu was up when it ran (so an OK edge can be held against it).
+    #[derive(Default, Debug)]
+    struct BenchInputs { ok_down: u32, ok_up: u32, back: u32, dir: u32, ok_with_menu_up: u32 }
+
+    /// One frame of the press bench exactly as the loop runs it: the tick, then the frame.
+    fn bench_step(app: &mut App, t: &mut u32, seen: &mut BenchInputs) {
+        use plx_machine::machine::{Edge, InputKind, Key};
+        let before = app.inputs.len();
+        let menu_up = super::super::bridge::item_menu_up(&app.pages);
+        crate::dev::scenarios::hold_bench_tick(app, *t + 16);
+        for ev in &app.inputs[before..] {
+            if let InputKind::Key { key, edge, .. } = ev.kind {
+                match (key, edge) {
+                    (Key::Ok, Edge::Down) => seen.ok_down += 1,
+                    (Key::Ok, Edge::Up) => seen.ok_up += 1,
+                    (Key::Back, Edge::Down) => seen.back += 1,
+                    (Key::Left | Key::Right, Edge::Down) => seen.dir += 1,
+                    _ => {}
+                }
+                if key == Key::Ok && menu_up { seen.ok_with_menu_up += 1; }
+            }
+        }
+        step(app, t, vec![]);
+    }
+
+    /// Home with the first grid card focused and a press bench of `n` cycles armed and past its
+    /// settle gate (the gate waits on presented frames, which this host loop does not produce).
+    fn home_press_bench(n: u32, kind: crate::dev::scenarios::bench::PressKind) -> (App, u32) {
+        let mut app = app();
+        let mut t = 0u32;
+        super::super::bridge::show_page(&mut app.pages, AppArg::Home);
+        app.bridge.seed_hub_grid_for_test(3, 4);
+        settle(&mut app, &mut t);
+        let entry = app.pages.nav.top_page().unwrap().id;
+        let instance = app.pages.nav.instance_of(entry).unwrap();
+        app.pages.emit(plx_machine::machine::MachineId::Nav, plx_machine::machine::Fx::Deliver(
+            plx_machine::machine::MachineId::Instance(instance),
+            plx_machine::machine::Delivery::Screen(plx_ui::screen::ScreenEvent::App(
+                plx_screens::registry::AppMsg::Home(plx_screens::registry::HomeCmd::FocusGrid { row: 0, col: 0 })))));
+        for _ in 0..40 { step(&mut app, &mut t, vec![]); }
+        assert!(app.bridge.home_grid_focused(&app.pages), "premise: a grid card is focused");
+        use crate::dev::scenarios::bench;
+        let period = match kind { bench::PressKind::Hold => bench::DEFAULT_HOLD_PERIOD_MS, bench::PressKind::Tap => bench::DEFAULT_TAP_PERIOD_MS };
+        let mut b = bench::PressBench::new(n, period, kind);
+        b.clock.phase = bench::BenchPhase::Waiting;
+        b.clock.last = t;
+        app.scenarios.hold_bench = Some(b);
+        (app, t)
+    }
+
+    /// **The hold trigger performs a real hold.** Every cycle: ONE OK-down and no OK-up (the press is
+    /// never released), the hold fill runs past `LONG_MS` and the dispatcher answers it with the item
+    /// menu, then ONE Back dismisses it. No OK edge is ever queued while a menu is up (a hold menu
+    /// opens on its Play row), the page is still Home at the end, and the bench counts its cycles
+    /// through to `done`.
+    #[test]
+    fn the_hold_bench_opens_the_item_menu_from_a_real_hold_and_dismisses_it_with_back_only() {
+        let _serial = plx_base::testlock::serial();
+        let (mut app, mut t) = home_press_bench(3, crate::dev::scenarios::bench::PressKind::Hold);
+        let (mut seen, mut menu_frames, mut menu_cycles, mut was_up) = (BenchInputs::default(), 0u32, 0u32, false);
+        for _ in 0..1500 {
+            bench_step(&mut app, &mut t, &mut seen);
+            let up = super::super::bridge::item_menu_up(&app.pages);
+            menu_frames += u32::from(up);
+            menu_cycles += u32::from(up && !was_up);
+            was_up = up;
+            if app.scenarios.hold_bench.is_none() { break; }
+        }
+        assert!(app.scenarios.hold_bench.is_none(), "the bench ran its cycles to `done`: {seen:?}");
+        assert_eq!((seen.ok_down, seen.back), (3, 3), "one press and one dismissal per cycle: {seen:?}");
+        assert_eq!(seen.ok_up, 0, "a hold is never released: {seen:?}");
+        assert_eq!(seen.ok_with_menu_up, 0, "no OK is queued onto an open menu: {seen:?}");
+        assert_eq!(menu_cycles, 3, "every hold opened the menu (and every Back closed it)");
+        assert!(menu_frames > 30, "the menu stayed up across frames, not for one: {menu_frames}");
+        for _ in 0..120 { step(&mut app, &mut t, vec![]); }
+        assert!(!super::super::bridge::item_menu_up(&app.pages), "Back closed the last menu");
+        assert!(matches!(app.route(), AppArg::Home), "nothing navigated away");
+    }
+
+    /// The tap-and-cancel variant: OK down, then a direction key BEFORE the hold threshold, so the
+    /// press is abandoned (the real cancel path) without activating a card or opening a menu.
+    #[test]
+    fn the_tap_bench_cancels_the_press_without_activating_or_opening_a_menu() {
+        let _serial = plx_base::testlock::serial();
+        let (mut app, mut t) = home_press_bench(4, crate::dev::scenarios::bench::PressKind::Tap);
+        let (mut seen, mut menu_seen) = (BenchInputs::default(), false);
+        for _ in 0..1500 {
+            bench_step(&mut app, &mut t, &mut seen);
+            menu_seen |= super::super::bridge::item_menu_up(&app.pages);
+            assert!(matches!(app.route(), AppArg::Home), "a cancelled press never navigates: {seen:?}");
+            if app.scenarios.hold_bench.is_none() { break; }
+        }
+        assert!(app.scenarios.hold_bench.is_none(), "the bench ran to `done`: {seen:?}");
+        assert_eq!((seen.ok_down, seen.dir), (4, 4), "{seen:?}");
+        assert_eq!((seen.ok_up, seen.back, seen.ok_with_menu_up), (0, 0, 0), "{seen:?}");
+        assert!(!menu_seen, "a press cancelled under LONG_MS never opens the menu");
+        for _ in 0..60 { step(&mut app, &mut t, vec![]); }
+        assert!(!app.pages.input.press.is_active(), "the spring came to rest");
+    }
+
     /// A hold the app DECLINES (nothing to offer a collection) is not taken: the dispatcher
     /// abandons the press and it springs back, then comes to rest.
     #[test]
@@ -4237,6 +4396,36 @@ mod lifecycle_regression_tests {
             rig.app.route().id(),
         );
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin));
+    }
+
+    /// **Issue #575: a stop is not reflected in the page it returns to.** The Detail page keeps
+    /// the `viewOffset` it fetched when it opened, and Play reads its resume point from that copy,
+    /// so a second Play after a stop starts from where the FIRST one did (or from 0:00 when the
+    /// page opened on an item with no offset). The return must re-read the item once the stop
+    /// report has landed - the server is the only one that knows what it committed.
+    #[test]
+    fn back_from_the_player_rereads_the_page_so_play_resumes_where_the_stop_left_off() {
+        let _serial = plx_base::testlock::serial();
+        let Some(mut rig) = Rig::serving(false) else {
+            eprintln!("SKIPPED back_from_the_player_rereads_the_page_so_play_resumes_where_the_stop_left_off: \
+                lifecycle fixture worker thread could not be spawned");
+            return;
+        };
+        let mut t = product_transition(&mut rig.app);
+        settle(&mut rig.app, &mut t);
+        super::super::bridge::open_detail(&mut rig.app.pages, &mut rig.app.bridge, rig.sid, "1", None, None);
+        settle(&mut rig.app, &mut t);
+        play_with_a_landing_inside_the_dip(&mut rig, &mut t);
+        let reads_before = plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref());
+        let back = back_key(t + 16);
+        step(&mut rig.app, &mut t, vec![back]);
+        settle(&mut rig.app, &mut t);
+        for _ in 0..8 { step(&mut rig.app, &mut t, vec![]); }
+        let reads_after = plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref());
+        assert!(
+            reads_after > reads_before,
+            "returning to the page re-read nothing: its resume point is still the one it opened with",
+        );
     }
 
     /// The same session drained to its end with nothing queued after it: `finish_playback` leaves

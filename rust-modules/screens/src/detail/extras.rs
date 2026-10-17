@@ -5,10 +5,10 @@
 
 use plx_data::metadata::{extra_play_context, Detail, Extra};
 use crate::registry::PlayIntent;
-use plx_ui::card_row::{self, CardRow, RowStyle, TileLabel};
+use plx_ui::cards::{self as ui_cards, RowStyle, TileLabel};
 use plx_machine::machine::GroupId;
 use plx_ui::widgets::Art;
-use plx_ui::{theme, Painter, Rect};
+use plx_ui::{theme, Painter};
 
 pub const EXTRAS_ELEM_RANGE_START: u32 = 1728;
 /// Stops before published detail keys (`FIRST_ITEM_ELEM` 2048). 32 tiles is the shelf cap.
@@ -37,23 +37,7 @@ pub fn len(d: &Detail) -> usize {
 /// fixed `TileLabel::height(true)` is exactly `card_row::under_band(1.0)`, so a FOCUSED extras
 /// shelf is unchanged and only the unfocused one gives its room back.
 pub fn block_h(band: f32) -> f32 {
-    LABEL_H + STYLE.h + card_row::under_band(band)
-}
-
-pub fn rect(row: &CardRow, index: usize, top: f32, at_drawn: bool) -> Rect {
-    let base = card_row::tile_rect(
-        index,
-        plx_ui::consts::MARGIN_X,
-        STYLE.w + STYLE.gap,
-        row.scroll_x(),
-        top + LABEL_H,
-        (STYLE.w, STYLE.h),
-    );
-    if at_drawn {
-        base.scaled(row.scale(index))
-    } else {
-        base.scaled(STYLE.focus_scale)
-    }
+    LABEL_H + STYLE.h + ui_cards::under_band(band)
 }
 
 /// Play fields for one extra. `None` when the tile is missing or has no playable file.
@@ -78,19 +62,28 @@ fn thumb<'a>(d: &'a Detail, extra: &'a Extra) -> Art<'a> {
     }
 }
 
-pub fn draw(
-    p: Painter,
-    d: &Detail,
-    row: &CardRow,
-    top: f32,
-    focused: Option<usize>,
-    measure: &dyn plx_machine::machine::Measure,
-) {
-    let n = len(d);
-    if n == 0 {
-        return;
-    }
-    let lift = row.lift();
+/// Card `i`'s thumbnail; a missing extra draws the card placeholder.
+pub fn art(d: &Detail, i: usize) -> Art<'_> {
+    d.extras.get(i).map(|e| thumb(d, e)).unwrap_or(Art::Thumb {
+        sid: d.sid.raw(),
+        key: "",
+        res: (STYLE.w as i32, STYLE.h as i32),
+    })
+}
+
+/// Card `i`'s label block: its title (its caption when it has none) over its caption.
+pub fn label(d: &Detail, i: usize) -> TileLabel {
+    let e = &d.extras[i];
+    let title = if e.title.is_empty() {
+        e.caption()
+    } else {
+        e.title.as_str()
+    };
+    TileLabel::titled(title, e.caption())
+}
+
+/// The shelf's heading, `lift` being the row's live label lift (`Shelf::heading_lift`).
+pub fn draw_heading(p: Painter, top: f32, lift: f32) {
     p.text(
         plx_platform::i18n::msg::browse_detail_extras_c().as_ptr(),
         plx_ui::consts::MARGIN_X,
@@ -99,73 +92,6 @@ pub fn draw(
         theme::TEXT_HEADING,
         0,
         1,
-    );
-    card_row::strip(
-        p,
-        row,
-        n,
-        focused.map(|i| i as i32).unwrap_or(-1),
-        top + LABEL_H,
-        (STYLE.w, STYLE.h),
-        STYLE.w + STYLE.gap,
-        &STYLE,
-        plx_ui::consts::SCR_W,
-        |i| d.extras.get(i).map(|e| thumb(d, e)).unwrap_or(Art::Thumb {
-            sid: d.sid.raw(),
-            key: "",
-            res: (STYLE.w as i32, STYLE.h as i32),
-        }),
-        |_| None,
-        |i| {
-            let e = &d.extras[i];
-            let title = if e.title.is_empty() {
-                e.caption()
-            } else {
-                e.title.as_str()
-            };
-            TileLabel::titled(title, e.caption())
-        },
-        |_, _, _, _| {},
-        measure,
-    );
-}
-
-pub fn draw_focused(
-    p: Painter,
-    d: &Detail,
-    row: &CardRow,
-    index: usize,
-    top: f32,
-    press: f32,
-    measure: &dyn plx_machine::machine::Measure,
-) {
-    let Some(extra) = d.extras.get(index) else {
-        return;
-    };
-    let base = card_row::tile_rect(
-        index,
-        plx_ui::consts::MARGIN_X,
-        STYLE.w + STYLE.gap,
-        row.scroll_x(),
-        top + LABEL_H,
-        (STYLE.w, STYLE.h),
-    );
-    let scale = row.scale(index) * press;
-    let title = if extra.title.is_empty() {
-        extra.caption()
-    } else {
-        extra.title.as_str()
-    };
-    card_row::draw_focused(
-        p,
-        thumb(d, extra),
-        base.scaled(scale),
-        scale,
-        &STYLE,
-        None,
-        &TileLabel::titled(title, extra.caption())
-            .settling(row.settle_lag(d.extras.len(), index, &STYLE)),
-        measure,
     );
 }
 

@@ -851,6 +851,102 @@ fn modal_mut(d: &mut Dispatcher<FixtureHost>, id: EntryId) -> &mut crate::fixtur
         .downcast_mut::<crate::fixture::FixtureModal>().unwrap()
 }
 
+/// **The dispatcher carries the opener's lifted element into the page pass, and re-takes the host
+/// snapshot exactly when it changes** (`Dispatcher::lifted_opener`, `draw_with`'s `lifted_last`,
+/// `DrawFrame::lifted`). The card sections' half is graded in `cards`, the press's in `press`; this
+/// is the wiring between them, which nothing else names: delete the `f.lifted = lifted` hand-off
+/// and the page never leaves the card out; delete the change detection and the "card section took
+/// it" flag is never cleared, so a later non-card opener's hold raises no page damage.
+///
+/// Mount (None to Some), the lift standing down once focus left the opener while the menu fades
+/// (Some to None), and the surface's removal (Some to None) each change the lifted element; the
+/// frames between them do not.
+#[test]
+fn the_lifted_element_reaches_the_page_pass_and_every_change_of_it_retakes_the_snapshot() {
+    use crate::popover::{host, lift_owns, set_lift_owns};
+    let _guard = plx_base::testlock::serial();
+    let (mut d, mut rig, _) = booted();
+    let home = d.nav.top_page().unwrap().id;
+    let opener = FocusKey { entry: home, elem: 0 };
+    let seen = |d: &Dispatcher<FixtureHost>| d.nav.entry(home).unwrap().inst.as_ref().unwrap().screen.as_any().unwrap()
+        .downcast_ref::<crate::fixture::FixtureScreen>().unwrap().lifted;
+    let mut ms = 16;
+    // Draw one frame (the production order: frame, then draw), return how often the snapshot was
+    // thrown away across it.
+    let mut step = |d: &mut Dispatcher<FixtureHost>, rig: &mut FixtureRig, keys: Vec<_>| {
+        ms += 16;
+        let before = host::invalidations();
+        let r = d.frame(rig, tick(ms), keys, vec![], &mut NoTap);
+        d.draw(rig, true);
+        d.prune(&r.unmounted);
+        host::invalidations() - before
+    };
+
+    for removal_by_prune in [false, true] {
+        set_lift_owns(true);
+        step(&mut d, &mut rig, vec![]);
+        assert_eq!(seen(&d), None, "no surface, no lifted element");
+        // the card the menu opens from is the page's focus, and comes back to it on dismissal
+        d.set_focus(Some(opener));
+        d.nav.next_style = Style::Compact;
+        d.request(MachineId::Nav, NavOp::Present(FixtureArg::Modal));
+        step(&mut d, &mut rig, vec![]);
+        let id = d.nav.modals.top().expect("presented").entry.id;
+        modal_mut(&mut d, id).opener = Some((home, Some(opener)));
+
+        // mount: None -> Some. The flag a previous card left set is cleared, the snapshot dropped
+        // once, and the page pass is handed the element to leave out.
+        set_lift_owns(true);
+        let retakes = step(&mut d, &mut rig, vec![]);
+        assert_eq!(seen(&d), Some(opener), "the page pass must be handed the lifted element");
+        assert!(!lift_owns(), "a change of the lifted element clears the card section's flag");
+        assert_eq!(retakes, 1, "the mount re-takes the snapshot once");
+        // the lift running: nothing changes, so nothing is cleared or re-taken, however long it runs
+        for _ in 0..3 {
+            set_lift_owns(true);
+            assert_eq!(step(&mut d, &mut rig, vec![]), 0, "an unchanged lifted element re-takes nothing");
+            assert!(lift_owns(), "…and clears nothing");
+            assert_eq!(seen(&d), Some(opener));
+        }
+
+        // Back: the menu is Closing, input is the page's again and its focus is still the opener,
+        // so the lift keeps the card (the fixture page's own seat is the opener).
+        step(&mut d, &mut rig, vec![key(Key::Back, tick(0))]);
+        assert_eq!(d.nav.modals.top().unwrap().phase, Phase::Closing);
+        assert_eq!(d.lifted_opener(), Some((home, Some(opener))));
+        set_lift_owns(true);
+        assert_eq!(step(&mut d, &mut rig, vec![]), 0);
+        assert!(lift_owns());
+        assert_eq!(seen(&d), Some(opener));
+
+        if !removal_by_prune {
+            // stand-down: focus left the opener while the menu fades. Some -> None.
+            d.set_focus(Some(FocusKey { entry: home, elem: 6 }));
+            set_lift_owns(true);
+            let retakes = step(&mut d, &mut rig, vec![]);
+            assert!(d.nav.modals.top().is_some_and(|s| s.phase == Phase::Closing), "still fading");
+            assert_eq!(seen(&d), None, "the page draws the card itself once the lift stood down");
+            assert!(!lift_owns());
+            assert_eq!(retakes, 1, "the stand-down re-takes the snapshot once");
+        }
+        // run the fade out: the surface is pruned. For the run that never stood down this is the
+        // Some -> None change; for the other nothing is left to change.
+        let mut changes = 0;
+        set_lift_owns(true);
+        for _ in 0..200 {
+            changes += step(&mut d, &mut rig, vec![]);
+            if d.nav.modals.is_empty() { break; }
+        }
+        assert!(d.nav.modals.is_empty(), "the menu faded out and was pruned");
+        assert_eq!(seen(&d), None, "after prune the page owns every card");
+        assert_eq!(changes, u32::from(removal_by_prune), "the removal is one change, and only when the lift still ran");
+        if removal_by_prune { assert!(!lift_owns(), "removal clears the flag"); }
+        assert_eq!(step(&mut d, &mut rig, vec![]), 0);
+        set_lift_owns(false);
+    }
+}
+
+
 #[test]
 fn a_request_freezes_inactive_group_cursors_before_focus_moves_during_the_fade() {
     use plx_machine::machine::GroupId;
@@ -2197,4 +2293,49 @@ fn frozen_dispatch_modal_takes_the_single_snapshot() {
     open_modal(&mut d, &mut rig, Style::Sheet, 16);
     d.draw(&mut rig, true);
     assert!(!d.page_snapshot.valid(), "page-only pixels cannot serve a modal's chrome prefix");
+}
+
+/// **A held page image carries the placeholders it was captured with.** During a push the
+/// destination is drawn live once (the floor capture) and then painted as its image until the page
+/// is quiescent, so nothing walks the page on those frames: a spinner, a "Loading" title or a
+/// skeleton captured into the image stays on screen while the counter, which counts at the draw,
+/// would read 0 and the demo-video driver would write the frame. The capture's debt is re-noted
+/// on every frame the image stands in for the page, and `held_page_image` says so.
+#[test]
+fn a_held_page_image_keeps_the_placeholders_it_captured_counted() {
+    use crate::placeholder::{self, Reason};
+    let _guard = plx_base::testlock::serial();
+    let (mut d, mut rig) = frozen_fixture();
+    d.request(MachineId::Nav, NavOp::Push(FixtureArg::Page(QUIESCENCE_PAGE)));
+    let mut image_frames = 0;
+    let mut live_frames = 0;
+    for i in 0..40u32 {
+        plx_machine::idle::frame_begin(1.0 / 60.0);
+        let ((), frame) = placeholder::capture(|| {
+            d.frame_with(&mut rig, tick(i * 16), vec![], vec![], &mut NoTap, false);
+            d.draw(&mut rig, true);
+        });
+        if d.top_arg() != Some(&FixtureArg::Page(QUIESCENCE_PAGE)) {
+            continue;
+        }
+        if d.held_page_image().is_some() {
+            image_frames += 1;
+            assert!(frame.count > 0, "frame {i}: an image of a page with a spinner counted nothing");
+            assert_eq!(frame.of(Reason::DetailSpinner), frame.entries.len(), "frame {i}: {frame:?}");
+        } else {
+            live_frames += 1;
+            assert!(frame.count > 0, "frame {i}: the live page drew its placeholder uncounted");
+        }
+    }
+    assert!(image_frames >= 3, "premise: the destination was shown as an image ({image_frames} frames)");
+    assert!(live_frames >= 1, "premise: the page went live again ({live_frames} frames)");
+}
+
+/// The held-image query is `None` for a page drawn live and for a page that was never captured.
+#[test]
+fn held_page_image_is_none_while_the_page_draws_live() {
+    let _guard = plx_base::testlock::serial();
+    let (mut d, mut rig) = frozen_fixture();
+    d.draw(&mut rig, true);
+    assert_eq!(d.held_page_image(), None);
 }

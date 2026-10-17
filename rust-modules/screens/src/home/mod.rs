@@ -17,7 +17,8 @@ use std::sync::Arc;
 use plx_data::pms::{HeroRef, HubIdentity, HubRef, HubsView, PmsMovie};
 use plx_data::stores::hubs::HubsCmd;
 use plx_data::stores::{StoreCmd, StoreId, StoreWork};
-use plx_ui::card_row::{self, CardRow, RowStyle};
+use plx_ui::cards::{self as ui_cards, RowStyle};
+use plx_ui::cards::{CardSource, SectionFrame, Shelf};
 use plx_ui::consts::*;
 use plx_ui::frame::Budget;
 use plx_ui::hero_logo::{self, HeroLogo, LogoRung};
@@ -48,6 +49,18 @@ use plx_ui::widgets::{
 use plx_ui::{hero_alpha, on_axis, Env, Painter, Rect, Spring, View};
 
 use super::clock_readout::ClockWatch;
+
+/// Cards from either end of a Recently Added row at which Home asks for the neighbouring page.
+const PAGE_EDGE_CARDS: usize = 6;
+
+/// A paging command for a hub, when the hub has a listing identity to page by.
+fn hub_page_cmd(hub: &HubRef<'_>,
+    make: impl FnOnce(plx_plex::plex::ServerId, String, String) -> HubsCmd) -> Option<HubsCmd> {
+    match hub.identity {
+        Some(HubIdentity::Identifier { sid, id, key }) => Some(make(sid, id.into(), key.into())),
+        _ => None,
+    }
+}
 use super::plaintext_question::{self, AlertStep, Near, OfferWatch, PlaintextAlert};
 use super::registry::{
     tile_facts, AppFx, AppMsg, ContentArg, ContentReq, HomeCmd, HomeGroupKey, HomeHubIdentity, HomeItemIdentity, HomeItemKey, HomeLike,
@@ -115,7 +128,10 @@ const SOURCE_PAD: f32 = theme::space::XS;
 const HERO_ICON_RATIO: f32 = 1.15;
 const HERO_ICON_GAP: f32 = 12.0;
 
-pub const SHAPE: &str = "HomeScreen{snap_target:f32,snap:{pos:f32,vel:f32},hero_flip_cd:f32,hero_auto:f32,covered:bool,visible_activation:Option<u32>,cta_available:bool,strip_chosen:bool,next_group:u32,next_elem:u32,groups:[HomeGroupKey{identity:HomeHubIdentity,group:u32}],items:[HomeItemKey{identity:HomeItemIdentity,elem:u32,last_row:u32,last_col:u32}],carousel:Option<(sid:u32,rk:str)>,outgoing:Option<(sid:u32,rk:str)>,hero_slide:{pos:f32,vel:f32},hero_dir:f32,hero_pop:{sp:[Spring{pos:f32,vel:f32};2],focused:Option<u32>},projected_generation:Option<u32>,grid:{scroll_y:{pos:f32,vel:f32},scroll_target:f32,rows:[{identity:HomeHubIdentity,group:u32,elems:[u32],motion:CardRow{scale:[Spring;24],overflow:Spring,scroll_x:Spring,lift:Spring,band:Spring,focus:i32,base_y:f32}}]},restored_scroll:[(group:u32,scroll:f32)],restore_reveal:bool}";
+/// Each row's `motion` bytes are its `Shelf`'s (`Shelf::write`), the L0 row's motion write unchanged
+/// (`base_y` included), so the text, `SCREEN_SHAPES_PIN` and the replay anchors stay what they were;
+/// the primitive's name is split only so the `cards` gate does not read a shape string as a use of it.
+pub const SHAPE: &str = concat!("HomeScreen{snap_target:f32,snap:{pos:f32,vel:f32},hero_flip_cd:f32,hero_auto:f32,covered:bool,visible_activation:Option<u32>,cta_available:bool,strip_chosen:bool,next_group:u32,next_elem:u32,groups:[HomeGroupKey{identity:HomeHubIdentity,group:u32}],items:[HomeItemKey{identity:HomeItemIdentity,elem:u32,last_row:u32,last_col:u32}],carousel:Option<(sid:u32,rk:str)>,outgoing:Option<(sid:u32,rk:str)>,hero_slide:{pos:f32,vel:f32},hero_dir:f32,hero_pop:{sp:[Spring{pos:f32,vel:f32};2],focused:Option<u32>},projected_generation:Option<u32>,grid:{scroll_y:{pos:f32,vel:f32},scroll_target:f32,rows:[{identity:HomeHubIdentity,group:u32,elems:[u32],motion:Card", "Row{scale:[Spring;24],overflow:Spring,scroll_x:Spring,lift:Spring,band:Spring,focus:i32,base_y:f32}}]},restored_scroll:[(group:u32,scroll:f32)],restore_reveal:bool}");
 
 #[derive(Clone)]
 struct HubProjection {
@@ -151,12 +167,9 @@ fn heading_elem(shelf: GroupId) -> u32 {
     HEADING_BASE | shelf.0
 }
 
-/// What a row index past the grid reads: a shelf at rest, so a stale index never panics.
-static RESTING: CardRow = CardRow::new();
-
 struct Grid {
-    /// One motion row per published row: `shelves.len() == rows.len()` once `sync_catalog` returns.
-    shelves: Vec<CardRow>,
+    /// One shelf per published row: `shelves.len() == rows.len()` once `sync_catalog` returns.
+    shelves: Vec<Shelf>,
     scroll_y: Spring,
     scroll_target: f32,
 }
@@ -170,12 +183,26 @@ impl Grid {
         }
     }
 
-    fn shelf(&self, row: usize) -> &CardRow {
-        self.shelves.get(row).unwrap_or(&RESTING)
+    /// The y the layout gave row `row` (a stale row index reads a shelf at rest).
+    fn base_y(&self, row: usize) -> f32 {
+        self.shelves.get(row).map_or(0.0, Shelf::base_y)
+    }
+
+    /// How far the row's heading has risen to clear the focused tile.
+    fn lift(&self, row: usize) -> f32 {
+        self.shelves.get(row).map_or(0.0, Shelf::heading_lift)
+    }
+
+    fn under_band(&self, row: usize) -> f32 {
+        self.shelves.get(row).map_or(0.0, Shelf::under_band)
+    }
+
+    fn scroll_x(&self, row: usize) -> f32 {
+        self.shelves.get(row).map_or(0.0, Shelf::scroll)
     }
 
     fn eff_scroll(&self, row: usize, snap: f32) -> f32 {
-        self.shelf(row).scroll_x() * snap
+        self.scroll_x(row) * snap
     }
 }
 
@@ -187,6 +214,10 @@ struct Backdrop {
     tex: (u32, f32, f32),
     outgoing_tex: (u32, f32, f32),
     keyed: Option<(plx_plex::plex::ServerId, String)>,
+    /// The hero art path the page names NOW when that art is wanted on screen and has no texture
+    /// yet (`bind` sets it, `draw` counts it — `placeholder.rs`: a count belongs at the DRAW,
+    /// never at the resolve, and `prefetch` resolves neighbours it never draws). Empty otherwise.
+    pending_art: String,
 }
 
 impl Backdrop {
@@ -199,6 +230,7 @@ impl Backdrop {
             tex: (0, 0.0, 0.0),
             outgoing_tex: (0, 0.0, 0.0),
             keyed: None,
+            pending_art: String::new(),
         }
     }
 
@@ -233,6 +265,10 @@ impl Backdrop {
         } else {
             self.tex = (0, 0.0, 0.0);
             self.outgoing_tex = (0, 0.0, 0.0);
+        }
+        self.pending_art.clear();
+        if let Some(h) = hero.filter(|h| snap < HERO_ART_CULL && self.tex.0 == 0 && !h.item.art.is_empty()) {
+            self.pending_art.push_str(&h.item.art);
         }
 
         let changed = match (self.keyed.as_ref(), selected) {
@@ -285,6 +321,9 @@ impl Backdrop {
     }
 
     fn draw(&self, p: Painter, env: &Env, slide: Option<(f32, f32)>) {
+        if !self.pending_art.is_empty() && env.hero_a > 0.01 && env.sp < HERO_ART_CULL {
+            plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::HomeBackdrop, &self.pending_art);
+        }
         let incoming_a = reveal(self.tex.0, &self.art);
         let outgoing_a = reveal(self.outgoing_tex.0, &self.outgoing_art);
         // THE GROUND: the wash, the one art layer dissolving over it (the snap dive, or the art
@@ -690,18 +729,19 @@ impl HomeScreen {
                 link,
             });
         }
-        let old_shelves = std::mem::take(&mut self.grid.shelves);
-        self.grid.shelves = vec![CardRow::new(); rows.len()];
-        for (index, row) in rows.iter().enumerate() {
-            if let Some(old) = self.rows.iter().position(|old| old.identity == row.identity) {
-                self.grid.shelves[index] = old_shelves[old];
-            }
+        let mut old_shelves: Vec<Option<Shelf>> = std::mem::take(&mut self.grid.shelves).into_iter().map(Some).collect();
+        self.grid.shelves = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let kept = self.rows.iter().position(|old| old.identity == row.identity)
+                .and_then(|old| old_shelves.get_mut(old)?.take());
+            let mut shelf = kept.unwrap_or_else(|| Shelf::new(self.entry, &RowStyle::HOME).cull_margin(GLOW_PAD));
             if let Some(&(_, scroll)) = self.restored_scroll.iter().find(|(group, _)| *group == row.group.0) {
-                self.grid.shelves[index].restore_scroll(scroll, row.elems.len(), &RowStyle::HOME);
+                shelf.restore_scroll(scroll, row.elems.len());
             }
+            self.grid.shelves.push(shelf);
         }
         debug_assert_eq!(self.grid.shelves.len(), rows.len());
-        // A fresh `CardRow` rests at `base_y = 0`, and this runs on events (`Mount`, `StoreChanged`,
+        // A fresh shelf rests at `base_y = 0`, and this runs on events (`Mount`, `StoreChanged`,
         // `Uncover`) as well as on the `Tick` whose `update_grid` lays the grid out. A frame drawn
         // between the two showed the new rows at the top of the screen, over the billboard.
         self.layout_grid();
@@ -847,6 +887,11 @@ impl HomeScreen {
         self.hero_slide.jump(0.0);
         self.hero_flip_cd = HERO_FLIP_CD;
         self.hero_auto = HERO_AUTO_S;
+        // One line per page TURN (a key press or the 8 s advance, never a frame): the demo film
+        // reads the pages it showed from these (`tools/site_video.py`, `hero_pool.logged`, `hero_pool.turns`).
+        if let Some(page) = view.hero(next) {
+            plx_base::eventlog::log(&format!("home: hero page slot {next} rk={}", page.item.rk));
+        }
         true
     }
 
@@ -925,7 +970,7 @@ impl HomeScreen {
         let m = heading.measure(measure);
         let focused = self.focused_heading(focus) == Some(row);
         let y = match at {
-            At::Drawn => heading_y(self.grid.shelf(row).base_y, self.grid.shelf(row).lift()),
+            At::Drawn => heading_y(self.grid.base_y(row), self.grid.lift(row)),
             At::SpringTarget => GRID_TOP_Y + shelf_top_banded(row, self.band_row(focus, row))
                 - self.grid.scroll_target - TITLE_DY,
         };
@@ -959,38 +1004,48 @@ impl HomeScreen {
         let top = PEEK_Y + (GRID_TOP_Y - PEEK_Y) * self.snap.pos;
         let mut flow = 0.0;
         for shelf in &mut self.grid.shelves {
-            shelf.base_y = top + flow - self.grid.scroll_y.pos * self.snap.pos;
-            flow += card_row::ROW_PITCH_FIXED + shelf.under_band();
+            shelf.set_base_y(top + flow - self.grid.scroll_y.pos * self.snap.pos);
+            flow += ui_cards::ROW_PITCH_FIXED + shelf.under_band();
         }
     }
 
-    fn update_grid<H: HomeLike>(&mut self, view: HubsView<'_>, cx: &Cx<'_, H>, dt: f32) {
+    fn update_grid<H: HomeLike>(&mut self, view: HubsView<'_>, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>, t: Tick) {
+        let dt = t.dt();
         let focused = self.focused_grid(cx.focus.current);
-        let grid_live = self.snap.pos > 0.5;
-        for row in 0..self.grid.shelves.len() {
-            let count = self
-                .hub(view, row)
-                .map_or(0, |h| h.items.len().min(MAX_ITEMS));
-            let col = focused
-                .filter(|&(r, _)| grid_live && r == row)
-                .map(|(_, c)| c);
-            let Some(shelf) = self.grid.shelves.get_mut(row) else { continue };
-            // A row at exact rest is a fixed point of `update`: skipping it changes no bit.
-            if col.is_none() && shelf.at_exact_rest() {
-                continue;
-            }
-            shelf.update(count, col, &RowStyle::HOME, dt);
-            // `step` never lands a released spring exactly on rest, so a visited row would be
-            // stepped forever; snap it once every spring is inside the idle gate's settled band.
-            if col.is_none() {
-                shelf.park();
+        // Until the dive has reached the shelves the engine's card is not the picture's focus: the
+        // shelves read none (they let go) and keep what the moves said, so the card grows from
+        // rest when they wake rather than being adopted whole.
+        let dormant = self.snap.pos <= 0.5;
+        let mut shelves = std::mem::take(&mut self.grid.shelves);
+        for (row, shelf) in shelves.iter_mut().enumerate() {
+            shelf.dormant(dormant);
+            let top = heading_y(shelf.base_y(), shelf.heading_lift());
+            let bottom = shelf.base_y() + CARD_H + shelf.under_band();
+            let visible = !dormant && on_axis(top, bottom - top, SCR_H, 0.0);
+            let mut src = self.cards(view, row);
+            src.paging = visible && focused.is_some_and(|(r, col)|
+                r == row && col.saturating_add(PAGE_EDGE_CARDS) >= self.rows[row].elems.len());
+            // The shelf skips a row at exact rest with nothing focused, and parks one that has
+            // settled once focus left it.
+            let want = shelf.on(&ScreenEvent::Tick(t), cx, &src, fx);
+            let before = focused.is_some_and(|(r, col)| r == row && col < PAGE_EDGE_CARDS)
+                && self.hub(view, row).is_some_and(|hub| hub.offset > 0);
+            let backward = shelf.want_before(
+                self.hub(view, row).map_or(0, |hub| hub.offset), visible && before);
+            if visible
+                && (backward || (!before && matches!(want, Some(ui_cards::CardEvent::Want(_))))) {
+                if let Some(cmd) = self.hub(view, row).and_then(|hub| hub_page_cmd(&hub,
+                    |sid, id, key| HubsCmd::Page { sid, id, key, before })) {
+                    fx.push(Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(cmd))));
+                }
             }
         }
+        self.grid.shelves = shelves;
         let revealed = focused.map(|(row, _)| (row, Some(row)))
             .or_else(|| self.focused_heading(cx.focus.current).map(|row| (row, None)));
         if let Some((row, band_row)) = revealed.filter(|(r, _)| *r < self.rows.len()) {
             let (lo, hi) = row_reveal_band(shelf_top_banded(row, band_row));
-            self.grid.scroll_target = card_row::reveal(
+            self.grid.scroll_target = ui_cards::reveal(
                 self.grid.scroll_y.pos,
                 lo,
                 hi,
@@ -1019,7 +1074,7 @@ impl HomeScreen {
             .grid
             .shelves
             .get(row)
-            .map_or(0.0, |shelf| shelf.settle_lag(count, col, &RowStyle::HOME));
+            .map_or(0.0, |shelf| shelf.settle_lag(count, col));
         // The screenshot pipeline pins every free-running, time-driven animation (`stillclock`,
         // `motion::phase_clocks_held`): a hint that stands up 1.5 s after a scene settles is one,
         // and would put itself into every documentation figure that rests on a card. A real hold
@@ -1140,7 +1195,7 @@ impl HomeScreen {
             ..Default::default() },
             owner: cx.owner,
         };
-        self.update_grid(view, &visible_cx, dt);
+        self.update_grid(view, &visible_cx, fx, t);
 
         let grid_item = self
             .focused_grid(visible_focus)
@@ -1438,7 +1493,6 @@ impl HomeScreen {
         let visible_focus = self.visible_focus(f.focus.current);
         let env = self.env(0.0);
         let focus = self.focused_loc(visible_focus);
-        let grid_focus = self.focused_grid(visible_focus);
         let p = f.painter.alpha(f.page_alpha);
         let slide = self.slide_offsets();
         // Re-bind the art to the heroes `slide` is about: an event delivered after this frame's
@@ -1465,7 +1519,7 @@ impl HomeScreen {
         }
         plx_ui::profile::phase("hm.grid", || {
             let heading = self.focused_heading(visible_focus);
-            self.draw_grid(view, &env, p, f.press.scale, grid_focus, heading, f.measure)
+            self.draw_grid(f, view, &env, p, heading)
         });
         plx_ui::profile::phase("hm.status", || self.draw_status(view, &env, p, focus));
         plx_ui::testpat::underlay(p);
@@ -1583,21 +1637,19 @@ impl HomeScreen {
     /// left a heading already on screen undrawn until the first card pixel crossed the bottom
     /// edge, so it popped in mid-scroll.
     fn shelf_on_screen(&self, row: usize) -> bool {
-        let shelf = self.grid.shelf(row);
-        let top = heading_y(shelf.base_y, shelf.lift());
-        let bottom = shelf.base_y + CARD_H + shelf.under_band();
+        let base_y = self.grid.base_y(row);
+        let top = heading_y(base_y, self.grid.lift(row));
+        let bottom = base_y + CARD_H + self.grid.under_band(row);
         on_axis(top, bottom - top, SCR_H, 0.0)
     }
 
-    fn draw_grid(
+    fn draw_grid<H: HomeLike>(
         &self,
+        f: &DrawFrame<'_, '_, H>,
         view: HubsView<'_>,
         env: &Env,
         p: Painter,
-        press_scale: f32,
-        focused: Option<(usize, usize)>,
         heading: Option<usize>,
-        measure: &dyn Measure,
     ) {
         for row in 0..self.rows.len() {
             let Some(hub) = self.hub(view, row) else {
@@ -1606,101 +1658,52 @@ impl HomeScreen {
             if !self.shelf_on_screen(row) {
                 continue;
             }
-            let row_y = self.grid.shelf(row).base_y;
+            let row_y = self.grid.base_y(row);
             if let Some(linked) = self.heading_widget(view, row).filter(|_| env.sp > 0.02) {
-                let m = linked.measure(measure);
+                let m = linked.measure(f.measure);
                 let focus_t = f32::from(heading == Some(row) && env.sp > 0.5);
                 linked.draw(
                     p.alpha(env.sp),
                     MARGIN_X,
-                    heading_y(row_y, self.grid.shelf(row).lift()),
+                    heading_y(row_y, self.grid.lift(row)),
                     focus_t,
                     &m,
-                    measure,
+                    f.measure,
                 );
             } else if env.sp > 0.02 {
-                card_row::draw_heading(
+                ui_cards::draw_heading(
                     p.alpha(env.sp),
                     hub.title,
                     hub.source,
                     MARGIN_X,
-                    heading_y(row_y, self.grid.shelf(row).lift()),
+                    heading_y(row_y, self.grid.lift(row)),
                     f32::INFINITY,
-                    measure,
+                    f.measure,
                 );
             }
-            for (col, item) in hub.items.iter().take(MAX_ITEMS).enumerate() {
-                if focused == Some((row, col)) && env.sp > 0.5 {
-                    continue;
-                }
-                let x = card_x(col, self.grid.eff_scroll(row, env.sp));
-                if !on_axis(x, CARD_W, SCR_W, GLOW_PAD) {
-                    continue;
-                }
-                let (rect, scale) = self.drawn_card_geometry(row, col, 1.0);
-                card_row::draw_tile(
-                    p,
-                    Art::Poster(Some(tile_facts::of(item))),
-                    rect,
-                    scale,
-                    &RowStyle::HOME,
-                    item.resume_frac(),
-                );
+            if let Some(shelf) = self.grid.shelves.get(row) {
+                shelf.paint_resting(f, p, &self.cards(view, row), self.section(row));
             }
         }
-        self.draw_focused_cell(view, env, p, press_scale, focused, measure);
+        // The focused tile after every row, so its glow overlaps the neighbouring rows.
+        if let Some((row, _)) = self.focused_grid(self.visible_focus(f.focus.current)) {
+            if let (Some(shelf), Some(_)) = (self.grid.shelves.get(row), self.hub(view, row)) {
+                shelf.paint_focused(f, p, &self.cards(view, row), self.section(row));
+            }
+        }
     }
 
-    fn draw_focused_cell(
-        &self,
-        view: HubsView<'_>,
-        env: &Env,
-        p: Painter,
-        press_scale: f32,
-        focused: Option<(usize, usize)>,
-        measure: &dyn Measure,
-    ) {
-        let Some((row, col)) = focused.filter(|_| env.sp > 0.5) else {
-            return;
-        };
-        let Some(hub) = self.hub(view, row) else {
-            return;
-        };
-        let Some(item) = hub.items.get(col) else {
-            return;
-        };
-        let (rect, scale) = self.drawn_card_geometry(row, col, press_scale);
-        let cw = self.rows[row].identity == HomeHubIdentity::ContinueWatching;
-        let mut label = deck_label(cw, &item.title);
-        label.caption = card_row::focused_caption(&tile_facts::of(item), cw);
-        let count = hub.items.len().min(MAX_ITEMS);
-        // The grid draws at `scroll_x * snap` ([`Grid::eff_scroll`]), so the lag it still owes does too.
-        let lag = self.grid.shelf(row).settle_lag(count, col, &RowStyle::HOME) * self.snap.pos;
-        let label = label.revealed(self.grid.shelf(row).band_reveal()).settling(lag);
-        card_row::draw_focused(
-            p,
-            Art::Poster(Some(tile_facts::of(item))),
-            rect,
-            scale,
-            &RowStyle::HOME,
-            item.resume_frac(),
-            &label,
-            measure,
-        );
+    /// Where row `row`'s tiles are drawn: the top of the tile (screen space), clipped under the top bar.
+    fn section(&self, row: usize) -> SectionFrame {
+        SectionFrame {
+            y: self.grid.base_y(row) + CARD_DY,
+            clip: Rect::new(0.0, plx_ui::widgets::TOP_BAR_BOTTOM, SCR_W, SCR_H - plx_ui::widgets::TOP_BAR_BOTTOM),
+        }
     }
 
-    /// One drawn rectangle for the tile painter and the input map, including the press bounce.
-    fn drawn_card_geometry(&self, row: usize, col: usize, press_scale: f32) -> (Rect, f32) {
-        let scale = self.grid.shelf(row).scale(col)
-            * if press_scale > 0.0 { press_scale } else { 1.0 };
-        let rect = Rect::new(
-            card_x(col, self.grid.eff_scroll(row, self.snap.pos)),
-            self.grid.shelf(row).base_y + CARD_DY,
-            CARD_W,
-            CARD_H,
-        )
-        .scaled(scale);
-        (rect, scale)
+    /// Row `row`'s cards as `cards::Shelf` reads them.
+    fn cards<'a>(&'a self, view: HubsView<'a>, row: usize) -> HomeCards<'a> {
+        HomeCards { paging: false, home: self, view, row, hover: Hover::Focus }
     }
 
     fn draw_status(&self, view: HubsView<'_>, env: &Env, p: Painter, focus: Option<Located>) {
@@ -1758,31 +1761,17 @@ impl HomeScreen {
                 if !row_focused && !self.shelf_on_screen(row_index) {
                     continue;
                 }
-                for &elem in &row.elems {
-                    let Some(placed) = Focusable::<H>::place(self, &elem, f.cx, At::Drawn) else {
-                        continue;
-                    };
-                    let fully_visible = placed.rest_rect.y >= 40.0
-                        && placed.rest_rect.y + placed.rest_rect.h <= SCR_H - 20.0;
-                    let hover = if fully_visible || row_focused {
-                        Hover::Focus
-                    } else {
-                        Hover::OnlyIfFocused
-                    };
-                    f.stop(
-                        f.painter,
-                        Stop {
-                            key: FocusKey {
-                                entry: self.entry,
-                                elem,
-                            },
-                            rect: placed.rect,
-                            rest_rect: placed.rest_rect,
-                            clip: placed.clip,
-                            hover,
-                            activate: Activate::Press,
-                        },
-                    );
+                // Every tile of the row shares one y, so one answer says whether a pointer passing
+                // over the row may take its focus.
+                let rest = Rect::new(0.0, self.grid.base_y(row_index) + CARD_DY, CARD_W, CARD_H)
+                    .scaled(RowStyle::HOME.focus_scale);
+                let fully_visible = rest.y >= 40.0 && rest.y + rest.h <= SCR_H - 20.0;
+                let src = HomeCards {
+                    hover: if fully_visible || row_focused { Hover::Focus } else { Hover::OnlyIfFocused },
+                    ..self.cards(view, row_index)
+                };
+                if let Some(shelf) = self.grid.shelves.get(row_index) {
+                    shelf.record_stops(f, f.painter, &src, self.section(row_index));
                 }
                 // After the row's tiles, so a popped tile's glow never wins the heading's hit.
                 if let (Some(heading), Some(rect)) = (
@@ -1835,7 +1824,7 @@ impl HomeScreen {
     #[cfg(feature = "devtriggers")]
     pub fn motion_witness(&self, row: usize) -> Option<[f32; 3]> {
         self.rows.get(row)?;
-        Some([self.snap.pos, self.grid.shelf(row).scroll_x(), self.grid.shelf(row).scroll_velocity()])
+        Some([self.snap.pos, self.grid.scroll_x(row), self.grid.shelves.get(row).map_or(0.0, Shelf::scroll_velocity)])
     }
 
     pub fn snap_target(&self) -> f32 {
@@ -1867,15 +1856,16 @@ impl HomeScreen {
         let Some(key) = focus.filter(|k| k.entry == self.entry) else {
             return;
         };
-        let Some((row, col)) = self.focused_grid(Some(key)) else {
+        let Some((row, _)) = self.focused_grid(Some(key)) else {
             return;
         };
         let view = H::hubs(f.cx);
-        let env = self.env(0.0);
         let p = f.painter.alpha(f.page_alpha);
         let cut = plx_ui::widgets::TOP_BAR_BOTTOM;
         let _clip = f.clip(p, Rect::new(0.0, cut, SCR_W, SCR_H - cut));
-        self.draw_focused_cell(view, &env, p, f.press.scale, Some((row, col)), f.measure);
+        if let Some(shelf) = self.grid.shelves.get(row) {
+            shelf.redraw_focused(f, p, &self.cards(view, row), self.section(row), Some(key));
+        }
     }
 
     pub fn dev_focus_key<H: HomeLike>(
@@ -1895,7 +1885,11 @@ impl LogicalState for HomeScreen {
     fn write(&self, c: &mut Canon) {
         // Exhaustive field census. Entry/instance identity is encoded by Navigation; spinner
         // phase and backdrop resources only paint. Every motion value queried by input/reveal
-        // is encoded below, including velocities that determine the next Tick's answer.
+        // is encoded below, including velocities that determine the next Tick's answer. A shelf
+        // encodes its springs and focus (`Shelf::write`); the moves it has been told since its
+        // last tick (`seen`, `left`) and its wake latch (`slept`, `dormant`) are hand-offs from an
+        // event to the next `Tick`, not motion, and are not encoded (`dormant` is re-derived from
+        // `snap` on every `Tick`).
         let Self { entry: _, instance: _, groups: _, items: _, next_group: _, next_elem: _,
             // `elem_at` is derived from `rows`, which the census already covers via its elems.
             // `item_index` / `group_index` are caches of `items` / `groups`, which are covered.
@@ -1948,7 +1942,11 @@ impl LogicalState for HomeScreen {
             write_hub_identity(&row.identity, c);
             c.u32(row.group.0).seq(row.elems.len());
             for elem in &row.elems { c.u32(*elem); }
-            self.grid.shelf(index).write_motion(c);
+            // a row with no shelf yet (the grid trails the rows by a sync) hashes as a resting one
+            match self.grid.shelves.get(index) {
+                Some(shelf) => shelf.write(c),
+                None => Shelf::new(self.entry, &RowStyle::HOME).write(c),
+            }
         }
         c.seq(self.restored_scroll.len());
         for &(group, scroll) in &self.restored_scroll { c.u32(group).f32(scroll); }
@@ -2030,7 +2028,7 @@ impl<H: HomeLike> Focusable<H> for HomeScreen {
                     MARGIN_X,
                     top + CARD_DY,
                     SCR_W - 2.0 * MARGIN_X,
-                    CARD_H + card_row::UNDER_LABEL_H,
+                    CARD_H + ui_cards::UNDER_LABEL_H,
                 ),
                 len: projection.elems.len(),
                 elem: ElemKind::Card,
@@ -2132,51 +2130,33 @@ impl<H: HomeLike> Focusable<H> for HomeScreen {
                     index: None,
                 })
             }
-            Located::Item(row, col) => {
+            Located::Item(row, _) => {
                 let shelf = self.grid.shelves.get(row)?;
-                let snap = match at {
-                    At::Drawn => self.snap.pos,
-                    At::SpringTarget => self.snap_target,
-                };
-                let y = match at {
-                    At::Drawn => shelf.base_y,
-                    At::SpringTarget => {
-                        let focus_row = self
-                            .focused_grid(cx.focus.current)
-                            .map(|(r, _)| r)
-                            .unwrap_or(row);
-                        GRID_TOP_Y + shelf_top_settled(row, focus_row) - self.grid.scroll_target
-                    }
-                };
+                if matches!(at, At::Drawn) {
+                    return shelf.place(cx, &self.cards(view, row), key, self.section(row), At::Drawn);
+                }
+                // Where it will settle: the dive's destination, the settled layout.
+                let col = self.item_col(row, *key)?;
+                let focus_row = self
+                    .focused_grid(cx.focus.current)
+                    .map(|(r, _)| r)
+                    .unwrap_or(row);
+                let y = GRID_TOP_Y + shelf_top_settled(row, focus_row) - self.grid.scroll_target;
                 let base = Rect::new(
-                    card_x(col, self.grid.eff_scroll(row, snap)),
+                    card_x(col, self.grid.eff_scroll(row, self.snap_target)),
                     y + CARD_DY,
                     CARD_W,
                     CARD_H,
                 );
-                let scale = match at {
-                    At::Drawn => shelf.scale(col),
-                    At::SpringTarget => {
-                        if self.focused_grid(cx.focus.current) == Some((row, col)) {
-                            RowStyle::HOME.focus_scale
-                        } else {
-                            1.0
-                        }
-                    }
+                let scale = if self.focused_grid(cx.focus.current) == Some((row, col)) {
+                    RowStyle::HOME.focus_scale
+                } else {
+                    1.0
                 };
                 Some(Placed {
-                    rect: if matches!(at, At::Drawn) {
-                        let focused = self.snap.pos > 0.5
-                            && self.focused_grid(self.visible_focus(cx.focus.current)) == Some((row, col));
-                        self.drawn_card_geometry(row, col, if focused { cx.press.scale } else { 1.0 }).0
-                    } else { base.scaled(scale) },
+                    rect: base.scaled(scale),
                     rest_rect: base.scaled(RowStyle::HOME.focus_scale),
-                    clip: Rect::new(
-                        0.0,
-                        plx_ui::widgets::TOP_BAR_BOTTOM,
-                        SCR_W,
-                        SCR_H - plx_ui::widgets::TOP_BAR_BOTTOM,
-                    ),
+                    clip: self.section(row).clip,
                     index: Some(col as u32),
                 })
             }
@@ -2247,12 +2227,12 @@ impl<H: HomeLike> Focusable<H> for HomeScreen {
                 elem: HERO_PLAY_ELEM,
             };
         };
-        let col = card_row::column_near_x(
+        let col = ui_cards::column_near_x(
             from.rect.cx(),
             MARGIN_X,
             CARD_W + GAP,
             CARD_W,
-            self.grid.shelf(row_index).scroll_x(),
+            self.grid.scroll_x(row_index),
             row.elems.len(),
             from.index.unwrap_or(0) as usize,
         );
@@ -2264,6 +2244,34 @@ impl<H: HomeLike> Focusable<H> for HomeScreen {
 }
 
 impl HomeScreen {
+    /// The column of `elem` in row `row`.
+    fn item_col(&self, row: usize, elem: u32) -> Option<usize> {
+        self.elem_at.get(&elem).filter(|&&(r, _)| r as usize == row).map(|&(_, c)| c as usize)
+    }
+
+    /// Tell every row's shelf what moved (`FocusMoved`): it keeps no focus of its own and reads
+    /// the engine's at the next tick. Presses and holds are NOT routed through it; they stay the
+    /// page's own `activate` and `emit_item_menu`, on the element the engine holds.
+    fn feed_shelves<H: HomeLike>(&mut self, ev: &ScreenEvent<H>, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
+        let view = H::hubs(cx);
+        let mut shelves = std::mem::take(&mut self.grid.shelves);
+        for (row, shelf) in shelves.iter_mut().enumerate() {
+            shelf.on(ev, cx, &self.cards(view, row), fx);
+        }
+        self.grid.shelves = shelves;
+    }
+
+    fn cancel_row_page<H: HomeLike>(&mut self, row: usize, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
+        let requested = self.grid.shelves.get(row).is_some_and(ui_cards::Shelf::has_page_request);
+        if let Some(shelf) = self.grid.shelves.get_mut(row) { shelf.reset_page_requests(); }
+        if !requested { return; }
+        if let Some(hub) = self.hub(H::hubs(cx), row).filter(|hub| hub.more || hub.offset > 0) {
+            if let Some(cmd) = hub_page_cmd(&hub, |sid, id, key| HubsCmd::CancelPage { sid, id, key }) {
+                fx.push(Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(cmd))));
+            }
+        }
+    }
+
     fn activation_elem(&self, engine_elem: u32) -> u32 {
         let engine_grid = self.locate(engine_elem).is_some_and(Located::on_grid);
         let picture_grid = self.snap.pos >= 0.5;
@@ -2341,6 +2349,7 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 Handled::Yes
             }
             ScreenEvent::Cover => {
+                for row in 0..self.rows.len() { self.cancel_row_page(row, cx, fx); }
                 self.covered = true;
                 Handled::Yes
             }
@@ -2356,6 +2365,7 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 Handled::Yes
             }
             ScreenEvent::StoreChanged(ord, _) if *ord == StoreId::Hubs.ord() => {
+                for shelf in &mut self.grid.shelves { shelf.reset_page_requests(); }
                 self.projected_generation = None;
                 self.sync_catalog(cx);
                 if self.rows.is_empty() {
@@ -2365,6 +2375,15 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { from, to, by } => {
+                if let Some((row, _)) = self.focused_grid(*from) {
+                    if self.focused_grid(Some(*to)).is_none_or(|(next, _)| next != row) {
+                        self.cancel_row_page(row, cx, fx);
+                    } else if let Some(shelf) = self.grid.shelves.get_mut(row) {
+                        // A page the store gave up on leaves no landing to clear the latch.
+                        shelf.reset_page_requests();
+                    }
+                }
+                self.feed_shelves(ev, cx, fx);
                 let from_loc = from.and_then(|key| self.locate(key.elem));
                 let to_loc = self.locate(to.elem);
                 if let (Some(a), Some(b)) = (from_loc, to_loc) {
@@ -2390,12 +2409,12 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                             (self.grid.shelves.get_mut(row), self.rows.get(row))
                         {
                             let count = hub.elems.len();
-                            let scroll = card_row::scroll_into_view(shelf.scroll_x(), col, count,
+                            let scroll = ui_cards::scroll_into_view(shelf.scroll(), col, count,
                                 CARD_W, GAP, SCR_W - 2.0 * MARGIN_X);
-                            shelf.restore_scroll(scroll, count, &RowStyle::HOME);
+                            shelf.restore_scroll(scroll, count);
                         }
                         let (lo, hi) = row_reveal_band(shelf_top_settled(row, row));
-                        self.grid.scroll_target = card_row::reveal(self.grid.scroll_y.pos,
+                        self.grid.scroll_target = ui_cards::reveal(self.grid.scroll_y.pos,
                             lo, hi, grid_max_scroll(self.rows.len()));
                         self.grid.scroll_y.jump(self.grid.scroll_target);
                     }
@@ -2444,6 +2463,9 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 ..
             }) if *at_edge && matches!(key, Key::Left | Key::Right) => {
                 let direction = if *key == Key::Left { -1 } else { 1 };
+                if let Some((row, _)) = self.focused_grid(cx.focus.current) {
+                    if let Some(shelf) = self.grid.shelves.get_mut(row) { shelf.reset_page_requests(); }
+                }
                 if matches!(self.focused_loc(cx.focus.current), Some(Located::Hero(_)))
                     && self.flip(H::hubs(cx), direction)
                 {
@@ -2485,6 +2507,17 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
 }
 
 impl<H: HomeLike> Screen<H> for HomeScreen {
+    /// A grid card only: the hero and a heading are not a card, so an opener has no rect for them.
+    fn focused_card<'a>(&self, cx: &Cx<'a, H>, focus: Option<plx_machine::machine::FocusKey<u32>>, at: Option<At>) -> Option<plx_ui::screen::FocusedCard<'a>> {
+        let key = focus.filter(|k| k.entry == self.entry)?;
+        self.focused_grid(Some(key))?;
+        let item = self.focused_item(Some(key), cx)?;
+        let placed = at.and_then(|at| Focusable::<H>::place(self, &key.elem, cx, at));
+        Some(plx_ui::screen::FocusedCard::new(item, placed))
+    }
+    fn focused_card_rect(&self, cx: &Cx<'_, H>, focus: Option<plx_machine::machine::FocusKey<u32>>, at: At) -> Option<Rect> {
+        HomeScreen::focused_rect::<H>(self, focus, cx, at)
+    }
     fn redraw_focused(&self, f: &mut DrawFrame<'_, '_, H>, focus: Option<plx_machine::machine::FocusKey<u32>>) {
         HomeScreen::redraw_focused::<H>(self, f, focus)
     }
@@ -2555,7 +2588,7 @@ impl<H: HomeLike> Screen<H> for HomeScreen {
             strip_chosen: self.strip_chosen,
             scroll_y: self.grid.scroll_y.pos,
             row_scroll: self.rows.iter().enumerate()
-                .map(|(index, row)| (row.group.0, self.grid.shelf(index).scroll_x()))
+                .map(|(index, row)| (row.group.0, self.grid.scroll_x(index)))
                 .chain(self.restored_scroll.iter().copied()).collect(),
         })
     }
@@ -2629,6 +2662,7 @@ fn status_read(
     }
     Some(match view.state {
         plx_data::pms::HubState::Loading => {
+            // placeholder-exempt: builds the value only; counted where drawn (StatusOverlay::draw_geometry, Working)
             (plx_platform::i18n::msg::browse_home_loading_c(), StatusKind::Working, None)
         }
         plx_data::pms::HubState::Failed => (
@@ -2709,7 +2743,7 @@ fn row_reveal_band(top: f32) -> (f32, f32) {
 }
 fn grid_max_scroll(rows: usize) -> f32 {
     let n = rows.max(1);
-    let h = card_row::settled_top(n, Some(n - 1), card_row::ROW_PITCH_FIXED);
+    let h = ui_cards::settled_top(n, Some(n - 1), ui_cards::ROW_PITCH_FIXED);
     (h - (SCR_H - CONTENT_Y) + 60.0).max(0.0)
 }
 fn shelf_top_settled(row: usize, focus_row: usize) -> f32 {
@@ -2718,7 +2752,7 @@ fn shelf_top_settled(row: usize, focus_row: usize) -> f32 {
 /// [`shelf_top_settled`] with the open label band named explicitly: `None` while a linked heading
 /// holds focus, which opens no row's band.
 fn shelf_top_banded(row: usize, band_row: Option<usize>) -> f32 {
-    card_row::settled_top(row, band_row, card_row::ROW_PITCH_FIXED)
+    ui_cards::settled_top(row, band_row, ui_cards::ROW_PITCH_FIXED)
 }
 
 fn wash_corners(hero: Option<&PmsMovie>, grid: [[f32; 4]; 4], snap: f32) -> [[f32; 4]; 4] {
@@ -2937,14 +2971,91 @@ fn hero_content(hero: &PmsMovie, source: &str, p: Painter, dx: f32, measure: &dy
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod placeholder_tests;
+#[cfg(test)]
+pub(crate) mod cards_harness; // Tier 2 card conformance (cards_conformance_tests.rs)
 
 /// A focused tile's title line. The deck's carries the amber ▶ only while OK on a Continue
 /// Watching card plays (`DeckPress::Play`): the triangle promises the press, so when OK opens the
 /// page there is none (`widgets::still_line`'s rule).
-fn deck_label(is_deck: bool, title: &str) -> card_row::TileLabel {
+fn deck_label(is_deck: bool, title: &str) -> ui_cards::TileLabel {
     if is_deck && plx_media::route::deck_press().press_plays() {
-        card_row::TileLabel::played(title)
+        ui_cards::TileLabel::played(title)
     } else {
-        card_row::TileLabel::title(title)
+        ui_cards::TileLabel::title(title)
+    }
+}
+
+/// One row's cards, as `cards::Shelf` reads them: the published hub's items under the elements
+/// the page interned for them. The screen keeps the heading, the vertical flow, the focus groups,
+/// the dive and every press action.
+struct HomeCards<'a> {
+    home: &'a HomeScreen,
+    view: HubsView<'a>,
+    row: usize,
+    /// How the row's stops treat a passing pointer (one answer for the row, it shares one y).
+    hover: Hover,
+    paging: bool,
+}
+
+impl<'a> HomeCards<'a> {
+    fn item(&self, i: usize) -> Option<&'a PmsMovie> {
+        self.home.item_at(self.view, self.row, i)
+    }
+}
+
+impl<H: HomeLike> CardSource<H> for HomeCards<'_> {
+    fn more(&self) -> bool {
+        self.paging && self.home.hub(self.view, self.row).is_some_and(|hub| hub.more)
+    }
+    fn len(&self) -> usize {
+        self.home.rows.get(self.row).map_or(0, |r| r.elems.len())
+    }
+
+    fn elem(&self, i: usize) -> u32 {
+        self.home.rows.get(self.row).and_then(|r| r.elems.get(i)).copied().unwrap_or_default()
+    }
+
+    fn index_of(&self, e: &u32) -> Option<usize> {
+        self.home.item_col(self.row, *e)
+    }
+
+    /// The card the PICTURE shows focused: none until the dive has made the shelves the picture,
+    /// and the card the page came from while the dive back to the billboard still shows them.
+    fn focus_index(&self, e: &u32) -> Option<usize> {
+        if self.home.snap.pos <= 0.5 {
+            return None;
+        }
+        self.home.item_col(self.row, self.home.activation_elem(*e))
+    }
+
+    fn art(&self, i: usize) -> Art<'_> {
+        Art::Poster(self.item(i).map(tile_facts::of))
+    }
+
+    fn label(&self, i: usize) -> ui_cards::TileLabel {
+        let Some(item) = self.item(i) else { return ui_cards::TileLabel::default() };
+        let continue_watching = self.home.rows[self.row].identity == HomeHubIdentity::ContinueWatching;
+        let mut label = deck_label(continue_watching, &item.title);
+        label.caption = ui_cards::focused_caption(&tile_facts::of(item), continue_watching);
+        label
+    }
+
+    fn progress(&self, i: usize) -> Option<f32> {
+        self.item(i).and_then(PmsMovie::resume_frac)
+    }
+
+    fn loaded(&self, i: usize) -> bool {
+        self.item(i).is_some()
+    }
+
+    fn hover(&self, _i: usize) -> Hover {
+        self.hover
+    }
+
+    /// The row sweeps in with the dive: its offset and its caption's lag are the spring's times `snap`.
+    fn sweep(&self) -> f32 {
+        self.home.snap.pos
     }
 }

@@ -62,6 +62,43 @@ kill. Full design + migration status: `docs/ui-system-migration.md`.
    bespoke widget is only justified when nothing here is close — and then it lands *here*, as a
    reusable `View`, so the next screen gets it for free.
 
+## Card shelves and grids: `cards::Shelf` / `cards::Grid`
+
+A new screen that shows a strip or grid of media tiles uses `plx_ui::cards::{Shelf, Grid}` and
+implements `CardSource` for its content; it does not assemble `CardRow`, `GridPop` or `GridBands`
+itself. `card_row` and `poster_grid` are `pub(crate)`: what a screen's own layout reads from them
+(`RowStyle`, `TileLabel`, `under_band`, `reveal`, the heading painters, `GRID_STYLE`...) is
+re-exported from `plx_ui::cards`, and the profile picker's circular avatar row is
+`cards::AvatarRow`. The `cards` gate in `ci/check-deps.sh` is the backstop (`ci/allow/cards.txt` is
+empty).
+The component reads focus from the engine, adopts a focus no deliberate move announced at full pop,
+takes the press from the frame, registers the stops it draws and reports one `CardEvent`
+(Activate / Hold / Want) from `on(ev, cx, src, fx)`, which the screen calls with EVERY event. (Three screens are exceptions: Home feeds Tick and FocusMoved only and keeps its own press paths, because a Continue Watching press is account-affecting; Library and Detail feed every event but discard the returned `CardEvent` and handle Activate / PressCommit / PressHold themselves.) The
+contract is the `//!` of `cards/mod.rs`; `cards/tests.rs` is its Tier 1 conformance, and
+`cards/conformance.rs` the Tier 2 drivers each real screen runs. Three rules a screen can break by
+reaching around the component: a `SectionFrame`'s `y` (and a `Grid`'s `top`) is SCREEN space and
+`draw` undoes the painter's own translate, so hand it the painter you have, never a pre-offset
+one; a content landing that moves the focused element's index is the component's to absorb (the
+pop and the scroll follow the element, `Shelf::landed` / `Grid::landed` report it) so the screen
+does not re-seat anything; and read a shelf through `heading_lift()` / `under_band()`, not through
+the L0 `CardRow`.
+
+`GridSpec::new(top, edge)` is the six-column `cards::GRID_STYLE` grid from `MARGIN_X`;
+`.columns(cols, style, left)` sets the column count, card style and left edge (a rail-aware or
+episode grid), and `.external()` selects `ScrollMode::External`, for a grid inside a document whose page scroll
+another owner drives: the Library's All grid runs under the Library's scroll and every grid section
+of a `cards::Stack` under the stack's. Both shipped grids are external; `ScrollMode::Own` is the
+default a spec is built with and no screen runs it, so a scroll fault on a stack page is in
+`cards/stack.rs`, not in `Grid`. An external grid never steps a scroll: the owner calls
+`set_page(top, scroll)` before each
+`on` / `draw` / `place`, may read the scroll the focused row wants from `reveal_target()` (the
+Library does not: it reveals by its own rule over the settled layout) and applies the document
+shift a content landing needs, `landed_shift()`, to its scroll and scroll target; the grid does
+not home when focus is elsewhere. An owner whose columns, style or document top change at run time
+(the Library's episode listing, its shelf run) hands them over with `set_columns` / `set_page`;
+`settle_band` adopts a restored focus row's caption band before the next tick so a layout built in
+between sizes the document from it.
+
 ## Localization and shared reading layout
 
 App-owned text comes from typed `i18n::msg` accessors. Keep protocol identifiers and server-returned
@@ -448,6 +485,55 @@ press did. Behaviour and mark both read `is_continue && route::deck_press().pres
 cannot disagree. A poster wears nothing at all when it has never
 been started — most of a server is unstarted, so a clean shelf is the common case and a mark is
 information.
+
+## Placeholders are counted where they are DRAWN (`placeholder.rs`)
+
+A skeleton, a loading ground, a spinner or a "Loading" read-out says "the real thing has not
+arrived". Every site that paints one calls `placeholder::note` (or one of its wrappers: `skeleton`,
+`ground`, `flat`, `face`, `ink`) at the DRAW, with the painter that paints it — never at a resolve
+(Home's `prefetch` resolves heroes it never draws), and a recording pass counts nothing. Absence is
+not a placeholder: a person the server has no headshot of and a collection with no artwork wear
+`theme::CARD_ABSENT` (declared with a `placeholder-exempt:` reason), a profile with no picture keeps
+its ordinary `CONTROL_IDLE_FILL` disc, and a hero whose clearLogo has settled as a miss
+(`tex::logo_failed`, asked only when `placeholder::accounting_visible()`: armed, or the sentinel build)
+types its title as plain ink and is reported in `Frame::absent`; none is counted
+(a profile whose picture path has not resolved, and a logo still on its way, ARE counted). The
+feature `placeholder-sentinel` (off in every default, shipping and TV build; `make check` compiles
+it) additionally paints the FILLED placeholders (skeletons, grounds, spinner dots, the stale-strip
+cover) in the one exact `theme::PLACEHOLDER_SENTINEL` at alpha 1 with no sheen, so a frame scan can
+find them by pixel. The two oracles fail differently (the counter misses a site nobody hooked, the
+pixels miss a colour nobody overrode), which is why both exist.
+
+**The count is zero or non-zero, never "how many"**: the page closure runs once per walk (discovery,
+each blur source job, the visible pass) and each walk ticks. **A page shown as a held image** (a
+`PageDip` push's IN half and its quiescence hold) draws nothing, so its capture's placeholders are
+recorded (`placeholder::since`) and re-noted on every frame the image is painted; the pixel oracle
+cannot see a placeholder inside a blended image, so the counter alone vouches for those frames
+(`Dispatcher::held_page_image`). A frame dump holds no image (every dip frame re-captures the page
+live, `PageImage::step_filmed`), so there the capture's own draw is the debt.
+
+**The demo-video driver's contract** (full text: `placeholder.rs` module docs, "What the dump driver
+(S5b) must do"): `reset` before the frame's first walk and `take` after the last, on the UI thread;
+force a live draw on every written frame; a held page image is not a hold reason, only its captured
+placeholders are; read the count as zero or
+non-zero only; wait out reveal springs and the dip alpha after arrival (an `Xfade` In ramp plays in a
+dump as in the product, under the dip: a dump films a pushed page live, never as a held image,
+`plx_gfx::dump`'s one picture-changing page rule); cover
+late-arriving sections (Home shelves, Detail's related/cast/extras/ratings, Library shelves, an
+`Xfade` Hold) with the landing predicate, since neither oracle sees an absent section; fail fast on
+`Frame::absent` and on an entry whose key is `""` instead of holding; scan connected components
+against exactly (255,0,254), never scanline runs, and report as COUNTER-ONLY the reasons no pixel
+can show (Home and Detail backdrops, every caption, the hero-logo fallback, the spinner under a
+run scan, anything under a scrim or glass, a held image); build the sentinel in CI; keep `pin_hero`.
+
+Unarmed (every shipping build) a hook is one relaxed atomic load and a branch before any
+thread-local access; do not put a hook on a resident-texture path, and read anything a hook needs
+once per draw, not once per cell (`season_loading()` is two `SeqCst` loads).
+
+`ci/check-placeholders.py` (in `make check`) fails on a placeholder reference with no counting call
+in the SAME FUNCTION, or `// placeholder-exempt: <reason>`, pairs each spinner with its own call or
+marker, and fails when a `Reason` loses its last hook; a new loading surface needs one or the other.
+Its docstring states what it cannot see.
 
 ## Gotchas that bite
 

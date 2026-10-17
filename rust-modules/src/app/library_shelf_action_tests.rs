@@ -1,6 +1,7 @@
 //! Library shelf physical-hold engine item capture.
 
 use super::*;
+use plx_ui::screen::Focusable;
 #[allow(unused_imports)]
 use super::test_support::*;
 use super::test_support::{frame};
@@ -135,6 +136,7 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
                     scale: d.input.press.scale(),
                     is_long: d.input.press.was_long(),
                     held_ms: None,
+                    owner: d.input.dip_owner,
                 },
                 focus: d.input.engine.read(InputOwner::Entry(key.entry)),
                 owner: InputOwner::Entry(key.entry),

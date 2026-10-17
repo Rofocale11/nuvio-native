@@ -239,8 +239,34 @@ pub trait Screen<H: Host>: Machine<H, Ev = ScreenEvent<H>> + Focusable<H> {
     /// **Repaint the focused element above a modal dim** — the item-menu opener lift, asked of
     /// whichever page hosts the menu. `focus` is the engine key the surface was opened from, passed
     /// explicitly so the page never keeps a cursor of its own. A page with no card to lift draws
-    /// nothing, which is the default.
+    /// nothing, which is the default. The host calls it only while `focus` is still what the page
+    /// has focused (`app::bridge::opener_lift`), so an implementer may draw `focus` as focused
+    /// without checking that the page has not moved on.
     fn redraw_focused(&self, _f: &mut DrawFrame<'_, '_, H>, _focus: Option<FocusKey<H::Elem>>) {}
+    /// **The page element this surface lifts back out of the dim** (`(host page, element)`), for a
+    /// surface that has one: the item menu's captured opener. The dispatcher folds it with the
+    /// surface's phase and the engine's focus into [`Dispatcher::lifted_opener`] and keeps that
+    /// element OUT of the frozen page pass (`DrawFrame::lifted`), so the lift is its only copy.
+    /// `None` (the default) for every other screen.
+    fn opener(&self) -> Option<(EntryId, Option<FocusKey<H::Elem>>)> {
+        None
+    }
+    /// **The card the page has focused, and where it sits** — the host's question for an item menu
+    /// and for the focus probe, asked of whichever card page is on screen so the host names no
+    /// screen type. `focus` is the engine key to answer for (a page answers only its own entry's
+    /// cards); `None` for a page with no card, which is the default. The rect is measured only
+    /// when `at` names how (`None` for a caller that wants the item alone).
+    fn focused_card<'a>(&self, _cx: &Cx<'a, H>, _focus: Option<FocusKey<H::Elem>>, _at: Option<At>) -> Option<FocusedCard<'a>> {
+        None
+    }
+    /// **Where the focused card sits, without needing its item to resolve** — the live drawn rect
+    /// of the card `focus` names. An opener that only anchors a menu (the item travels on the
+    /// request, it is not re-read) asks this instead of [`Self::focused_card`], so a page whose
+    /// data moved on between the hold and the request still anchors the menu where the card is.
+    /// `None` for a page with no card, which is the default.
+    fn focused_card_rect(&self, _cx: &Cx<'_, H>, _focus: Option<FocusKey<H::Elem>>, _at: At) -> Option<Rect> {
+        None
+    }
     /// Typed application inspection during migration; the library never names a screen type.
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
@@ -423,6 +449,24 @@ pub enum At {
     Drawn,
 }
 
+/// The card a page has focused ([`Screen::focused_card`]): the catalog item behind it, as the
+/// application's own type (this layer names none, so the host downcasts it), and its rect.
+#[derive(Clone, Copy)]
+pub struct FocusedCard<'a> {
+    pub item: &'a dyn std::any::Any,
+    /// The live drawn rect ([`Placed::rect`]).
+    pub rect: Option<Rect>,
+    /// The settled focus-scaled rect ([`Placed::rest_rect`]) — what an opener anchors to.
+    pub rest_rect: Option<Rect>,
+}
+
+impl<'a> FocusedCard<'a> {
+    /// `item` with the placement the page measured for it (`None` when the caller asked for none).
+    pub fn new(item: &'a dyn std::any::Any, placed: Option<Placed>) -> Self {
+        Self { item, rect: placed.map(|p| p.rect), rest_rect: placed.map(|p| p.rest_rect) }
+    }
+}
+
 /// What was painted / where it rests / what clipped it (§7.6).
 #[derive(Clone, Copy, Debug)]
 pub struct Placed {
@@ -600,19 +644,24 @@ macro_rules! focusable_via_composed {
 /// `TableScreen`/`DocumentScreen` over its own state (`fn $view(&self) -> impl Focusable<$h>`).
 /// The screen keeps the widgets; the composition is rebuilt per query, exactly as the draw
 /// rebuilds it (phase 5b's family pages).
+///
+/// The second form is for a screen generic over its host (a page that reads its store through a
+/// host trait): `focusable_via_view!(Screen, H: [Bounds], view)` writes
+/// `impl<H: Bounds> Focusable<H> for Screen` and calls `self.view::<H>()`, so the view method is
+/// generic too (`fn view<H: Bounds>(&self) -> impl Focusable<H> + '_`) — a `cards::Stack` page.
 #[macro_export]
 macro_rules! focusable_via_view {
-    ($t:ty, $h:ty, $view:ident) => {
-        impl $crate::screen::Focusable<$h> for $t {
+    (@impl [$($gen:tt)*] $t:ty, $h:ty, $view:ident, [$($turbofish:tt)*]) => {
+        impl $($gen)* $crate::screen::Focusable<$h> for $t {
             fn groups(&self, cx: &plx_machine::machine::Cx<'_, $h>, out: &mut Vec<$crate::screen::GroupSpec>) {
-                $crate::screen::Focusable::<$h>::groups(&self.$view(), cx, out)
+                $crate::screen::Focusable::<$h>::groups(&self.$view $($turbofish)* (), cx, out)
             }
             fn group_of(
                 &self,
                 key: &<$h as plx_machine::machine::Host>::Elem,
                 cx: &plx_machine::machine::Cx<'_, $h>,
             ) -> Option<plx_machine::machine::GroupId> {
-                $crate::screen::Focusable::<$h>::group_of(&self.$view(), key, cx)
+                $crate::screen::Focusable::<$h>::group_of(&self.$view $($turbofish)* (), key, cx)
             }
             fn neighbour(
                 &self,
@@ -620,7 +669,7 @@ macro_rules! focusable_via_view {
                 dir: $crate::screen::Dir,
                 cx: &plx_machine::machine::Cx<'_, $h>,
             ) -> $crate::screen::Step<<$h as plx_machine::machine::Host>::Elem> {
-                $crate::screen::Focusable::<$h>::neighbour(&self.$view(), key, dir, cx)
+                $crate::screen::Focusable::<$h>::neighbour(&self.$view $($turbofish)* (), key, dir, cx)
             }
             fn place(
                 &self,
@@ -628,14 +677,14 @@ macro_rules! focusable_via_view {
                 cx: &plx_machine::machine::Cx<'_, $h>,
                 at: $crate::screen::At,
             ) -> Option<$crate::screen::Placed> {
-                $crate::screen::Focusable::<$h>::place(&self.$view(), key, cx, at)
+                $crate::screen::Focusable::<$h>::place(&self.$view $($turbofish)* (), key, cx, at)
             }
             fn reconcile(
                 &self,
                 want: plx_machine::machine::FocusKey<<$h as plx_machine::machine::Host>::Elem>,
                 cx: &plx_machine::machine::Cx<'_, $h>,
             ) -> plx_machine::machine::FocusKey<<$h as plx_machine::machine::Host>::Elem> {
-                $crate::screen::Focusable::<$h>::reconcile(&self.$view(), want, cx)
+                $crate::screen::Focusable::<$h>::reconcile(&self.$view $($turbofish)* (), want, cx)
             }
             fn seat(
                 &self,
@@ -643,9 +692,15 @@ macro_rules! focusable_via_view {
                 from: $crate::screen::Placed,
                 cx: &plx_machine::machine::Cx<'_, $h>,
             ) -> plx_machine::machine::FocusKey<<$h as plx_machine::machine::Host>::Elem> {
-                $crate::screen::Focusable::<$h>::seat(&self.$view(), g, from, cx)
+                $crate::screen::Focusable::<$h>::seat(&self.$view $($turbofish)* (), g, from, cx)
             }
         }
+    };
+    ($t:ty, $h:ident: [$($bound:tt)+], $view:ident) => {
+        $crate::focusable_via_view!(@impl [<$h: $($bound)+>] $t, $h, $view, [::<$h>]);
+    };
+    ($t:ty, $h:ty, $view:ident) => {
+        $crate::focusable_via_view!(@impl [] $t, $h, $view, []);
     };
 }
 
@@ -726,14 +781,52 @@ pub struct DrawFrame<'a, 'views, H: Host> {
     /// reads this field instead, so it survives that overwrite. Never mutated after
     /// construction — the one write is `with_navigation`.
     pub nav_page_alpha: f32,
-    pub press: PressRead,
+    pub press: PressRead<H::Elem>,
     /// **The page under this surface, as the container latched it** — the `ModalStack`'s one
     /// underlay field (`containers::modal::ModalUnderlay`), which a popover panel's ground is drawn
     /// from (`widgets::panel_ground`). `None` on a page's own frame and on any frame whose
     /// container owns no field; a panel reads `None`, or a field not latched yet, as "draw the flat
     /// sheet". Set by the dispatcher's surface pass, never by a screen.
     pub underlay: Option<&'a crate::underlay::UnderlayField>,
+    /// **The page element a surface lifts back out of the dim this frame** (item menu opener,
+    /// [`Screen::opener`]). A card section leaves that card OUT of the page pass
+    /// (`cards::Shelf` / `Grid::draw_card`): the lift ([`Screen::redraw_focused`], drawn live above
+    /// the host snapshot at the press's own scale) is its only copy, so the frozen page never holds
+    /// a stale (dipped) copy under the growing one and the release spring of a taken hold is not
+    /// page damage. `None` on every frame the lift does not run, and on the lift's own frame.
+    pub lifted: Option<FocusKey<H::Elem>>,
     stops: Vec<Stop<H::Elem>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static STOPS_IN_RECORDING_WALK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a recording walk registers stops (only ever true inside [`record_stops_while_recording`]).
+#[cfg(any(test, feature = "test-support"))]
+fn stops_in_recording_walk() -> bool {
+    STOPS_IN_RECORDING_WALK.with(|v| v.get())
+}
+#[cfg(not(any(test, feature = "test-support")))]
+const fn stops_in_recording_walk() -> bool {
+    false
+}
+
+/// **Run `f` so a recording walk ALSO registers its stops** (test only). A host test has no GL
+/// context, so it can only run a screen's real `draw` through a recording painter, which places no
+/// stop (`DrawFrame::records_stops`); inside this scope the stops are placed exactly as the visible
+/// walk would place them, and nothing is painted. Per thread, restored on unwind.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_stops_while_recording<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STOPS_IN_RECORDING_WALK.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(STOPS_IN_RECORDING_WALK.with(|v| v.replace(true)));
+    f()
 }
 
 impl<'a, 'views, H: Host> DrawFrame<'a, 'views, H> {
@@ -752,6 +845,7 @@ impl<'a, 'views, H: Host> DrawFrame<'a, 'views, H> {
             nav_page_alpha: nav.page_alpha,
             press: cx.press,
             underlay: None,
+            lifted: None,
             stops: Vec::new(),
         }
     }
@@ -778,7 +872,7 @@ impl<'a, 'views, H: Host> DrawFrame<'a, 'views, H> {
     /// folded in here (`Painter::to_screen`) and the stop is clipped to the cascade's clip
     /// intersected with `s.clip` (also in painter space).
     pub fn stop(&mut self, p: Painter, mut s: Stop<H::Elem>) {
-        if p.is_recording() || !self.records_stops() {
+        if (p.is_recording() && !stops_in_recording_walk()) || !self.records_stops() {
             return;
         }
         let (rect, _, cascade_clip) = p.to_screen(s.rect);
@@ -807,7 +901,7 @@ impl<'a, 'views, H: Host> DrawFrame<'a, 'views, H> {
     /// anything (`if !f.records_stops() { return; }` at the top of each `record_stops`), and
     /// [`Self::stop`] refuses outside it as the backstop for inline producers.
     pub fn records_stops(&self) -> bool {
-        !self.painter.is_recording() && !plx_gfx::gfx::blur_source_pass()
+        (!self.painter.is_recording() || stops_in_recording_walk()) && !plx_gfx::gfx::blur_source_pass()
     }
 
     pub fn stops(&self) -> &[Stop<H::Elem>] {

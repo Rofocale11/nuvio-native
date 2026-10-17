@@ -175,7 +175,7 @@ pub fn plex_tv_credential(snapshot_user: &UserRef) -> Option<String> {
 /// every boot, with a fresh `X-Plex-Client-Identifier` each time.
 ///
 /// The first entry is still deliberately OUTSIDE the app install dir: appinstalld replaces
-/// `applications/com.beb.plxnative/` wholesale on every ipk (re)install, which silently signed the
+/// `applications/com.nuvionative.app/` wholesale on every ipk (re)install, which silently signed the
 /// user out when the file lived there.
 #[cfg(not(any(test, feature = "test-support")))]
 fn auth_paths() -> Vec<std::path::PathBuf> {
@@ -229,14 +229,9 @@ static TEST_FILE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 #[cfg(any(test, feature = "test-support"))]
 fn fallback_file() -> std::path::PathBuf {
     static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    PATH.get_or_init(|| {
-        let dir = std::env::temp_dir()
-            .join(format!("plxnative-session-fallback-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join("auth.json")
-    })
-    .clone()
+    // Removed when the test process exits (`plx_base::testscratch`).
+    PATH.get_or_init(|| plx_base::testscratch::process_dir("session-fallback").join("auth.json"))
+        .clone()
 }
 
 /// The same process-global scratch path [`fallback_file`] resolves to, exposed to other modules'
@@ -641,6 +636,8 @@ pub struct Session {
     /// committed replay fixtures included — serializes exactly as it did before.
     #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
     pub deck_press: DeckPress,
+    #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
+    pub rating_source: RatingSource,
     /// **Device-wide ambient memory**: the last hero `UltraBlurColors` envelope Home actually
     /// rendered on this television, so a route in the Settings/first-run family that opens
     /// BEFORE Home has fetched anything this boot — first-run consent moved ahead of the
@@ -753,6 +750,8 @@ struct CanonicalSessionPreferences {
     skip_interval: SkipInterval,
     #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
     deck_press: DeckPress,
+    #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
+    rating_source: RatingSource,
     #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
     plaintext_consent: Vec<PlaintextConsent>,
     #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
@@ -791,6 +790,7 @@ impl Default for CanonicalSessionPreferences {
             next_episode_mode: NextEpisodeMode::Countdown,
             skip_interval: SkipInterval::Seconds10,
             deck_press: DeckPress::Details,
+            rating_source: RatingSource::Imdb,
             plaintext_consent: Vec::new(),
             server_key_pins: Vec::new(),
             audio_enhancements: crate::plex::AudioEnhancements::NONE,
@@ -843,6 +843,7 @@ fn split_public(session: &Session) -> Result<plx_platform::storage::state::Publi
         next_episode_mode: session.next_episode_mode,
         skip_interval: session.skip_interval,
         deck_press: session.deck_press,
+        rating_source: session.rating_source,
         plaintext_consent: session.plaintext_consent.clone(),
         server_key_pins: session.server_key_pins.clone(),
         audio_enhancements: session.audio_enhancements,
@@ -917,6 +918,7 @@ pub fn join_canonical(
         next_episode_mode: preferences.next_episode_mode,
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
+        rating_source: preferences.rating_source,
         plaintext_consent: preferences.plaintext_consent,
         server_key_pins: preferences.server_key_pins,
         audio_enhancements: preferences.audio_enhancements,
@@ -950,6 +952,7 @@ fn public_session(public: &plx_platform::storage::state::PublicPayload) -> Sessi
         next_episode_mode: preferences.next_episode_mode,
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
+        rating_source: preferences.rating_source,
         plaintext_consent: preferences.plaintext_consent,
         server_key_pins: preferences.server_key_pins,
         audio_enhancements: preferences.audio_enhancements,
@@ -1428,6 +1431,20 @@ impl DeckPress {
         self == DeckPress::Play
     }
 }
+
+/// The score provider shown by Nuvio Native. Missing scores stay absent.
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RatingSource {
+    #[default]
+    Imdb,
+    RottenTomatoes,
+}
+fn de_soft_rating_source<'de, D: serde::Deserializer<'de>>(d: D) -> Result<RatingSource, D::Error> {
+    let value = Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+fn is_default_rating_source(source: &RatingSource) -> bool { *source == RatingSource::Imdb }
 
 /// One profile's search history.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -2613,6 +2630,11 @@ impl Session {
         let mut next = self.clone();
         next.skip_interval = interval;
         next
+    }
+
+    pub fn rating_source(&self) -> RatingSource { self.rating_source }
+    pub fn with_rating_source(&self, source: RatingSource) -> Self {
+        let mut next = self.clone(); next.rating_source = source; next
     }
 
     pub fn deck_press(&self) -> DeckPress {
@@ -6161,5 +6183,20 @@ mod server_key_pin_tests {
         plx_base::storage_worker::drain_for_test();
         let _ = peek();
         assert_eq!(plx_net::net::keypin::pin_for_test(&key), None, "the late probe did not repopulate it");
+    }
+}
+
+#[cfg(test)]
+mod rating_source_tests {
+    use super::*;
+    #[test]
+    fn rating_preference_survives_the_public_private_db8_split() {
+        let session = Session::default().with_rating_source(RatingSource::RottenTomatoes);
+        let (public, protected) = split_canonical(&session).unwrap();
+        assert_eq!(join_canonical(&public, &protected).unwrap().rating_source(), RatingSource::RottenTomatoes);
+        assert_eq!(public_session(&public).rating_source(), RatingSource::RottenTomatoes);
+        assert!(!serde_json::to_string(&Session::default()).unwrap().contains("rating_source"));
+        let unknown: Session = serde_json::from_value(serde_json::json!({"rating_source":"future"})).unwrap();
+        assert_eq!(unknown.rating_source(), RatingSource::Imdb);
     }
 }

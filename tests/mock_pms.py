@@ -47,8 +47,10 @@ which is the home hero's first slot. An episode marked `stand_in` plays: its med
 silent file of the episode's catalog length that `derive` made (never the work itself), which is
 enough for the simulator's clock sink to run the player over it. And a `continuous=1` PlayQueue
 of an episode carries the rest of its show after it, as PMS's does, so Up Next has a successor.
-Nothing recorded against it may be committed as a fixture — the harness's alphabet check would
-refuse it, correctly.
+A focus-fingerprint or replay recording made against it must not be committed under
+`tests/fixtures/replay/`: the harness's alphabet check would refuse it, correctly. The one
+sanctioned capture is `tools/demo_library.py fixtures`, which writes the demo library's own
+detail answers to `tests/demo_library/fixtures/` for the data crate's parse tests.
 
 Every mode also answers the four plex.tv calls of the QR sign-in (`/api/v2/pins`, the poll, the
 QR image, and `/api/v2/user`) with a fixed demo code, for an app booted with
@@ -996,6 +998,21 @@ def demo_cache_dir():
     return pathlib.Path(env) if env else pathlib.Path.home() / ".cache" / "plxnative-demo"
 
 
+_DEMO_TOOL = []
+
+
+def demo_derived_file(assets, cache, key, rec, role):
+    """Where `tools/demo_library.py derive` put one derived file (`derived_file` there decides: the
+    name carries a hash of the recipe, so checkouts sharing a cache never overwrite each other)."""
+    if not _DEMO_TOOL:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "demo_library_tool", pathlib.Path(__file__).resolve().parent.parent / "tools" / "demo_library.py")
+        _DEMO_TOOL.append(importlib.util.module_from_spec(spec))
+        spec.loader.exec_module(_DEMO_TOOL[0])
+    return _DEMO_TOOL[0].derived_file(assets, cache, key, rec, role)
+
+
 class CatalogLibrary(Library):
     """The demo library (`--catalog`): the same wire shapes and the same queries as the generated
     library, built from `tests/demo_library/catalog.json` instead of a seed. Keys are dense and
@@ -1046,12 +1063,36 @@ class CatalogLibrary(Library):
             return self.genres[gid]
 
         def credits(rec):
+            # A show's creators are its `Writer` rows — what the detail hero reads "Created by"
+            # from. No person is served with a `thumb`: the app draws its glyph for a credit
+            # without a photograph, and the demo library carries no photographs of real people.
+            writers = list(dict.fromkeys(rec.get("writers", []) + rec.get("creators", [])))
             return {
                 "Genre": [dict(genre(g)) for g in rec.get("genres", [])],
                 "Director": [dict(person(n)) for n in rec.get("directors", [])],
-                "Writer": [dict(person(n)) for n in rec.get("writers", [])],
-                "Role": [dict(person(c["name"]), role=c["role"]) for c in rec.get("cast", [])],
+                "Writer": [dict(person(n)) for n in writers],
+                "Role": [dict(person(c["name"]), **({"role": c["role"]} if c.get("role") else {}))
+                         for c in rec.get("cast", [])],
             }
+
+        def described(rec):
+            """What a title's page draws beyond its credits, from the catalog's optional keys:
+            `tagline` (our own text, marked DEMO there), `Country`, and the CITED `contentRating`
+            and `Rating[]` — a title without a cited value serves none, so the app shows
+            "Unrated" and no ratings row. The flat `rating`/`audienceRating` pair is the one a
+            section listing sends; it is the first critic and the first audience row."""
+            out = {"Country": [{"tag": c} for c in rec.get("countries", [])],
+                   "Rating": [{"image": r["image"], "value": r["value"], "type": r["type"]}
+                              for r in rec.get("ratings", [])]}
+            if rec.get("tagline"):
+                out["tagline"] = rec["tagline"]
+            if "contentRating" in rec:
+                out["contentRating"] = rec["contentRating"]["value"]
+            for kind, flat in (("critic", "rating"), ("audience", "audienceRating")):
+                row = next((r for r in out["Rating"] if r["type"] == kind), None)
+                if row:
+                    out[flat], out[flat + "Image"] = row["value"], row["image"]
+            return out
 
         def base(rk, kind, section, rec, slug):
             key = slug.replace("/", "_")
@@ -1066,17 +1107,19 @@ class CatalogLibrary(Library):
                 it["year"] = rec["year"]
             images = {}
             for role, name in (("thumb", "poster"), ("art", "art"), ("thumb", "thumb")):
-                path = self.derived / key / f"{name}.jpg"
-                if name in rec and path.is_file():
+                if name not in rec:
+                    continue
+                path = demo_derived_file(assets, self.cache, slug, rec, name)
+                if path.is_file():
                     images[role] = path
                     it[role] = f"/library/metadata/{rk}/{role}/{self.now}"
-                elif name in rec:
+                else:
                     raise ValueError(f"{slug}: derived {name} is missing ({path}); rerun "
                                      "`python3 tools/demo_library.py derive`")
             if "logo" in rec:
                 # The item's clearLogo, which the app asks for by path
                 # (`/library/metadata/<rk>/clearLogo`), as it does of a real server.
-                path = self.derived / key / "logo.png"
+                path = demo_derived_file(assets, self.cache, slug, rec, "logo")
                 if not path.is_file():
                     raise ValueError(f"{slug}: derived logo is missing ({path}); rerun "
                                      "`python3 tools/demo_library.py derive`")
@@ -1095,7 +1138,7 @@ class CatalogLibrary(Library):
             it = base(rk, "movie", movies, m, m["id"])
             dur = m["minutes"] * 60_000
             it.update(studio=m.get("studio", ""), originallyAvailableAt=m["originallyAvailableAt"],
-                      duration=dur, Chapter=[], Marker=[], **credits(m))
+                      duration=dur, Chapter=[], Marker=[], **credits(m), **described(m))
             if m.get("collections"):
                 it["Collection"] = [{"tag": c, "id": coll_id[c]} for c in m["collections"]]
             if "media" in m:
@@ -1111,7 +1154,7 @@ class CatalogLibrary(Library):
             rk = 201 + n
             show = base(rk, "show", shows, s, s["id"])
             show.update(studio=s.get("studio", ""), originallyAvailableAt=f"{s['year']}-01-01",
-                        duration=0, childCount=0, leafCount=0, viewedLeafCount=0, **credits(s))
+                        duration=0, childCount=0, leafCount=0, viewedLeafCount=0, **credits(s), **described(s))
             self.items[rk] = show
             for season in s["seasons"]:
                 srk = rk * 10 + season["index"]
@@ -1132,10 +1175,16 @@ class CatalogLibrary(Library):
                               grandparentThumb=show.get("thumb", ""), grandparentArt=show.get("art", ""),
                               year=int(e["date"][:4]), originallyAvailableAt=e["date"], duration=dur,
                               Media=self._demo_media(erk, part, dur, f"/media/TV/{s['title']}/S{season['index']:02d}E{e['index']:02d}"),
-                              Director=[], Writer=[], Role=[], Chapter=[], Marker=[])
+                              Chapter=[], Marker=[])
+                    # An episode carries its show's credits and rating, as a server's episodes do
+                    # when the agent has no per-episode crew.
+                    for field in ("Director", "Writer", "Role"):
+                        ep[field] = [dict(t) for t in show[field]]
+                    if "contentRating" in show:
+                        ep["contentRating"] = show["contentRating"]
                     if e.get("stand_in"):
                         slug = f"{s['id']}/{season['index']}/{e['index']}"
-                        path = self.derived / slug.replace("/", "_") / "stand-in.mp4"
+                        path = demo_derived_file(assets, self.cache, slug, e, "stand-in")
                         if not path.is_file():
                             raise ValueError(f"{slug}: derived stand-in is missing ({path}); rerun "
                                              "`python3 tools/demo_library.py derive`")
@@ -1171,6 +1220,9 @@ class CatalogLibrary(Library):
         cat = self.catalog
         if hero not in self.by_slug:
             raise ValueError(f"--hero {hero!r} is not in the catalog")
+        if any(t["id"] == hero.split("/")[0] and t.get("not_hero") for t in cat["movies"] + cat["shows"]):
+            # The head of Continue Watching is the home hero; the catalog declares this title never one.
+            raise ValueError(f"--hero {hero!r} is marked `not_hero` in the catalog")
         for i, slug in enumerate(cat["added_order"]):
             it = self.items[self.by_slug[slug]]
             added = self.now - 86_400 * (2 + 3 * i)
@@ -1787,6 +1839,10 @@ class MockPms:
             if q.get("includeMeta") == "1":
                 extra["Meta"] = self.sort_meta(q.get("type"))
             return j(self.container(Metadata=page, **extra))
+        if len(segs) == 4 and segs[:2] == ["library", "sections"] and segs[3] == "recentlyAdded":
+            kind = {"1": "movie", "2": "episode"}.get(segs[2], "movie")
+            page, extra = paged(lib.recent(kind, 1000))
+            return j(self.container(Metadata=page, **extra))
         if len(segs) == 4 and segs[:2] == ["library", "sections"]:
             d = segs[3]
             if d == "collections":
@@ -1859,6 +1915,11 @@ class MockPms:
         if segs[:2] == ["library", "people"] and len(segs) == 4 and segs[3] == "media":
             pid = int(segs[2]) if segs[2].isdigit() else -1
             return j(self.container(Metadata=lib.person_media(pid)))
+        if catalog and segs[:2] == ["hubs", "demo"] and len(segs) == 3:
+            hub = next((hub for hub in lib.catalog["hubs"] if hub.get("hubIdentifier") == segs[2] and "recent" in hub), None)
+            if hub:
+                page, extra = paged(lib.recent(hub["recent"], 1000))
+                return j(self.container(Metadata=page, **extra))
         if p == "/hubs" or p == "/hubs/promoted":
             hubs = [{"title": "home.continue", "type": "mixed", "hubIdentifier": "home.continue",
                      "key": "/hubs/continueWatching", "size": 0, "Metadata": []},
@@ -2606,6 +2667,7 @@ def _selftest_plaintext_only_lan():
             raw = socket.create_connection(("127.0.0.1", cfg["fail_port"]), timeout=5)
             try:
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
                 ctx.wrap_socket(raw, server_hostname="127.0.0.1").close()

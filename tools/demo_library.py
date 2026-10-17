@@ -2,27 +2,72 @@
 """The demo library behind the documentation screenshots: fetch its openly licensed artwork, derive
 the images the mock server serves, and write the credits.
 
-    python3 tools/demo_library.py fetch     # download every pinned asset (sha256-checked)
+    python3 tools/demo_library.py fetch     # download every pinned asset (sha256 and pixel size checked)
     python3 tools/demo_library.py derive    # fetch, then build posters/backdrops/stills
     python3 tools/demo_library.py credits   # rewrite docs/screenshots/CREDITS.md and site/credits.html
     python3 tools/demo_library.py site-credits  # rewrite site/credits.html only (make screenshots does)
     python3 tools/demo_library.py check     # validate the two manifests; no network
+    python3 tools/demo_library.py check --complete  # also: every title and episode complete, bar the
+                                            # shrink-only list in tests/demo_library/pending.json
+    python3 tools/demo_library.py hero-report  # per hero-eligible title: where its declared
+                                            # `art.subject` box lands in the 1920x1080 frame, the
+                                            # zones it overlaps and the verdict; no network, no images
+    python3 tools/demo_library.py fixtures  # capture the two fixture titles' detail responses
 
 Two committed manifests drive it:
 
-* `tests/demo_library/assets.json` — every SOURCE file: pinned URL, sha256, byte size, licence,
-  author, attribution. A download whose hash differs is refused, so the artwork cannot drift under
+* `tests/demo_library/assets.json` — every SOURCE file: pinned URL, sha256, byte size, kind,
+  pixel width and height, licence, author, attribution. A download whose hash differs is refused, so the artwork cannot drift under
   the screenshots without the manifest changing in review.
 * `tests/demo_library/catalog.json` — the library itself (titles, credits, synopses, watch state,
   shelves) and, per item, which asset each image is derived from and how (`mode`, `anchor`, `crop`).
 
-Nothing is committed but the manifests: the sources and the derived images live in a cache outside
+Hero art. A title the home hero can show (the pinned hero and alternatives, Continue Watching,
+Recently Added) must have its subject on the RIGHT with logo and text off the centre. Its catalog
+`art` declares `subject: [x0, y0, x1, y1]` in SOURCE pixels, read off the image by a person;
+`check --complete` maps that box into the frame by arithmetic from the recipe (`mode: cover` only,
+`anchor`/`crop`) and the asset's recorded width and height, and fails the title (category
+`hero_art`) when the box is missing, outside the source, cut off by the crop, left of 60% of the
+frame, or over a text zone. The zones are copied in `HERO_PINS`, each pinned to the Rust constant
+it comes from, and `check --complete` re-reads that source so a layout change cannot leave the
+check stale. Titles that fail are listed in `pending.json` under `hero_art`; the list only shrinks,
+and the demo-video workflow (`.github/workflows/site-video.yml`, stage S6 of the plan) is to refuse to
+run while it, or any pending entry, is non-empty. It does not yet: it neither runs `check --complete`
+nor reads `pending.json`, so a render can still start with hero art pending.
+
+Per-title flags in `catalog.json`, all checked by `check`:
+
+* `not_hero: true` — the title can never be the home hero: `hero_eligible` leaves it out, so it needs
+  no `art.subject`, and `check` refuses it where the app's hero pool could take it from: the pinned
+  hero, `hero_alternatives`, or one of the first `HERO_MAX` slots of the pool `hero_pool` rebuilds
+  from the catalog the way `data/src/pms.rs` merges it (a test holds that to what the mock's Home
+  answers). The mock refuses `--hero` on it too. Set it on a title whose backdrop does not look
+  right behind the hero.
+* `not_in_video: true` — the title is never opened in the site video. `site_video.py render
+  --storyboard` records every title page the film opened (the mock's `GET /library/metadata/<ratingKey>`
+  log) beside this list in `render.json`, and the `storyboard/opened` gate fails the render if the two
+  intersect. Focus at rest leaves no request, so the storyboard's positions keep a flagged title out of frame. A title in `logo_none_approved` (its hero and
+  detail page show the text title, not a clear logo) must carry it; the pinned hero and
+  `hero_alternatives` cannot (the video shows the hero pages).
+* `poster.still_as_poster: true` — the poster is a film still, not a poster: allowed only for a title
+  listed in the catalog's `still_poster_approved`, and then the asset may be of kind `still` or
+  `backdrop`.
+
+A clear logo is cut from the title's own poster (`logo-from-poster`: asset kind `poster`), or is the
+film's own official title card or a frame of the film: asset kind `logo-title-card`, which records
+`of` (the title id it belongs to) and `origin` (`official-title-card` or `film-frame`). It is a
+source for that title's logo and for nothing else, and takes the same licences as every other asset.
+
+Nothing is committed but the manifests and the two captured detail fixtures: the sources and the derived images live in a cache outside
 the repository (`$PLXNATIVE_DEMO_CACHE`, default `~/.cache/plxnative-demo`, ~390 MB of sources,
 283 MB of it the complete Sintel the player figure plays), so a fresh clone rebuilds them with one
 command. Derivation is ffmpeg with fixed filters and fixed
-encoder settings, so one ffmpeg build derives byte-identical files every time. The clear logos
-(`logo` in the catalog, see `derive_logo`) are cut from each film's own poster with Pillow, the
-one Python package the screenshots need. An episode marked `stand_in` also gets a STAND-IN video
+encoder settings, so one ffmpeg build derives byte-identical files every time. A derived file's name
+carries a hash of its recipe (`derived_file`), so checkouts that share the cache never overwrite one
+another's artwork. The clear logos
+(`logo` in the catalog, see `derive_logo`) are cut from each film's own poster by a keyed recipe,
+or, for a `logo-title-card` asset, trimmed to the lettering of the film's own title card; both
+are done with Pillow, the one Python package the screenshots need. An episode marked `stand_in` also gets a STAND-IN video
 (`derive_stand_in`): black and silent, the episode's catalog length, so the simulator can play the
 episode (the Up Next figure) without a copy of the work being fetched or shown.
 """
@@ -32,10 +77,13 @@ import html
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -73,6 +121,33 @@ def source_path(aid, asset):
     return cache_dir() / "src" / f"{aid}.{ext}"
 
 
+# Wikimedia rate-limits cloud IPs (a CI runner got HTTP 429 on the 36th request of a cold fetch), asks
+# bots for a descriptive User-Agent and for a polite rate. So: a pause before each wikimedia download,
+# and a bounded retry with backoff (honouring Retry-After) on 429 and 5xx. Never on a sha256 mismatch.
+POLITE_HOSTS = ("upload.wikimedia.org",)
+POLITE_PAUSE = 1.0
+RETRY_AFTER_CAP = 120
+ATTEMPTS = 6
+
+
+def open_url(req, opener=None, sleep=time.sleep):
+    """`opener(req, timeout=120)` (default `urllib.request.urlopen`, looked up per call), retried on
+    429 and 5xx with exponential backoff."""
+    opener = opener or urllib.request.urlopen
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return opener(req, timeout=120)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500 or attempt == ATTEMPTS:
+                raise
+            try:
+                wait = min(int(e.headers.get("Retry-After", "")), RETRY_AFTER_CAP)
+            except (TypeError, ValueError):
+                wait = min(5 * 2 ** (attempt - 1), RETRY_AFTER_CAP)
+            print(f"demo_library: HTTP {e.code} from {req.full_url}; retry {attempt}/{ATTEMPTS - 1} in {wait}s", flush=True)
+            sleep(wait)
+
+
 def fetch(assets, only=None):
     """Download what is missing; verify everything. Returns {asset id: path}."""
     out = {}
@@ -84,10 +159,12 @@ def fetch(assets, only=None):
             dst.parent.mkdir(parents=True, exist_ok=True)
             print(f"demo_library: fetch {aid} ({a['bytes']:,} bytes)", flush=True)
             req = urllib.request.Request(a["url"], headers={"User-Agent": UA})
+            if urllib.parse.urlparse(a["url"]).hostname in POLITE_HOSTS:
+                time.sleep(POLITE_PAUSE)
             with tempfile.NamedTemporaryFile(dir=dst.parent, delete=False) as tmp:
                 pass
             try:  # the partial download never survives: a failed request, a bad hash, a ^C
-                with open(tmp.name, "wb") as f, urllib.request.urlopen(req, timeout=120) as r:
+                with open(tmp.name, "wb") as f, open_url(req) as r:
                     shutil.copyfileobj(r, f)
                 got = sha256(tmp.name)
                 if got != a["sha256"]:
@@ -96,8 +173,27 @@ def fetch(assets, only=None):
             finally:
                 if os.path.exists(tmp.name):
                     os.unlink(tmp.name)
+        got = _dimensions(dst, a)
+        if got != (a["width"], a["height"]):
+            sys.exit(f"demo_library: {aid}: {got[0]}x{got[1]} != pinned {a['width']}x{a['height']} "
+                     f"in assets.json ({dst})")
         out[aid] = dst
     return out
+
+
+def _dimensions(path, asset):
+    """(width, height) of a source: an image through Pillow (which reads the header, not the
+    pixels), the one `media` video through ffprobe, so the manifest's sizes are checked against
+    the files themselves and the hero-art geometry can trust them without opening anything."""
+    if asset.get("kind") == "media":
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=width,height", "-of", "csv=p=0", str(path)],
+                             capture_output=True, text=True, check=True).stdout
+        w, h = out.strip().split(",")
+        return int(w), int(h)
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.size
 
 
 # ------------------------------------------------------------------ derivation ----------------
@@ -116,18 +212,33 @@ def _cover(w, h, anchor):
             f"crop={w}:{h}:{x}:{y}")
 
 
+def recipe_anchor(recipe):
+    """Where a cover crop sits: the recipe's `anchor`, else the one its named `crop` stands for,
+    else the centre. The deriver and the hero-art geometry (`hero_map_box`) both read it here."""
+    return recipe.get("anchor") or {"focus-right": "right", "upper": "upper"}.get(recipe.get("crop", ""), "center")
+
+
+def recipe_stamp(recipe):
+    """The part of an image recipe that decides its pixels. `subject` (the hero-art box a person
+    read off the source) is a declaration about the picture, not a step in making it, so declaring
+    or correcting one never re-derives an image."""
+    return {k: v for k, v in recipe.items() if k != "subject"}
+
+
 def derive_image(src, dst, size, recipe):
     """One image, per its recipe:
 
     * `mode: cover` (default) — fill the frame and crop at `anchor` (`center`/`right`/`left`/`upper`).
     * `mode: extend` — for wide key art: fit the whole picture to the frame's HEIGHT, pin it to
       `anchor`, and fill the rest with a blurred, darkened stretch of itself. This is how a 2.9:1
-      banner becomes a 16:9 backdrop without cropping its subject out of the frame.
+      banner becomes a 16:9 backdrop without cropping its subject out of the frame. Art a hero can
+      show may not use it (the pad boundary is a visible seam in the text zone): `hero_geometry`
+      refuses `extend`, so such a title is `cover` with a declared `art.subject`.
     * `crop: focus-right` / `upper` — a named anchor for a cover crop (poster from a landscape still).
     """
     w, h = size
     mode = recipe.get("mode", "cover")
-    anchor = recipe.get("anchor") or {"focus-right": "right", "upper": "upper"}.get(recipe.get("crop", ""), "center")
+    anchor = recipe_anchor(recipe)
     if mode == "extend":
         x = "W-w" if anchor == "right" else "(W-w)/2"
         graph = (f"[0:v]format=rgb24,split[a][b];"
@@ -214,6 +325,15 @@ def derive_logo(paths, dst, recipe):
         from PIL import Image, ImageChops, ImageFilter
     except ImportError:
         sys.exit("demo_library: the clear logos need Pillow: python3 -m pip install Pillow")
+    if not recipe.get("keys"):
+        # A film's own title card (asset kind `logo-title-card`) is lettering on a transparent ground
+        # already: trim it to its ink and keep every pixel as it was.
+        with Image.open(paths[recipe["asset"]]) as src:
+            if src.mode not in ("RGBA", "LA") and "transparency" not in src.info:
+                sys.exit(f"demo_library: {recipe['asset']} has no transparent ground; cut it with `keys`")
+            card = src.convert("RGBA")
+        card.crop(card.getchannel("A").getbbox()).save(dst, format="PNG", optimize=False)
+        return
     x, y, w, h = recipe["box"]
     n = recipe.get("scale", 1)
     rgb = Image.open(paths[recipe["asset"]]).convert("RGB").crop((x, y, x + w, y + h))
@@ -261,60 +381,126 @@ def derived_dir():
     return cache_dir() / "derived"
 
 
+# Bump when the deriving CODE changes the pixels an unchanged recipe makes (a filter, a quality, the
+# keying maths): it is part of every derived file's name, so the old files are simply not looked at.
+DERIVE_VERSION = 1
+
+DERIVED_EXT = {"logo": "png", "stand-in": "mp4"}
+
+
+def derived_parts(assets, rec, role):
+    """What decides the bytes of one derived file: the source's hash, the frame it is cut to and the
+    recipe less its `subject` (a declaration about the picture, not a step in making it)."""
+    if role in ("poster", "art", "thumb"):
+        recipe = rec[role]
+        size = {"poster": POSTER, "art": ART, "thumb": THUMB}[role]
+        return [assets[recipe["asset"]]["sha256"], list(size), recipe_stamp(recipe)]
+    if role == "logo":
+        return [assets[rec["logo"]["asset"]]["sha256"], rec["logo"]]
+    if role == "stand-in":
+        return [rec["minutes"], STAND_IN]
+    raise KeyError(role)
+
+
+def derived_file(assets, cache, key, rec, role):
+    """The cache path of one derived file, `derived/<item>/<role>-<12 hex>.<ext>`. The name carries a
+    hash of `derived_parts` and `DERIVE_VERSION`, so two checkouts whose catalogs hold different
+    recipes for the same title write DIFFERENT files into the one shared cache instead of
+    overwriting each other's; `derive` and the mock server both resolve a file through here. Files
+    for superseded recipes are left behind (delete the `derived` directory to reclaim them)."""
+    h = hashlib.sha256(json.dumps([DERIVE_VERSION, role, derived_parts(assets, rec, role)],
+                                  sort_keys=True).encode()).hexdigest()[:12]
+    return pathlib.Path(cache) / "derived" / key.replace("/", "_") / f"{role}-{h}.{DERIVED_EXT.get(role, 'jpg')}"
+
+
+def _atomically(dst, make):
+    """Run `make(path)` into a sibling temp file and rename it into place, so an interrupted run
+    never leaves a half-written file under a name the next run would trust."""
+    tmp = dst.with_name(f"{dst.stem}.tmp{dst.suffix}")
+    make(tmp)
+    os.replace(tmp, dst)
+
+
 def derive(assets, catalog):
     paths = fetch(assets)
     out = derived_dir()
     out.mkdir(parents=True, exist_ok=True)
-    report = {}
+    count = 0
     for key, kind, rec in item_keys(catalog):
-        jobs = []
-        if "poster" in rec:
-            jobs.append(("poster", POSTER, rec["poster"]))
-        if "art" in rec:
-            jobs.append(("art", ART, rec["art"]))
-        if "thumb" in rec:
-            jobs.append(("thumb", THUMB, rec["thumb"]))
-        for role, size, recipe in jobs:
-            dst = out / key.replace("/", "_") / f"{role}.jpg"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            stamp = dst.with_suffix(".recipe")
-            want = json.dumps([assets[recipe["asset"]]["sha256"], size, recipe], sort_keys=True)
-            if not dst.exists() or not stamp.exists() or stamp.read_text() != want:
-                derive_image(paths[recipe["asset"]], dst, size, recipe)
-                stamp.write_text(want)
-            report[f"{key}:{role}"] = sha256(dst)
-        if "logo" in rec:
-            recipe = rec["logo"]
-            dst = out / key.replace("/", "_") / "logo.png"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            stamp = dst.with_suffix(".recipe")
-            want = json.dumps([assets[recipe["asset"]]["sha256"], recipe], sort_keys=True)
-            if not dst.exists() or not stamp.exists() or stamp.read_text() != want:
-                derive_logo(paths, dst, recipe)
-                stamp.write_text(want)
-            report[f"{key}:logo"] = sha256(dst)
+        roles = [r for r in ("poster", "art", "thumb", "logo") if r in rec]
         if rec.get("stand_in"):
-            dst = out / key.replace("/", "_") / "stand-in.mp4"
+            roles.append("stand-in")
+        for role in roles:
+            dst = derived_file(assets, cache_dir(), key, rec, role)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            stamp = dst.with_suffix(".recipe")
-            want = json.dumps([rec["minutes"], STAND_IN], sort_keys=True)
-            if not dst.exists() or not stamp.exists() or stamp.read_text() != want:
-                derive_stand_in(dst, rec["minutes"] * 60)
-                stamp.write_text(want)
-            report[f"{key}:stand-in"] = sha256(dst)
-    for m in catalog["movies"]:
-        if "media" in m:
-            report[f"{m['id']}:media"] = assets[m["media"]]["sha256"]
-    (out / "derived.json").write_text(json.dumps(report, indent=1, sort_keys=True))
-    print(f"demo_library: {len(report)} derived files in {out}", flush=True)
+            count += 1
+            if dst.exists():
+                continue
+            if role == "logo":
+                _atomically(dst, lambda t: derive_logo(paths, t, rec["logo"]))
+            elif role == "stand-in":
+                _atomically(dst, lambda t: derive_stand_in(t, rec["minutes"] * 60))
+            else:
+                size = {"poster": POSTER, "art": ART, "thumb": THUMB}[role]
+                _atomically(dst, lambda t: derive_image(paths[rec[role]["asset"]], t, size, rec[role]))
+    print(f"demo_library: {count} derived files in {out}", flush=True)
     return out
 
 
-def media_path(assets, aid):
-    return source_path(aid, assets[aid])
-
-
 # ------------------------------------------------------------------ validation ----------------
+
+# The review-score marks a catalog `ratings` row may name: the ones the app badges
+# (`data/src/metadata.rs`, `RatingArt`) minus what this library never claims. The TMDB mark is
+# refused (its terms forbid this use), Rotten Tomatoes' "certified" is a state only RT itself
+# awards, and Metacritic has no badge in the app.
+RATING_IMAGES = frozenset({
+    "imdb://image.rating",
+    "rottentomatoes://image.rating.ripe", "rottentomatoes://image.rating.rotten",
+    "rottentomatoes://image.rating.upright", "rottentomatoes://image.rating.spilled",
+})
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _cited(key, what, row):
+    """A real value is shown only with where it came from and when it was read."""
+    src = row.get("source")
+    assert isinstance(src, str) and src.startswith("https://"), f"{key}: {what} needs an https `source`"
+    assert DATE.match(str(row.get("retrieved", ""))), f"{key}: {what} needs a `retrieved` date (YYYY-MM-DD)"
+
+
+def check_cited_metadata(key, kind, rec):
+    """The optional metadata the mock serves beyond the basics. Nothing here may be invented: a
+    content rating and every review score carry their source and retrieval date, a tagline is our
+    own text and says so (`demo_values`), and the lists are well formed."""
+    if "contentRating" in rec:
+        row = rec["contentRating"]
+        assert isinstance(row, dict) and row.get("value"), f"{key}: contentRating is {{value, source, retrieved}}"
+        _cited(key, "contentRating", row)
+    for row in rec.get("ratings", []):
+        assert row.get("image") in RATING_IMAGES, \
+            f"{key}: rating image {row.get('image')!r} is not one of {sorted(RATING_IMAGES)}"
+        assert row.get("type") in ("critic", "audience"), f"{key}: rating type"
+        assert isinstance(row.get("value"), (int, float)) and 0 < row["value"] <= 10, \
+            f"{key}: a rating value is on PMS's 0-10 scale"
+        _cited(key, "a rating", row)
+    if "tagline" in rec:
+        assert rec["tagline"] and "tagline" in rec.get("demo_values", []), \
+            f"{key}: a tagline is our own text and is listed in `demo_values`"
+    for field in ("countries", "creators"):
+        if field in rec:
+            assert isinstance(rec[field], list) and rec[field] and all(isinstance(n, str) and n for n in rec[field]), \
+                f"{key}: {field} is a non-empty list of names"
+    assert "creators" not in rec or kind == "show", f"{key}: only a show has creators"
+    # An empty credit list is a claim, so it is cited: `cast_none` / `writers_none` say that the
+    # source was read and credits no performer / writer. They stand in for the list, not beside it.
+    for none, listed in (("cast_none", "cast"), ("writers_none", "writers")):
+        if none in rec:
+            _cited(key, none, rec[none])
+            assert not rec.get(listed), f"{key}: {none} contradicts the {listed} it lists"
+    for src in rec.get("sources", []):
+        _cited(key, "a source", dict(src, source=src.get("url")))
+        assert src.get("fields"), f"{key}: a source names the fields it supplied"
+
 
 def check(assets, catalog):
     """Every referenced asset exists and carries a licence; every asset is referenced; ids unique."""
@@ -327,19 +513,30 @@ def check(assets, catalog):
             if role in rec:
                 aid = rec[role]["asset"]
                 assert aid in assets, f"{key}: {role} asset {aid!r} is not in assets.json"
+                assert assets[aid].get("kind") != "logo-title-card", \
+                    f"{key}: {role} uses a title card, which is a source for a clear logo only"
                 used.add(aid)
+        check_cited_metadata(key, kind, rec)
         if "media" in rec:
             assert rec["media"] in assets, f"{key}: media {rec['media']!r} is not in assets.json"
+            assert assets[rec["media"]].get("kind") == "media", f"{key}: media is an asset of kind media"
             used.add(rec["media"])
         if "stand_in" in rec:
             assert kind == "episode" and rec["stand_in"] is True and "media" not in rec, \
                 f"{key}: stand_in is `true` on an episode without media"
         if "logo" in rec:
-            # A clearLogo is the film's own title art, so it is cut from that film's own poster.
-            assert rec["logo"]["asset"] == rec.get("poster", {}).get("asset"), \
-                f"{key}: a logo is cut from the item's own poster"
-            assert rec["logo"]["keys"], f"{key}: a logo needs at least one key"
-            for k in rec["logo"]["keys"]:
+            # A clearLogo is the film's own title art: cut from that film's own poster, or the
+            # film's own official title card / a frame of it (`logo-title-card`, which names its film).
+            lid = rec["logo"]["asset"]
+            assert lid in assets, f"{key}: logo asset {lid!r} is not in assets.json"
+            used.add(lid)
+            if assets[lid].get("kind") == "logo-title-card":
+                assert assets[lid].get("of") == key, \
+                    f"{key}: a title-card logo is the item's own card (asset {lid!r} is of {assets[lid].get('of')!r})"
+            else:
+                assert lid == rec.get("poster", {}).get("asset"), f"{key}: a logo is cut from the item's own poster"
+                assert rec["logo"]["keys"], f"{key}: a logo needs at least one key"
+            for k in rec["logo"].get("keys", []):
                 for sig in (k["signal"], k.get("grow", {}).get("signal", k["signal"])):
                     assert sig in _SIGNALS, f"{key}: logo key {sig!r}"
                 if "fill" in k:
@@ -349,6 +546,14 @@ def check(assets, catalog):
             assert a.get(field) not in (None, ""), f"asset {aid}: missing {field}"
         assert a["licence"].startswith(("CC BY", "CC0", "Public domain")), f"asset {aid}: licence {a['licence']!r}"
         assert "-SA" not in a["licence"] and "-NC" not in a["licence"] and "-ND" not in a["licence"], aid
+        assert a.get("kind") in ASSET_KINDS, f"asset {aid}: kind {a.get('kind')!r} is not one of {sorted(ASSET_KINDS)}"
+        for field in ("width", "height"):
+            assert type(a.get(field)) is int and a[field] > 0, f"asset {aid}: {field} is a positive pixel count"
+        if a["kind"] == "logo-title-card":
+            assert a.get("of") in seen, f"asset {aid}: a title card names the item it belongs to in `of`"
+            assert a.get("origin") in TITLE_CARD_ORIGINS, \
+                f"asset {aid}: a title card's `origin` is one of {sorted(TITLE_CARD_ORIGINS)}"
+    check_flags(assets, catalog, seen)
     unused = sorted(set(assets) - used)
     assert not unused, f"assets never used: {unused}"
     for ref in [c["item"] for c in catalog["continue_watching"]] + catalog["watched"] + catalog["added_order"] \
@@ -360,6 +565,487 @@ def check(assets, catalog):
         assert sorted(order) == sorted(members), \
             f"collection_order[{name!r}] must list every member exactly once: {sorted(members)}"
     return True
+
+
+# ------------------------------------------------------------------ hero art geometry --------
+
+# The home hero and the detail page both paint a title's derived 1920x1080 backdrop full bleed
+# with text laid over its left; the owner's rule is that the picture's SUBJECT is on the RIGHT and
+# neither logo nor text covers the centre of the composition. A machine cannot see a subject, so a
+# person reads it off the SOURCE image and declares it, `art.subject = [x0, y0, x1, y1]` in source
+# pixels; this module then does the part a machine can: map that box into the frame by arithmetic
+# (cover scale, then the crop at the anchor, from the asset's recorded width and height; no image
+# is opened, so it runs offline on Linux and in `make check`) and require it to be clear of every
+# zone the layout draws text or chrome in. Whether the box really covers the subject stays the
+# owner's eye (the signed contact sheet).
+
+# What a `cover` crop at each named anchor keeps: the share of the horizontal / vertical overflow
+# cut off the left / top. `_cover`'s crop expressions as numbers; any other anchor is the centre.
+COVER_ANCHORS = {"right": (1.0, 0.5), "left": (0.0, 0.5), "upper": (0.5, 0.3)}
+# The subject's centre must be at or right of 60% of the frame (the owner's rule, not a layout fact).
+HERO_CENTRE_MIN_X = 0.60 * ART[0]
+# ffmpeg rounds the scaled picture to whole pixels, so the mapped box is good to about one.
+HERO_FRAME_EPS = 1.0
+
+# The layout numbers the zones come from, each COPIED here and pinned to where it lives in the Rust
+# source: `check_hero_pins` re-reads the source and fails when a copy has drifted, so a layout change
+# cannot leave the check judging a frame that no longer exists. name -> [file, kind, key, value]:
+#   const    `const KEY: T = <expression>;` (the expression may name other pins), value the number
+#   literal  the number captured by the regex KEY (a figure only a test or a comment states)
+#   text     the source text KEY must still contain (a formula the zones rebuild), value None
+# SCR_W / SCR_H come first: later expressions are written in them.
+HERO_PINS = {
+    "SCR_W": ["rust-modules/base/src/surface.rs", "const", "LOGICAL_W", 1920.0],
+    "SCR_H": ["rust-modules/base/src/surface.rs", "const", "LOGICAL_H", 1080.0],
+    "MARGIN_X": ["rust-modules/ui/src/consts.rs", "const", "MARGIN_X", 96.0],
+    "PEEK_Y": ["rust-modules/ui/src/consts.rs", "const", "PEEK_Y", 811.0],
+    "TITLE_DY": ["rust-modules/ui/src/consts.rs", "const", "TITLE_DY", 34.0],
+    "COL_W": ["rust-modules/ui/src/landing_hero.rs", "const", "COL_W", 660.0],
+    "TEXT_BOTTOM": ["rust-modules/ui/src/landing_hero.rs", "const", "TEXT_BOTTOM", 692.0],
+    "SPACE_MD": ["rust-modules/ui/src/theme.rs", "const", "space::MD", 24.0],
+    "CTRL_H": ["rust-modules/ui/src/widgets.rs", "const", "CTRL_H", 60.0],
+    "HERO_SCRIM_W": ["rust-modules/ui/src/widgets.rs", "const", "HERO_SCRIM_W", 1536.0],
+    "HERO_SCRIM_TOP": ["rust-modules/ui/src/widgets.rs", "const", "HERO_SCRIM_TOP", 162.0],
+    "HERO_SCRIM_R_TOP": ["rust-modules/ui/src/widgets.rs", "const", "HERO_SCRIM_R_TOP", 702.0],
+    "HERO_LOGO_TOP_DETAIL": ["rust-modules/ui/src/widgets.rs", "literal", r"y=(\d+) on detail", 298.0],
+    "HERO_LOGO_TOP_HOME": ["rust-modules/ui/src/hero_logo.rs", "literal", r"tall\.y,\s*([0-9.]+),", 260.0],
+    "HERO_TEXT_W": ["rust-modules/ui/src/detail_layout.rs", "const", "HERO_TEXT_W", 943.0],
+    "PEOPLE_W": ["rust-modules/ui/src/detail_layout.rs", "const", "PEOPLE_W", 560.0],
+    "PEOPLE_LEAD": ["rust-modules/ui/src/detail_layout.rs", "const", "PEOPLE_LEAD", 32.0],
+    "PEOPLE_MAX_LINES": ["rust-modules/ui/src/detail_layout.rs", "const", "PEOPLE_MAX_LINES", 4.0],
+    # The formulas the zones rebuild from those numbers:
+    "HOME_ROW_RULE": ["rust-modules/screens/src/home/mod.rs", "text",
+                      "const HERO_ROW_Y: f32 = HERO_TEXT_BOTTOM + theme::space::MD;", None],
+    "HOME_CTRL_RULE": ["rust-modules/screens/src/home/mod.rs", "text",
+                       "const HERO_CTRL_D: f32 = StatusOverlay::CTRL_H;", None],
+    "HOME_SHELF_HEADING_RULE": ["rust-modules/screens/src/home/mod.rs", "text", "row_y - TITLE_DY - lift", None],
+    "HOME_SHELF_PEEK_RULE": ["rust-modules/screens/src/home/mod.rs", "text",
+                             "let top = PEEK_Y + (GRID_TOP_Y - PEEK_Y) * self.snap.pos;", None],
+    "DETAIL_PEOPLE_RULE": ["rust-modules/ui/src/detail_layout.rs", "text",
+                           "Rect::new(SCR_W - MARGIN_X - PEOPLE_W, 700.0, PEOPLE_W, 100.0)", None],
+    "DETAIL_TEXT_RULE": ["rust-modules/ui/src/detail_layout.rs", "text",
+                         "Rect::new(MARGIN_X, TITLE_BOTTOM - 200.0, HERO_TEXT_W, 200.0)", None],
+}
+
+
+# The size of the app's rotating hero pool (`hero_pool`), pinned to the Rust constant the same way.
+# Not a zone number, so it is checked with the pins but feeds no zone.
+HERO_POOL_PINS = {"HERO_MAX": ["rust-modules/data/src/pms.rs", "const", "HERO_MAX", 8.0]}
+
+
+def _rust_expr(expr, names):
+    """The value of a Rust arithmetic expression (numbers, + - * /, names, `a::b::` paths and
+    `as f32` casts) with each name looked up in `names`. Anything else is refused."""
+    import ast
+    src = re.sub(r"\bas\s+f32\b", "", re.sub(r"(?:[A-Za-z_]\w*::)+", "", expr)).strip()
+    try:
+        tree = ast.parse(src, mode="eval")
+    except SyntaxError:
+        raise AssertionError(f"not an arithmetic expression: {expr!r}")
+
+    def ev(node):
+        if isinstance(node, ast.Expression):
+            return ev(node.body)
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return float(node.value)
+        if isinstance(node, ast.Name):
+            assert node.id in names, f"unknown name {node.id!r} in {expr!r}"
+            return float(names[node.id])
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -ev(node.operand)
+        if isinstance(node, ast.BinOp) and type(node.op) in (ast.Add, ast.Sub, ast.Mult, ast.Div):
+            a, b = ev(node.left), ev(node.right)
+            return {ast.Add: a + b, ast.Sub: a - b, ast.Mult: a * b, ast.Div: a / b if b else float("nan")}[type(node.op)]
+        raise AssertionError(f"not an arithmetic expression: {expr!r}")
+    return round(ev(tree), 6)
+
+
+def _rust_pin_value(root, pin, names):
+    """What the Rust source says for one pin: a number, or (for `text`) True when the text is there.
+    Raises AssertionError when the source no longer says it."""
+    file, kind, key = pin[0], pin[1], pin[2]
+    path = root / file
+    assert path.is_file(), f"{file} does not exist"
+    text = path.read_text()
+    if kind == "text":
+        assert key in text, f"{file} no longer contains `{key}`"
+        return True
+    if kind == "literal":
+        found = re.findall(key, text)
+        assert len(found) == 1, f"{file}: /{key}/ matches {len(found)} times, not once"
+        return float(found[0])
+    scope, name = text, key
+    if "::" in key:  # `mod::NAME`: the constant inside `pub mod mod { ... }`
+        mod, name = key.split("::", 1)
+        m = re.search(rf"pub mod {mod}\s*\{{", text)
+        assert m, f"{file} has no `pub mod {mod}`"
+        scope = text[m.end():text.index("\n}", m.end())]
+    found = re.findall(rf"\bconst\s+{re.escape(name)}\s*:\s*\w+\s*=\s*([^;]+);", scope)
+    assert len(found) == 1, f"{file}: `const {name}` is declared {len(found)} times, not once"
+    return _rust_expr(found[0], names)
+
+
+def check_hero_pins(pins=None, root=None):
+    """Re-read every pinned layout number from the Rust source and fail, naming each constant and
+    its file, when a Python copy has drifted or the source no longer says what the zone is built on."""
+    pins = {**HERO_PINS, **HERO_POOL_PINS} if pins is None else pins
+    root = ROOT if root is None else pathlib.Path(root)
+    names, drift = {}, []
+    for name, pin in pins.items():
+        try:
+            got = _rust_pin_value(root, pin, names)
+        except AssertionError as e:
+            drift.append(f"{name}: {e} ({pin[0]})")
+            continue
+        if pin[1] == "text":
+            continue
+        names[name] = got
+        if pin[1] == "const":
+            names[pin[2].split("::")[-1]] = got  # an expression may use the constant's own name
+        if abs(got - pin[3]) > 1e-3:
+            drift.append(f"{name}: {pin[0]} says {got:g}, tools/demo_library.py HERO_PINS says {pin[3]:g}")
+    assert not drift, ("the hero zones no longer match the layout; update HERO_PINS (and re-check the zone "
+                       "list) from the Rust source:\n  " + "\n  ".join(drift))
+
+
+def hero_zones(pins=None):
+    """The rectangles ([x0, y0, x1, y1], frame pixels) hero art must keep its subject out of, built
+    from the pinned layout numbers. `advisory` ones are reported, never gated."""
+    v = {n: p[3] for n, p in (HERO_PINS if pins is None else pins).items()}
+    w, h = v["SCR_W"], v["SCR_H"]
+    text_r = v["MARGIN_X"] + v["HERO_TEXT_W"]
+    people_l = w - v["MARGIN_X"] - v["PEOPLE_W"]
+
+    def zone(name, rect, uses, **extra):
+        return dict(name=name, rect=rect, uses=uses, **extra)
+    return [
+        # Home: the logo (paints up from the band to y 260), title, meta, synopsis and the CTA row
+        # (HERO_ROW_Y = TEXT_BOTTOM + MD, CTRL_H tall), all in the COL_W column from the margin.
+        zone("home text column", [v["MARGIN_X"], v["HERO_LOGO_TOP_HOME"], v["MARGIN_X"] + v["COL_W"],
+                                  v["TEXT_BOTTOM"] + v["SPACE_MD"] + v["CTRL_H"]],
+             ["MARGIN_X", "HERO_LOGO_TOP_HOME", "COL_W", "TEXT_BOTTOM", "SPACE_MD", "CTRL_H"]),
+        # The peek shelf: its heading draws TITLE_DY above the row origin PEEK_Y, its cards below.
+        zone("home shelf row", [0.0, v["PEEK_Y"] - v["TITLE_DY"], w, h], ["PEEK_Y", "TITLE_DY", "SCR_H", "SCR_W"]),
+        # Detail: logo, identity line, synopsis and buttons, to the synopsis' wrap edge. The chain
+        # below the title is measured at run time, so this runs to the foot of the frame.
+        zone("detail text column", [v["MARGIN_X"], v["HERO_LOGO_TOP_DETAIL"], text_r, h],
+             ["MARGIN_X", "HERO_LOGO_TOP_DETAIL", "HERO_TEXT_W", "SCR_H"]),
+        # The facts row runs from there to the people column and sits level with that column's top
+        # line (a 4-line block reaches PEOPLE_MAX_LINES * PEOPLE_LEAD below it).
+        zone("detail facts row", [text_r, v["HERO_SCRIM_R_TOP"], people_l,
+                                  v["HERO_SCRIM_R_TOP"] + v["PEOPLE_MAX_LINES"] * v["PEOPLE_LEAD"]],
+             ["MARGIN_X", "HERO_TEXT_W", "SCR_W", "PEOPLE_W", "HERO_SCRIM_R_TOP", "PEOPLE_MAX_LINES", "PEOPLE_LEAD"]),
+        # The right-aligned Starring block, from where the right wedge starts to the frame's foot.
+        zone("detail starring column", [people_l, v["HERO_SCRIM_R_TOP"], w - v["MARGIN_X"], h],
+             ["SCR_W", "MARGIN_X", "PEOPLE_W", "HERO_SCRIM_R_TOP", "SCR_H"]),
+        # The left wedge's scrim: it darkens, it does not hide, so its share is only printed.
+        zone("hero scrim", [0.0, v["HERO_SCRIM_TOP"], v["HERO_SCRIM_W"], h],
+             ["HERO_SCRIM_TOP", "HERO_SCRIM_W", "SCR_H"], advisory=True),
+    ]
+
+
+def hero_map_box(src_w, src_h, recipe, box, frame=ART):
+    """`box` ([x0, y0, x1, y1] in source pixels) where it lands in the derived frame for a `cover`
+    recipe: scale by max(frame_w / src_w, frame_h / src_h), then crop the overflow at the anchor
+    (`COVER_ANCHORS`). Pure arithmetic on the recorded size; ffmpeg's rounding is within a pixel."""
+    assert recipe.get("mode", "cover") == "cover", "only a cover crop has this mapping"
+    fw, fh = frame
+    s = max(fw / src_w, fh / src_h)
+    fx, fy = COVER_ANCHORS.get(recipe_anchor(recipe), (0.5, 0.5))
+    ox, oy = (src_w * s - fw) * fx, (src_h * s - fh) * fy
+    x0, y0, x1, y1 = box
+    return [x0 * s - ox, y0 * s - oy, x1 * s - ox, y1 * s - oy]
+
+
+def _overlap(a, b):
+    """Area of the intersection of two [x0, y0, x1, y1] rectangles (0 when they only touch)."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return w * h if w > 1e-6 and h > 1e-6 else 0.0
+
+
+def _is_box(subject):
+    return (isinstance(subject, (list, tuple)) and len(subject) == 4
+            and all(type(n) in (int, float) and n >= 0 for n in subject)
+            and subject[2] > subject[0] and subject[3] > subject[1])
+
+
+def hero_geometry(assets, rec):
+    """The hero-art verdict for one title, from its manifests alone. `verdict` is `pass`, `fail` or
+    `skip` (no art: that is a backdrop gap already); `reasons` says why it fails: `extend`/`mode`
+    (not a cover crop), `no-subject`, `bad-subject`, `outside-source`, `outside-frame` (the crop cuts
+    the subject off), `centre-left`, and `overlap:<zone>` per gated zone it touches."""
+    out = {"verdict": "fail", "reasons": [], "box": None, "overlaps": {}, "centre_x": None,
+           "scrim_share": None, "source": None}
+    art = rec.get("art")
+    if not art:
+        return dict(out, verdict="skip", reasons=["no-art"])
+    src = assets[art["asset"]]
+    out["source"] = (src["width"], src["height"])
+    mode = art.get("mode", "cover")
+    if mode != "cover":
+        out["reasons"] = ["extend" if mode == "extend" else "mode"]
+        return out
+    subject = art.get("subject")
+    if subject is None:
+        out["reasons"] = ["no-subject"]
+    elif not _is_box(subject):
+        out["reasons"] = ["bad-subject"]
+    elif subject[2] > src["width"] or subject[3] > src["height"]:
+        out["reasons"] = ["outside-source"]
+    if out["reasons"]:
+        return out
+    box = out["box"] = hero_map_box(src["width"], src["height"], art, subject)
+    fw, fh = ART
+    if box[0] < -HERO_FRAME_EPS or box[1] < -HERO_FRAME_EPS or box[2] > fw + HERO_FRAME_EPS \
+            or box[3] > fh + HERO_FRAME_EPS:
+        out["reasons"] = ["outside-frame"]
+        return out
+    out["centre_x"] = (box[0] + box[2]) / 2
+    if out["centre_x"] < HERO_CENTRE_MIN_X:
+        out["reasons"].append("centre-left")
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    for z in hero_zones():
+        hit = _overlap(box, z["rect"])
+        if z.get("advisory"):
+            out["scrim_share"] = hit / area
+        else:
+            out["overlaps"][z["name"]] = hit
+            if hit:
+                out["reasons"].append(f"overlap:{z['name']}")
+    out["verdict"] = "fail" if out["reasons"] else "pass"
+    return out
+
+
+def hero_eligible(catalog):
+    """The titles the home hero can show, in catalog order: the pinned hero and its alternatives, the
+    Continue Watching deck (an episode stands for its show) and Recently Added. A title taken out
+    of all of them can never be a hero, which is the other way to satisfy the check."""
+    pool = {catalog.get("hero")} | set(catalog.get("hero_alternatives", [])) | set(catalog.get("added_order", []))
+    pool |= {c["item"].split("/")[0] for c in catalog.get("continue_watching", [])}
+    return [t["id"] for t in catalog["movies"] + catalog.get("shows", [])
+            if t["id"] in pool and not t.get("not_hero")]
+
+
+def hero_pool(catalog, hero=None):
+    """The titles the app's rotating hero holds on the mock's Home, in slot order: `merge` in
+    `data/src/pms.rs` takes Continue Watching first (the hero at its head, as `CatalogLibrary` pins
+    it), then Recently Added (newest first), skips an item with no landscape `art`, drops a repeat
+    and stops at `HERO_MAX`. Only a movie qualifies: the mock's episode rows carry `grandparentArt`,
+    which the app does not read, so an episode (Continue Watching's, Recently Added's) has no art
+    and is skipped, and a show is never on a Home shelf. `not_hero` keeps a title out of the pool by
+    its being outside these slots, which `check_flags` enforces and a test holds to the mock's Home."""
+    movies = {m["id"]: m for m in catalog["movies"]}
+    hero = hero or catalog["hero"]
+    deck = [c["item"] for c in catalog.get("continue_watching", [])]
+    if hero not in deck:
+        deck.insert(0, hero)
+    deck.sort(key=lambda ref: ref != hero)  # stable: the hero first, the rest in order
+    pool = []
+    for ref in deck + catalog.get("added_order", []):
+        if ref in movies and "art" in movies[ref] and ref not in pool:
+            pool.append(ref)
+    return pool[:int(HERO_POOL_PINS["HERO_MAX"][3])]
+
+
+def check_flags(assets, catalog, seen):
+    """The per-title flags and approval lists (module docstring): `not_hero`, `not_in_video`,
+    `poster.still_as_poster` + `still_poster_approved`, `logo_none_approved`."""
+    films = {t["id"]: t for t in catalog["movies"] + catalog.get("shows", [])}
+    pinned = [catalog["hero"], *catalog.get("hero_alternatives", [])]
+    pool = hero_pool(catalog)
+    for key, rec in films.items():
+        for flag in ("not_hero", "not_in_video"):
+            assert rec.get(flag, True) is True, f"{key}: {flag} is `true` or absent"
+        if rec.get("not_hero"):
+            where = [name for name, hit in (("the pinned hero", key == catalog["hero"]),
+                                            ("hero_alternatives", key in catalog.get("hero_alternatives", [])),
+                                            ("the hero pool's slots", key in pool)) if hit]
+            assert not where, f"{key}: not_hero, yet it is in {', '.join(where)}"
+        if rec.get("not_in_video"):
+            assert key not in pinned, f"{key}: not_in_video, yet the video shows the pinned hero and its alternatives"
+        poster = rec.get("poster", {})
+        if "still_as_poster" in poster:
+            assert poster["still_as_poster"] is True, f"{key}: still_as_poster is `true` or absent"
+            assert key in catalog.get("still_poster_approved", []), \
+                f"{key}: a still as the poster needs the owner's approval (`still_poster_approved`)"
+            assert assets[poster["asset"]]["kind"] in ("still", "backdrop"), \
+                f"{key}: still_as_poster names a still or a backdrop, not a {assets[poster['asset']]['kind']}"
+    for name in ("still_poster_approved", "logo_none_approved"):
+        for key in catalog.get(name, []):
+            assert key in films, f"{name}: no title {key!r}"
+    for key in catalog.get("still_poster_approved", []):
+        assert films[key].get("poster", {}).get("still_as_poster") is True, \
+            f"{key}: approved for a still as its poster, so the poster says `still_as_poster`"
+    for key in catalog.get("logo_none_approved", []):
+        assert films[key].get("not_in_video") is True, \
+            f"{key}: it has no clear logo (logo_none_approved), so it is never opened in the video: not_in_video"
+
+
+def hero_gap(assets, catalog, rec):
+    """The reasons `rec` fails the hero check; empty when it passes, has no art or is not eligible."""
+    if rec["id"] not in hero_eligible(catalog):
+        return []
+    v = hero_geometry(assets, rec)
+    return v["reasons"] if v["verdict"] == "fail" else []
+
+
+def hero_report(assets, catalog):
+    """Print the zones with the Rust constants they are pinned to, then one line per hero-eligible
+    title: its art recipe, the declared subject, where the box lands, the area it shares with each
+    gated zone, and the verdict."""
+    print("hero zones (frame pixels x0 y0 x1 y1); each number is pinned to the Rust source in HERO_PINS:")
+    for z in hero_zones():
+        tag = " (advisory)" if z.get("advisory") else ""
+        print(f"  {z['name']:<24} {' '.join(f'{n:g}' for n in z['rect'])}{tag}")
+    print("pins (python copy == Rust source, checked by `check --complete`):")
+    for name, (file, kind, key, value) in HERO_PINS.items():
+        print(f"  {name:<24} {'' if value is None else f'{value:g}':<7} {file} {kind} {key}")
+    print(f"the subject's centre must be at x >= {HERO_CENTRE_MIN_X:g}; `extend` art is refused\n")
+    counts = {"pass": 0, "fail": 0, "skip": 0}
+    films = {t["id"]: t for t in catalog["movies"] + catalog.get("shows", [])}
+    for key in hero_eligible(catalog):
+        rec = films[key]
+        v = hero_geometry(assets, rec)
+        counts[v["verdict"]] += 1
+        art = rec.get("art", {})
+        src = "-" if v["source"] is None else "{}x{}".format(*v["source"])
+        recipe = f"{art.get('mode', 'cover')}/{recipe_anchor(art)}" if art else "-"
+        subject = json.dumps(art.get("subject")) if art.get("subject") is not None else "-"
+        box = "-" if v["box"] is None else "[" + ", ".join(f"{n:.0f}" for n in v["box"]) + "]"
+        hits = ", ".join(f"{n} {a:.0f}px2" for n, a in v["overlaps"].items() if a) or "-"
+        scrim = "-" if v["scrim_share"] is None else f"{v['scrim_share']:.0%}"
+        print(f"{key:<26} {src:>10} {recipe:<14} subject {subject} -> {box} overlaps {hits} "
+              f"scrim {scrim} {v['verdict']} {', '.join(v['reasons']) or '-'}")
+    print(f"\nhero art: {counts['pass']} pass, {counts['fail']} fail, {counts['skip']} skip (no art)")
+
+
+# ------------------------------------------------------------------ completeness -------------
+
+# What a source file IS (`kind` in assets.json), which decides the roles it may fill: a title's
+# poster is a `poster`, its backdrop a `backdrop` or a `still`, an episode's thumbnail a `still`.
+# `media` is a film itself, `headshot` a photograph of a person (none yet), `logo-title-card` a
+# film's own official title card or a frame of the film, the source of its clear logo.
+ASSET_KINDS = frozenset({"poster", "backdrop", "still", "headshot", "media", "logo-title-card"})
+# Where a `logo-title-card` comes from: the studio's own title card, or a frame of the film itself.
+TITLE_CARD_ORIGINS = frozenset({"official-title-card", "film-frame"})
+# The licences the demo library accepts, exactly. Share-alike is not among them: it would put the
+# credits page's whole body under the same terms (owner decision pending).
+LICENCES = frozenset({"CC0 1.0", "CC0", "Public domain", "CC BY 3.0", "CC BY 4.0"})
+# The categories a gap is reported (and listed in the pending file) under.
+GAP_CATEGORIES = frozenset({
+    "title", "year", "summary", "genres", "directors", "creators", "tagline", "cast", "writers",
+    "country", "poster", "backdrop", "hero_art", "logo", "still"})
+PENDING = ROOT / "tests" / "demo_library" / "pending.json"
+
+
+def _is_cited(row):
+    return (isinstance(row, dict) and str(row.get("source", "")).startswith("https://")
+            and bool(DATE.match(str(row.get("retrieved", "")))))
+
+
+def _asset_kind(assets, ref):
+    """The kind of the asset a `{"asset": id}` recipe names, or None."""
+    return assets.get(ref.get("asset"), {}).get("kind") if isinstance(ref, dict) else None
+
+
+def _gaps_of(assets, catalog, kind, rec):
+    gaps = set()
+    if not (isinstance(rec.get("title"), str) and rec["title"]):
+        gaps.add("title")
+    if kind == "episode":
+        if not rec.get("summary"):
+            gaps.add("summary")
+        if _asset_kind(assets, rec.get("thumb")) != "still":
+            gaps.add("still")
+        return gaps
+    if not isinstance(rec.get("year"), int):
+        gaps.add("year")
+    if not rec.get("summary"):
+        gaps.add("summary")
+    if not rec.get("genres"):
+        gaps.add("genres")
+    credit = "creators" if kind == "show" else "directors"
+    if not rec.get(credit):
+        gaps.add(credit)
+    if not (rec.get("tagline") and "tagline" in rec.get("demo_values", [])):
+        gaps.add("tagline")
+    if not (rec.get("cast") or _is_cited(rec.get("cast_none"))):
+        gaps.add("cast")
+    # A show's creators are the writers its page shows ("Created by"), so they count as listed.
+    if not (rec.get("writers") or (kind == "show" and rec.get("creators")) or _is_cited(rec.get("writers_none"))):
+        gaps.add("writers")
+    if not rec.get("countries"):
+        gaps.add("country")
+    # A film still may stand in for the poster only where the owner approved it for this title and the
+    # poster says so (`check_flags` ties the two together).
+    poster_kind = _asset_kind(assets, rec.get("poster"))
+    still_ok = (poster_kind in ("still", "backdrop") and rec["poster"].get("still_as_poster") is True
+                and rec["id"] in catalog.get("still_poster_approved", []))
+    if poster_kind != "poster" and not still_ok:
+        gaps.add("poster")
+    if _asset_kind(assets, rec.get("art")) not in ("backdrop", "still"):
+        gaps.add("backdrop")
+    # Art a hero can show must also put its subject on the right, clear of the text (`hero_geometry`).
+    if hero_gap(assets, catalog, rec):
+        gaps.add("hero_art")
+    # A clearLogo is cut from the item's own poster; only an owner-approved title may go without.
+    logo = rec.get("logo")
+    cut_from_poster = (isinstance(logo, dict) and logo.get("asset") == rec.get("poster", {}).get("asset")
+                       and _asset_kind(assets, logo) == "poster")
+    # ...or it is the film's own title card (`check` has already tied its `of` to this title).
+    own_card = (isinstance(logo, dict) and _asset_kind(assets, logo) == "logo-title-card"
+                and assets[logo["asset"]].get("of") == rec["id"])
+    if not (cut_from_poster or own_card or rec["id"] in catalog.get("logo_none_approved", [])):
+        gaps.add("logo")
+    return gaps
+
+
+def complete_gaps(assets, catalog):
+    """{item key: sorted gap categories} for every title and episode that is not yet complete,
+    judged from the manifests alone (no file is opened). The rule is S2 of the demo-library plan;
+    `check_cited_metadata` already refuses a value that is present but uncited."""
+    out = {}
+    for key, kind, rec in item_keys(catalog):
+        gaps = _gaps_of(assets, catalog, kind, rec)
+        if gaps:
+            out[key] = sorted(gaps)
+    return out
+
+
+def check_assets_complete(assets):
+    """Per source file: an accepted licence, and no headshot that carries the Commons
+    personality-rights tag (a person's likeness is not covered by the photograph's licence). A
+    headshot must record its `tags`: an absent list is "not looked at", never "clear"."""
+    for aid, a in sorted(assets.items()):
+        assert a["licence"] in LICENCES, \
+            f"asset {aid}: licence {a['licence']!r} is not one of {sorted(LICENCES)}"
+        if a["kind"] == "headshot":
+            assert isinstance(a.get("tags"), list), f"asset {aid}: a headshot records the file page's `tags`"
+            assert not any("personality" in str(t).lower() for t in a["tags"]), \
+                f"asset {aid}: a headshot with the personality-rights tag is refused"
+
+
+def load_pending():
+    """{item key: sorted gap categories} the committed `pending.json` accepts for now."""
+    return json.loads(PENDING.read_text())["pending"]
+
+
+def check_complete(assets, catalog, pending=None):
+    """The completeness gate. The catalog may hold only what `pending` lists: a gap that is not on
+    the list fails (new content must be complete), and so does a listed gap that no longer exists
+    (the entry is deleted when its content lands, so the list can only shrink). Returns the gaps."""
+    pending = load_pending() if pending is None else pending
+    check_hero_pins()
+    check_assets_complete(assets)
+    gaps = complete_gaps(assets, catalog)
+    new = {k: sorted(set(v) - set(pending.get(k, []))) for k, v in gaps.items()}
+    new = {k: v for k, v in new.items() if v}
+    assert not new, f"incomplete and not pending (fill them in; never add to the pending list): {new}"
+    stale = {k: sorted(set(v) - set(gaps.get(k, []))) for k, v in pending.items()}
+    stale = {k: v for k, v in stale.items() if v}
+    assert not stale, f"pending entries that are complete now (delete them from {PENDING.name}): {stale}"
+    return gaps
 
 
 # ------------------------------------------------------------------ credits -------------------
@@ -374,9 +1060,12 @@ def credits(assets, catalog, dst=CREDITS):
             if aid:
                 where.setdefault(aid, []).append((key, role))
         if "logo" in rec:
-            recoloured = any("fill" in k for k in rec["logo"]["keys"])
-            where.setdefault(rec["logo"]["asset"], []).append((key, "logo-fill" if recoloured else "logo"))
+            recoloured = any("fill" in k for k in rec["logo"].get("keys", []))
+            card = assets[rec["logo"]["asset"]]["kind"] == "logo-title-card"
+            where.setdefault(rec["logo"]["asset"], []).append(
+                (key, "logo-card" if card else "logo-fill" if recoloured else "logo"))
     label = {"poster": "poster", "art": "backdrop", "thumb": "episode still", "media": "video",
+             "logo-card": "clear logo, the film's own title card",
              "logo": "clear logo, derived from this poster",
              "logo-fill": "clear logo, derived from this poster, lettering recoloured"}
     show_of = {}
@@ -395,6 +1084,8 @@ def credits(assets, catalog, dst=CREDITS):
         "logo (the title art over the home hero) is derived from that film's own poster, under the",
         "poster's licence: its title lettering is cut out onto a transparent ground and nothing is",
         "redrawn; where the table says so, lettering too dark to read over a backdrop is recoloured.",
+        "Where the table says a logo is the film's own title card, it is that card (or a frame of the",
+        "film) trimmed to its lettering, under its own licence.",
         "",
         "Written by `make screenshots` with the images; do not edit by hand.",
         "",
@@ -433,6 +1124,8 @@ def _changes(role, recipe):
     """What was done to a source to make the image the app shows, in the credits page's words."""
     if role == "media":
         return "Played in the app as the film itself; not altered."
+    if role == "logo-card":
+        return "The film's own title card, trimmed to its lettering for the clear logo; nothing redrawn."
     if role == "logo":
         text = "Title lettering cut out of the poster onto a transparent ground for the clear logo"
         return text + ("; dark lettering recoloured to read over a backdrop." if any("fill" in k for k in recipe["keys"])
@@ -463,7 +1156,7 @@ def site_works(assets, catalog):
             def use(aid, role, recipe, episode=None):
                 u = uses.setdefault(aid, {"roles": [], "changes": [], "episodes": []})
                 label = {"poster": "Poster", "art": "Backdrop", "thumb": "Episode still", "media": "Video",
-                         "logo": "Clear logo"}[role]
+                         "logo": "Clear logo", "logo-card": "Clear logo"}[role]
                 if label not in u["roles"]:
                     u["roles"].append(label)
                 change = _changes(role, recipe)
@@ -474,7 +1167,8 @@ def site_works(assets, catalog):
 
             for role in ("poster", "art", "thumb", "logo"):
                 if role in rec:
-                    use(rec[role]["asset"], role, rec[role])
+                    card = role == "logo" and assets[rec[role]["asset"]]["kind"] == "logo-title-card"
+                    use(rec[role]["asset"], "logo-card" if card else role, rec[role])
             if "media" in rec:
                 use(rec["media"], "media", None)
             for season in rec.get("seasons", []):
@@ -558,7 +1252,7 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Credits and licences for the openly licensed artwork in the PlxNative screenshots." />
+    <meta name="description" content="Credits and licences for the openly licensed artwork in the PlxNative screenshots and demo video." />
     <title>Artwork credits — PlxNative</title>
     <link rel="canonical" href="https://plxnative.com/credits.html" />
     <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -569,7 +1263,7 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
     <meta property="og:site_name" content="PlxNative" />
     <meta property="og:url" content="https://plxnative.com/credits.html" />
     <meta property="og:title" content="Artwork credits — PlxNative" />
-    <meta property="og:description" content="Credits and licences for the openly licensed artwork in the PlxNative screenshots." />
+    <meta property="og:description" content="Credits and licences for the openly licensed artwork in the PlxNative screenshots and demo video." />
     <meta property="og:image" content="https://plxnative.com/media/og-card.jpg" />
     <meta property="og:image:type" content="image/jpeg" />
     <meta property="og:image:width" content="1200" />
@@ -578,7 +1272,7 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
     <meta property="og:locale" content="en_US" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Artwork credits — PlxNative" />
-    <meta name="twitter:description" content="Credits and licences for the openly licensed artwork in the PlxNative screenshots." />
+    <meta name="twitter:description" content="Credits and licences for the openly licensed artwork in the PlxNative screenshots and demo video." />
     <meta name="twitter:image" content="https://plxnative.com/media/og-card.jpg" />
     <meta name="twitter:image:alt" content="PlxNative home screen on an LG TV, next to the headline: Plex that feels fast on LG TVs." />
     <link rel="stylesheet" href="styles.css" />
@@ -613,12 +1307,12 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
         <section class="credits-intro" aria-labelledby="credits-title">
           <h1 id="credits-title">Artwork credits</h1>
           <p class="lead">
-            The screenshots on this site show PlxNative browsing a demo library made entirely of openly
+            The screenshots and the demo video on this site show PlxNative browsing a demo library made entirely of openly
             licensed and public-domain works: open movies by Blender Studio and others.
           </p>
           <p>
             Each work is listed with its author, licence, source and the changes made. Every picture was
-            scaled and cropped to the app&rsquo;s layout, and the screenshots themselves are cropped and
+            scaled and cropped to the app&rsquo;s layout, and the screenshots and the video are cropped and
             resized for this site. Nothing was redrawn or otherwise altered except where noted.
           </p>
         </section>
@@ -644,10 +1338,34 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
     print(f"demo_library: wrote {dst}")
 
 
+FIXTURES = ROOT / "tests" / "demo_library" / "fixtures"
+FIXTURE_TITLES = {"sintel": 102, "tears-of-steel": 105}  # the two fixture titles, by ratingKey
+
+
+def fixtures(dst=FIXTURES):
+    """Capture the mock's `/library/metadata/<rk>` answer for each fixture title, the detail
+    pages the data crate parses (`metadata_demo_fixture_tests.rs`). Needs the derived artwork."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    import mock_pms
+    pms = mock_pms.MockPms(mock_pms.CatalogLibrary(CATALOG))
+    dst.mkdir(parents=True, exist_ok=True)
+    for slug, rk in FIXTURE_TITLES.items():
+        status, _, body = pms.handle("GET", f"/library/metadata/{rk}")
+        assert status == 200, (slug, status)
+        (dst / f"detail-{rk}.json").write_text(json.dumps(json.loads(body), indent=1, sort_keys=True) + "\n")
+        print(f"demo_library: wrote {dst / f'detail-{rk}.json'}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("command", choices=["fetch", "derive", "credits", "site-credits", "check"])
+    ap.add_argument("command", choices=["fetch", "derive", "credits", "site-credits", "check", "hero-report",
+                                        "fixtures"])
+    ap.add_argument("--complete", action="store_true",
+                    help="with `check`: also require every title and episode to be complete "
+                         "(tests/demo_library/pending.json lists what is not yet)")
     a = ap.parse_args()
+    if a.complete and a.command != "check":
+        ap.error("--complete belongs to `check`")
     assets, catalog = load()
     check(assets, catalog)
     if a.command == "fetch":
@@ -659,8 +1377,21 @@ def main():
         site_credits(assets, catalog)
     elif a.command == "site-credits":
         site_credits(assets, catalog)
+    elif a.command == "fixtures":
+        fixtures()
+    elif a.command == "hero-report":
+        hero_report(assets, catalog)
     else:
         print("demo_library: manifests ok")
+        if a.complete:
+            gaps = check_complete(assets, catalog)
+            counts = {}
+            for fields in gaps.values():
+                for f in fields:
+                    counts[f] = counts.get(f, 0) + 1
+            by = ", ".join(f"{f} {n}" for f, n in sorted(counts.items())) or "none"
+            print(f"demo_library: complete except the pending list: {len(gaps)} of "
+                  f"{len(list(item_keys(catalog)))} items pending ({by})")
 
 
 if __name__ == "__main__":

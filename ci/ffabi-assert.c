@@ -76,6 +76,10 @@ SAME64(offsetof(AVStream, time_base), 32, "OFF_STREAM_TIME_BASE != 20 [host]");
    AVFrame.pts carries below. */
 SAME32(offsetof(AVStream, metadata), 72, "OFF_STREAM_METADATA != 72");
 SAME64(offsetof(AVStream, metadata), 80, "OFF_STREAM_METADATA != 72 [host]");
+SAME32(offsetof(AVStream, disposition), 56, "OFF_STREAM_DISPOSITION != 56");
+SAME64(offsetof(AVStream, disposition), 64, "OFF_STREAM_DISPOSITION != 56 [host]");
+SAME32(offsetof(AVStream, avg_frame_rate), 76, "OFF_STREAM_AVG_FRAME_RATE != 76");
+SAME64(offsetof(AVStream, avg_frame_rate), 88, "OFF_STREAM_AVG_FRAME_RATE != 76 [host]");
 SAME(offsetof(AVDictionaryEntry, key), 0, "AVDictionaryEntry.key moved");
 SAME32(offsetof(AVDictionaryEntry, value), 4, "AVDictionaryEntry.value moved");
 SAME64(offsetof(AVDictionaryEntry, value), 8, "AVDictionaryEntry.value moved [host]");
@@ -297,6 +301,8 @@ SAME64(offsetof(AVBSFContext, time_base_in), 40, "AVBSFContext.time_base_in move
        FF_API_VOXWARE were removed; the n3.3 values are 28 / 174 / 0x15029. --- */
 SAME(AV_CODEC_ID_H264, 27, "AV_CODEC_ID_H264 != 27");
 SAME(AV_CODEC_ID_HEVC, 172, "AV_CODEC_ID_HEVC != 172 (173 on FFmpeg 6 — the enum shifts again)");
+SAME(AV_CODEC_ID_VP9, 166, "AV_CODEC_ID_VP9 != 166");
+SAME(AV_CODEC_ID_AV1, 222, "AV_CODEC_ID_AV1 != 222");
 SAME(AV_CODEC_ID_AAC, 0x15002, "AV_CODEC_ID_AAC moved");
 SAME(AV_CODEC_ID_AC3, 0x15003, "AV_CODEC_ID_AC3 moved");
 SAME(AV_CODEC_ID_EAC3, 0x15028, "AV_CODEC_ID_EAC3 != 0x15028 (0x15029 names ATRAC3P here)");

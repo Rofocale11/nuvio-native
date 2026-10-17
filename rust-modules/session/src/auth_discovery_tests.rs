@@ -589,24 +589,57 @@ fn an_on_time_result_queued_before_the_deadline_survives_coordinator_delay() {
     assert!(matches!(reach, Reach::At(..)));
 }
 
+/// A local answer that lands after the local deadline is ignored while the remote candidate's own
+/// deadline is still live: the remote route wins and is the only one ever activated.
+///
+/// Ordered by events, not by sleeps. The local dial holds on until it has run PAST its deadline (a
+/// lower bound, so an oversleep only makes it later, which is the point); the remote dial holds
+/// until the local job has returned, so the late local outcome is always settled (or already
+/// expired) BEFORE the remote answer exists. The remote deadline and grace are far beyond anything
+/// a scheduler stall can eat, so the remote answer is always on time.
 #[test]
 fn a_late_local_result_is_ignored_while_a_remote_deadline_remains_live() {
+    const LOCAL_DEADLINE: Duration = Duration::from_millis(5);
     let plan = race_plan();
-    let dial: ProbeDial = status_dial(|origin, _, _| {
+    let local_index = plan
+        .candidates
+        .iter()
+        .position(|c| c.location == probe::Location::Local)
+        .expect("the race plan has a local candidate");
+    let (local_returned, remote_may_answer) = std::sync::mpsc::channel::<()>();
+    let remote_may_answer = Mutex::new(remote_may_answer);
+    let dial: ProbeDial = status_dial(move |origin, _, _| {
         if origin.host().starts_with("192-") {
-            std::thread::sleep(Duration::from_millis(25));
+            let began = Instant::now();
+            while began.elapsed() <= LOCAL_DEADLINE {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         } else {
-            std::thread::sleep(Duration::from_millis(35));
+            remote_may_answer
+                .lock()
+                .unwrap()
+                .recv()
+                .expect("the local job reports that it returned");
         }
         (200, identity_json("race-machine"))
     });
+    let spawn = move |index: usize, job: ProbeJob| {
+        let returned = local_returned.clone();
+        std::thread::spawn(move || {
+            job();
+            if index == local_index {
+                let _ = returned.send(());
+            }
+        });
+        true
+    };
     let policy = ProbeDeadlines {
-        local: Duration::from_millis(5),
-        remote: Duration::from_millis(100),
-        grace: Duration::from_millis(100),
+        local: LOCAL_DEADLINE,
+        remote: Duration::from_secs(30),
+        grace: Duration::from_secs(30),
     };
     let mut activated = Vec::new();
-    let reach = probe_server_racing(&plan, dial, &threaded_spawn, policy, &mut |_, c, _| {
+    let reach = probe_server_racing(&plan, dial, &spawn, policy, &mut |_, c, _| {
         activated.push(c.location)
     });
     assert!(matches!(reach, Reach::At(ref c, _) if c.location == probe::Location::Remote));
@@ -2259,7 +2292,7 @@ fn a_refused_token_is_reported_as_authorization_not_as_silence() {
             last, attempts: 3, elapsed: Duration::from_secs(6), trigger: DiscoveryTrigger::Login,
         })).expect("a failure");
         assert_eq!(incident.kind, IncidentKind::Discovery(DiscoveryClass::Silent), "{last:?}");
-        assert!(message.contains("plex.tv"));
+        assert!(message.contains("Nuvio"));
     }
 }
 
@@ -2271,20 +2304,20 @@ fn terminal_discovery_copy_names_the_target_cause_retry_and_action() {
         last, attempts: 3, elapsed: Duration::from_secs(6), trigger: DiscoveryTrigger::Login,
     })).unwrap().0.into_owned();
     assert_eq!(message(failure(Some(6), plx_net::net::RequestError::Transport)),
-        "This TV couldn't find plex.tv, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
+        "This TV couldn't find Nuvio, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
     assert_eq!(message(failure(Some(28), plx_net::net::RequestError::TimedOut)),
-        "This TV couldn't reach plex.tv, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
+        "This TV couldn't reach Nuvio, so your servers weren't checked. We tried 3 times. Check the TV's internet connection, then try again.");
     assert_eq!(message(failure(Some(60), plx_net::net::RequestError::Transport)),
-        "This TV couldn't make a secure connection to plex.tv. Check the TV's date and time, then try again.");
+        "This TV couldn't make a secure connection to Nuvio. Check the TV's date and time, then try again.");
     for evidence in [Ok(200), Ok(408), Ok(429), Ok(503)] {
         assert_eq!(message(evidence),
-            "plex.tv is having trouble right now, so your servers weren't checked. Try again in a few minutes.");
+            "Nuvio is having trouble right now, so your servers weren't checked. Try again in a few minutes.");
     }
     let servers = discovery_failure(&Discovery::ServersUnreachable {
         trigger: DiscoveryTrigger::Rediscover,
     }).unwrap().0;
     assert_eq!(servers,
-        "plex.tv listed your servers, but none of them answered. Make sure your Plex Media Server is on and online, then try again.");
+        "Nuvio listed your servers, but none of them answered. Make sure your Nuvio addons is on and online, then try again.");
 }
 
 #[test]
@@ -2320,7 +2353,7 @@ fn dns_copy_never_claims_that_a_plex_server_was_contacted() {
     let (caption, _) = discovery_failure(&Discovery::PlexTvFailed(PlexTvFailure {
         last, attempts: 3, elapsed: Duration::from_secs(6), trigger: DiscoveryTrigger::Login,
     })).unwrap();
-    assert!(caption.contains("plex.tv"));
+    assert!(caption.contains("Nuvio"));
     assert!(caption.contains("TV's internet connection"));
     assert!(!caption.contains("Plex server"), "{caption}");
 }
@@ -2860,7 +2893,7 @@ fn localized_discovery_retries_use_the_whole_sentence_and_belarusian_count_rules
         for text in [plx_platform::i18n::msg::browse_auth_plex_dns_retry_in(&be, count),
             plx_platform::i18n::msg::browse_auth_plex_connect_retry_in(&be, count)] {
             assert!(text.contains(phrase), "{text}");
-            assert!(text.contains("plex.tv") && text.contains("Праверце злучэнне"), "{text}");
+            assert!(text.contains("Nuvio") && text.contains("Праверце злучэнне"), "{text}");
             assert!(!text.contains("We tried"), "an English sentence fragment must never survive");
         }
     }

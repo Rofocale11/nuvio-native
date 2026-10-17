@@ -87,24 +87,33 @@ impl Collection {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct CollectionView<'a> { current: Option<&'a Collection> }
+pub struct CollectionView<'a> { current: Option<&'a Collection>, revision: u64 }
 
 impl<'a> CollectionView<'a> {
     pub fn current(self) -> Option<&'a Collection> { self.current }
+    /// The content counter: bumped whenever the collection's items, summary, status or `more`
+    /// change (or the collection itself is replaced). A reader derives its per-member state again
+    /// when this moves; the request epoch (`generation`) does not move on paging, and an item
+    /// count or summary length can stay put while the content behind it changes.
+    pub fn revision(self) -> u64 { self.revision }
 }
 
 pub struct CollectionState {
     current: Option<Collection>,
     generation: u32,
+    /// The content counter [`CollectionView::revision`] reads.
+    revision: u64,
     retry_cd: u32,
 }
 
 impl Default for CollectionState {
-    fn default() -> Self { Self { current: None, generation: 0, retry_cd: 0 } }
+    fn default() -> Self { Self { current: None, generation: 0, revision: 0, retry_cd: 0 } }
 }
 
 impl CollectionState {
-    pub fn view(&self) -> CollectionView<'_> { CollectionView { current: self.current.as_ref() } }
+    pub fn view(&self) -> CollectionView<'_> {
+        CollectionView { current: self.current.as_ref(), revision: self.revision }
+    }
 
     fn supersede(&mut self, adapter: &CollectionAdapter) {
         self.generation = self.generation.checked_add(1).expect("collection generation exhausted");
@@ -113,6 +122,12 @@ impl CollectionState {
     }
 
     pub fn run(&mut self, adapter: &Arc<CollectionAdapter>, cmd: crate::stores::collection::CollectionCmd) -> bool {
+        let changed = self.run_cmd(adapter, cmd);
+        self.revision += u64::from(changed);
+        changed
+    }
+
+    fn run_cmd(&mut self, adapter: &Arc<CollectionAdapter>, cmd: crate::stores::collection::CollectionCmd) -> bool {
         use crate::stores::collection::CollectionCmd;
         match cmd {
             CollectionCmd::Open { target } => {
@@ -158,6 +173,7 @@ impl CollectionState {
         let (id, want) = (c.id.clone(), c.want);
         self.supersede(adapter);
         self.current = Some(Collection::loading(id, want, now));
+        self.revision += 1;
         true
     }
 
@@ -165,7 +181,7 @@ impl CollectionState {
         let mut changed = self.refresh_if_client_changed(adapter);
         if self.retry_cd > 0 { self.retry_cd -= 1; }
         let reply = crate::stores::tape::take_store_landing(
-            gate, crate::stores::StoreId::Collection, "collection", 0, &adapter.fetch);
+            gate, crate::stores::StoreId::Collection, "collection", 0, &adapter.fetch, |m| m.gen);
         if let Some(reply) = reply {
             plx_machine::idle::invalidate();
             if reply.gen == self.generation { changed |= self.apply(reply.what); }
@@ -195,12 +211,15 @@ impl CollectionState {
         let Some(c) = self.current.as_ref() else { return };
         let Some(client) = plx_plex::plex::client_for(c.id.sid) else {
             self.retry_cd = RETRY_FRAMES;
-            if c.items.is_empty() { self.current.as_mut().unwrap().status = CollectionStatus::Failed; }
+            if c.items.is_empty() {
+                self.current.as_mut().unwrap().status = CollectionStatus::Failed;
+                self.revision += 1;
+            }
             return;
         };
         let generation = self.generation;
         let sid = c.id.sid;
-        adapter.fetch.claim();
+        adapter.fetch.claim(generation);
         let worker_adapter = Arc::clone(adapter);
         let request = serde_json::json!({"store":"collection","slot":0,"gen":generation,
             "sid":sid.raw(),"client":client.instance_gen(),"job":job});
@@ -212,6 +231,12 @@ impl CollectionState {
     }
 
     fn apply(&mut self, landing: Landing) -> bool {
+        let changed = self.apply_landing(landing);
+        self.revision += u64::from(changed);
+        changed
+    }
+
+    fn apply_landing(&mut self, landing: Landing) -> bool {
         let Some(c) = self.current.as_mut() else { return false };
         match landing {
             Landing::Header { rk, head } => {
@@ -259,6 +284,7 @@ impl CollectionState {
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_for_test(&mut self, items: Vec<PmsMovie>, status: CollectionStatus) {
         let Some(c) = self.current.as_mut() else { return };
+        self.revision += 1;
         c.title = if c.id.name.is_empty() { "Collection".into() } else { c.id.name.clone() };
         c.summary = "A collection summary long enough for screen layout tests.".into();
         c.child_count = items.len();
@@ -272,7 +298,7 @@ impl CollectionState {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn edit_for_test(&mut self, edit: impl FnOnce(&mut Collection)) {
-        if let Some(c) = self.current.as_mut() { edit(c); }
+        if let Some(c) = self.current.as_mut() { edit(c); self.revision += 1; }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -463,6 +489,86 @@ mod tests {
         assert_eq!(member(&row("episode", "/still", "", ""), sid).thumb, "",
             "a landscape still is never cropped into a portrait cell");
         assert_eq!(member(&row("movie", "/poster", "", ""), sid).thumb, "/poster");
+    }
+
+    /// `generation` is the request epoch (paging leaves it); `revision` is the content counter
+    /// (a header and a page both move it, a dropped landing does not).
+    #[test]
+    fn the_revision_follows_content_while_the_generation_follows_requests() {
+        let adapter = Arc::new(CollectionAdapter::default());
+        let mut state = CollectionState::default();
+        state.run(&adapter, CollectionCmd::Open { target: set_target("50001", 7, "Set") });
+        let (generation, opened) = (state.generation(), state.view().revision());
+        adapter.land(generation, Landing::Header { rk: None, head: header("Set", 130) });
+        assert!(state.take_landing_for_test(&adapter));
+        let header_rev = state.view().revision();
+        assert!(header_rev > opened, "a header landing is a content change");
+        let page = (0..PAGE_SIZE).map(|i| PmsMovie { rk: i.to_string(), ..Default::default() }).collect();
+        adapter.land(generation, Landing::Page { start: 0, got: PAGE_SIZE, items: page, total: 130 });
+        assert!(state.take_landing_for_test(&adapter));
+        let paged_rev = state.view().revision();
+        assert!(paged_rev > header_rev, "a page landing is a content change");
+        assert_eq!(state.generation(), generation, "…while paging leaves the request epoch alone");
+        adapter.land(generation, Landing::Page { start: 0, got: 0, items: Vec::new(), total: 130 });
+        assert!(!state.take_landing_for_test(&adapter));
+        assert_eq!(state.view().revision(), paged_rev, "a dropped landing changes nothing");
+    }
+
+    /// DUMP MODE at the Collection site, through the real pump: a request that is out lands on the
+    /// pump that runs, however late the worker posts (25 ms here). A plain take (the conversion
+    /// reverted) returns empty and the first assertion fails. A superseded request is the next test.
+    #[test]
+    fn dump_mode_a_request_out_lands_on_the_pump_that_runs_whatever_the_worker() {
+        let _serial = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let adapter = Arc::new(CollectionAdapter::default());
+        let mut state = CollectionState::default();
+        state.run(&adapter, CollectionCmd::Open { target: set_target("50001", 7, "Set") });
+        let generation = state.generation();
+        adapter.fetch.claim(generation);
+        let gate = plx_machine::landgate::Gate::default();
+        gate.arm_dump(std::time::Duration::from_secs(20));
+        let worker = Arc::clone(&adapter);
+        let join = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            worker.land(generation, Landing::Header { rk: None, head: header("Set", 130) });
+        });
+        assert!(state.pump_with_gate(&adapter, &gate),
+            "the header the pump owed must be taken by the pump that asked");
+        assert!(state.view().current().unwrap().header_ready);
+        assert!(!adapter.fetch.busy(), "the TAKE released the claim");
+        join.join().unwrap();
+    }
+
+    /// A superseded request's stale answer arrives FIRST: it must neither end the dump wait nor
+    /// release the NEW request's claim, so the new answer lands on the pump that was owed it.
+    #[test]
+    fn dump_mode_a_superseded_requests_stale_answer_does_not_release_the_new_claim() {
+        let _serial = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let adapter = Arc::new(CollectionAdapter::default());
+        let mut state = CollectionState::default();
+        state.run(&adapter, CollectionCmd::Open { target: set_target("50001", 7, "Set") });
+        let stale = state.generation();
+        adapter.fetch.claim(stale); // request A is out
+        state.run(&adapter, CollectionCmd::Open { target: set_target("50002", 7, "Other") }); // supersedes A
+        let current = state.generation();
+        assert_ne!(stale, current);
+        adapter.fetch.claim(current); // request B is out
+        let gate = plx_machine::landgate::Gate::default();
+        gate.arm_dump(std::time::Duration::from_secs(20));
+        let worker = Arc::clone(&adapter);
+        let join = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            worker.land(stale, Landing::Header { rk: None, head: header("Set", 130) });
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            worker.land(current, Landing::Header { rk: None, head: header("Other", 7) });
+        });
+        assert!(state.pump_with_gate(&adapter, &gate),
+            "B was out when the pump ran, so B's answer must land on this pump");
+        assert!(state.view().current().unwrap().header_ready);
+        assert!(!adapter.fetch.busy(), "B's own answer released B's claim");
+        join.join().unwrap();
     }
 
     #[test]

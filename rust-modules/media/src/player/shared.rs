@@ -769,6 +769,14 @@ pub struct Shared {
     /// a different failure from a connection that answered 401.
     pub dg_http_status: AtomicI32,
     pub dg_net_rx: AtomicI64,
+    /// WHY the media transfer died, when it was a curl transfer dying mid-body (issue #504): the
+    /// libcurl code (0 = none recorded), the transfer's age in ms (-1 = unknown) and whether the
+    /// reopen that follows a failed read was refused as well. Written by the demux thread beside
+    /// `demux_io_failed` (`ff::frame_read_failed`), read by the handled playback error as a
+    /// class and an age bucket — never as these numbers.
+    pub dg_transport_rc: AtomicI32,
+    pub dg_transport_age_ms: AtomicI64,
+    pub dg_transport_reopen_failed: AtomicBool,
     /// SDL ticks when `loadCompleted` landed, and when `frames` last CHANGED. A photograph has no
     /// time axis: "Load completed, 0 frames" is innocent at 2 s and damning at 4 minutes, and the
     /// panel cannot tell the difference without these. Stamped in the pump, never in `app::diagnostics` —
@@ -806,7 +814,7 @@ pub struct Shared {
     pub dg_fed_v_pts: AtomicI64,
     pub dg_fed_a_pts: AtomicI64,
     /// The codec strings this session actually put in the Starfish Load payload, as small codes
-    /// (0 = none/not built; video 1 = H264, 2 = H265; audio 1 = AC3, 2 = AC3 PLUS, 3 = AAC).
+    /// (0 = none/not built; video 1 = H264, 2 = H265, 3 = AV1, 4 = VP9; audio 1 = AC3, 2 = AC3 PLUS, 3 = AAC).
     ///
     /// Codes rather than strings so they need no lock on the render path — and the PAYLOAD's view
     /// rather than a re-derivation, because the whole class of bug here is the payload disagreeing
@@ -897,6 +905,9 @@ impl Shared {
             dg_cb_err: AtomicI32::new(0),
             dg_cb_err_at: AtomicU32::new(0),
             dg_http_status: AtomicI32::new(0),
+            dg_transport_rc: AtomicI32::new(0),
+            dg_transport_age_ms: AtomicI64::new(-1),
+            dg_transport_reopen_failed: AtomicBool::new(false),
             dg_net_rx: AtomicI64::new(0),
             side_anchor: Mutex::new(None),
             side_subs_owner: AtomicBool::new(false),
@@ -1487,6 +1498,9 @@ impl Shared {
         self.dg_cb_err.store(0, Ordering::Relaxed);
         self.dg_cb_err_at.store(0, Ordering::Relaxed);
         self.dg_http_status.store(0, Ordering::Relaxed);
+        self.dg_transport_rc.store(0, Ordering::Relaxed);
+        self.dg_transport_age_ms.store(-1, Ordering::Relaxed);
+        self.dg_transport_reopen_failed.store(false, Ordering::Relaxed);
         self.dg_net_rx.store(0, Ordering::Relaxed);
         self.dg_load_at.store(0, Ordering::Relaxed);
         self.dg_frame_at.store(0, Ordering::Relaxed);
@@ -2317,6 +2331,49 @@ pub struct Transport {
     pub seek_reqs: AtomicU32,
 }
 
+/// The instant the user-pause clock reads for a transition or a sample. `Instant::now()`, except
+/// that a host test may pin it for its own thread (`pinned_pause_clock`) so a Pause->Resume
+/// cycle can be given an exact length instead of being slept through.
+fn pause_clock_now() -> Instant {
+    #[cfg(test)]
+    if let Some(pinned) = pinned_pause_clock::read() {
+        return pinned;
+    }
+    Instant::now()
+}
+
+/// A per-thread virtual reading for `pause_clock_now`: time moves only when `advance` is called.
+/// Dropping the guard restores the real clock for the thread.
+#[cfg(test)]
+pub(crate) mod pinned_pause_clock {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    thread_local! {
+        static PINNED: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn read() -> Option<Instant> { PINNED.with(Cell::get) }
+
+    pub(crate) struct Pinned;
+
+    impl Pinned {
+        /// Pin this thread's pause clock at the real time now.
+        pub(crate) fn now() -> Self {
+            PINNED.with(|pinned| pinned.set(Some(Instant::now())));
+            Pinned
+        }
+
+        pub(crate) fn advance(&self, by: Duration) {
+            PINNED.with(|pinned| pinned.set(pinned.get().map(|at| at + by)));
+        }
+    }
+
+    impl Drop for Pinned {
+        fn drop(&mut self) { PINNED.with(|pinned| pinned.set(None)); }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct UserPauseClock {
     completed: Duration,
@@ -2400,7 +2457,7 @@ impl Transport {
         // The timestamp belongs to the mutex-order transition. Sampling it before `lock` lets a
         // concurrent clock snapshot linearize first while this transition carries an earlier
         // time, manufacturing paused duration before the transaction's own W0.
-        let now = Instant::now();
+        let now = pause_clock_now();
         match (clock.active_since, paused) {
             (None, true) => {
                 clock.active_since = Some(now);
@@ -2434,7 +2491,7 @@ impl Transport {
 
     pub fn pause_state_sample(&self) -> UserPauseSnapshot {
         let clock = self.pause_clock.lock().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
+        let now = pause_clock_now();
         UserPauseSnapshot {
             now,
             elapsed: clock.elapsed_at(now),
@@ -3309,6 +3366,9 @@ mod tests {
         s.seen_frame.store(true, Ordering::Relaxed);
         s.frames.store(9, Ordering::Relaxed);
         s.demux_io_failed.store(true, Ordering::Relaxed);
+        s.dg_transport_rc.store(56, Ordering::Relaxed);
+        s.dg_transport_age_ms.store(60_000, Ordering::Relaxed);
+        s.dg_transport_reopen_failed.store(true, Ordering::Relaxed);
         s.playback_trace
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -3336,6 +3396,15 @@ mod tests {
         assert!(
             !s.demux_io_failed.load(Ordering::Relaxed),
             "a new session must not inherit an I/O failure"
+        );
+        assert_eq!(
+            (
+                s.dg_transport_rc.load(Ordering::Relaxed),
+                s.dg_transport_age_ms.load(Ordering::Relaxed),
+                s.dg_transport_reopen_failed.load(Ordering::Relaxed),
+            ),
+            (0, -1, false),
+            "nor the cause of the last session's transfer failure"
         );
         assert_eq!(
             s.playback_trace

@@ -3,10 +3,15 @@
 //! server that answers `/decision`, a playing transcode installed on it — are `route`'s own test
 //! seams. This is the one door between them; it is `cfg(test)` only.
 //!
-//! The server holds each live `/decision` for `delay` before answering, so a test has a window in
-//! which the flight's worker is known to be waiting on the network, and it logs every request line
-//! BEFORE it writes the answer, so a client that has been answered can rely on the log. Any other
-//! request but a stop is held for `delay` BEFORE it is logged (see the server loop).
+//! The server logs every request line the moment it arrives, and answers it only when the test
+//! lets it: [`FlightRig::hold_answers`] parks every answer (a `/decision`, the selection PUT, the
+//! `hasMDE=1` probe, any other worker request but an encoder stop) until
+//! [`FlightRig::release_answers`], and [`FlightRig::answered`] counts the answers written. That is
+//! how a test grades "the frame made no PMS round trip": a frame that waited on the server could not
+//! have returned before an answer was written, so `answered()` unchanged at the frame's return is a
+//! causal fact. The request LOG is not a thing to grade at that moment: the flight's worker may
+//! legitimately have sent its request by then. Each answer, once released, still takes `delay`, so a
+//! flight stays in the air long enough for a test to act mid-flight.
 
 use super::test_support::*;
 use super::test_support::apply_plan;
@@ -34,15 +39,16 @@ enum Shape {
 }
 
 pub(crate) struct FlightRig {
-    _serial: plx_base::testlock::Serial,
+    /// `None` only once [`FlightRig::close`] has handed the lock to the test.
+    _serial: Option<plx_base::testlock::Serial>,
     done: std::sync::mpsc::Sender<()>,
     server: Option<std::thread::JoinHandle<()>>,
     log: RequestLog,
     /// How many of the next live `/decision` calls the server refuses.
     refusals: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// While set, the server logs a `/decision` but does not answer it ([`FlightRig::hold_decisions`]).
+    /// While set, the server logs a request but does not answer it ([`FlightRig::hold_answers`]).
     held: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// How many live `/decision` answers the server has written.
+    /// How many answers (to anything but an encoder stop) the server has written.
     answered: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -91,30 +97,34 @@ impl FlightRig {
                     let line = drain_http(&mut socket);
                     let probe = line.contains("/decision?") && line.contains("hasMDE=1");
                     let decision = line.contains("/decision?") && !probe;
-                    // A selection PUT (or any other worker request but a stop) is logged only after
-                    // `delay`, so a frame that returns within it sees an empty log whatever the
-                    // machine's load. A `/decision` is logged at once and HELD instead, which is
-                    // the window a test waits in; a stop is instant housekeeping, never what a
-                    // frame is graded on.
-                    if !probe && !decision && !line.contains("/stop?") {
-                        std::thread::sleep(delay);
-                    }
+                    let stop = line.contains("/stop?");
                     shared.lock().unwrap_or_else(|e| e.into_inner()).push(line.clone());
-                    if probe {
-                        write_json(&mut socket, MDE_DIRECTPLAY);
-                    } else if decision {
+                    // A stop is instant housekeeping a frame is never graded on: it is neither held
+                    // nor counted. Every other request waits here while the test holds answers.
+                    if !stop {
                         let since = std::time::Instant::now();
                         while hold.load(Ordering::SeqCst) && since.elapsed() < HOLD_SAFETY {
                             std::thread::sleep(std::time::Duration::from_millis(2));
                         }
+                    }
+                    if probe {
+                        write_json(&mut socket, MDE_DIRECTPLAY);
+                    } else if decision {
                         std::thread::sleep(delay);
                         let refuse = owed
                             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                             .is_ok();
                         write_json(&mut socket, if refuse { DECISION_REFUSED } else { MDE_TRANSCODE_COPY });
-                        count_answers.fetch_add(1, Ordering::SeqCst);
                     } else {
+                        // The selection PUT and any other worker request take `delay` too, as the
+                        // `/decision` does, so the flight they belong to stays in the air.
+                        if !stop {
+                            std::thread::sleep(delay);
+                        }
                         write_json(&mut socket, EMPTY_MC);
+                    }
+                    if !stop {
+                        count_answers.fetch_add(1, Ordering::SeqCst);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -176,7 +186,7 @@ impl FlightRig {
             ps.cur_auto_original_watched = true;
             ps.cur_src = (28_000, 1_920, 1_080);
         }
-        FlightRig { _serial: serial, done, server: Some(server), log, refusals, held, answered }
+        FlightRig { _serial: Some(serial), done, server: Some(server), log, refusals, held, answered }
     }
 
     /// The rung the Auto bootstrap chose for a source that never opens (what the unopened-source
@@ -255,32 +265,27 @@ impl FlightRig {
         self.refusals.store(n, Ordering::SeqCst);
     }
 
-    /// From now until [`FlightRig::release_decisions`] the server LOGS each live `/decision` but does
-    /// not answer it. A frame that returns while an answer is held cannot have waited for it: that
-    /// is a causal fact, where "returned within N ms" is a statement about the machine's load.
-    pub(crate) fn hold_decisions(&self) {
+    /// From now until [`FlightRig::release_answers`] the server LOGS each request (but an encoder
+    /// stop) and does not answer it. A frame that returns while no answer was written cannot have
+    /// waited for one: that is a causal fact, where "returned within N ms" is a statement about the
+    /// machine's load. Pair it with [`FlightRig::answered`] taken before the frame.
+    pub(crate) fn hold_answers(&self) {
         self.held.store(true, Ordering::SeqCst);
     }
 
-    /// Let the held `/decision` answers go (they are written after `delay` as usual).
-    pub(crate) fn release_decisions(&self) {
+    /// Let the held answers go (each is written after `delay`, as usual).
+    pub(crate) fn release_answers(&self) {
         self.held.store(false, Ordering::SeqCst);
     }
 
-    /// How many live `/decision` answers the server has written.
-    pub(crate) fn answered_decisions(&self) -> usize {
+    /// How many answers (to anything but an encoder stop) the server has written.
+    pub(crate) fn answered(&self) -> usize {
         self.answered.load(Ordering::SeqCst)
     }
 
     /// Every request line the server has seen, in order.
     pub(crate) fn requests(&self) -> Vec<String> {
         self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    /// How many requests other than encoder stops the server has been asked: what a frame is
-    /// graded on, since a stop is queued by an earlier flight's housekeeping on its own worker.
-    pub(crate) fn asked(&self) -> usize {
-        self.requests().iter().filter(|r| !r.contains("/video/:/transcode/universal/stop")).count()
     }
 
     /// How many live `/decision` calls (not the `hasMDE=1` probe) the server has been asked.
@@ -307,21 +312,40 @@ impl FlightRig {
     }
 }
 
-impl Drop for FlightRig {
-    fn drop(&mut self) {
+impl FlightRig {
+    /// Tear the rig down and hand back the crate-wide lock it held, for a test whose own cleanup
+    /// writes process-global route state (`reset_player_control_for_test` advances the route
+    /// generation). That cleanup has to run after the rig's workers and server are gone AND before
+    /// the lock is released: run after a plain `drop(rig)`, it lands inside the next test's flight
+    /// (already past `fresh_registry`, waiting on its `/decision`) and makes that test's worker
+    /// ticket stale, so its `arm_original_trial` returns `None`.
+    #[must_use = "the lock is released when this is dropped; run the test's cleanup first"]
+    pub(crate) fn close(mut self) -> plx_base::testlock::Serial {
+        self.teardown();
+        self._serial.take().expect("the rig holds the lock until it is closed")
+    }
+
+    /// Everything the drop does but release the lock. Once only: [`FlightRig::close`] runs it and
+    /// then no longer holds the lock, so the drop that follows must not touch the globals again.
+    fn teardown(&mut self) {
+        let Some(server) = self.server.take() else { return };
         self.held.store(false, Ordering::SeqCst);
         // The flight's worker (and any encoder stop it queued) finishes against THIS rig's server
         // before the server goes away and the lock is released.
         plx_base::task::drain_workers_for_test();
         let _ = self.done.send(());
-        if let Some(server) = self.server.take() {
-            let _ = server.join();
-        }
+        let _ = server.join();
         plx_plex::plex::reset_servers_for_test();
         // A landing a failed test left in the mailbox belongs to no later test.
         drop(take_claim_landing());
         crate::player::claim_hold::clear();
         // The HLS and Auto-Original shapes set the quality preference; the lock is still held (fields drop after this).
         restore_quality(Quality::Original);
+    }
+}
+
+impl Drop for FlightRig {
+    fn drop(&mut self) {
+        self.teardown();
     }
 }

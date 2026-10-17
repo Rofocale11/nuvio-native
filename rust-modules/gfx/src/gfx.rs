@@ -469,9 +469,10 @@ fn frame_clear_alpha(r: f32, g: f32, b: f32, a: f32) {
     });
 }
 
-/// Block until the GPU has finished all queued commands. Used ONLY as a completion boundary and
-/// coarse wall-clock aid for the draw profiler (`ui::profile`) — it is not a GPU timestamp and it
-/// serializes the pipeline, so never call it on the normal render path.
+/// Block until the GPU has finished all queued commands. Used as a completion boundary by the draw
+/// profiler (`ui::profile`), a coarse wall-clock aid, and by dump mode's GPU wait
+/// (`snapshot_frame_begin`, only while `crate::dump` is armed). It is not a GPU timestamp and it
+/// serializes the pipeline, so never call it on the normal render path of a live loop.
 #[cfg(feature = "devtriggers")]
 pub fn gl_finish() {
     unsafe { glFinish() }
@@ -940,6 +941,7 @@ fn bind_core_profile_vao() {
 
 pub fn init_gl() {
     unsafe {
+        WARM_TARGET = None;
         // Before any buffer or attribute state is touched — in a core profile the calls below are
         // errors without it.
         #[cfg(feature = "hostsim")]
@@ -2190,6 +2192,19 @@ pub fn snapshot_defers(fence: Option<bool>, deferred: u32) -> bool {
     fence == Some(false) && deferred < SNAPSHOT_DEFER_MAX
 }
 
+/// Dump mode's GPU wait. `glFinish` is bound only in a `devtriggers` build (the dump driver's own
+/// build), so a shipping binary has no call to it here at all.
+fn dump_wait_for_gpu() {
+    #[cfg(feature = "devtriggers")]
+    gl_finish();
+}
+
+/// [`snapshot_defers`] under dump mode, which never defers: the GPU was just waited out, so
+/// readiness is a constant instead of an environmental observation.
+pub fn snapshot_defers_in(dump: bool, fence: Option<bool>, deferred: u32) -> bool {
+    !dump && snapshot_defers(fence, deferred)
+}
+
 /// Close a presented frame: a frame that captured the page leaves a fence behind it.
 pub fn snapshot_frame_end() {
     if SNAPSHOT_THIS_FRAME.swap(false, Ordering::Relaxed) {
@@ -2204,10 +2219,16 @@ pub fn snapshot_frame_end() {
 /// answer; controlled replay supplies the recorded one. Native fence retirement still follows
 /// the actual GPU, and the independent physical window gate still governs every swap.
 pub fn snapshot_frame_begin(readiness: impl FnOnce(bool) -> bool) {
+    // DUMP MODE (`crate::dump`): the GPU is waited out BEFORE the sample, so the fence has
+    // signalled and the capture is never pending; GPU speed is not an input to the dump.
+    let dump = crate::dump::armed();
+    if dump {
+        dump_wait_for_gpu();
+    }
     // SAFETY: main render thread.
     let fence = unsafe { (*std::ptr::addr_of!(SNAPSHOT_FENCE)).as_ref().map(|f| f.signaled()) };
     let n = SNAPSHOT_DEFERRED.load(Ordering::Relaxed);
-    let defer = snapshot_defers(fence, n);
+    let defer = snapshot_defers_in(dump, fence, n);
     if defer {
         SNAPSHOT_DEFERRED.store(n + 1, Ordering::Relaxed);
     } else if fence.is_some() {
@@ -2237,15 +2258,68 @@ pub fn snapshot_pending() -> bool {
 /// the row that was actually scrolling, took under 1 ms. That is the hitch a headshot shelf shows
 /// while it rolls, and the "freeze" a cold detail page shows as its backdrop, logo and posters
 /// land one after another. Paying it HERE moves the cost into the pump, whose budget already
-/// bounds uploads per frame, and off the draw, which cannot bound anything. One pixel is enough:
-/// residency is per texture, not per texel. The page's `frame_clear` overwrites the pixel.
+/// bounds uploads per frame, and off the draw, which cannot bound anything.
+///
+/// **The sample lands in a tiny offscreen target ([`WARM_PX`] square), never on framebuffer 0.**
+/// The first draw of a frame into framebuffer 0 is where this driver blocks on the back buffer
+/// (5-9 ms in `poll` on the television, 2026-10-08). A warm drawn there took that wait inside
+/// `prepare`, so the prepare clock read a 7-10 ms "upload" and admitted one poster per frame, and
+/// the page's draw work queued behind the wait instead of overlapping it. Drawn offscreen the
+/// wait stays with the frame's `clear`; the warm costs 0.3-0.4 ms. Residency is per texture, not
+/// per texel, so a draw into any target forces it. The target is built on the first warm and
+/// kept; if it cannot be built the warm is skipped, never redirected to framebuffer 0.
+///
+/// Leaves the default framebuffer bound and the viewport at `surface::viewport()`, exactly as
+/// every other offscreen pass in this file does.
 pub fn warm_tex(tex: c_uint) {
     if tex == 0 {
         return;
     }
     const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-    draw_tex(tex, 0.0, 0.0, 1.0, 1.0, 0.0, WHITE.as_ptr());
+    unsafe {
+        let slot = &mut *std::ptr::addr_of_mut!(WARM_TARGET);
+        let target = *slot.get_or_insert_with(|| fbo_target(WARM_PX, WARM_PX, "warm"));
+        let Some((_, fbo)) = target else { return };
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        // The whole logical screen maps onto the target, so a screen-sized quad fills it and
+        // every texel of it samples `tex`.
+        glViewport(0, 0, WARM_PX, WARM_PX);
+        // `Class::Blur`, like every other offscreen pass: the quad writes a 16x16 target, not the
+        // panel, so the overdraw ledger must not book it as a full-screen `Image` and a
+        // `drawmask` of `image` must not skip it (`overdraw::gate` never books or masks `Blur`).
+        draw_tex_core(
+            Class::Blur,
+            tex,
+            0.0,
+            0.0,
+            SCR_W,
+            SCR_H,
+            UV_FULL,
+            0.0,
+            WHITE.as_ptr(),
+            0.0,
+            NO_RIM.as_ptr(),
+            0.0,
+            0.0,
+            0.0,
+            NO_RIM.as_ptr(),
+            0.0,
+            0.0,
+            None,
+        );
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        glViewport(vx, vy, vw, vh);
+    }
 }
+
+/// Side, in pixels, of the offscreen target [`warm_tex`] draws into.
+const WARM_PX: c_int = 16;
+
+/// [`warm_tex`]'s target: unbuilt (`None`), failed (`Some(None)`, latched so a driver that refuses
+/// it is asked once) or ready (texture, framebuffer). Main render thread only, like every cached
+/// target here; `init_gl` clears it, so a fresh GL context never sees a stale name.
+static mut WARM_TARGET: Option<Option<(c_uint, c_uint)>> = None;
 
 /// Delete a texture created by upload_rgba (0 = no-op). Main-thread only.
 ///
@@ -4499,6 +4573,26 @@ impl ProbeCadence {
     }
 }
 
+/// How a ground sampler answers a call: see [`probe_mode`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProbeMode {
+    /// The product: queue a fenced copy on a cadence, collect it a frame later ([`ProbeCadence`]).
+    Cadenced,
+    /// Dump mode: copy and read inside the call, every call, so the answer is a function of the
+    /// frame being drawn and not of how many loop iterations went by (`crate::dump`).
+    Sync,
+}
+
+/// The mode, as a pure function of the dump switch (the half a host test can reach).
+#[inline(always)]
+pub fn probe_mode(dump_armed: bool) -> ProbeMode {
+    if dump_armed {
+        ProbeMode::Sync
+    } else {
+        ProbeMode::Cadenced
+    }
+}
+
 /// **A ground sampler's asynchronous read-back**: `N` boxes of `px` square, copied side by side
 /// into one `N*px x px` target, fenced, and read once finished. See [`ProbeCadence`] for why.
 ///
@@ -4560,12 +4654,39 @@ impl<const N: usize> GroundProbe<N> {
         self.ready = Some(buf);
     }
 
+    /// Dump mode's answer: build the target if needed, copy the boxes, read them back now.
+    #[cold]
+    unsafe fn read_now(&mut self, origins: &[(c_int, c_int); N], who: &str) -> Option<Vec<u8>> {
+        if self.target.is_none() {
+            self.target = fbo_target(self.px * N as c_int, self.px, who);
+            if self.target.is_none() {
+                self.off = true;
+                return None;
+            }
+        }
+        let (tex, fbo) = self.target?;
+        let px = self.px;
+        glBindTexture(GL_TEXTURE_2D, tex);
+        for (i, &(x, y)) in origins.iter().enumerate() {
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, i as c_int * px, 0, x, y, px, px);
+        }
+        let (w, h) = (px * N as c_int, px);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf.as_mut_ptr() as *mut c_void);
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        Some(buf)
+    }
+
     /// One sampler call. `origins` are the boxes' lower-left corners in framebuffer pixels, already
     /// clamped — used only on a kick. Returns the collected `N*px x px` RGBA row-major buffer on a
     /// collect, `None` otherwise.
     unsafe fn step(&mut self, have: bool, origins: &[(c_int, c_int); N], who: &str) -> Option<Vec<u8>> {
         if self.off {
             return None;
+        }
+        if probe_mode(crate::dump::armed()) == ProbeMode::Sync {
+            return self.read_now(origins, who);
         }
         match self.cadence.step(have, drawn_frames(), self.ready.is_some()) {
             ProbeStep::Keep => None,

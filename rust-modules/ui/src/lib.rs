@@ -22,7 +22,8 @@ use std::os::raw::{c_char, c_int};
 
 pub mod qr;
 pub mod anim;
-pub mod card_row;
+pub(crate) mod card_row;
+pub mod cards; // shared card sections (plan: shared-card-sections): Shelf, Grid, CardSource, and the card conformance suite
 pub mod marquee; // the focused run's looping glide: a tile's title and caption (card_row), cast name and role, menu rows (table)
 pub mod card_motion;
 #[cfg(feature = "devtriggers")]
@@ -48,6 +49,7 @@ pub mod frame; // RESTRUCTURE spike (spec §8.1): `Budget`, admission control fo
 pub mod glassload; // dev-only backdrop-glass LOAD DIAL + the blurred-route-transition prototype
 pub mod hold_hint; // the standing "Hold [OK] for options" capsule: dwell/life schedule, hold-progress cap, fade + rise
 pub mod hit; // RESTRUCTURE (spec §7.6): the double-buffered hit map and the pointer gates
+pub mod placeholder; // placeholder accounting: a per-frame count at every placeholder DRAW + the #FF00FE pixel sentinel (feature `placeholder-sentinel`)
 pub mod hero_logo; // the ONE clearLogo sizing rule + its fallback-to-title band (both heroes, the compact title)
 pub mod landing_hero; // shared landing hero geometry and scrim curve, also read by route/legibility checks
 pub mod icons;
@@ -71,7 +73,7 @@ pub mod page_stack; // the drill-in page stack Tracks and More share
 pub mod panel_motion; // the resize/page-slide spring of the in-player table popovers (Tracks, More)
 pub mod nav; // the page transition's PRESENTATION, published once a frame from the container
 pub mod pill; // THE CAPSULE OUTLINE — three blended arcs per corner, solved; not a stadium
-pub mod poster_grid; // uniform six-column portrait geometry for collection-like pages
+pub(crate) mod poster_grid; // uniform six-column portrait geometry for collection-like pages
 pub mod popover; // shared modal open/appear choreography (track menu / info / chapters / account)
 pub mod press; // tvOS-style click: OK-down dips the focused card, OK-up springs it back + activates
 pub use plx_gfx::gfx::profile; // the draw-phase profiler lives in `gfx` now (module-layers step L5)

@@ -137,6 +137,10 @@ pub struct MetadataAdapter {
     detail_landing: plx_machine::landing::Landing<DetailKey, Option<Detail>>,
     detail_want: std::sync::Mutex<Option<DetailKey>>,
     alt_gen: std::sync::atomic::AtomicU32,
+    /// The alt-sources generation that has been SETTLED: answered and taken, or superseded with no
+    /// replacement request (a roster change, a one-server install, a refused spawn). `alt_gen !=
+    /// alt_done` is "a request is out and owes an answer", the claim dump mode waits on.
+    alt_done: std::sync::atomic::AtomicU32,
     alt_roster_gen: std::sync::atomic::AtomicU32,
     alt_facts_gen: std::sync::atomic::AtomicU32,
     alt_slot: std::sync::Mutex<Option<AltResult>>,
@@ -158,6 +162,7 @@ impl Default for MetadataAdapter {
             detail_landing: plx_machine::landing::Landing::with_inflight(2, 4),
             detail_want: std::sync::Mutex::new(None),
             alt_gen: std::sync::atomic::AtomicU32::new(0),
+            alt_done: std::sync::atomic::AtomicU32::new(0),
             alt_roster_gen: std::sync::atomic::AtomicU32::new(0),
             alt_facts_gen: std::sync::atomic::AtomicU32::new(0),
             alt_slot: std::sync::Mutex::new(None),
@@ -1617,6 +1622,24 @@ pub struct Detail {
     #[serde(default)]
     pub trailer_rk: String,
 }
+impl Detail {
+    /// Choose at presentation time so cached details reflect a changed preference immediately.
+    pub fn shown_ratings(&self) -> &[Rating] {
+        if !self.guid.starts_with("nuvio://") { return &self.ratings; }
+        self.ratings_for_source(plx_plex::plex::nuvio::rating_source())
+    }
+    fn ratings_for_source(&self, source: plx_plex::plex::session::RatingSource) -> &[Rating] {
+        let accepts = |r: &Rating| match source {
+            plx_plex::plex::session::RatingSource::Imdb => r.art == RatingArt::Imdb,
+            plx_plex::plex::session::RatingSource::RottenTomatoes => matches!(r.art, RatingArt::TomatoFresh | RatingArt::TomatoCertified | RatingArt::TomatoRotten),
+        };
+        match self.ratings.iter().position(accepts) {
+            Some(i) => &self.ratings[i..i + 1],
+            None => &[],
+        }
+    }
+}
+
 
 impl Detail {
     /// **Does this item have a FILE of its own?** — the rule behind the *Track information* sheet
@@ -2543,6 +2566,11 @@ pub fn fetch_playing_item(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Pla
         return None;
     }
     let it = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(rk));
+    playing_item_from_metadata(sid, rk, it.as_ref())
+}
+
+/// Interpret the same metadata shape from an authoritative playback decision.
+pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: Option<&plx_plex::plex::Metadata>) -> Option<PlayingItem> {
     // Markers and chapters hang off the ITEM, streams off its first Part — so a part-less response
     // still yields both of those instead of discarding all three. `Client::metadata` already sends
     // `includeChapters=1` (plex/library.rs), so the Chapter[] is on the wire either way: taking it
@@ -3722,7 +3750,17 @@ pub fn pump_detail_with_gate(state: &mut MetadataState, adapter: &std::sync::Arc
                 .into_iter().collect::<Vec<_>>()
         }).into_iter().flat_map(|drain| drain.landed).collect()
     } else {
-        crate::stores::take_landings(gate, crate::stores::StoreId::Metadata, || {
+        // DUMP MODE: the request is owed until a record ADDRESSED TO ITS GENERATION has been taken.
+        // `detail_done` is written below, after the take, so "answered" is read off the batch (an
+        // earlier request's stale record in it does not count). A request nothing awaits
+        // (`want` is `None`, or `detail_done` caught up at a supersede or a refused admission) is
+        // not owed.
+        crate::stores::take_landings_owed(gate, crate::stores::StoreId::Metadata,
+            |batch: &[plx_machine::landing::Landed<DetailKey, Option<Detail>>]| {
+                let gen = adapter.detail_gen.load(Ordering::SeqCst);
+                want.is_some() && gen != 0 && gen != adapter.detail_done.load(Ordering::SeqCst)
+                    && !batch.iter().any(|rec| rec.addr.req.0 == gen)
+            }, || {
             let mut out = Vec::new();
             adapter.detail_landing_ref().take_for(&|_| true, &|key| want.as_ref().is_none_or(|wanted| key == wanted), &mut out);
             out
@@ -4054,17 +4092,22 @@ fn request_alt_sources(
     let roster_gen = plx_plex::plex::server_roster_gen();
     adapter.alt_roster_gen.store(roster_gen, Ordering::SeqCst);
     *adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // A request that never goes out owes no answer: `alt_done` catches up on every early return
+    // (and on a refused spawn below), and only a spawned worker leaves it behind `alt_gen`.
     if guid.is_empty() {
+        adapter.alt_done.store(gen, Ordering::SeqCst);
         return; // nothing portable to match on; the panel stays absent
     }
     let others: Vec<plx_plex::plex::ServerId> = plx_plex::plex::server_ids().collect();
     if others.len() < 2 {
+        adapter.alt_done.store(gen, Ordering::SeqCst);
         return; // a one-server install pays nothing: no worker, no query, no control
     }
     let (rk, guid) = (rk.to_string(), guid.to_string());
     let n = others.len();
     let adapter = std::sync::Arc::clone(adapter);
-    let _ = plx_base::task::spawn_small("altsrc", move || {
+    let refused = std::sync::Arc::clone(&adapter);
+    let spawned = plx_base::task::spawn_small("altsrc", move || {
         let list = catch_unwind(|| resolve_alt_sources(&others, &guid)).unwrap_or_default();
         // The one line that makes this chain debuggable from a device log. A guid is a public
         // metadata id — not an address, a token or a machine. It was filed as "safe to log" on
@@ -4085,6 +4128,9 @@ fn request_alt_sources(
             list,
         });
     });
+    if !spawned {
+        refused.alt_done.store(gen, Ordering::SeqCst);
+    }
 }
 
 /// WORKER. One `find_by_guid` per source, projected into rows. Pure of app state apart from the
@@ -4170,7 +4216,10 @@ fn pump_alt_sources_with_library(
     let mut changed = false;
     let roster_gen = plx_plex::plex::server_roster_gen();
     if adapter.alt_roster_gen.swap(roster_gen, Ordering::SeqCst) != roster_gen {
-        adapter.alt_gen.fetch_add(1, Ordering::SeqCst);
+        // the in-flight answer is now stale and nothing replaces it, so the request is SETTLED
+        // here (`alt_done` caught up), or a dump-mode take would wait for it forever
+        let gen = adapter.alt_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        adapter.alt_done.store(gen, Ordering::SeqCst);
         *adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
         changed |= alt_prune_inactive(state);
     }
@@ -4187,10 +4236,18 @@ fn pump_alt_sources_with_library(
     // the landing GATE (§3.3 step 3): a replay takes this on its recorded frame. The roster and
     // facts re-stamps above are NOT gated — they follow other stores' landings, which are gated
     // where those land.
-    let taken = crate::stores::take_landing(gate, crate::stores::StoreId::Metadata, || {
-        adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    // DUMP MODE: owed while the current generation is unsettled. A superseded request's late
+    // answer is dropped INSIDE the take, so it neither ends the wait nor settles the new request.
+    let taken = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Metadata,
+        || adapter.alt_gen.load(Ordering::SeqCst) != adapter.alt_done.load(Ordering::SeqCst), || {
+        let mut slot = adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.take() {
+            Some(r) if r.gen != adapter.alt_gen.load(Ordering::SeqCst) => None,
+            other => other,
+        }
     });
     let Some(r) = taken else { return changed };
+    adapter.alt_done.store(r.gen, Ordering::SeqCst);
     if r.gen != adapter.alt_gen.load(Ordering::SeqCst) || r.roster_gen != roster_gen {
         return changed; // superseded: the page moved on while this was in flight
     }
@@ -4496,11 +4553,17 @@ pub fn pump_season_with_gate(state: &mut MetadataState, adapter: &MetadataAdapte
     gate: &plx_machine::landgate::Gate) -> bool {
     use std::sync::atomic::Ordering;
     // the landing GATE (§3.3 step 3): a replay takes this on its recorded frame
-    let res = crate::stores::take_landing(gate, crate::stores::StoreId::Metadata, || {
-        adapter.season_result
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+    // DUMP MODE: owed while `season_loading` (a request is out, and `season_done` has not caught
+    // up). A superseded request's late answer is dropped INSIDE the take, so it neither ends the
+    // wait nor settles the new request (`supersede_season` and a refused spawn catch `season_done`
+    // up themselves, so an abandoned request is not owed).
+    let res = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Metadata,
+        || season_loading(adapter), || {
+        let mut slot = adapter.season_result.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.take() {
+            Some(r) if r.gen != adapter.season_gen.load(Ordering::SeqCst) => None,
+            other => other,
+        }
     });
     let Some(r) = res else { return false };
     if r.gen != adapter.season_gen.load(Ordering::SeqCst) {
@@ -5262,9 +5325,35 @@ mod detail_mailbox_tests;
 mod season_mailbox_tests;
 
 #[cfg(test)]
+#[path = "metadata_dump_tests.rs"]
+mod dump_tests;
+
+#[cfg(test)]
 #[path = "metadata_watch_state_tests.rs"]
 mod watch_state_tests;
 
 #[cfg(test)]
 #[path = "metadata_credits_tests.rs"]
 mod credits_tests;
+
+#[cfg(test)]
+#[path = "metadata_demo_fixture_tests.rs"]
+mod demo_fixture_tests;
+
+#[cfg(test)]
+mod nuvio_rating_preference_tests {
+    use super::*;
+    #[test]
+    fn a_cached_detail_can_switch_provider_without_substituting_imdb() {
+        let mut detail = Detail::default();
+        detail.guid = "nuvio://movie/tt1".into();
+        detail.ratings = vec![
+            Rating { art: RatingArt::Imdb, value: 8.1, critic: false },
+            Rating { art: RatingArt::TomatoFresh, value: 9.4, critic: true },
+        ];
+        assert_eq!(detail.ratings_for_source(plx_plex::plex::session::RatingSource::Imdb)[0].art, RatingArt::Imdb);
+        assert_eq!(detail.ratings_for_source(plx_plex::plex::session::RatingSource::RottenTomatoes)[0].value, 9.4);
+        detail.ratings.truncate(1);
+        assert!(detail.ratings_for_source(plx_plex::plex::session::RatingSource::RottenTomatoes).is_empty());
+    }
+}

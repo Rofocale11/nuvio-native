@@ -34,8 +34,8 @@ For each case in manifest.json this driver:
      --no-early to turn it off);
   6. records PASS/FAIL with the failing evidence line.
 
-Two builds can sit on one television -- com.beb.plxnative, the app users install, and
-com.beb.plxnative.debug beside it -- each with its own app directory, its own SAM id and its own
+Two builds can sit on one television -- com.nuvionative.app, the app users install, and
+com.nuvionative.app.debug beside it -- each with its own app directory, its own SAM id and its own
 runtime root (/tmp for stable, /tmp/<app id> for a flavoured install). Every run here drives
 exactly ONE of them: the flavour comes from --flavor, else the overlay's `flavour` key, else the
 Makefile's own default, and every path that follows is ASKED FOR rather than restated
@@ -124,7 +124,7 @@ FIXTURES_ROOT = serve_fixtures_default_root()
 # (The Makefile spells the variable FLAVOR; this repo's prose, the Rust half and the overlay key
 # spell the word flavour. Both spellings are deliberate, so neither side is being quoted wrong.)
 FLAVOUR = None          # "stable" | "debug"
-APPID = None            # com.beb.plxnative[.<flavour>]
+APPID = None            # com.nuvionative.app[.<flavour>]
 RUNDIR = None           # the runtime root: /tmp for stable, /tmp/<app id> for a flavoured install
 EVENTLOG = None         # <RUNDIR>/plxnative-events.log
 RUN_STREAM_MARK = None  # the remote command text — see _run_stream_pids()
@@ -140,7 +140,7 @@ ALL_TRIGGERS = [
     "plxnative-grid", "plxnative-autoplay", "plxnative-h265", "plxnative-playidx", "plxnative-url",
     "plxnative-play", "plxnative-server", "plxnative-ffprobe", "plxnative-token", "plxnative-servers",
     # UI/FPS scenes (both profiler triggers MUST be cleared; either invalidates production pacing)
-    "plxnative-detailosc", "plxnative-homeosc", "plxnative-heroosc", "plxnative-herobench", "plxnative-homefoldosc",
+    "plxnative-detailosc", "plxnative-homeosc", "plxnative-heroosc", "plxnative-herobench", "plxnative-holdbench", "plxnative-homefoldosc",
     "plxnative-info", "plxnative-chapters", "plxnative-profile",
     "plxnative-hwcnt",
     # the track's material and the instruments that override or narrate it. `flattabs` is the one
@@ -1234,7 +1234,7 @@ def apply_triggers(tv, files, extra=None):
 
     The glob is scoped to RUNDIR, which is what keeps the two installs out of each other's way: the
     stable root is /tmp itself, and `/tmp/plxnative-*` cannot match the flavoured root beside it
-    (`/tmp/com.beb.plxnative.debug` — the separator is a DOT for exactly this reason, since a
+    (`/tmp/com.nuvionative.app.debug` — the separator is a DOT for exactly this reason, since a
     directory called `plxnative-debug` would read as an armed trigger to `dev::any_trigger_present`
     and silently suppress the other install's who's-watching picker).
 
@@ -5400,14 +5400,85 @@ def parse_framedrop(lines, route):
     return out
 
 
+# A scene graded only on the poster-upload share needs the detector ARMED (its frame pacing and
+# per-frame upload counters ride the heartbeat only then) but wants no `FRAMEDROP` line at all:
+# a threshold nothing reaches arms the instrument without a log write per slow frame.
+UPLOAD_GATE_THRESHOLD_MS = 1000
+
+
 def frame_ceiling_threshold(scene):
-    """The `plxnative-framedrop` content to arm for this scene, or None when it declares neither
-    ceiling. The detector logs a FRAMEDROP line only ABOVE its threshold, so the threshold is the
-    lower of the two ceilings: everything a gate could fail on is then in the log."""
+    """The `plxnative-framedrop` content to arm for this scene, or None when it declares no frame
+    gate. The detector logs a FRAMEDROP line only ABOVE its threshold, so the threshold is the
+    lower of the two ceilings: everything a gate could fail on is then in the log. A scene that
+    declares only an upload-pacing key arms it at [`UPLOAD_GATE_THRESHOLD_MS`]."""
     cs = [scene[k] for k in ("worst_ceiling_ms", "stall_ceiling_ms") if scene.get(k) is not None]
     if not cs:
-        return None
+        return str(UPLOAD_GATE_THRESHOLD_MS) if (scene.get("upload_late_share_max") is not None
+                                                 or scene.get("upload_per_frame_min") is not None) else None
     return str(int(min(cs)))
+
+
+# ` pupf=<n> pupf_ge22=<k> pup=<u>` — the armed heartbeat's poster-upload tally for that second
+# (`diag::heartbeat::FramePacing::note_uploads`): frames that uploaded posters (mean upload at most
+# `POSTER_UPLOAD_MAX_PX`), those of them whose present-to-present interval was >= 22 ms, and the
+# uploads on them. Absent in a second with none, so a log from an older build or an unarmed run
+# yields no samples and `grade_upload_pacing` fails it rather than passing on zero.
+PUP_RE = re.compile(r"\bloop=\d+ route=(\w+)(?: overlay=(\w+))?.*?\bpupf=(\d+) pupf_ge22=(\d+) pup=(\d+)")
+
+
+def parse_upload_pacing(lines, route, overlay):
+    """`(upload_frames, late_frames, uploads)` summed over the whole run's heartbeats on this route
+    (warmup included: the load bursts are the point)."""
+    reject_simulator(lines)
+    reject_recorder(lines)
+    frames = late = uploads = 0
+    for ln in lines:
+        m = PUP_RE.search(ln)
+        if not m or m.group(1) != route:
+            continue
+        if overlay and (m.group(2) or "none") != overlay:
+            continue
+        frames += int(m.group(3))
+        late += int(m.group(4))
+        uploads += int(m.group(5))
+    return frames, late, uploads
+
+
+def grade_upload_pacing(scene, lines, route, overlay):
+    """The poster-upload gates, over the heartbeat's `pupf=` tally (summed over the whole run).
+
+    `upload_per_frame_min` is the FLOOR that separates the builds: uploads per frame that uploaded
+    (`pup / pupf`). With `warm_tex` drawing to framebuffer 0 the back-buffer wait inside `prepare`
+    stopped a second upload from fitting in the frame, and the ratio was exactly 1.00 in every
+    base run; with the warm offscreen it was 1.41-1.85 in every run (television, 2026-10-09,
+    8 base runs against 22 runs of the fix). `upload_late_share_max` is only a backstop: of the
+    frames that uploaded posters, the share whose interval was >= 22 ms. A single run's share does
+    not separate the builds (fix 0-30 %, base 30-51 %); the fix never exceeded 35 %. Either key
+    arms the grade, and `upload_frames_min` (default 15) upload frames must exist, so a scene that
+    loaded nothing, or a log without `pupf=`, FAILS rather than passing on an empty set.
+    Returns (ok, detail_suffix)."""
+    limit = scene.get("upload_late_share_max")
+    floor = scene.get("upload_per_frame_min")
+    if limit is None and floor is None:
+        return True, ""
+    need = scene.get("upload_frames_min", 15)
+    frames, late, uploads = parse_upload_pacing(lines, route, overlay)
+    if frames < need:
+        return False, (f" | FAIL: {frames} poster-upload frame(s) in the heartbeat (need {need}) — "
+                       f"the scene loaded no posters, or this build/run lacks `pupf=`")
+    share = late / frames
+    per = uploads / frames
+    late_txt = f"{late}/{frames} = {share:.0%}"
+    per_txt = f"{per:.2f} uploads/frame"
+    ok = True
+    if limit is not None:
+        late_txt += f" vs upload_late_share_max {limit:.0%}"
+        ok = ok and share <= limit
+    if floor is not None:
+        per_txt += f" vs upload_per_frame_min {floor:.2f}"
+        ok = ok and per >= floor
+    detail = f" | poster-upload frames >= 22ms: {late_txt}; {per_txt}"
+    return ok, (detail if ok else " | FAIL:" + detail[2:])
 
 
 def grade_frame_ceilings(scene, lines, route, overlay, warmup):
@@ -5451,14 +5522,27 @@ def grade_frame_ceilings(scene, lines, route, overlay, warmup):
 # refreshes on which the panel repeated a picture, counted from present-to-present intervals
 # (`dev::scenarios::bench::HalfStats`). `worst_ms` is the largest Top->Swap, which on this driver
 # includes the frame's own vsync wait, so it is reported but not graded. Each `<half>` is
-# `first:<ms>,worst:<ms>@<i>,iv:<ms>,missed:<k>` — the open (press) and close (back) halves.
+# `first:<ms>,worst:<ms>@<i>,iv:<ms>,missed:<k>[,defer_first:<n>]` — the open (press) and close
+# (back) halves. `iv` is the half's worst present-to-present interval (graded by the optional
+# `bench_iv_max_ms`); `defer_first` counts loop iterations the capture fence held BEFORE the
+# half's first presented frame (input-to-first-frame latency: reported, never in `missed`). A
+# deferral AFTER the first present is inside `iv`/`missed`. Older lines lack `defer_first`.
 BENCH_TAIL = (r"(?: tex=\S+)? first_ms=(?P<first>\d+(?:\.\d+)?) missed=(?P<missed>\d+)"
               r" open=(?P<open>\S+)(?: close=(?P<close>\S+))?")
 BENCH_RE = re.compile(
-    r"^bench: kind=(?P<kind>push|modal|hero) cycle=(?P<cycle>\d+)/(?P<n>\d+) "
+    r"^bench: kind=(?P<kind>push|modal|hero|hold) cycle=(?P<cycle>\d+)/(?P<n>\d+) "
     r"target=(?P<target>[\w-]+) worst_ms=(?P<worst>\d+(?:\.\d+)?) frames=(?P<frames>\d+) "
     r"dur_ms=(?P<dur>\d+) rss_kb=(?P<rss>\d+)(?:" + BENCH_TAIL + r")?")
-BENCH_DONE_RE = re.compile(r"^bench: kind=(?P<kind>push|modal|hero) done cycles=(?P<n>\d+)")
+BENCH_DONE_RE = re.compile(r"^bench: kind=(?P<kind>push|modal|hero|hold) done cycles=(?P<n>\d+)")
+
+
+def _half_field(half, name):
+    """`name:<number>` out of a `<half>` string, or `None` when absent (an older binary) or `half`
+    is `None` (a one-way bench has no close half)."""
+    if not half:
+        return None
+    m = re.search(r"(?:^|,)" + name + r":(\d+(?:\.\d+)?)", half)
+    return float(m.group(1)) if m else None
 
 
 def _bench_tail(m):
@@ -5470,7 +5554,18 @@ def _bench_tail(m):
         "missed": int(missed) if missed is not None else None,
         "open": m.group("open"),
         "close": m.group("close"),
+        **_half_extras(m.group("open"), m.group("close")),
     }
+
+
+def _half_extras(open_half, close_half):
+    """`iv_max_ms` (worst present-to-present interval over both halves) and `defer_first` (summed),
+    each `None` when no half carries it."""
+    def worst(name):
+        v = [x for x in (_half_field(open_half, name), _half_field(close_half, name)) if x is not None]
+        return v
+    iv, df = worst("iv"), worst("defer_first")
+    return {"iv_max_ms": max(iv) if iv else None, "defer_first": int(sum(df)) if df else None}
 
 
 def parse_bench(lines, kind):
@@ -5525,6 +5620,18 @@ def _grade_missed(samples, scene, unit):
             for c in worst)
         detail += f" | most missed: {named}"
     ok = total <= ceiling
+    deferred = [c["defer_first"] for c in samples if c.get("defer_first") is not None]
+    if deferred:
+        detail += f" | defer_first={sum(deferred)} (latency, not missed)"
+    iv_ceiling = scene.get("bench_iv_max_ms")
+    if iv_ceiling is not None:
+        ivs = [c["iv_max_ms"] for c in samples if c.get("iv_max_ms") is not None]
+        if not ivs:
+            return False, (f" | FAIL: bench_iv_max_ms is set but no {unit} line carries an `iv:` "
+                           f"interval")
+        worst_iv = max(ivs)
+        detail += f" | worst present interval={worst_iv:.1f}ms vs bench_iv_max_ms {iv_ceiling}"
+        ok = ok and worst_iv <= iv_ceiling
     if not ok:
         detail = " | FAIL:" + detail[2:]
     return ok, detail
@@ -5570,6 +5677,16 @@ def grade_bench(scene, lines):
     if not done:
         ok = False
         detail += " | FAIL: no `done` line — not every cycle completed"
+
+    if kind == "hold":
+        # A `hold` cycle that pressed nothing or opened no menu graded an idle or wrong window: the
+        # dev trigger names it in `target=` (`<host>-nocard`, `<host>-nomenu`), see
+        # `dev::scenarios::hold_bench_tick`. Fail it rather than count its quiet frames as clean.
+        bad = [c for c in cycles if c["target"].endswith(("-nocard", "-nomenu"))]
+        if bad:
+            ok = False
+            detail += (f" | FAIL: {len(bad)} cycle(s) did not exercise the animation "
+                       f"(first: cycle={bad[0]['cycle']} target={bad[0]['target']})")
 
     missed_ok, missed_detail = _grade_missed(cycles, scene, "cycle")
     ok = ok and missed_ok
@@ -6012,6 +6129,10 @@ def run_fps_scene(scene, cfg, token, *, extra_triggers=(), capture=None,
     ok = ok and ok_o
     detail += detail_o
 
+    ok_u, detail_u = grade_upload_pacing(scene, lines, route, overlay)
+    ok = ok and ok_u
+    detail += detail_u
+
     ok_p, detail_p = grade_poster_gate(scene, lines)
     ok = ok and ok_p
     detail += detail_p
@@ -6047,8 +6168,10 @@ def grade_walk_prelude(scene, lines, walker):
                 f"{unit}s landed than min_landed (a short or failed fetch, or the data layer "
                 f"dropped {unit}s)"), lines, ""
     # Home: one Down per landed row. Library: one per shelf, a second for each linked shelf, and
-    # `extra_rows` more past the shelves (`mock_fps.walk_downs`), all capped at `max_rows`.
-    want = 2 * min(mock_fps.walk_downs(scene, rows), int(walk["max_rows"])) if rows else 0
+    # `extra_rows` more past the shelves (`mock_fps.walk_downs`), all capped at `max_rows`, then
+    # the Up leg; a row walk (`walk.cards`) is its fixed plan and a burst walk (`walk.burst`) adds
+    # its bursts instead (`mock_fps.walk_steps`).
+    want = mock_fps.walk_expected_keys(scene, rows)
     if walker.sent < want or want == 0:
         return (f"the key walk sent {walker.sent} of {want} key(s) ({rows} {unit}(s) landed); it "
                 f"never ran to completion — raise run_secs or look at the log"), lines, ""
@@ -6077,6 +6200,18 @@ def grade_walk_prelude(scene, lines, walker):
     keys_seen = sum(1 for ln in window if mock_fps.KEY_RE.search(ln))
     detail = mock_fps.describe_walk(final if final else rows, keys_seen, stats,
                                     mock_fps.landed_lands(scene, lines), unit)
+    if mock_fps.is_row_walk(walk):
+        # The row walk exists to measure frames while pages land under moving focus: a run that
+        # never paged measured nothing, so it fails rather than printing a clean number.
+        forward_keys = int(walk.get("row_down", 0)) + int(walk["cards"])
+        paging_fail, paging_detail = mock_fps.describe_paging(
+            window, forward_keys, int(walk.get("min_page_landings", 6)))
+        if paging_fail:
+            return paging_fail, lines, ""
+        detail += paging_detail
+    if mock_fps.is_burst(scene):
+        prelude = min(mock_fps.walk_downs(scene, rows), int(walk["max_rows"]))
+        detail += mock_fps.describe_burst(window, scene["route"], walk, prelude)
     return None, window, detail
 
 
@@ -6696,6 +6831,8 @@ def main():
         # Which scenes THIS server can serve: under --mock only the ones that declare a `mock`
         # block, and without it never a `mock.only` scene. Before anything reads a token.
         selected, mock_skipped = mock_fps.partition_mock(selected, args.mock)
+        if args.mock:
+            selected = [mock_fps.mock_scene(s) for s in selected]
         fps_skipped = list(fps_skipped) + mock_skipped
         scenes, _skipped = setup_shared(manifest, cfg, args, selected, "scene")
         # Bail BEFORE read_token() and arm_teardown(): arming commits to driving the television,

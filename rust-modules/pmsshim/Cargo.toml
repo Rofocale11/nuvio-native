@@ -1,0 +1,29 @@
+[package]
+name = "plx_pmsshim"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "NuvioNative PMS shim: an in-process, loopback-only HTTP server that answers the Plex Media Server dialect the PlxNative front end speaks, backed by Stremio addons (plx_stremio)."
+publish = false
+
+[lib]
+name = "plx_pmsshim"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "pmsshim-serve"
+path = "src/bin/serve.rs"
+
+[dependencies]
+plx_net = { path = "../net" }
+plx_stremio = { path = "../stremio" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
+# gunzip of addon subtitle downloads (already in the tree through `image`'s png decoder).
+flate2 = "1"
+# The Nuvio sign-in QR the shim serves in place of plex.tv's (both already in the tree via `ui`/`image`).
+qrcodegen = "=1.8.0"
+png = "0.18"
+
+[lints]
+workspace = true

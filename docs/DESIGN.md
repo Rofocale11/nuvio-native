@@ -105,7 +105,7 @@ Improve a component before forking one. If a shared widget almost fits, add a bu
 style variant. A genuinely new widget still lands in `ui/` as a reusable `View` so the next screen
 gets it free.
 
-Card rows come from `ui::card_row` with a named `RowStyle`:
+Card rows come from `plx_ui::cards::Shelf` with a named `RowStyle`:
 
 - `HOME` for poster shelves, and the single source of shelf motion
 - `EPISODE` 420x236, gap 28, `focus_scale` 1.09, the 16:9 landscape still
@@ -124,8 +124,8 @@ file would then have to keep in step.
 Surfaces over a page stand on the page's own latched light: `widgets::panel_ground` draws the
 underlay field the modal dim latched, windowed to the panel's rect and graded toward the panel
 material under its frost. Backdrop-blur glass (`Glass::DYNAMIC_BACKDROP`) is chrome-only — the top
-bar's track and the profile chip — plus the one non-interactive standing note, the Home "Hold OK for options"
-capsule (`ui::hold_hint`). See `docs/liquid-glass.md`.
+bar's track and the profile chip — plus the one non-interactive standing note, the "Hold OK for options"
+capsule (`ui::hold_hint`: standing on Home, and once per screen kind per run on the other card screens). See `docs/liquid-glass.md`.
 
 ## Navigation says where BACK goes, once
 

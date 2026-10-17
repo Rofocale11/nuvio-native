@@ -128,7 +128,7 @@
     "description": "browse detail cast"
   },
   "browse.detail.also_available": {
-    "value": "Also available",
+    "value": "Streams",
     "description": "browse detail also_available"
   },
   "browse.detail.mark_watched": {
@@ -328,7 +328,7 @@
     "description": "browse login slow"
   },
   "browse.login.title": {
-    "value": "Sign in to Plex",
+    "value": "Sign in to Nuvio",
     "description": "browse login title"
   },
   "browse.login.instructions": {
@@ -388,7 +388,7 @@
     "description": "browse login finding"
   },
   "browse.login.connecting": {
-    "value": "Connecting to Plex…",
+    "value": "Connecting to Nuvio…",
     "description": "browse login connecting"
   },
   "browse.person.eyebrow": {
@@ -678,26 +678,26 @@
     "description": "browse auth timeout"
   },
   "browse.auth.no_servers": {
-    "value": "This Plex account has no server yet.",
+    "value": "This Nuvio account has no server yet.",
     "description": "browse auth no_servers"
   },
   "browse.auth.no_servers_signed_in_as": {
-    "value": "Signed in as {account}.\nThis Plex account has no server yet.",
+    "value": "Signed in as {account}.\nThis Nuvio account has no server yet.",
     "args": {
       "account": "str"
     },
     "description": "Sign-in read-out reason when the account has no server: two sentences on two lines (the line break is deliberate and the read-out honours it); {account} is the signed-in account's name, shortened to fit the first line. Without a name the plain no_servers reason is used."
   },
   "browse.auth.refused": {
-    "value": "Your Plex server refused the connection — check its network access settings.",
+    "value": "Your addon service refused the connection — check its network access settings.",
     "description": "browse auth refused"
   },
   "browse.auth.unreachable": {
-    "value": "Couldn't reach any Plex server — check the connection.",
+    "value": "Couldn't reach any addon service — check the connection.",
     "description": "browse auth unreachable"
   },
   "browse.auth.plex_unreachable": {
-    "value": "Couldn’t reach Plex. Check your internet connection. An internet connection is needed to sign in.",
+    "value": "Couldn’t reach Nuvio. Check your internet connection. An internet connection is needed to sign in.",
     "description": "browse auth plex_unreachable"
   },
   "browse.auth.switch_failed": {
@@ -709,7 +709,7 @@
     "description": "browse auth offline_profile"
   },
   "browse.auth.insecure": {
-    "value": "Found your Plex server, but couldn't connect to it securely (HTTPS). Check that your server allows secure connections, then try again.",
+    "value": "Found your addons, but couldn’t connect securely over HTTPS. Check your connection.",
     "description": "browse auth insecure"
   },
   "browse.auth.no_access": {
@@ -727,7 +727,7 @@
     "description": "Reason line on Who's watching when the profile was picked and every server that was reached refused it (HTTP 401): this profile genuinely has no grant on the server. Only for that case: a server that did not answer uses servers_unreachable and a certificate this TV does not trust uses tls_untrusted, so do not word this as a connection problem. {profile} is the profile's name. The picker draws it as one centred line."
   },
   "browse.auth.tls_untrusted": {
-    "value": "This TV doesn't trust your server's security certificate. Update PlxNative and try again.",
+    "value": "This TV doesn't trust your server's security certificate. Update Nuvio Native and try again.",
     "description": "Reason line on Who's watching or the sign-in read-out when the server answered over HTTPS but its certificate chain could not be verified against this television's trusted certificate authorities (X509 verify result 2, 18, 19, 20 or 21); it is NOT the wrong-clock case, which has its own line. The sentence names the remedy that exists in the app: results 2, 20 and 21 on a plex.direct name mean an out-of-date certificate store, which an update answers with newer bundled public roots; 18 and 19 mean the server presented its own root, which only the server's owner can fix. No placeholders. Sits in a two-line reason slot on the sign-in read-out and one centred line on the picker; keep the whole sentence at 125 characters or fewer."
   },
   "browse.kind.episodes": {
@@ -1486,27 +1486,27 @@
     }
   },
   "browse.auth.discovery_trouble": {
-    "value": "Plex isn't responding. Still trying…",
+    "value": "Nuvio isn't responding. Still trying…",
     "description": "browse auth discovery_trouble"
   },
   "browse.auth.signin_refused": {
-    "value": "Plex didn't accept this sign-in. Try again.",
+    "value": "Nuvio didn't accept this sign-in. Try again.",
     "description": "browse auth signin_refused"
   },
   "browse.auth.servers_unreachable": {
-    "value": "plex.tv listed your servers, but none of them answered. Make sure your Plex Media Server is on and online, then try again.",
+    "value": "Nuvio listed your servers, but none of them answered. Make sure your Nuvio addons is on and online, then try again.",
     "description": "Reason line when plex.tv listed the account's servers and none of them answered: on the sign-in read-out (no server reachable after sign-in), and on Who's watching when a picked profile found no server answering (and none refused it or presented a certificate this TV does not trust: those have no_source_access and tls_untrusted). Two-line read-out slot, and one centred line on the picker, so keep the whole sentence at 125 characters or fewer."
   },
   "browse.auth.plex_tls": {
-    "value": "This TV couldn't make a secure connection to plex.tv. Check the TV's date and time, then try again.",
+    "value": "This TV couldn't make a secure connection to Nuvio. Check the TV's date and time, then try again.",
     "description": "browse auth plex_tls"
   },
   "browse.auth.plex_unavailable": {
-    "value": "plex.tv is having trouble right now, so your servers weren't checked. Try again in a few minutes.",
+    "value": "Nuvio is having trouble right now, so your servers weren't checked. Try again in a few minutes.",
     "description": "browse auth plex_unavailable"
   },
   "browse.auth.profile_signin_refused": {
-    "value": "plex.tv refused {profile}’s sign-in. Try again.",
+    "value": "Nuvio refused {profile}’s sign-in. Try again.",
     "description": "browse auth profile_signin_refused",
     "args": {
       "profile": "str"
@@ -1526,8 +1526,8 @@
   },
   "browse.auth.plex_dns_retry": {
     "value": {
-      "one": "This TV couldn't find plex.tv, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
-      "other": "This TV couldn't find plex.tv, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
+      "one": "This TV couldn't find Nuvio, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
+      "other": "This TV couldn't find Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
     },
     "description": "Discovery failed after this many attempts; complete retry explanation and remedy",
     "args": {
@@ -1536,8 +1536,8 @@
   },
   "browse.auth.plex_connect_retry": {
     "value": {
-      "one": "This TV couldn't reach plex.tv, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
-      "other": "This TV couldn't reach plex.tv, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
+      "one": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
+      "other": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
     },
     "description": "Discovery failed after this many attempts; complete retry explanation and remedy",
     "args": {
@@ -1545,27 +1545,27 @@
     }
   },
   "browse.auth.plaintext_offer": {
-    "value": "Your Plex server is on this network but can’t be reached securely. Select Connect to connect without encryption.",
+    "value": "Your addons is on this network but can’t be reached securely. Select Connect to connect without encryption.",
     "description": "browse auth plaintext_offer"
   },
   "browse.auth.plaintext_allowed": {
-    "value": "Your Plex server is on this network but can’t be reached securely. Select Try again to connect without encryption.",
+    "value": "Your addons is on this network but can’t be reached securely. Select Try again to connect without encryption.",
     "description": "browse auth plaintext_allowed"
   },
   "browse.auth.plaintext_declined_signin": {
-    "value": "You chose not to connect to your Plex server without encryption. Select Try again to be asked again.",
+    "value": "You chose not to connect to your addons without encryption. Select Try again to be asked again.",
     "description": "browse auth plaintext_declined_signin"
   },
   "browse.auth.plaintext_revoked_signin": {
-    "value": "Unencrypted connections to your Plex server are off. Select Try again to be asked again.",
+    "value": "Unencrypted connections to your addons are off. Select Try again to be asked again.",
     "description": "browse auth plaintext_revoked_signin"
   },
   "browse.auth.plaintext_declined_signed_in": {
-    "value": "You chose not to connect to your Plex server without encryption. Allow it in Settings → Unencrypted connections.",
+    "value": "You chose not to connect to your addons without encryption. Allow it in Settings → Unencrypted connections.",
     "description": "browse auth plaintext_declined_signed_in"
   },
   "browse.auth.plaintext_revoked_signed_in": {
-    "value": "Unencrypted connections to your Plex server are off. Turn them on in Settings → Unencrypted connections.",
+    "value": "Unencrypted connections to your addons are off. Turn them on in Settings → Unencrypted connections.",
     "description": "browse auth plaintext_revoked_signed_in"
   },
   "browse.auth.plaintext_shared_offer": {
@@ -1611,7 +1611,7 @@
     }
   },
   "browse.auth.plaintext_remote": {
-    "value": "Your Plex server answered only without encryption, from outside this network. Check Remote Access in its settings.",
+    "value": "Your addons answered only without encryption, from outside this network. Check Remote Access in its settings.",
     "description": "browse auth plaintext_remote"
   },
   "browse.auth.plaintext_shared_remote": {
@@ -2062,5 +2062,37 @@
   "browse.clock.key_changed": {
     "value": "Your server’s key has changed. Connect the TV to the internet once so the app can check it again.",
     "description": "Reason line under the failed Home or Library read-out when the Plex server presented a different key than the one the app remembered, so the app will not trust it while the television's clock cannot be checked. Same two-line slot as the no-key line; keep the whole sentence under 140 characters."
+  },
+  "browse.streams.loading": {
+    "value": "Finding streams…",
+    "description": "Addon stream picker status"
+  },
+  "browse.streams.empty": {
+    "value": "No playable streams found.",
+    "description": "Addon stream picker status"
+  },
+  "browse.streams.failed": {
+    "value": "Couldn’t load streams. Close and try again.",
+    "description": "Addon stream picker status"
+  },
+  "browse.list.add": {
+    "value": "Add to My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.remove": {
+    "value": "Remove from My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.saving": {
+    "value": "Syncing My List…",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.retry": {
+    "value": "Retry My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.signin": {
+    "value": "Sign in for My List",
+    "description": "Nuvio account My List action/status."
   }
 }

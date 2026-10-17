@@ -199,6 +199,12 @@ impl BrowseStore {
         crate::browse::record::take_from(&self.adapter)
     }
 
+    /// Does a discovery request this owner launched still owe its answer? The claim the landing
+    /// gate's dump mode waits on at the Bridge's controlled-Home discovery take.
+    pub fn discovery_owed(&self) -> bool {
+        crate::browse::discovery_owed(&self.adapter)
+    }
+
     fn sync_roster(&mut self) -> bool {
         let sync = self.state.sync_roster_owned();
         if sync.retire_adapter {
@@ -327,6 +333,15 @@ impl BrowseStore {
             section,
             rows,
             per_row,
+        );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_first_shelf_items_for_test(&mut self, section: usize, rks: &[String]) {
+        crate::browse::section_hubs::seed_first_shelf_items_for_owner_test(
+            &mut self.state,
+            section,
+            rks,
         );
     }
 

@@ -29,6 +29,12 @@ pub(super) fn execute(command: PreferenceCmd) {
                 plx_machine::idle::invalidate();
             });
         }
+        PreferenceCmd::RatingSource { source, reply } => {
+            let _ = plx_base::storage_worker::submit_retained(move || {
+                let _ = reply.send(plx_plex::plex::nuvio::set_rating_source(source));
+                plx_machine::idle::invalidate();
+            });
+        }
         PreferenceCmd::Quality { quality, reply } => {
             let _ = plx_base::storage_worker::submit_retained(move || {
                 let _ = reply.send(plx_media::route::set_default_quality(quality));

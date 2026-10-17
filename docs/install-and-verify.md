@@ -12,7 +12,7 @@ You can skip the Developer Mode and computer setup below. If your existing Homeb
 
 You will need:
 
-- an LG TV running **webOS 4.0 or newer**; check the [compatibility notes](../README.md#will-it-work-on-my-television), since playback support varies by model;
+- an LG TV running **webOS 4.0 or newer** (or webOS 3.4.3, tested on one set); check the [compatibility notes](../README.md#will-it-work-on-my-television), since playback support varies by model;
 - a Plex account with access to a **Plex Media Server**, either your own or one shared with you;
 - a Mac, Windows PC, or Linux computer for the setup described here;
 - the TV and computer on the **same local network**.
@@ -126,7 +126,7 @@ See [LG's session guidance](https://webostv.developer.lge.com/develop/getting-st
 
 **PlxNative opens but your libraries are missing:** make sure you signed in to a Plex account with access to a server and that the server is reachable. PlxNative does not include a media library or set up Plex Media Server for you.
 
-For more connection help, see [webOSbrew's troubleshooting guide](https://www.webosbrew.org/devmode/#troubleshooting). To [report a PlxNative problem](https://github.com/GLinnik21/plx-native/issues), include your TV model, webOS version, PlxNative version, installation method, and the exact error. Do not post passwords, Passphrase, Plex tokens, or screenshots containing them.
+For more connection help, see [webOSbrew's troubleshooting guide](https://www.webosbrew.org/devmode/#troubleshooting). To [report a PlxNative problem](https://github.com/GLinnik21/plx-native/issues/new/choose), include your TV model, webOS version, PlxNative version, installation method, and the exact error. Do not post passwords, Passphrase, Plex tokens, or screenshots containing them. For a how-do-I question about setup, ask in [Discussions > Q&A](https://github.com/GLinnik21/plx-native/discussions/categories/q-a); bugs go to the issue form.
 
 If PlxNative itself is installed and opens but something inside it doesn't work — sign-in, playback, or anything else — see [Troubleshooting](troubleshooting.md).
 
@@ -182,7 +182,7 @@ This section is invariant across releases. Where a release changes one of these 
 
 ### What it writes
 
-Both entries below are restricted to the app, but not at the same mode. The three logs are mode `0640` — owner read/write, the app's own group read, nothing for anyone else — so that on a television that is not rooted you can still fetch them with webOS Dev Manager and attach them to a bug report. The signed-in session is mode `0600`, owner only.
+Both entries below are restricted to the app, but not at the same mode. The three logs are mode `0640` — owner read/write, the app's own group read, nothing for anyone else — so that on a television that is not rooted, Dev Manager should be able to fetch them and you can attach them to a bug report. The signed-in session is mode `0600`, owner only.
 
 - `/tmp/plxnative-events.log`, `/tmp/plxnative-stderr.log` and `/tmp/plxnative-crash.log` (mode `0640`) — the first two are truncated each launch, while the crash log is append-only so it survives a restart. Because the mode includes group read, another app installed on the same television that runs in PlxNative's group can read these three files too; the event log is scrubbed as described next, and so is the panic text the app appends to the crash log, but the crash tracer's own records (a faulting address, registers, one memory-map line) and the stderr log (whatever aborts and the television's own libraries print) are not. Every event-log line is scrubbed **before it is written**: tokens, header and query credentials, hostnames (including `plex.direct` names that encode your LAN address), bare addresses, Plex GUIDs, search queries, and your server and profile names are rewritten. Media titles, search terms, and subtitle text are never written at all. What remains includes ratingKeys — server-local item numbers used to diagnose playback bugs. Someone with access to the same server could map one back to an item, so still think before posting a log publicly. [`PRIVACY.md`](https://github.com/GLinnik21/plx-native/blob/main/PRIVACY.md) is the full contract.
 - Your signed-in session (mode `0600`), as `<id>-auth.json` under `/media/developer` or `/media/internal` — one access token per server your account can reach. PlxNative capability-probes the documented `com.webos.service.keymanager3` service (TV 24+) and uses its AES-GCM operation when LS2 policy permits it. The older `com.palm.keymanager` AES-CFB service is deliberately not used because it cannot authenticate ciphertext. webOS TV 4.10.2 has neither usable service, so the compatible result there is an atomically replaced, app-owned mode-0600 file. A protected file is never silently downgraded during a temporary service failure. The probe is an ordinary application-service call and the fallback needs no root service or root-only HAL API; store entitlement for Key Manager is still capability-tested at runtime rather than assumed from the OS version.

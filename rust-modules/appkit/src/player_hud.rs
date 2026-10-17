@@ -153,13 +153,10 @@ pub fn draw_subtitles(hud_up: bool, burned: bool) {
     draw_subtitle_message(&text, hud_up);
 }
 
-/// Shared caption placement for plain text and a styled-renderer failure message. Text size and
-/// vertical placement follow the viewer's Settings > Playback picks (`route::subtitle_size`,
-/// `route::subtitle_position`) — native ASS/SSA keeps its authored style instead
-/// (`docs/ass-subtitles.md`).
-pub fn draw_subtitle_message(text: &str, hud_up: bool) {
-    let scale = subtitle_size_scale(plx_media::route::subtitle_size());
-    let max_chars = ((42.0 / scale).round() as usize).max(20);
+/// The wrapped lines [`draw_subtitle_message`] stacks for one cue: each authored line break
+/// starts a new line, each segment word-wraps to `max_chars`, and at most [`MAX_CAPTION_LINES`]
+/// survive (the rest of a pathologically long cue is dropped).
+fn caption_lines(text: &str, max_chars: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for seg in text.split('\n') {
         let seg = seg.trim();
@@ -172,6 +169,17 @@ pub fn draw_subtitle_message(text: &str, hud_up: bool) {
             }
         }
     }
+    lines
+}
+
+/// Shared caption placement for plain text and a styled-renderer failure message. Text size and
+/// vertical placement follow the viewer's Settings > Playback picks (`route::subtitle_size`,
+/// `route::subtitle_position`) — native ASS/SSA keeps its authored style instead
+/// (`docs/ass-subtitles.md`).
+pub fn draw_subtitle_message(text: &str, hud_up: bool) {
+    let scale = subtitle_size_scale(plx_media::route::subtitle_size());
+    let max_chars = ((42.0 / scale).round() as usize).max(20);
+    let lines = caption_lines(text, max_chars);
     if lines.is_empty() {
         return;
     }
@@ -246,18 +254,23 @@ fn subtitle_position_lift(position: plx_plex::plex::session::SubtitlePosition) -
 const SUB_BASE_Y: f32 = SCR_H - 100.0;
 const SUB_CEIL_Y: f32 = SCR_H - 300.0;
 
-/// The most caption lines [`draw_subtitle_message`] ever stacks (the rest of a longer cue is
-/// dropped), and the reason the Timing capsule's y is fixed rather than following the caption
-/// block (`appkit::timing_capsule`, plan `subtitle-menu-capsule` §4): a live cue's line count changes
-/// frame to frame, and a capsule that tracked it would jump under a viewer's thumb mid-hold.
-const MAX_CAPTION_LINES: usize = 3;
+/// The most caption lines [`draw_subtitle_message`] ever stacks — a safety bound against a
+/// pathological cue, not a layout choice: the block grows upward from its baseline, and a cue of
+/// authored line breaks that each wrap again (#585) legitimately runs past three lines, so the
+/// cap sits well above anything a real cue needs rather than cutting its tail.
+const MAX_CAPTION_LINES: usize = 8;
+/// The caption lines the Timing capsule clears (`appkit::timing_capsule`, plan
+/// `subtitle-menu-capsule` §4). Its y is fixed rather than following the caption block — a live
+/// cue's line count changes frame to frame, and a capsule that tracked it would jump under a
+/// viewer's thumb mid-hold — so it clears the usual cue; a rarer taller one overlaps it.
+const CAPSULE_CLEAR_LINES: usize = 3;
 /// The vertical pitch of one caption line in [`draw_subtitle_message`] — its 36 px face plus
 /// leading.
 const CAPTION_LINE_PITCH: f32 = 48.0;
-/// The Timing capsule's bottom y — [`SUB_BASE_Y`] cleared by the tallest caption block this app
-/// ever draws ([`MAX_CAPTION_LINES`] at [`CAPTION_LINE_PITCH`]), so the capsule never overlaps
-/// even a three-line cue.
-pub const CAPSULE_BOTTOM_Y: f32 = SUB_BASE_Y - MAX_CAPTION_LINES as f32 * CAPTION_LINE_PITCH;
+/// The Timing capsule's bottom y — [`SUB_BASE_Y`] cleared by the caption block this app
+/// usually draws ([`CAPSULE_CLEAR_LINES`] at [`CAPTION_LINE_PITCH`]), so the capsule never
+/// overlaps even a three-line cue.
+pub const CAPSULE_BOTTOM_Y: f32 = SUB_BASE_Y - CAPSULE_CLEAR_LINES as f32 * CAPTION_LINE_PITCH;
 
 /// Map a decoded image-subtitle rect from the stream's `cw`×`ch` authoring canvas onto the video
 /// rect — which is always the full panel here (the video track is authored 1920×1080; see the
@@ -1768,6 +1781,7 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
             Some(id) => {
                 plx_ui::icons::draw(p, id, Rect::new(bx, icy - bs * 0.5, bs, bs), white)
             }
+            // placeholder-exempt: the transport's inline busy mark on a button (R_INLINE), reported by the playback pipeline, not a content stand-in
             None => Spinner::new(bx + isz * 0.5, icy, Spinner::R_INLINE)
                 .phase(now)
                 .tint(white)
@@ -1935,6 +1949,18 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
 
 #[cfg(test)]
 mod tests {
+    /// #585: a cue of authored line breaks that each wrap again ran past three lines and the tail
+    /// was silently dropped. Every line of an ordinary long cue must survive.
+    #[test]
+    fn a_long_cue_keeps_every_line_past_three() {
+        let cue = "First authored line that is long enough to wrap onto a second row\n\
+                   Second authored line that is long enough to wrap onto a second row\n\
+                   Third authored line that is long enough to wrap onto a second row";
+        let lines = super::caption_lines(cue, 42);
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert!(lines.last().unwrap().ends_with("second row"), "{lines:?}");
+    }
+
     #[test]
     fn chapter_panel_retains_selection_without_borrowing_hud_focus() {
         assert_eq!(super::hud_tab_state(false, 2, 1, 1), (false, true));
@@ -2641,6 +2667,31 @@ mod tests {
             }
         }
         assert!(out.is_empty(), "rows wider than the screen:\n  {}", out.join("\n  "));
+    }
+
+    /// The sandbox failure's help sentence ends in a URL that cannot break, and it is drawn as the
+    /// read-out's note — centred CAPTION, two lines of [`StatusOverlay::REASON_W`]. It must fit
+    /// that in every shipped language, or the pointer to the fix is the part an ellipsis eats.
+    #[test]
+    fn the_jail_help_note_fits_the_note_slot_in_every_language() {
+        use plx_base::fontcov::advances::ShippedMeasure;
+        use plx_ui::fit::HEADROOM;
+        use plx_ui::text_view::TextView;
+        use plx_platform::i18n::{language_on_this_thread_for_test, msg, Preference};
+        let mut out = Vec::new();
+        for language in [Preference::En, Preference::Es, Preference::Be] {
+            let _guard = language_on_this_thread_for_test(language);
+            let help = msg::widgets_reason_jail_help();
+            let fits = !TextView::new(help, theme::size::CAPTION, theme::TEXT_TERTIARY)
+                .h(plx_ui::label::HAlign::Center)
+                .max_lines(2)
+                .with_measure(&ShippedMeasure)
+                .truncates(StatusOverlay::REASON_W * HEADROOM);
+            if !fits {
+                out.push(format!("{}: {help}", language.tag()));
+            }
+        }
+        assert!(out.is_empty(), "jail help cut short:\n  {}", out.join("\n  "));
     }
 
     /// Every Force verdict fits the read-out's two-line reason slot, in every shipped language.

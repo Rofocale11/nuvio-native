@@ -183,18 +183,18 @@ fn grid_paint_window_keeps_cards_above_the_centered_tab_track() {
     let y = plx_ui::widgets::TOP_BAR_BOTTOM - plx_ui::consts::CARD_H - 8.0;
     let scroll = layout.row_y(2, 0.0) - y;
     page.pair.detail.set_geometry(layout, scroll, layout, scroll);
-    let rect = page.pair.detail.rect_at(index, false, 1.0);
+    let rect = page.pair.detail.rect_at(&fixture.cx(None), index);
     assert!(rect.y + rect.h > 0.0 && rect.y + rect.h < plx_ui::widgets::TOP_BAR_BOTTOM);
-    let (lo, hi) = page.pair.detail.visible_window();
-    assert!((lo..hi).contains(&index), "the real paint iterator must include this visible card");
+    let window = page.pair.detail.window();
+    assert!(window.contains(&index), "the real paint iterator must include this visible card");
 
     // The paint iterator conservatively retains overscan rows, but never the entire catalog.
     // Far outside that window, the same card must be excluded on either side of the screen.
     for y in [-2.0 * SCR_H, 2.0 * SCR_H] {
         let scroll = layout.row_y(2, 0.0) - y;
         page.pair.detail.set_geometry(layout, scroll, layout, scroll);
-        let (lo, hi) = page.pair.detail.visible_window();
-        assert!(!(lo..hi).contains(&index), "far-offscreen card at {y} must not enter paint iteration");
+        let window = page.pair.detail.window();
+        assert!(!window.contains(&index), "far-offscreen card at {y} must not enter paint iteration");
     }
 }
 
@@ -1026,6 +1026,22 @@ impl Fixture {
         fixture
     }
 
+    /// 1200 cards, each with a poster (`/poster/{i}`) and a still (`/still/{i}`): a grid that scrolls
+    /// far past its window. `episodes` makes it an Episodes library (stills), else Primary (posters).
+    fn art_listing(episodes: bool) -> Self {
+        let sid = plx_plex::plex::ServerId::from_raw(0);
+        let mut fixture = Self::new();
+        fixture.listing = plx_data::browse::view::ListingSnapshot::fixture(sid,
+            (0..1200).map(|i| Some(plx_data::pms::PmsMovie {
+                sid, rk: i.to_string(), kind: if episodes { 3 } else { 0 },
+                thumb: format!("/poster/{i}"), still: format!("/still/{i}"),
+                ..Default::default()
+            })).collect(), Vec::new()).with_library_type(if episodes {
+                plx_data::browse::LibraryType::Episodes
+            } else { plx_data::browse::LibraryType::Primary });
+        fixture
+    }
+
     pub(super) fn new() -> Self {
         let sid = plx_plex::plex::ServerId::from_raw(0);
         let listing = plx_data::browse::view::ListingSnapshot::fixture(sid, (0..36).map(|i|
@@ -1102,7 +1118,7 @@ fn shelf_horizontal_viewport_and_engine_item_survive_body_eviction() {
     session.watching("u-library-shelf-return");
     let fixture = Fixture::shelves(&["movie.inprogress.1"], 12);
     let mut page = fixture.screen();
-    page.shelves[0].motion.restore_scroll(700.0, 12, &RowStyle::HOME);
+    page.shelves[0].cards.restore_scroll(700.0, 12);
     let key = page.key(page.shelves[0].elems[3]);
     let before = page.place(&key.elem, &fixture.cx(Some(key)), At::Drawn).unwrap().rest_rect;
     let mut engine = FocusEngine::new();
@@ -1113,10 +1129,43 @@ fn shelf_horizontal_viewport_and_engine_item_survive_body_eviction() {
     restored.sync(&fixture.cx(Some(key)));
     engine.enter(OWNER, &restored, FocusTarget::ContainerGroup(restored.shelves[0].group), Some(key), &fixture.cx(Some(key)));
     assert_eq!(engine.current(OWNER), Some(key));
-    assert_eq!(restored.shelves[0].motion.scroll_x(), 700.0);
+    assert_eq!(restored.shelves[0].cards.scroll(), 700.0);
     let after = restored.place(&key.elem, &fixture.cx(Some(key)), At::Drawn).unwrap().rest_rect;
     assert_eq!([before.x, before.y, before.w, before.h], [after.x, after.y, after.w, after.h]);
     assert_eq!(restored.focused_item(engine.current(OWNER), &fixture.cx(Some(key))).unwrap().rk, "movie.inprogress.1-3");
+}
+
+/// A page that turns opaque while a compact menu covers it must not stay dormant until Uncover: the
+/// focused tile and the opener lift the menu's redraw reads would draw unpopped under the menu.
+#[test]
+fn a_page_that_turns_opaque_while_covered_draws_its_focused_tile_popped() {
+    let _guard = plx_base::testlock::serial();
+    let session = plx_plex::plex::session::TempSession::new("library-covered-fade");
+    session.watching("u-library-covered-fade");
+    let fixture = Fixture::shelves(&["movie.inprogress.1"], 12);
+    let mut page = fixture.screen();
+    page.live = true;
+    page.page_fade.mount();
+    let key = page.key(page.shelves[0].elems[2]);
+    let mut engine = FocusEngine::new();
+    engine.set(OWNER, key, Some(page.shelves[0].group), By::Restore);
+    let tick = |page: &mut LibraryScreen, engine: &FocusEngine<u32>, ms: u32| {
+        let mut out = Vec::new();
+        let mut present = plx_machine::present::Present::new();
+        let mut cx = fixture.cx(engine.current(OWNER));
+        cx.tick = Tick { ms, dt_us: 16_667 };
+        page.step(&ScreenEvent::Tick(cx.tick), &cx,
+            &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
+    };
+    for ms in 0..3 { tick(&mut page, &engine, ms * 16); }
+    assert!(page.page_fade.is_arriving(), "the page is still dissolving in");
+    deliver(&mut page, &mut engine, &fixture, ScreenEvent::Cover);
+    for ms in 3..200 { tick(&mut page, &engine, ms * 16); }
+    assert!(page.page_fade.alpha() >= 1.0, "the page turned opaque under the menu");
+    let cx = fixture.cx(engine.current(OWNER));
+    let pop = page.shelves[0].cards.scale_of(&cx, &page.hub_src(0, &cx), &key.elem).unwrap();
+    assert!((pop - RowStyle::HOME.focus_scale).abs() < 0.002,
+        "the focused tile draws at {pop}, not popped, though the page is opaque");
 }
 
 #[test]
@@ -1332,7 +1381,7 @@ fn rapid_shelf_moves_use_settled_geometry_and_walk_each_document_row() {
     engine.set(OWNER, first, Some(page.shelves[0].group), By::Restore);
     let resting = page.place(&first.elem, &fixture.cx(Some(first)), At::Drawn).unwrap();
     let mut pressed_cx = fixture.cx(Some(first));
-    pressed_cx.press = PressRead { scale: 0.85, is_long: true, held_ms: None };
+    pressed_cx.press = PressRead { scale: 0.85, is_long: true, held_ms: None, owner: Some(first) };
     let pressed = page.place(&first.elem, &pressed_cx, At::Drawn).unwrap();
     assert!(pressed.rect.w < resting.rect.w);
     let rect = |r: Rect| [r.x, r.y, r.w, r.h];
@@ -1436,6 +1485,7 @@ fn the_page_glyph_and_the_librarys_live_tab_strip_never_overlap() {
 mod type_tests { include!("type_tests.rs"); }
 
 mod art_admission_tests { include!("art_admission_tests.rs"); }
+mod lookahead_tests { include!("lookahead_tests.rs"); }
 
 mod grid_motion_tests { include!("grid_motion_tests.rs"); }
 
@@ -1502,10 +1552,10 @@ fn a_released_shelf_row_reaches_exact_rest() {
             &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
     };
     for _ in 0..30 { tick(&mut page, Some(on)); }
-    assert!(!page.shelves[0].motion.at_exact_rest(), "a focused row is mid-spring");
+    assert!(!page.shelves[0].cards.at_rest(), "a focused row is mid-spring");
     let off = page.key(page.shelves[1].elems[0]);
     for _ in 0..600 { tick(&mut page, Some(off)); }
-    assert!(page.shelves[0].motion.at_exact_rest(), "a released row parks instead of being stepped forever");
+    assert!(page.shelves[0].cards.at_rest(), "a released row parks instead of being stepped forever");
 }
 
 /// `run` and `target_run` are derived, with no dirty flag: every relayout refills both, so after
@@ -1517,7 +1567,7 @@ fn the_runs_equal_a_fresh_recompute_after_every_kind_of_change() {
     session.watching("u-library-run-fresh");
     let fresh = |page: &LibraryScreen, focus: Option<FocusKey<u32>>| {
         let live = layout::ShelfRun::of(&page.shelves.iter()
-            .map(|row| layout::shelf_pitch(row.landscape, row.motion.band_expand())).collect::<Vec<_>>());
+            .map(|row| layout::shelf_pitch(row.landscape, row.cards.band_expand())).collect::<Vec<_>>());
         let target = layout::ShelfRun::of(&page.shelves.iter()
             .map(|row| layout::shelf_pitch(row.landscape, f32::from(focus.is_some_and(|key| row.elems.contains(&key.elem)))))
             .collect::<Vec<_>>());
@@ -1630,4 +1680,90 @@ fn assert_back_glides(fixture: &Fixture, deep_index: usize) {
     }
     assert!(frames > 4, "reaching the top takes frames (took {frames}), it is not a cut");
     assert!(page.scroll.pos <= 0.5, "and it arrives");
+}
+
+/// **The page's focus groups are the base's, adopted shelves or not.** Their ids come from the key
+/// registry (sequential per kind, never from a position), their order is the document's
+/// (shelves in publication order, then the heading row, then the grid), the page's first seat is
+/// the first shelf and a shelf's elements keep their published order. A shelf drawn by
+/// `cards::Shelf` must not renumber, reorder or reseat any of it.
+#[test]
+fn the_pages_focus_groups_keep_their_ids_order_and_first_seat() {
+    let _guard = plx_base::testlock::serial();
+    let session = plx_plex::plex::session::TempSession::new("library-group-order");
+    session.watching("u-library-group-order");
+    let fixture = Fixture::shelves(&["movie.inprogress.1", "movie.recentlyadded.1"], 5);
+    let page = fixture.screen();
+    let mut groups = Vec::new();
+    page.groups(&fixture.cx(None), &mut groups);
+    let ids: Vec<u32> = groups.iter().map(|group| group.id.0).collect();
+    assert_eq!(ids, [0x2500_0003, 0x2500_0004, 0x2500_0002, 0x2500_0001],
+        "shelf 0, shelf 1, the heading row, the grid");
+    assert_eq!(groups.iter().map(|group| group.len).collect::<Vec<_>>(), [5, 5, 3, 120]);
+    assert_eq!(page.shelves.iter().map(|row| row.group.0).collect::<Vec<_>>(), [0x2500_0003, 0x2500_0004]);
+    assert_eq!(page.shelves[0].elems, [0x2200_0000, 0x2200_0001, 0x2200_0002, 0x2200_0003, 0x2200_0004]);
+    assert_eq!(page.shelves[1].elems, [0x2200_0005, 0x2200_0006, 0x2200_0007, 0x2200_0008, 0x2200_0009]);
+    assert_eq!(page.first_group(), page.shelves[0].group, "the page seats on its first shelf");
+    for (row, group) in page.shelves.iter().zip(&groups) {
+        assert!(matches!(group.kind, GroupKind::Row { wrap: false }) && group.seat == Seat::Remembered);
+        assert_eq!(page.row_elems(Some(row.group)), row.elems);
+        for elem in &row.elems {
+            assert_eq!(Focusable::<HostFixture>::group_of(&page, elem, &fixture.cx(None)), Some(row.group));
+        }
+    }
+    let mut links = Vec::new();
+    Screen::<HostFixture>::links(&page, &mut links);
+    assert!(links.iter().any(|link| link.from == page.shelves[0].group && link.dir == Dir::Down
+        && link.to == page.shelves[1].group), "the document is walked shelf by shelf");
+}
+
+/// The hold hint (`ui::hold_hint`) on a Library shelf card: it stands after the dwell once the
+/// page is opaque and the card at rest, not on a non-card focus, not while a menu owns focus, and
+/// not a second time on a Library page this run.
+#[test]
+fn the_hold_hint_stands_on_a_resting_library_card_once_per_run() {
+    let _guard = plx_base::testlock::serial();
+    plx_ui::hold_hint::reset_learned_for_test();
+    plx_ui::hold_hint::reset_shown_for_test();
+    let session = plx_plex::plex::session::TempSession::new("library-hold-hint");
+    session.watching("u-library-hold-hint");
+    let fixture = Fixture::shelves(&["movie.inprogress.1"], 12);
+    let mut page = fixture.screen();
+    page.live = true;
+    page.page_fade.mount();
+    let key = page.key(page.shelves[0].elems[2]);
+    let mut engine = FocusEngine::new();
+    engine.set(OWNER, key, Some(page.shelves[0].group), By::Restore);
+    let mut ms = 0;
+    let mut rest = |page: &mut LibraryScreen, focus: Option<FocusKey<u32>>, secs: f32| {
+        for _ in 0..(secs * 60.0) as u32 {
+            ms += 17;
+            let mut out = Vec::new();
+            let mut present = plx_machine::present::Present::new();
+            let mut cx = fixture.cx(focus);
+            cx.tick = Tick { ms, dt_us: 16_667 };
+            page.step(&ScreenEvent::Tick(cx.tick), &cx,
+                &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
+        }
+    };
+    rest(&mut page, Some(key), 1.0); // the page dissolves in; the dwell only starts once it is at rest
+    assert!(!page.hold_hint.visible(), "not before the dwell");
+    // The negatives come BEFORE the first stand: once it has stood the kind's latch is spent and
+    // nothing could stand whatever the wiring.
+    let plain = Some(page.key(TYPE));
+    rest(&mut page, plain, 4.0);
+    assert!(!page.hold_hint.visible() && !plx_ui::hold_hint::shown_this_run(plx_ui::hold_hint::Kind::Library),
+        "never on a chip of the same entry");
+    rest(&mut page, Some(FocusKey { entry: EntryId(900), elem: 0 }), 4.0);
+    assert!(!page.hold_hint.visible() && !plx_ui::hold_hint::shown_this_run(plx_ui::hold_hint::Kind::Library),
+        "never while a menu owns focus");
+    rest(&mut page, None, 4.0);
+    assert!(!page.hold_hint.visible() && !plx_ui::hold_hint::shown_this_run(plx_ui::hold_hint::Kind::Library),
+        "never without a focused card");
+    rest(&mut page, Some(key), 3.0);
+    assert!(page.hold_hint.visible(), "after the dwell, on a settled card of an opaque page");
+    rest(&mut page, Some(FocusKey { entry: EntryId(900), elem: 0 }), 1.0);
+    assert!(!page.hold_hint.visible(), "a menu taking focus hides it");
+    rest(&mut page, Some(key), 4.0);
+    assert!(!page.hold_hint.visible(), "and not a second time on a Library page this run");
 }

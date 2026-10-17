@@ -8,12 +8,19 @@ use std::sync::Arc;
 pub enum HubsCmd {
     /// A refetch is owed (a view-state write landed, a profile settled).
     RefetchHubs,
+    Page { sid: plx_plex::plex::ServerId, id: String, key: String, before: bool },
+    CancelPage { sid: plx_plex::plex::ServerId, id: String, key: String },
     /// The read-out's Retry: clear the back-off and ask again.
     Retry,
     /// The profile/account switch.
     Reset,
     /// The optimistic half of a view-state write on the hub catalog (`pms::LocalEdit`).
     EditItem { sid: plx_plex::plex::ServerId, rk: String, edit: crate::pms::LocalEdit },
+}
+
+impl HubsCmd {
+    /// Page requests move a window, not the catalog, so they do not bump the notice generation.
+    pub fn is_paging(&self) -> bool { matches!(self, HubsCmd::Page { .. } | HubsCmd::CancelPage { .. }) }
 }
 
 pub use crate::pms::Landing as HubsResult;
@@ -157,6 +164,16 @@ impl HubsStore {
         crate::pms::take_landings(&self.adapter)
     }
 
+    /// Does a worker spawned for this owner still owe a landing? The claim the landing gate's dump
+    /// mode waits on at Home's take; [`crate::pms::owed`] says why it is not `Src::fetching`.
+    pub fn owed(&self) -> bool {
+        crate::pms::owed(&self.adapter)
+    }
+
+    /// Test hook: how many spawned workers still owe a landing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owed_for_test(&self) -> u32 { crate::pms::owed_count_for_test(&self.adapter) }
+
     pub fn land_with_directory(
         &mut self,
         result: &HubsResult,
@@ -185,7 +202,7 @@ impl HubsStore {
         launch: &mut dyn FnMut(crate::pms::HubRequest) -> bool) -> super::StoreOutcome {
         plx_base::testlock::assert_held("controlled hubs store");
         self.prepare_command(cmd.as_ref());
-        let command = cmd.is_some();
+        let command = cmd.as_ref().is_some_and(|cmd| !cmd.is_paging());
         let outcome = crate::pms::controlled_work(&mut self.state, &self.adapter, cmd, dt, launch);
         if command || outcome.changed { self.bump(); }
         outcome
@@ -199,7 +216,7 @@ impl HubsStore {
         #[cfg(any(test, feature = "test-support"))]
         plx_base::testlock::assert_held("controlled hubs store with Browse owner");
         self.prepare_command(cmd.as_ref());
-        let command = cmd.is_some();
+        let command = cmd.as_ref().is_some_and(|cmd| !cmd.is_paging());
         let outcome = crate::pms::controlled_work_with_directory(&mut self.state, &self.adapter, cmd, dt, directory, launch);
         if command || outcome.changed { self.bump(); }
         outcome
@@ -210,8 +227,9 @@ impl HubsStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn run(&mut self, cmd: HubsCmd) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
+        let notice = !cmd.is_paging();
         let answer = crate::pms::run(&mut self.state, &self.adapter, cmd);
-        self.bump();
+        if notice || answer.changed { self.bump(); }
         answer
     }
 
@@ -224,8 +242,9 @@ impl HubsStore {
         directory: crate::stores::browse::DirectoryView<'_>,
     ) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
+        let notice = !cmd.is_paging();
         let answer = crate::pms::run_with_directory(&mut self.state, &self.adapter, cmd, directory);
-        self.bump();
+        if notice || answer.changed { self.bump(); }
         answer
     }
 }

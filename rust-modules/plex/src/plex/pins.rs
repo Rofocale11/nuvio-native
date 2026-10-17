@@ -161,6 +161,10 @@ pub fn resolve(libs: &[LibRef<'_>], rec: Option<&HomePins>) -> Vec<bool> {
 /// there is nothing to ask about for anybody. It counts SOURCES, not libraries, because the
 /// roster is what has landed by the time the route is chosen.
 pub fn asks(sources: usize, rec: Option<&HomePins>) -> bool {
+    // NuvioNative: Home is the addons' catalogs, not a choice of libraries — nothing to ask.
+    if plx_base::local_server::get().is_some() {
+        return false;
+    }
     sources >= 1 && !rec.is_some_and(|r| r.asked)
 }
 

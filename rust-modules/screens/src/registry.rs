@@ -82,6 +82,7 @@ pub enum PreferenceCmd {
         update: plx_plex::plex::account::PreferenceUpdate,
         reply: std::sync::mpsc::Sender<AccountPreferenceReply>,
     },
+    RatingSource { source: plx_plex::plex::session::RatingSource, reply: std::sync::mpsc::Sender<bool> },
     Quality { quality: plx_plex::plex::session::PlaybackQuality, reply: std::sync::mpsc::Sender<bool> },
     DirectPlay { mode: plx_plex::plex::session::DirectPlayMode, reply: std::sync::mpsc::Sender<bool> },
     NextEpisode { mode: plx_plex::plex::session::NextEpisodeMode, reply: std::sync::mpsc::Sender<bool> },
@@ -91,6 +92,11 @@ pub enum PreferenceCmd {
     SubtitlePosition { position: plx_plex::plex::session::SubtitlePosition, reply: std::sync::mpsc::Sender<bool> },
     Language { language: plx_platform::i18n::Preference, reply: std::sync::mpsc::Sender<bool> },
 }
+
+/// Whether an item has a context menu to open (`item_menu::has_actions`): the one predicate the
+/// app declines a menu with and the card screens' hold hint is gated by. The screens reach it
+/// here, never by naming the sibling `item_menu`.
+pub use crate::item_menu::has_actions as item_has_menu;
 
 /// **What the item context menu asks of the loop**, once its own `step` has resolved the pressed
 /// row to an [`crate::item_menu::Action`].
@@ -1077,6 +1083,7 @@ pub enum AppMsg {
     /// the destination and the PAGE navigates, which is `LibraryMenu`'s shape (`LibrarySelect`) and
     /// what keeps "what a press means on the Detail page" in one place instead of two.
     AltSourceOpen(ContentArg),
+    NuvioStreamSelected,
 }
 
 /// What the consent machine is told (§2.3): a person's answer to both questions at once.
@@ -2077,7 +2084,15 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // carries it too; the previous pin was 0x97ff_59c7_9aab_e35e.
 // Library shelf run (#412): the layout carries the run's height (`shelf_run:f32`) where it carried
 // twelve pitches (`pitches:[f32;12]`); the previous pin was 0x7063_dff7_775b_9075.
-const SCREEN_SHAPES_PIN: u64 = 0xac96_3316_a3a3_7bd4;
+// Collection adopts `cards::Stack` (cards-stack PR 5): its logical state gains the stack's motion
+// canon (`stack:Stack{scroll,target,sections}`); the previous pin was 0xac96_3316_a3a3_7bd4.
+// Person adopts `cards::Stack` (cards-stack PR 5): its logical state gains the stack's motion canon
+// (`stack:Stack{scroll,target,sections}`), the same as Collection's; the previous pin was
+// 0xbc1d_d51d_5b11_1273.
+// Nuvio rating source adds a Playback field and picker option vocabulary.
+// Real simulator recordings are required; previous pin: 0xf541c16b15ec999f.
+// My List adds the detail page's asynchronous account-library state. Real recordings replace the old shape.
+const SCREEN_SHAPES_PIN: u64 = 0xb9582887de5b0626;
 
 #[cfg(test)]
 mod arg_tests {

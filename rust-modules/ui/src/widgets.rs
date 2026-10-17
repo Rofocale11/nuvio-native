@@ -467,9 +467,9 @@ pub fn still_line(
 ///
 /// The order is `detail.rs`'s and is load-bearing: the bar belongs to the card's own bottom EDGE
 /// rather than to the scrim above it, so it goes LAST or the 78%-black gradient darkens it. That is
-/// also why a caller passes `None` for `card_row::strip`'s own `resume` closure and lets this draw
-/// the bar — `strip` runs the `extra` hook after the tile is complete, so a shelf that let
-/// `card_row` draw the bar and then painted the scrim from the hook had them the wrong way round.
+/// also why a caller passes `None` for `card_row::draw_tile`'s own `resume` and lets this draw the
+/// bar — a shelf that let `card_row` draw the bar and then painted the scrim afterwards had them
+/// the wrong way round.
 ///
 /// **It exists because the composition had already drifted twice, and both times in the same
 /// place**: a screen draws its shelf through one path and re-draws the FOCUSED tile through another
@@ -600,14 +600,21 @@ pub fn resolve_card_art(p: Painter, rect: Rect, art: &Art<'_>) -> (u32, f32, f32
     if p.is_recording() { return (0, 0.0, 0.0); }
     let _admission = art.motion_identity()
         .map(|id| crate::card_motion::Scope::card(id, p.to_screen(rect).0));
-    let image = match art {
-        Art::Poster(m) => m.map(|m| resolve_tex_wh_on(m.src, m.thumb, POSTER_RES.0, POSTER_RES.1, 0)).unwrap_or((0, 0.0, 0.0)),
-        Art::Still(m) => m.map(|m| resolve_tex_wh_on(m.src, still_key(&m), STILL_RES.0, STILL_RES.1, 0)).unwrap_or((0, 0.0, 0.0)),
-        Art::Thumb { sid, key, res } | Art::Person { sid, key, res } => resolve_tex_wh_on(*sid, key, res.0, res.1, 0),
-    };
+    let image = card_art_request(art).map_or((0, 0.0, 0.0), |(srv, path, w, h)| resolve_tex_wh_on(srv, path, w, h, 0));
     #[cfg(feature = "devtriggers")]
     crate::card_motion_metrics::draw(image.0 != 0);
     image
+}
+
+/// The `(server, path, width, height)` [`resolve_card_art`] asks the source for, for a screen that
+/// must WARM exactly that key (the Library's at-rest lookahead). [`resolve_card_art`] resolves
+/// through this, so the two cannot name different keys; `screens/src/library/lookahead_tests.rs::the_lookahead_asks_for_the_key_the_card_draw_resolves` pins it. `None` for an empty slot.
+pub fn card_art_request<'a>(art: &Art<'a>) -> Option<(u16, &'a str, c_int, c_int)> {
+    Some(match art {
+        Art::Poster(m) => { let m = (*m)?; (m.src, m.thumb, POSTER_RES.0, POSTER_RES.1) }
+        Art::Still(m) => { let m = (*m)?; (m.src, still_key(&m), STILL_RES.0, STILL_RES.1) }
+        Art::Thumb { sid, key, res } | Art::Person { sid, key, res } => (*sid, *key, res.0, res.1),
+    })
 }
 
 /// The name a poster card draws on the neutral collection tile, when it draws one: a collection
@@ -664,7 +671,10 @@ pub fn card_named(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>, rad
                     crate::collection_tile::draw_fan_name(p, frame, r, m.title);
                 }
             } else {
-                p.rect_sheened(r, rad, theme::SKELETON_TOP, theme::SKELETON_BOT);
+                // Counted where it is DRAWN: `Art::Poster(None)` (a not-yet-loaded index) and an
+                // empty thumb path reach here with no resolve at all, as does a miss.
+                crate::placeholder::skeleton(p, crate::placeholder::Reason::CardSkeleton,
+                    m.map_or("", |m| m.thumb), r, rad);
             }
             // The ONE state language on every poster, drawn in this shared composite so Home
             // shelves + the Library grid + Search + the person page + the detail page's Related
@@ -698,7 +708,7 @@ pub fn card_named(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>, rad
                 }
             }
         }
-        Art::Thumb { .. } => {
+        Art::Thumb { key, .. } => {
             let (t, tw, th) = image;
             if t != 0 {
                 p.tex_carded(t, art_uv(&art, tw, th, r), r, rad, theme::TINT_WHITE, f);
@@ -706,7 +716,7 @@ pub fn card_named(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>, rad
                     crate::collection_tile::draw_fan_name(p, frame, r, name);
                 }
             } else {
-                p.rrect_sheened(r, rad, theme::CARD_PLACEHOLDER);
+                crate::placeholder::ground(p, crate::placeholder::Reason::CardGround, key, r, rad);
             }
         }
         // A LANDSCAPE tile of a real catalog row: the item's own 16:9 art, and the same state
@@ -726,7 +736,11 @@ pub fn card_named(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>, rad
                 if t != 0 {
                     p.tex_carded(t, art_uv(&art, tw, th, r), r, rad, theme::TINT_WHITE, f);
                 } else {
-                    p.rect_sheened(r, rad, theme::SKELETON_TOP, theme::SKELETON_BOT);
+                    // `tex_carded_still` returns false for texture 0 before it paints anything, so
+                    // a still with no picture ALWAYS lands here (`a_still_with_no_texture_is_never_fused`).
+                    // `Art::Still(None)` and an empty `still_key` reach it without a resolve.
+                    crate::placeholder::skeleton(p, crate::placeholder::Reason::CardSkeleton,
+                        m.map_or("", |m| still_key(&m)), r, rad);
                 }
                 if m.is_some() { still_ground(p, r, rad, band, STILL_SCRIM_A); }
             }
@@ -746,7 +760,7 @@ pub fn card_named(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>, rad
             if t != 0 {
                 p.tex_carded(t, art_uv(&art, tw, th, r), r, rad, theme::TINT_WHITE, f);
             } else {
-                p.rrect_sheened(r, rad, theme::CARD_PLACEHOLDER);
+                person_ground(p, key, r, rad);
                 // Only for a person the server has NO headshot of — an unresolved texture with a
                 // key behind it is merely still loading, and glyphing that would flash a "no
                 // photo" mark on every tile of every page for the length of its fetch.
@@ -764,6 +778,18 @@ pub fn card_named(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>, rad
                 }
             }
         }
+    }
+}
+
+/// The ground of a person tile with no texture. A person the server has NO headshot of (empty
+/// `key`) is ABSENCE, not a wait: it wears the never-sentinel [`theme::CARD_ABSENT`] and is not
+/// counted. A key behind an unresolved texture is a fetch in flight, and is a placeholder.
+fn person_ground(p: Painter, key: &str, r: Rect, rad: f32) {
+    if key.is_empty() {
+        // placeholder-exempt: absence, a person the server has no headshot of; nothing will arrive
+        p.rrect_sheened(r, rad, theme::CARD_ABSENT);
+    } else {
+        crate::placeholder::ground(p, crate::placeholder::Reason::CardGround, key, r, rad);
     }
 }
 
@@ -1038,19 +1064,56 @@ pub const CONTROL_GAP: f32 = 20.0;
 /// same event at the same rate, which is the thing that was actually worth sharing. What still
 /// belongs to `press` is the click, and that is folded in by [`scale`](Self::scale) below.
 ///
-/// [`scale`](Self::scale) folds in [`press::scale`](crate::press::scale) for the focused control
-/// only. The dip is a FACTOR on top of the focus scale — that is what makes a press read the same on
-/// a 1.07 capsule as on a 1.09 poster — and it belongs to the control being pressed, which is always
-/// the focused one.
+/// [`scale`](Self::scale) folds in [`press::scale`](crate::press::scale) for the PRESSED control. The
+/// dip is a FACTOR on top of the focus scale — that is what makes a press read the same on a 1.07
+/// capsule as on a 1.09 poster. Unlike a card's dip (`cards::press_scale`, which matches
+/// `PressRead::owner`) a row of controls has no element keys, so the pressed control is LATCHED
+/// ([`DipLatch`]): the focused control when the press first reads off rest, kept until the press is
+/// back at rest. A direction key that moves focus abandons the press, and the spring-back then
+/// plays on the control that was pressed while its neighbour takes the ordinary focus pop.
 pub struct CtlPop<const N: usize> {
     sp: [Spring; N],
     focused: Option<usize>,
+    dip: DipLatch,
+}
+
+/// Which control of a row (or avatar of a picker) the press dip belongs to. A row has no element
+/// keys to match `PressRead::owner` against, so the dip latches the FOCUSED index the first time
+/// the press reads off rest and holds it until the press is back at exactly rest: focus moving
+/// away (a direction key abandons the press) then leaves the spring-back on the pressed control.
+/// The latch also remembers WHICH press it was taken for ([`press::arm_id`](crate::press::arm_id)),
+/// so a row that was not drawn when the last press returned to rest (the press committed a page or
+/// a popover) or a press armed inside the previous one's spring-back re-latches to the control
+/// holding focus when the new press arms, instead of dipping the old one. A draw-side cache, not
+/// logical state: derived from the press and focus every frame and part of no canon.
+#[derive(Default)]
+pub struct DipLatch(std::cell::Cell<Option<(u32, usize)>>);
+impl DipLatch {
+    /// The dip factor for control `i` given the press scale `press` (`0.0` = no press read) and
+    /// the control holding focus (`None` for none).
+    pub fn factor(&self, i: usize, focused: Option<usize>, press: f32) -> f32 {
+        let press = if press > 0.0 { press } else { 1.0 };
+        if press == 1.0 {
+            self.0.set(None);
+            return 1.0;
+        }
+        let arm = crate::press::arm_id();
+        match self.0.get() {
+            Some((a, _)) if a == arm => {}
+            _ => self.0.set(focused.map(|f| (arm, f))),
+        }
+        if self.0.get().is_some_and(|(_, l)| l == i) { press } else { 1.0 }
+    }
+    /// Forget the latch (a page torn down or re-mounted).
+    pub fn reset(&self) {
+        self.0.set(None);
+    }
 }
 impl<const N: usize> CtlPop<N> {
     /// Captured geometry needs the spring velocity as well as its current scale: the next
     /// input may land after another Tick. GPU resources and paint palettes are not encoded.
     pub fn write_motion(&self, c: &mut plx_machine::machine::Canon) {
-        let Self { sp, focused } = self;
+        let Self { sp, focused, dip: _ } = self;
         c.seq(sp.len());
         for spring in sp { c.f32(spring.pos).f32(spring.vel); }
         c.option(*focused, |c, i| { c.u32(i as u32); });
@@ -1060,6 +1123,7 @@ impl<const N: usize> CtlPop<N> {
         Self {
             sp: [Spring::at(1.0); N],
             focused: None,
+            dip: DipLatch(std::cell::Cell::new(None)),
         }
     }
     /// Advance every control's spring toward its target for this frame. `focused` is the index of
@@ -1086,16 +1150,13 @@ impl<const N: usize> CtlPop<N> {
     /// press value, without consulting the legacy global press machine. Zero means no press read.
     pub fn scale_with(&self, i: usize, press_scale: f32) -> f32 {
         let s = self.sp.get(i).map(|sp| sp.pos).unwrap_or(1.0);
-        if self.focused == Some(i) {
-            s * if press_scale > 0.0 { press_scale } else { 1.0 }
-        } else {
-            s
-        }
+        s * self.dip.factor(i, self.focused, press_scale)
     }
     /// Drop every pop to rest with no motion in between — for a page being torn down or re-mounted,
     /// so the next mount does not open on a control already popped (`detail::reset_view_state`).
     pub fn reset(&mut self) {
         self.focused = None;
+        self.dip.reset();
         for sp in self.sp.iter_mut() {
             sp.jump(1.0);
         }
@@ -1783,6 +1844,7 @@ pub fn skeleton_phase(ms: u32) -> f32 {
 /// only latch the gate on for the next frame, never off, so it self-sustains for exactly as long as
 /// something keeps drawing one.
 fn skeleton_sheen(p: Painter, r: Rect, rad: f32, phase: f32) {
+    // placeholder-exempt: the sweep is paint over a skeleton its caller (`skeleton_bar`, `skeleton_sheet`) counted first
     plx_machine::idle::invalidate();
     let band = (r.w * SKEL_BAND).max(1.0);
     // travel from fully off the left edge to fully off the right, so the block is clean at both
@@ -1805,7 +1867,11 @@ fn skeleton_sheen(p: Painter, r: Rect, rad: f32, phase: f32) {
 /// **A line of text that has not arrived** — a chip-radius bar at the run's own measured height, so
 /// the block it stands in keeps its height and nothing reflows when the words land.
 pub fn skeleton_bar(p: Painter, r: Rect, phase: f32) {
+    crate::placeholder::note(p, crate::placeholder::Reason::SkeletonBar, "");
     let rad = r.h * 0.5; // a chip radius on a text-line bar IS its half height
+    if crate::placeholder::sentinel_fill(p, r, rad) {
+        return;
+    }
     let base = theme::white(SKEL_BAR_A);
     p.rect(r, rad, base, base, 0.0);
     skeleton_sheen(p, r, rad, phase);
@@ -1815,7 +1881,11 @@ pub fn skeleton_bar(p: Painter, r: Rect, phase: f32) {
 /// missing poster, plus the sweep. Same geometry and same resting card edge as the real tile, which
 /// is the whole point: the placeholder is the card, without the picture.
 pub fn skeleton_sheet(p: Painter, r: Rect, rad: f32, phase: f32) {
+    crate::placeholder::note(p, crate::placeholder::Reason::SkeletonSheet, "");
     p.rect(r, rad, theme::SKELETON_TOP, theme::SKELETON_BOT, 0.0);
+    if crate::placeholder::sentinel_fill(p, r, rad) {
+        return;
+    }
     skeleton_sheen(p, r, rad, phase);
     // the resting card edge, so the placeholder holds its own boundary exactly as the real tile does
     p.rring(r, rad, theme::CARD_SHEEN_W, theme::CARD_SHEEN);
@@ -2561,12 +2631,19 @@ pub fn profile_chip_with(p: Painter, data: ProfileChipRead<'_>, chip_expand: f32
         }
     }
     if !drew {
-        p.rect_sheened(
-            r,
-            d * 0.5,
-            theme::CONTROL_IDLE_FILL,
-            theme::CONTROL_IDLE_FILL,
-        );
+        if thumb_s.is_empty() {
+            // no picture to wait for: the face is the avatar (absence, not a wait)
+            p.rect_sheened(
+                r,
+                d * 0.5,
+                theme::CONTROL_IDLE_FILL,
+                theme::CONTROL_IDLE_FILL,
+            );
+        } else {
+            // a picture is on its way: the same face, counted
+            crate::placeholder::face(p, crate::placeholder::Reason::ProfileChip, thumb_s, r, d * 0.5,
+                theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        }
         if initial_c.to_bytes().is_empty() {
             // nobody to name — signed out, or signed in with no roster landed yet. A generic
             // person glyph either way; the unfurled label above is what tells the two apart.
@@ -3071,13 +3148,21 @@ impl View for Spinner {
         if !plx_machine::motion::phase_clocks_held() {
             plx_machine::idle::invalidate();
         }
+        #[cfg_attr(feature = "placeholder-sentinel", allow(unused_variables))]
         let t = (self.phase % Self::PERIOD_MS) as f32 / Self::PERIOD_MS as f32;
         for i in 0..self.dots {
             let ang =
                 i as f32 / self.dots as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-            let lead = (t - i as f32 / self.dots as f32).rem_euclid(1.0);
-            let a = (1.0 - lead) * 0.85 + 0.12; // bright at the leading dot, fading behind it
-            let c = [self.col[0], self.col[1], self.col[2], self.col[3] * a];
+            #[cfg(not(feature = "placeholder-sentinel"))]
+            let c = {
+                let lead = (t - i as f32 / self.dots as f32).rem_euclid(1.0);
+                let a = (1.0 - lead) * 0.85 + 0.12; // bright at the leading dot, fading behind it
+                [self.col[0], self.col[1], self.col[2], self.col[3] * a]
+            };
+            // The sentinel build paints every dot at alpha 1 in the one exact colour, whatever the
+            // tint, the leading-dot fade or the cascade (`placeholder.rs`).
+            #[cfg(feature = "placeholder-sentinel")]
+            let (c, p) = (theme::PLACEHOLDER_SENTINEL, crate::placeholder::painter(p));
             let (dx, dy) = (self.cx + self.r * ang.cos(), self.cy + self.r * ang.sin());
             let d = self.dot_r;
             p.rect(Rect::new(dx - d, dy - d, 2.0 * d, 2.0 * d), d, c, c, 0.0);
@@ -4162,6 +4247,15 @@ impl<'a> StatusOverlay<'a> {
         // the centre alone. Using the cap band for one and a line-box metric for the other put the
         // two states on different baselines in the same frame.
         if working {
+            // A Working read-out is a wait that owns the surface (Home's hub load, a collection's,
+            // the Library's, a sign-in): counted where it is drawn. Home's `status_read` and the
+            // collection's `status_overlay` only build the value.
+            // The caption is only validated as UTF-8 for a count that can be seen: unarmed (every
+            // shipping build) this frame pays the one relaxed load and nothing else.
+            if crate::placeholder::accounting_visible() {
+                crate::placeholder::note(p, crate::placeholder::Reason::WorkingReadout,
+                    self.caption.to_str().unwrap_or(""));
+            }
             Spinner::new(
                 self.frame.cx(),
                 cy - Spinner::R_PAGE - theme::space::XS,
@@ -4227,6 +4321,7 @@ impl<'a> StatusOverlay<'a> {
                 // Cap-top on the band's top edge, exactly where the settled note's `TextView` puts
                 // its first line, so a report that lands does not hop; the ring sits on the cap band.
                 let (gutter_x, text) = Self::busy_note_split(band, measure.width(line, Self::NOTE_SZ, false));
+                // placeholder-exempt: an inline busy NOTE ("sending the report"), not a content stand-in
                 Spinner::leading(gutter_x, band.y + measure.cap_h(Self::NOTE_SZ) * 0.5)
                     .phase(self.phase)
                     .tint(ink)
@@ -7918,6 +8013,10 @@ mod tab_capsule_motion_tests;
 #[cfg(test)]
 #[path = "widgets_poster_mark_tests.rs"]
 mod poster_mark_tests;
+
+#[cfg(test)]
+#[path = "widgets_placeholder_tests.rs"]
+mod placeholder_tests;
 
 #[cfg(test)]
 #[path = "widgets_ambient_ground_tests.rs"]

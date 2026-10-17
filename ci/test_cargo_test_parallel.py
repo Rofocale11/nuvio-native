@@ -11,7 +11,10 @@ the gate:
 * a failed build returns cargo's own status and runs nothing;
 * each binary gets its own PLXNATIVE_RUNTIME_DIR under the caller's, runs in its package directory,
   and receives the --filter (and only there);
-* a binary killed by a signal fails the run.
+* no binary inherits the caller's proxy (NO_PROXY=* for each);
+* a binary killed by a signal fails the run;
+* each binary runs with its own empty `TMPDIR`, and one that exits leaving anything in it fails the
+  run, names the leftover and has it removed (read-only subdirectories included).
 """
 from __future__ import annotations
 
@@ -48,13 +51,16 @@ for i, a in enumerate(args):
 """
 
 # Behaviour by package name: `fail_*` exits 101 after printing a failing result, `kill_*` SIGKILLs
-# itself, anything else passes. It records cwd/runtime/args so the tests can read them back.
+# itself, `leak_*` passes but leaves a per-pid directory (with a read-only subdirectory) in its
+# TMPDIR, anything else passes. It records cwd/runtime/tmpdir/args so the tests can read them back.
 FAKE_BIN = """#!/bin/sh
 name=$(basename "$0")
-echo "bin=$name cwd=$(pwd) runtime=$PLXNATIVE_RUNTIME_DIR args=$*" >> "$FAKE_HOME/bins.log"
+echo "noproxy=$NO_PROXY,$no_proxy" >> "$FAKE_HOME/proxy.log"
+echo "bin=$name cwd=$(pwd) runtime=$PLXNATIVE_RUNTIME_DIR tmpdir=$TMPDIR args=$*" >> "$FAKE_HOME/bins.log"
 case "$name" in
   fail_*) echo "test result: FAILED. 0 passed; 1 failed; 0 ignored"; exit 101;;
   kill_*) kill -9 $$;;
+  leak_*) mkdir -p "$TMPDIR/plxnative-fixture-$$/sealed"; : > "$TMPDIR/plxnative-fixture-$$/sealed/f"; chmod 500 "$TMPDIR/plxnative-fixture-$$/sealed";;
 esac
 echo "running 1 test"
 echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
@@ -169,6 +175,28 @@ class RunnerEnvironment(unittest.TestCase):
             for name, path in runtimes.items():
                 self.assertEqual(path, str(f.home / "runtime" / name))
 
+    def test_each_binary_gets_its_own_empty_tmpdir_and_a_clean_one_passes(self):
+        with Fixture() as f:
+            out = f.run(["plx_a", "plx_b"])
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            tmpdirs = {}
+            for line in f.started():
+                fields = dict(part.split("=", 1) for part in line.split(" ") if "=" in part)
+                tmpdirs[fields["bin"]] = fields["tmpdir"]
+            self.assertEqual(len(set(tmpdirs.values())), 2, "two binaries must not share a TMPDIR")
+            for name, path in tmpdirs.items():
+                self.assertEqual(path, str(f.home / "runtime" / name / "tmp"))
+
+    def test_a_binary_that_leaves_scratch_in_its_tmpdir_fails_the_run_and_it_is_removed(self):
+        with Fixture() as f:
+            out = f.run(["plx_a", "leak_b"])
+            self.assertNotEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertIn("FAILED leak_b", out.stdout)
+            self.assertIn("plxnative-fixture-", out.stdout)
+            self.assertNotIn("FAILED plx_a", out.stdout)
+            self.assertEqual(list((f.home / "runtime" / "leak_b" / "tmp").iterdir()), [],
+                             "the sweep must remove what it reports, read-only subdirectories included")
+
     def test_binaries_run_in_their_package_directory(self):
         with Fixture() as f:
             f.run(["plx_a"])
@@ -181,6 +209,18 @@ class RunnerEnvironment(unittest.TestCase):
             out = f.run(["plx_a", "plx_b"], "--filter", "route::")
             self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
             self.assertTrue(all(line.endswith("args=route::") for line in f.started()), f.started())
+
+    def test_a_proxy_in_the_callers_environment_never_reaches_a_test_binary(self):
+        # The curl tests resolve fake names (`*.plex.direct`, `.invalid`) to loopback servers they
+        # start themselves. libcurl honours HTTPS_PROXY, so on a host that sets one (a cloud agent
+        # sandbox, a corporate laptop) those requests went to the proxy instead: about twenty TLS
+        # and redirect tests failed with CURLE_SSL_CONNECT_ERROR (35) for a reason that has nothing
+        # to do with the code. The TV has no proxy, so the suite grades the TV's environment.
+        with Fixture() as f:
+            out = f.run(["plx_a"], env={"HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
+                                        "NO_PROXY": "localhost", "no_proxy": "localhost"})
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertEqual((f.home / "proxy.log").read_text().splitlines(), ["noproxy=*,*"])
 
     def test_no_runtime_dir_from_the_caller_gets_a_private_one_that_is_removed(self):
         with Fixture() as f:

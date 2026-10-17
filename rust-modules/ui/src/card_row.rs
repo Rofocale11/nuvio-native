@@ -1,17 +1,15 @@
 //! `CardRow` — the shared animated poster-shelf component.
 //!
-//! Extracts the home shelf's per-row animation state (a focus-scale [`Spring`] per cell + a
-//! horizontal scroll spring) and its tile rendering (poster + big glow focus ring + resume bar +
-//! centered title) into ONE reusable widget, so the home `Grid` and the detail Related row are
-//! literally the same component — [`RowStyle::HOME`] is the single source of the shelf's motion and
-//! geometry that both screens read.
+//! The spring-and-tile primitive under [`cards::Shelf`](crate::cards::Shelf), `pub(crate)` L0: a
+//! focus-scale [`Spring`] per cell and a horizontal scroll spring, with the tile rendering (poster,
+//! big glow focus ring, resume bar, centered title). [`RowStyle::HOME`] is the single source of
+//! the shelf's motion and geometry.
 //!
-//! What stays per-caller is only the x/`base_y` positioning loop, because home threads `env.sp` and
-//! splits the loop across the `Grid`'s two-pass **cross-row** focused-last z-order (invariant #3 in
-//! `ui/CLAUDE.md`) — which a lone detail row doesn't have. So `CardRow` deliberately owns spring
-//! state + the leaf tile draws, and NEVER draws a whole row or applies an in-row focused-last pass
-//! on a caller's behalf. It's decoupled from any focus globals / catalog: focus is a plain
-//! `Option<usize>`, the item art is a [`Art`] the caller supplies.
+//! The x/`base_y` positioning loop, the cull and the stops are the Shelf's; `CardRow` owns spring state and
+//! the leaf tile draws and never draws a whole row itself. A screen never names it: it implements
+//! `CardSource` and hands the content to `cards::Shelf` / `cards::Grid`. It is decoupled from any
+//! focus globals / catalog: focus is a plain `Option<usize>`, the item art is a [`Art`] the caller
+//! supplies.
 use crate::consts::*;
 use crate::theme;
 use crate::tile::{TileFacts, TileKind};
@@ -51,6 +49,13 @@ pub struct RowStyle {
     pub right_reserve: f32,
 }
 impl RowStyle {
+    /// The furthest a row of `n` cells scrolls: the content past the viewport, 0 for a row that
+    /// fits whole.
+    pub fn max_scroll(&self, n: usize) -> f32 {
+        let viewport = SCR_W - 2.0 * self.margin_x;
+        (n as f32 * (self.w + self.gap) - self.gap - viewport).max(0.0)
+    }
+
     /// This style with `r` px of the panel's right edge reserved — see [`RowStyle::right_reserve`].
     /// A `const fn` so a screen can name the result once, beside the constant it derives it from,
     /// rather than rebuilding it per frame.
@@ -280,6 +285,48 @@ impl CardRow {
         self.band
             .step(focused.is_some() as i32 as f32, sty.k_scroll, dt);
     }
+    /// Adopt cell `i` as focused AT FULL pop, with no motion: the focus arrived without a deliberate
+    /// move (a restore, a reconcile, a landing), so the tile must be drawn as it was left rather than
+    /// growing from rest. The cell past the spring array shares `overflow`, as in [`CardRow::scale`].
+    pub fn adopt(&mut self, i: usize, sty: &RowStyle) {
+        if i < MAX_ROW_ITEMS { self.scale[i].jump(sty.focus_scale) } else { self.overflow.jump(sty.focus_scale) }
+    }
+    /// Cell `i`'s spring, the shared overflow one for a cell past the array.
+    fn cell_mut(&mut self, i: usize) -> &mut Spring {
+        if i < MAX_ROW_ITEMS { &mut self.scale[i] } else { &mut self.overflow }
+    }
+    /// Snap cell `i` to rest (1.0, no velocity): the tile it held lost focus without a deliberate
+    /// move, so nothing should let it go.
+    pub fn rest(&mut self, i: usize) {
+        self.cell_mut(i).jump(1.0);
+    }
+    /// The focused element moved from cell `from` to cell `to` because the CONTENT changed (a
+    /// landing), not because focus did: its pop spring, velocity and all, goes with it, the cell it
+    /// leaves snaps to rest, and the scroll shifts by `dx` so the tile stays where it was on screen.
+    pub fn relocate(&mut self, from: usize, to: usize, dx: f32) {
+        // two cells past the array share one spring: it already is the moved element's
+        if from != to && (from < MAX_ROW_ITEMS || to < MAX_ROW_ITEMS) {
+            let state = *self.cell_mut(from);
+            *self.cell_mut(to) = state;
+            self.rest(from);
+        }
+        self.scroll_x.pos += dx;
+    }
+    /// Cell `i`'s own pop spring; `None` for a cell past the array (those share one spring).
+    pub(crate) fn cell_spring(&self, i: usize) -> Option<Spring> {
+        self.scale.get(i).copied()
+    }
+    /// Give cell `i` the pop spring `sp` (state and velocity); a cell past the array is ignored.
+    pub(crate) fn put_cell_spring(&mut self, i: usize, sp: Spring) {
+        if let Some(cell) = self.scale.get_mut(i) {
+            *cell = sp;
+        }
+    }
+    /// The scroll half of a [`relocate`](Self::relocate): shift by `dx` so a tile whose pop was
+    /// carried some other way stays where it was on screen.
+    pub(crate) fn shift_scroll(&mut self, dx: f32) {
+        self.scroll_x.pos += dx;
+    }
     /// **How far the row still has to scroll for `focused` to be where it will rest** — live
     /// scroll minus [`scroll_into_view`]'s target, so a tile's settled screen x is its live x plus
     /// this. `0` once the glide has landed, and `0` for a focus that needs no scroll at all.
@@ -326,9 +373,19 @@ impl CardRow {
     /// Restore a saved viewport without animating from the constructor's origin. Clamp against
     /// current content because the row may have shrunk while its screen was covered or evicted.
     pub fn restore_scroll(&mut self, scroll: f32, n: usize, sty: &RowStyle) {
-        let viewport = SCR_W - 2.0 * sty.margin_x;
-        let max = (n as f32 * (sty.w + sty.gap) - sty.gap - viewport).max(0.0);
+        let max = sty.max_scroll(n);
         self.scroll_x.jump(scroll.clamp(0.0, max));
+    }
+    /// Pull the scroll back into `[0, max]` for `n` cells when it lies outside (a [`relocate`](Self::relocate)
+    /// shift the row cannot honour: a tile near either end, or a row that fits whole). The scroll
+    /// target is derived from the scroll, so this moves both; a scroll already inside is left
+    /// alone, so a clamp that does not bite adds no spring.
+    pub fn clamp_scroll(&mut self, n: usize, sty: &RowStyle) {
+        let max = sty.max_scroll(n);
+        let at = self.scroll_x.pos.clamp(0.0, max);
+        if at != self.scroll_x.pos {
+            self.scroll_x.jump(at);
+        }
     }
     /// Which cell holds focus (`-1` none), as `update` last recorded it.
     #[inline]
@@ -428,12 +485,13 @@ pub fn column_near_x(
 
 /// Where tile `i` of a row is drawn, centre x. The other half of [`column_near_x`], so a caller
 /// never spells the same lattice out twice with the chance of disagreeing about the half-tile.
+#[cfg(test)]
 #[inline]
 pub fn tile_centre_x(i: usize, origin: f32, adv: f32, w: f32, scroll: f32) -> f32 {
     origin + i as f32 * adv - scroll + w * 0.5
 }
 
-/// The SETTLED rect of tile `i` — the one formula [`strip`] draws by and `ui::geom::Shelf::place`
+/// The SETTLED rect of tile `i` — the one formula `cards::Shelf` draws by and `ui::geom::Shelf::place`
 /// answers with (spec §7.1: draw calls place). The focus pop is applied on top by the caller
 /// (`Rect::scaled` by the cell's spring), never here.
 #[inline]
@@ -779,6 +837,7 @@ impl TileLabel {
             }
     }
     /// [`TileLabel::height`] for a block that has whatever THIS one has.
+    #[cfg(test)]
     fn own_height(&self) -> f32 {
         Self::height(self.caption.is_some())
     }
@@ -831,75 +890,6 @@ pub fn draw_focused(
     }
     let p = p.alpha(label.reveal);
     draw_label_block(p, rect, sty, label, ty, measure);
-}
-
-/// THE one-row strip loop: draw a whole horizontal shelf, non-focused tiles first (off-axis
-/// culled) and the focused tile LAST for its z-order — the in-row focused-last rule, which is all
-/// a lone strip needs (home's `Grid` keeps its own CROSS-row pass, which this deliberately does
-/// not try to own).
-///
-/// This is the loop the detail page's Related and Cast rows and the person page's Movies/Shows
-/// shelves all run; it lives here rather than in a screen so the culling discipline travels with
-/// it. **Only tiles that pass `on_axis` are drawn, and therefore only they call `resolve_tex_wh_on`** —
-/// the 64-slot poster LRU must never see an off-screen request, which is exactly what a
-/// hand-rolled per-screen copy of this loop keeps getting wrong.
-///
-/// The caller supplies the per-index content as closures: `art` the tile's [`Art`], `resume` its
-/// amber progress fraction (`None` = not in progress), `label` the FOCUSED tile's [`TileLabel`]
-/// (`TileLabel::default()` for a row that captions every tile through `extra` instead), and `extra`
-/// any per-tile caption drawn for EVERY tile (cast names/roles). `label` is invoked for the focused
-/// index only. `axis_span` widens the cull band where captions should survive slightly off-screen.
-#[allow(clippy::too_many_arguments)]
-pub fn strip<'a>(
-    p: Painter,
-    row: &CardRow,
-    n: usize,
-    focus_col: std::os::raw::c_int,
-    row_y: f32,
-    size: (f32, f32),
-    pitch: f32,
-    sty: &RowStyle,
-    axis_span: f32,
-    art: impl Fn(usize) -> Art<'a>,
-    resume: impl Fn(usize) -> Option<f32>,
-    label: impl Fn(usize) -> TileLabel,
-    extra: impl Fn(Painter, usize, f32, bool),
-    measure: &dyn plx_machine::machine::Measure,
-) {
-    let sx = row.scroll_x();
-    let pr = p.translate(-sx, 0.0);
-    for i in 0..n {
-        if i as std::os::raw::c_int == focus_col {
-            continue; // focused tile drawn last
-        }
-        // `tile_rect` in the row's own (unscrolled) space: `pr` carries the scroll
-        let x = tile_rect(i, sty.margin_x, pitch, 0.0, row_y, size).x;
-        if !crate::on_axis(x - sx, size.0, axis_span, 0.0) {
-            continue;
-        }
-        let s = row.scale(i);
-        let rect = tile_rect(i, sty.margin_x, pitch, 0.0, row_y, size).scaled(s);
-        draw_tile(pr, art(i), rect, s, sty, resume(i));
-        extra(pr, i, x, false);
-    }
-    if focus_col >= 0 && (focus_col as usize) < n {
-        let i = focus_col as usize;
-        let x = tile_rect(i, sty.margin_x, pitch, 0.0, row_y, size).x;
-        // fold the ui::press click dip into the focused tile's scale (1.0 when idle) — same as home
-        let s = row.scale(i) * crate::press::scale();
-        let rect = tile_rect(i, sty.margin_x, pitch, 0.0, row_y, size).scaled(s);
-        draw_focused(
-            pr,
-            art(i),
-            rect,
-            s,
-            sty,
-            resume(i),
-            &label(i).revealed(row.band_reveal()).settling(row.settle_lag(n, i, sty)),
-            measure,
-        );
-        extra(pr, i, x, true);
-    }
 }
 
 /// **The one trailing FACT under a focused tile** — the caption rung, for every poster shelf in the
@@ -1251,7 +1241,7 @@ pub fn place_label(p: Painter, rect: Rect, sty: &RowStyle, w: f32, lag: f32) -> 
 /// **[`anchor_label`] with the card's edges and the screen's room.** `w` is the block's width
 /// clamped to [`under_budget`], `want` its uncapped one.
 ///
-/// **The panel test is a screen fact and `rect` usually is not.** [`strip`] draws a shelf through
+/// **The panel test is a screen fact and `rect` usually is not.** a shelf is drawn through
 /// `translate(-scroll_x, 0)`, so every rect below it is a CONTENT coordinate; `p.dx()` converts,
 /// so the comparison happens in screen space and the answer comes back in the painter's. An
 /// untranslated caller (`home`, `library`, `profiles`) has `dx == 0`.
@@ -1548,6 +1538,15 @@ pub fn resume_bar(p: Painter, r: Rect, frac: f32, rad: f32) {
 // ---------------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    /// A card draw takes its press from the frame: an idle `PressRead` (scale 0.0 before any press
+    /// machine read) dips by 1.0, not to nothing.
+    #[test]
+    fn an_idle_press_read_dips_by_one() {
+        assert_eq!(plx_machine::machine::PressRead::<()>::default().dip(), 1.0);
+        let moving = plx_machine::machine::PressRead::<()> { scale: 0.92, ..Default::default() };
+        assert_eq!(moving.dip(), 0.92);
+    }
+
     /// A collection's caption is its size — "1 item", "3 items" — never a year it does not have.
     #[test]
     fn a_collection_caption_counts_its_items() {
@@ -1920,7 +1919,7 @@ mod tests {
             last = history.observe(Identity { owner: 1, asset: 1 },
                 Rect::new(0.0, ROW_PITCH_FIXED + row.under_band(), 250.0, 375.0), frame * 16);
             if frame > 0 && (row.under_band() - before).abs() / DT > 120.0 {
-                assert_eq!(last, Verdict::Moving, "band-only displacement must defer poster work");
+                assert_eq!(last, Verdict::Moving, "band-only displacement classifies as Moving");
                 saw_fast = true;
             }
         }

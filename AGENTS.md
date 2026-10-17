@@ -28,13 +28,15 @@ the macOS simulator are valuable, but they cannot prove every device behavior.
 ## Working rules
 
 - **Trunk-based development, and `main` takes SQUASH merges only.** Work happens on short-lived
-  branches or worktrees cut from `main`; when a piece of work is verified it lands on `main` as ONE
-  commit (`git merge --squash <branch>` on `main`, then a single commit whose message is the
-  change's own account), never as a fast-forward of a working branch's history and never as a
-  merge commit. A fleet of lanes integrates into its integration branch however it likes; what
-  reaches `main` is the squash of the whole. The reason is the history itself: `main` is read by
-  `git log`, by the release audit and by `git bisect`, and a trunk of "fix typo" / "wip" / merge
-  commits pollutes all three. Push `main` only when the user asked for it.
+  branches or worktrees cut from `main`. Commit as often as is useful on a branch — there is no
+  limit on how many commits a branch carries and no need to tidy them. When the work is verified it
+  lands on `main` as ONE squash commit whose message is the change's own account (the PR's squash
+  merge, or `git merge --squash <branch>` on `main` followed by a single commit), never as a
+  fast-forward of a working branch's history and never as a merge commit. A fleet of lanes
+  integrates into its integration branch however it likes; what reaches `main` is the squash of the
+  whole. The reason is the history itself: `main` is read by `git log`, by the release audit and by
+  `git bisect`, and a trunk of "fix typo" / "wip" / merge commits pollutes all three. Push `main`
+  only when the user asked for it.
 - **A squash onto a MOVING `main` silently reverts it.** `git reset --soft origin/main` keeps the
   index, so any commit that landed on `origin/main` after your picks shows up inside your squash as
   a line-for-line reversal — and the reversal compiles, so every gate stays green. PR #156 undid
@@ -96,6 +98,16 @@ the macOS simulator are valuable, but they cannot prove every device behavior.
   short tool timeout — a queued run can wait a long time before it even starts building.
 - While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and runs only
   that crate's lib tests in `make test-fast`'s incremental tree. It is a loop, not a gate.
+- `make test-crate` does NOT enable `hostsim`: tests under `#[cfg(all(test, feature = "hostsim"))]`
+  (`app/run.rs` `lifecycle_regression_tests`, the player-return rig) run as `cd rust-modules &&
+  CARGO_INCREMENTAL=1 CARGO_TARGET_DIR=/tmp/<dir> PLXNATIVE_RUNTIME_DIR=$(mktemp -d)
+  cargo +nightly test --lib -p plxnative-modules --features hostsim -- <filter>`; a filter that
+  matches nothing reports `0 tests` and still exits 0. Keep that target dir OUTSIDE the checkout
+  and `git add` explicit paths: an untracked `rust-modules/target-*` is not ignored, and
+  `git add -A rust-modules` commits it.
+- `make sim-macos` / `make` fail with `make: cargo: No such file` from a non-login shell: prefix
+  `PATH="$HOME/.cargo/bin:$PATH"`. Test builds deny warnings, so a new `App` field must be read
+  (`dead-code`) and initialised at BOTH construction sites (`app/boot.rs` and the `app/run.rs` tests).
 - A PR that touches `Makefile`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/` config,
   `.github/workflows/` or the module layout pastes a before/after `make build-bench` table in its
   body (`docs/agent-reference.md`, build section); the tool takes the `make check` lock exclusively
@@ -132,6 +144,12 @@ the macOS simulator are valuable, but they cannot prove every device behavior.
 - Use the `which-tier` skill to choose between host checks, `ui-sim`, and real-device verification.
   Pixel output, LG text rasterization, video-plane composition, performance, and native playback
   generally need the TV before being called verified.
+- **A frame drop is diagnosed with the tools that point at it, not guessed at.** Any late frame, fps
+  dip or "I see it stutter" on the TV goes straight to the `profile-tv` skill: Mali HWCNT, the
+  every-frame legs and `tools/tv-sched-trace.sh`, attributing the late frames' time before any cause
+  is named. A count of late frames, an A/B between two builds, or a reading of the heartbeat line
+  is not a diagnosis, and "probably the upload" is not a finding. State a cause only with the
+  counter or trace evidence behind it; what was not measured is reported as not determined.
 - FFI, linkage, `dynlib!`, Starfish, ACB, curl, or bundled-FFmpeg changes require the
   `fw-compat-reviewer` custom agent (`fw_compat_reviewer` in Codex), or the equivalent manual
   review, before push.

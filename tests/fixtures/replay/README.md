@@ -15,6 +15,10 @@ The replays are independent processes (own runtime dir, recorded clock, no netwo
 by side: `--jobs N` / `PLX_REPLAY_JOBS=N`, default the CPU count capped at 4, `1` for serial. Each
 replay's line is printed whole when it finishes, every replay runs even after one fails, and the
 exit status is nonzero if any did; the timeout counts from each replay's own start.
+Each opens a 1920x1080 simulator window by default; `--window WxH` / `PLX_REPLAY_WINDOW=WxH` (16:9
+only) picks another, and the macOS CI job uses 960x540 because its runner has no GPU and a replay
+costs what the window has pixels (a 584-frame replay: 72 s at 1920x1080, 24.6 s at 960x540). The
+canvas and everything graded are 1920x1080 logical either way, so the window changes no grade.
 The renderer-backed replay gate is separate from the pure host suite: `make check` tests its
 strict result parser, but does not launch the simulator.
 
@@ -352,3 +356,36 @@ afresh on the unchanged shape (`tests/focusfp.sh --rec --only 6,12`, old fixture
 `tools/plxnative-rec import`, manifests restored byte for byte, `anchor: true` kept) and replayed SAME in
 Targets and Resolve (`make check-replay`, three consecutive runs) with every difference counter zero. The
 closed alphabet did not move: every new string is already a synthetic or localized literal it admits.
+
+`cards::Stack` (Collection and Person adopting it) moved the state shape, because both screens'
+logical state gained the stack's motion canon. All three anchors loaded and replayed SAME on the
+commit before it (`make check-replay`, six replays, every counter zero) and were then observed
+being refused on the branch (`replay: REFUSED — invalid or incompatible recording`, all three, both
+modes), so nothing could be compared. They were re-recorded with `tests/focusfp.sh --rec --only
+1,6,12`, `tools/plxnative-rec check`, then `tools/plxnative-rec rerecord` (shape `(3,
+3109788404986066319)` to `(3, 14333139794472628045)`, anchors preserved) and replayed SAME in
+Targets and Resolve with zero difference counters.
+
+Recently Added paging adds the page cursor and pending request to the recorded Home state.
+The three previous anchors were refused in both replay modes after the shape changed from
+14333139794472628045 to 6411129155501563480. All three were recorded again against the synthetic
+server and installed with `tools/plxnative-rec rerecord`, with their anchor flags retained.
+This macOS display runs at 120 Hz. The recordings use shorter idle intervals and a 350 ms
+key interval to stay within the replay memory budget. A host test checks the committed
+recordings' initial hashes and request validation. Targets and Resolve replay checks also
+verify the recorded behavior.
+
+The review fixes add raw item positions and the page direction and hidden-library list to
+the recorded data state. The state shape changed from 6411129155501563480 to
+9159381185758612433. All three anchors were recorded again against the synthetic server
+and installed with `tools/plxnative-rec rerecord`. Their anchor flags remain set.
+Targets and Resolve both report SAME, with every difference counter at zero.
+
+The Nuvio stream picker adds its discovery/select state and displayed stream rows to the
+recorded Alternative Sources overlay. The state shape changed from 9159381185758612433
+to 6547080067755101788, and the old anchors were refused by the loader. All three were
+recorded again against the synthetic server with the existing 350 ms key interval,
+checked against the closed alphabet, and replayed before import. Targets and Resolve
+report SAME for all three, with every difference counter zero. `tools/plxnative-rec
+rerecord` preserved their anchor flags. The alphabet gains only the localized Streams
+button from `locales/en/browse.json`.

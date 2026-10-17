@@ -702,6 +702,37 @@ if [ "$vis_bad" -eq 0 ]; then ok "mutators-visibility"; else fail "mutators-visi
 
 gate nav '(crate::ui|plx_ui)::nav::' "$SRC_SCREENS"
 
+# cards: a screen's card shelves and grids come from `plx_ui::cards::{Shelf, Grid}` (the
+# shared-card-sections plan, layer L1), which own the pop, press, stops, restore and paging a
+# hand-assembled strip forgets. The L0 modules `card_row` and `poster_grid` are `pub(crate)`, so a
+# screen cannot NAME them at all; what it can reach is what `plx_ui::cards` re-exports, and this
+# gate is the backstop on that surface. `screens/` may not use, in non-test code: the tile
+# painters `cards::{paint_visible, draw_tile, draw_focused}` (qualified through any alias, or
+# imported by name from `cards::{..}`) should one be re-exported or added there, the L0 types
+# `CardRow`, `GridPop` and `GridBands` (a screen can name one only through such a re-export), or the
+# thread-local `press::scale()`; and `AvatarRow`, the circular-avatar row painter, is the profile
+# picker's alone (`profiles.rs`) — the scoping is in the gate, not an allowlist row, because it is
+# a permanent fact about one screen and not a migration. The geometry and label helpers
+# `plx_ui::cards` also re-exports (`tile_rect`, `under_band`, `poster_label`, ...) are what a
+# screen's own layout reads and are deliberately not gated. Whole test files are skipped; the
+# allowlist (empty) is the screens that still assemble their own, one line per file, and only
+# SHRINKS.
+cards_pat='cards::(paint_visible|draw_tile|draw_focused)\b|use [^;]*cards::\{[^}]*\b(paint_visible|draw_tile|draw_focused)\b|\bCardRow\b|\bGridPop\b|\bGridBands\b|press::scale\(\)'
+cards_bad=0
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  p="${line%%:*}"
+  if is_wholly_test "$p"; then continue; fi
+  if ! allowed cards "$p"; then echo "    $line"; cards_bad=$((cards_bad+1)); fi
+done < <(grep_code "$cards_pat" "$SRC_SCREENS")
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  p="${line%%:*}"
+  if is_wholly_test "$p" || [ "$p" = "$SRC_SCREENS/profiles.rs" ]; then continue; fi
+  echo "    $line"; cards_bad=$((cards_bad+1))
+done < <(grep_code '\bAvatarRow\b' "$SRC_SCREENS")
+if [ "$cards_bad" -eq 0 ]; then ok "cards"; else fail "cards: $cards_bad line(s) outside ci/allow/cards.txt (or AvatarRow outside profiles.rs) — draw card sections with plx_ui::cards::Shelf / Grid"; fi
+
 # layer: a SCREEN never names the application. §2.1's table says `screens/` may name `ui/`,
 # `stores/`, `plex/` and `player/` and never `app/`, and until phase 10 that half of the rule was
 # prose alone — which is exactly how `screens/registry.rs` came to record, in its own module doc,

@@ -56,7 +56,7 @@ use plx_machine::machine::{
 };
 use plx_machine::present::Present;
 use plx_ui::screen::{
-    At, DrawFrame, FocusSource, Focusable, ReturnState, Screen, ScreenEvent,
+    At, DrawFrame, FocusSource, ReturnState, Screen, ScreenEvent,
 };
 
 
@@ -631,13 +631,14 @@ impl Bridge {
 
     pub(crate) fn search_selection(&self, d: &Dispatcher<AppHost>, entry: EntryId, focus: Option<FocusKey<u32>>)
         -> Option<(plx_data::search::Item, plx_ui::popover::Opener)> {
-        let page = d.nav.entry(entry)?.inst.as_ref()?.screen.as_any()?.downcast_ref::<plx_screens::search::SearchScreen>()?;
+        let e = d.nav.entry(entry).filter(|e| e.arg == AppArg::Search)?;
+        let screen = &e.inst.as_ref()?.screen;
         let parts = CxParts { tick: Tick::default(), press: Default::default(),
             focus: plx_machine::machine::FocusRead { current: focus, ..Default::default() }, owner: InputOwner::Entry(entry) };
         let cx = parts.cx::<AppHost>(self.views(), &self.measure);
-        let item = page.selected_item(focus, &cx)?.clone();
-        let rect = page.place(&focus?.elem, &cx, At::Drawn)?.rest_rect;
-        Some((item, plx_ui::popover::Opener { rect: Some(rect), ..plx_ui::popover::Opener::NONE }))
+        let card = screen.focused_card(&cx, focus, Some(At::Drawn))?;
+        let item = card.item.downcast_ref::<plx_data::search::Item>()?.clone();
+        Some((item, plx_ui::popover::Opener { rect: Some(card.rest_rect?), ..plx_ui::popover::Opener::NONE }))
     }
 
     pub(crate) fn search_tab_available(&self, tab: HomeTab) -> bool {
@@ -650,13 +651,14 @@ impl Bridge {
 
     pub(crate) fn library_selection(&self, d: &Dispatcher<AppHost>, entry: EntryId, focus: Option<FocusKey<u32>>)
         -> Option<(plx_data::pms::PmsMovie, plx_ui::popover::Opener)> {
-        let page = d.nav.entry(entry)?.inst.as_ref()?.screen.as_any()?.downcast_ref::<plx_screens::library::LibraryScreen>()?;
+        let e = d.nav.entry(entry).filter(|e| e.arg == AppArg::Library)?;
+        let screen = &e.inst.as_ref()?.screen;
         let parts = CxParts { tick: Tick::default(), press: Default::default(),
             focus: plx_machine::machine::FocusRead { current: focus , ..Default::default() }, owner: InputOwner::Entry(entry) };
         let cx = parts.cx::<AppHost>(self.views(), &self.measure);
-        let item = page.focused_item(focus, &cx)?.clone();
-        let rect = page.place(&focus?.elem, &cx, At::Drawn)?.rest_rect;
-        Some((item, plx_ui::popover::Opener { rect: Some(rect), ..plx_ui::popover::Opener::NONE }))
+        let card = screen.focused_card(&cx, focus, Some(At::Drawn))?;
+        let item = card.item.downcast_ref::<plx_data::pms::PmsMovie>()?.clone();
+        Some((item, plx_ui::popover::Opener { rect: Some(card.rest_rect?), ..plx_ui::popover::Opener::NONE }))
     }
 
     pub(crate) fn library_command(d: &mut Dispatcher<AppHost>, command: plx_screens::registry::LibraryCmd) {
@@ -724,6 +726,28 @@ impl Bridge {
         self.library_commands.push_back(plx_screens::registry::LibraryCmd::Enter(kind));
     }
 
+    /// **Aim the store at the PRESS, a dip-out ahead of a Library that is not on screen yet.** The
+    /// page is shown as the one image captured on the frame it mounts (`PageImage`), and a Library
+    /// that mounts over a store still pointing at another kind has nothing to draw there but its
+    /// spinner: the select it would send from its first tick lands a frame after the capture, so
+    /// the dip brings up an empty page and the grid appears in one frame when the image is
+    /// replaced. The target is the page's own (`DirectoryView::kind_address`, which its first tick
+    /// sends too, so the second select is the same command on a store already there). A store
+    /// already on a library of this kind stays on it (the reader's last pick), as
+    /// `LibraryScreen::sync` keeps it. Not for a Library already on top: its `LibraryCmd::Enter` saves the outgoing
+    /// section's cursor from the listing it is still showing, before it switches.
+    pub(crate) fn aim_library(&mut self, kind: plx_data::browse::SecKind) {
+        let target = {
+            let directory = self.directory.view();
+            let current = directory.current().map(|i| directory.sections()[i].kind);
+            directory.kind_address(kind).filter(|_| current != Some(kind))
+        };
+        if let Some(target) = target {
+            self.browse_run(plx_data::stores::browse::BrowseCmd::Addressed { target,
+                work: plx_data::stores::browse::LibraryWork::Commit { select: true, choice: false, query: None } });
+        }
+    }
+
     fn deliver_library_commands(&mut self, d: &mut Dispatcher<AppHost>) {
         if d.nav.top_page().is_none_or(|page| page.arg != AppArg::Library || page.inst.is_none()) { return; }
         while let Some(command) = self.library_commands.pop_front() { Self::library_command(d, command); }
@@ -732,12 +756,11 @@ impl Bridge {
     pub(crate) fn home_opener(&self, d: &Dispatcher<AppHost>, entry: EntryId,
         focus: Option<FocusKey<u32>>) -> plx_ui::popover::Opener {
         let rect = focus.filter(|key| key.entry == entry).and_then(|key| {
-            let screen = &d.nav.entry(entry)?.inst.as_ref()?.screen;
+            let screen = &d.nav.entry(entry).filter(|e| e.arg == AppArg::Home)?.inst.as_ref()?.screen;
             let parts = CxParts { tick: Tick { ms: 0, dt_us: 0 }, press: Default::default(),
                 focus: plx_machine::machine::FocusRead { current: Some(key) , ..Default::default() }, owner: InputOwner::Entry(entry) };
             let cx = parts.cx::<AppHost>(self.views(), &self.measure);
-            screen.as_any()?.downcast_ref::<plx_screens::home::HomeScreen>()?
-                .focused_rect::<AppHost>(Some(key), &cx, At::Drawn)
+            screen.focused_card_rect(&cx, Some(key), At::Drawn)
         });
         plx_ui::popover::Opener { rect, ..plx_ui::popover::Opener::NONE }
     }
@@ -773,6 +796,19 @@ impl Bridge {
             focus: plx_machine::machine::FocusRead { current: focus , ..Default::default() }, owner: InputOwner::Entry(entry.id) };
         let cx = parts.cx::<AppHost>(self.views(), &self.measure);
         Some(f(home, &cx, focus))
+    }
+
+    /// Is a MEMBER CARD focused on the mounted Collection page (not its header)? The press bench's
+    /// precondition on a `cards::Stack` page.
+    pub(crate) fn collection_card_focused(&self, d: &Dispatcher<AppHost>) -> bool {
+        let Some(entry) = d.nav.top_page() else { return false };
+        let Some(page) = entry.inst.as_ref().and_then(|i| i.screen.as_any())
+            .and_then(|s| s.downcast_ref::<plx_screens::collection::CollectionScreen>()) else { return false };
+        let focus = d.input.engine.current(InputOwner::Entry(entry.id));
+        let parts = CxParts { tick: Tick { ms: 0, dt_us: 0 }, press: Default::default(),
+            focus: plx_machine::machine::FocusRead { current: focus, ..Default::default() }, owner: InputOwner::Entry(entry.id) };
+        let cx = parts.cx::<AppHost>(self.views(), &self.measure);
+        page.focused_item::<AppHost>(focus, &cx).is_some()
     }
 
     pub(crate) fn home_grid_focused(&self, d: &Dispatcher<AppHost>) -> bool {
@@ -919,9 +955,10 @@ impl Bridge {
     pub(crate) fn content_menu_arg(&self, d: &Dispatcher<AppHost>, entry: EntryId, ret: &ReturnState<u32, PageMemory>)
         -> Option<plx_screens::registry::ItemMenuArg> {
         let e = d.nav.entry(entry)?;
-        let screen = e.inst.as_ref()?.screen.as_any()?;
+        let real = &e.inst.as_ref()?.screen;
+        let screen = real.as_any()?;
         let mut parts = CxParts { tick: Tick { ms: 0, dt_us: 0 },
-            press: plx_machine::machine::PressRead { scale: 1.0, is_long: false, held_ms: None },
+            press: plx_machine::machine::PressRead { scale: 1.0, is_long: false, held_ms: None, owner: None },
             focus: plx_machine::machine::FocusRead { current: None , ..Default::default() },
             owner: plx_machine::machine::InputOwner::Entry(entry) };
         parts.owner = plx_machine::machine::InputOwner::Entry(entry);
@@ -932,27 +969,22 @@ impl Bridge {
             let rect = page.focused_rect::<AppHost>(ret.focus, &cx, At::Drawn);
             let meta = <AppHost as plx_screens::registry::MetadataLike>::metadata(&cx);
             if let Some((rk, mark)) = page.focused_season(ret.focus, meta) {
-                Some(strip_menu_arg(sid, &rk, ItemMenuKind::Season { mark }, entry, ret.focus, rect))
-            } else if let Some((rk, mark)) = page.focused_episode(ret.focus, meta) {
-                // the ONE entry point whose item is a leaf of the season this page has loaded
-                Some(strip_menu_arg(sid, &rk, ItemMenuKind::Episode { mark }, entry, ret.focus, rect))
-            } else {
-                // …a RELATED tile is a DIFFERENT item standing on the same page: an ordinary card
-                // row, which is exactly what `MenuHost::Related` existed to say.
-                let item = page.focused_related(ret.focus, meta).filter(|m| plx_screens::item_menu::has_actions(m))?;
-                Some(card_menu_arg(item, false, false, entry, ret.focus, rect))
+                return Some(strip_menu_arg(sid, &rk, ItemMenuKind::Season { mark }, entry, ret.focus, rect));
             }
-        } else {
-            // A card page — Person or Collection — answers its focused card and where it sits.
-            let (item, rect) = if let Some(page) = screen.downcast_ref::<plx_screens::person::PersonScreen>() {
-                (page.focused_item(ret.focus, &cx), page.focused_rect::<AppHost>(ret.focus, &cx, At::Drawn))
-            } else {
-                let page = screen.downcast_ref::<plx_screens::collection::CollectionScreen>()?;
-                (page.focused_item(ret.focus, &cx), page.focused_rect::<AppHost>(ret.focus, &cx, At::Drawn))
-            };
-            let item = item.filter(|m| plx_screens::item_menu::has_actions(m))?;
-            Some(card_menu_arg(item, false, false, entry, ret.focus, rect))
+            if let Some((rk, mark)) = page.focused_episode(ret.focus, meta) {
+                // the ONE entry point whose item is a leaf of the season this page has loaded
+                return Some(strip_menu_arg(sid, &rk, ItemMenuKind::Episode { mark }, entry, ret.focus, rect));
+            }
         }
+        // A card page answers its focused card and where it sits: Person, Collection, and Detail's
+        // Related shelf — a RELATED tile is a DIFFERENT item standing on the same page, an
+        // ordinary card row, which is exactly what `MenuHost::Related` existed to say. Only a
+        // content page's route: Home, Library and Search cards open their menus through their own
+        // requests, which carry the `from_deck` / `from_home` bits this arm would drop.
+        if !matches!(e.arg, AppArg::Content(_)) { return None; }
+        let card = real.focused_card(&cx, ret.focus, Some(At::Drawn))?;
+        let item = card.item.downcast_ref::<plx_data::pms::PmsMovie>().filter(|m| plx_screens::item_menu::has_actions(m))?;
+        Some(card_menu_arg(item, false, false, entry, ret.focus, card.rect))
     }
 
     /// **The opener LIFT: the focused tile repainted above the modal dim.** Render-only, and the
@@ -965,9 +997,11 @@ impl Bridge {
     /// that the card stays visible behind it. The dim is the CONTAINER's now (`Screen::scrim`), so
     /// what is left here is the half only the page that drew the element can answer — a `fn()` lift
     /// has nothing to borrow a `&Dispatcher` through.
+    ///
+    /// Whether it runs at all is [`opener_lift`]'s answer, made once for every page: it stands down
+    /// once the menu is dismissed and focus has moved off the opener element.
     pub(crate) fn redraw_opener(&self, d: &Dispatcher<AppHost>) {
-        let Some((entry, focus)) = item_menu(d).map(|menu| menu.opener()) else { return };
-        if d.nav.top_page().map(|e| e.id) != Some(entry) { return; }
+        let Some((entry, focus)) = opener_lift(d) else { return };
         let Some(screen) = d.nav.entry(entry).and_then(|e| e.inst.as_ref()).map(|i| &i.screen) else { return };
         // The page pass may be submitting a cached host quad. Opener lifts are live paint
         // above that quad, like Popover::scrim_lifting's legacy callback scope.
@@ -1144,6 +1178,25 @@ impl Bridge {
     }
 
     pub(crate) fn landgate(&self) -> &plx_machine::landgate::Gate { &self.stores.landgate }
+
+    /// **Landing claims still open**, by store name: a request this owner spawned whose answer no
+    /// take has moved out yet. The frame-dump driver (`dev::framedump`) holds the picture while any
+    /// is open. It is the subset the owner can read without a take: Home's hubs
+    /// (`HubsStore::owed`) and the controlled-Home Browse discovery. The `Fetch`-based stores
+    /// (metadata, person, collection, search, view state) keep their claim inside the store and
+    /// answer through `take_owed` alone, so a request spawned this iteration is seen by NEXT
+    /// iteration's take, which waits for it (`plx_machine::landgate`'s module doc).
+    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    pub(crate) fn open_claims(&self) -> Vec<&'static str> {
+        let mut open = Vec::new();
+        if self.stores.hubs.owed() {
+            open.push(StoreId::Hubs.name());
+        }
+        if self.stores.browse.borrow().discovery_owed() {
+            open.push(StoreId::Browse.name());
+        }
+        open
+    }
 
     /// The `MetadataStore`'s own async detail landing — `app/run.rs`'s route-unconditional pump.
     pub(crate) fn metadata_pump_detail(&mut self) -> bool {
@@ -1745,8 +1798,11 @@ impl Bridge {
     /// arrival waits for the frame the recording delivered it on (§3.3 step 3). Off a replay, one
     /// relaxed atomic load and the same call.
     fn take_hubs_results(&self) -> AppResults {
-        let mut results =
-            self.stores.landgate.take_all(StoreId::Hubs.ord(), || self.stores.hubs.take_results());
+        // Dump mode waits here for every hub request the previous execution of this site (or the
+        // frame's own work) spawned, so a request issued in iteration k lands in k+1 whatever the
+        // worker's timing. The claim is the adapter's own count (`HubsStore::owed`).
+        let mut results = self.stores.landgate.take_all_owed(StoreId::Hubs.ord(), StoreId::Hubs.name(),
+            |_| self.stores.hubs.owed(), || self.stores.hubs.take_results());
         results.sort_by_key(|result| result.request_id());
         results.into_iter().map(|result| (
             plx_machine::machine::Addr {
@@ -1806,7 +1862,8 @@ impl Bridge {
         }
         results.extend(self.take_hubs_results());
         if self.home_io.is_some() {
-            if let Some(result) = self.stores.landgate.take(StoreId::Browse.ord(),
+            if let Some(result) = self.stores.landgate.take_owed(StoreId::Browse.ord(), StoreId::Browse.name(),
+                || self.stores.browse.borrow().discovery_owed(),
                 || self.stores.browse.borrow_mut().take_discovery()) {
                 results.push((plx_machine::machine::Addr {
                     to: MachineId::Store(StoreId::Browse.ord()),
@@ -2090,7 +2147,7 @@ fn page_probe(d: &Dispatcher<AppHost>, rig: &Bridge) -> String {
     let Some(instance) = d.nav.entry(owner).and_then(|e| e.inst.as_ref()) else { return String::new() };
     let focus = d.focus();
     let parts = CxParts { tick: Tick { ms: 0, dt_us: 0 },
-        press: plx_machine::machine::PressRead { scale: 1.0, is_long: false, held_ms: None },
+        press: plx_machine::machine::PressRead { scale: 1.0, is_long: false, held_ms: None, owner: None },
         focus: plx_machine::machine::FocusRead { current: focus , ..Default::default() }, owner: InputOwner::Entry(owner) };
     let cx = parts.cx::<AppHost>(rig.views(), &rig.measure);
     let mut groups = Vec::new();
@@ -2149,18 +2206,16 @@ fn page_probe(d: &Dispatcher<AppHost>, rig: &Bridge) -> String {
             let filmography = d.nav.is_surface(owner)
                 && d.nav.entry(owner).is_some_and(|e| matches!(e.arg, AppArg::Content(ContentArg::Filmography { .. })));
             let _ = write!(out, " card={} filmography={}", card as u8, filmography as u8);
-            let item = instance.screen.as_any()
-                .and_then(|s| s.downcast_ref::<plx_screens::person::PersonScreen>())
-                .and_then(|s| s.focused_item(focus, &cx));
+            let item = instance.screen.focused_card(&cx, focus, None)
+                .and_then(|card| card.item.downcast_ref::<plx_data::pms::PmsMovie>());
             if let Some(item) = item {
                 let _ = write!(out, " sid={} rk=", item.sid.raw());
                 crate::focusprobe::push_rk(&mut out, &item.rk);
             } else { out.push_str(" sid=- rk=-"); }
         }
         AppArg::Content(ContentArg::Collection(plx_plex::plex::collections::CollectionRef { rk, sec, tag, .. })) => {
-            let item = instance.screen.as_any()
-                .and_then(|screen| screen.downcast_ref::<plx_screens::collection::CollectionScreen>())
-                .and_then(|screen| screen.focused_item(focus, &cx));
+            let item = instance.screen.focused_card(&cx, focus, None)
+                .and_then(|card| card.item.downcast_ref::<plx_data::pms::PmsMovie>());
             let _ = write!(out, " card={} collection_rk=", card as u8);
             crate::focusprobe::push_rk(&mut out, rk);
             let _ = write!(out, " sec={sec} tag={tag}");
@@ -2400,16 +2455,35 @@ fn strip_menu_arg(
 }
 
 /// **What the opener lift reads of the press: the dispatcher's own, live.** The lift is the page's
-/// focused card drawn a second time above the dim, and the page draws it at the press scale
-/// (`DrawFrame.press`, from `Dispatcher::parts`), so the lift must be handed the SAME number or the
-/// two disagree on every frame the press is moving. They did, while this was a constant `1.0`: a
-/// taken hold's card was drawn at its pop by the lift and at its dip by the page and the host
-/// snapshot, and the owner saw a poster that popped in one frame with its title doubled.
+/// focused card drawn a second time above the dim. A card a card section left out of the page pass
+/// (`DrawFrame::lifted`) is drawn by the lift ALONE, at this scale. An opener no card section draws
+/// (the Detail episode strip, season tabs, hero buttons, the Home hero) is still drawn by the page
+/// at the press scale (`DrawFrame.press`, from `Dispatcher::parts`), so there the lift must be
+/// handed the SAME number or the two disagree on every frame the press is moving. They did, while
+/// this was a constant `1.0`: a taken hold's card was drawn at its pop by the lift and at its dip
+/// by the page and the host snapshot, and the owner saw a poster that popped in one frame with its
+/// title doubled.
 ///
 /// Only the scale is the lift's business; a hold in flight or the hint's elapsed time is not (the
 /// lift draws one card, not the page's hold hint).
-pub(crate) fn opener_press(d: &Dispatcher<AppHost>) -> plx_machine::machine::PressRead {
-    plx_machine::machine::PressRead { scale: d.input.press.scale(), is_long: false, held_ms: None }
+pub(crate) fn opener_press(d: &Dispatcher<AppHost>) -> plx_machine::machine::PressRead<u32> {
+    plx_machine::machine::PressRead { scale: d.input.press.scale(), is_long: false, held_ms: None, owner: d.input.dip_owner }
+}
+
+/// **Which element, if any, the opener lift repaints this frame** — the ONE decision every page
+/// inherits, so no screen's `redraw_focused` has to defend against a stale key.
+///
+/// The lift is the opener tile drawn again above the dim, *because it is the focused one*. That
+/// stops being true the moment the menu is dismissed: `ModalStack::dismiss` hands input back to the
+/// page on the same frame, but the surface stays in the stack until its fade settles, so a D-pad
+/// press during the fade moves the page's focus to a neighbour while this lift would still paint
+/// the OLD tile fully popped and captioned (two tiles look focused at once; the new one's pop
+/// reads late). So while the surface is `Closing`, the lift is painted only if the engine's focus
+/// on the host page is still the opener element (or there is none to compare); once focus has
+/// moved, the page draws the tiles itself and the lift stands down. While the menu is open the
+/// engine's focus is on the menu's own rows, so the lift always paints then.
+pub(crate) fn opener_lift(d: &Dispatcher<AppHost>) -> Option<(EntryId, Option<FocusKey<u32>>)> {
+    d.lifted_opener()
 }
 
 /// **The context the opener lift draws with**: the page's own pieces for `entry`'s focused element,
@@ -2434,10 +2508,12 @@ pub(crate) fn opener_parts(
 ///
 /// **It does not touch the press.** A hold the screen answered was already abandoned onto its
 /// release spring by the dispatcher (`InputMachine::cancel_press`), so the card springs from its dip
-/// up to its pop as the menu opens, and the press is the ONE owner of that motion: the page and
-/// the opener lift ([`opener_press`]) both draw its scale, and `Press::tick` reports the frames a
-/// cancelled long hold visibly moves the card as page damage (a tap's spring is not) so the host snapshot below is re-taken until the card rests (see
-/// the style paragraph). Ending the press at rest here instead (`Press::settle`, rc.3) made the
+/// up to its pop as the menu opens, and the press is the ONE owner of that motion: the opener
+/// lift ([`opener_press`]) draws it live above the frozen page (and, for an opener no card section
+/// draws, the page draws it too). The page pass leaves
+/// the lifted card out (`DrawFrame::lifted`), so the snapshot holds no copy of it to go stale and
+/// the spring is not page damage (`Press::tick`); only an opener no card section draws keeps the
+/// per-frame re-take. Ending the press at rest here instead (`Press::settle`, rc.3) made the
 /// card jump to its pop in one frame, the lost animation the owner reported.
 ///
 /// The style is `Compact`, whose host policy is `(Frozen, Cached)`: the page under the panel is
@@ -2786,8 +2862,12 @@ pub(crate) fn nav_tab(
             }
             AppArg::Home
         }
-        HomeTab::Movies => { rig.enter_library(plx_data::browse::SecKind::Movie); AppArg::Library }
-        HomeTab::Shows => { rig.enter_library(plx_data::browse::SecKind::Show); AppArg::Library }
+        HomeTab::Movies | HomeTab::Shows => {
+            let kind = if tab == HomeTab::Movies { plx_data::browse::SecKind::Movie } else { plx_data::browse::SecKind::Show };
+            rig.enter_library(kind);
+            if d.top_arg() != Some(&AppArg::Library) { rig.aim_library(kind); }
+            AppArg::Library
+        }
         HomeTab::Search => AppArg::Search,
     };
     nav_peer(d, arg, ret);
@@ -3333,14 +3413,17 @@ pub(crate) fn release_input(now: Tick) -> InputEvent<u32> {
 
 /// A scripted direction (the dev oscillators), both edges.
 pub(crate) fn script_key(key: Key, now: Tick) -> Vec<InputEvent<u32>> {
-    [Edge::Down, Edge::Up]
-        .into_iter()
-        .map(|edge| InputEvent {
-            at: now,
-            source: Source::Script,
-            kind: InputKind::Key { key, sym: 0, wcode: 0, edge, at_edge: false },
-        })
-        .collect()
+    [Edge::Down, Edge::Up].into_iter().map(|edge| script_edge(key, edge, now)).collect()
+}
+
+/// One scripted key edge. The frame dump presses a key as a person does, the down edge and then
+/// the up edge some frames later (`dev::framedump`).
+pub(crate) fn script_edge(key: Key, edge: Edge, now: Tick) -> InputEvent<u32> {
+    InputEvent {
+        at: now,
+        source: Source::Script,
+        kind: InputKind::Key { key, sym: 0, wcode: 0, edge, at_edge: false },
+    }
 }
 
 #[allow(dead_code)]
@@ -3416,8 +3499,16 @@ mod session_dispatch_tests;
 mod home_retention_tests;
 
 #[cfg(test)]
+#[path = "hubs_dump_tests.rs"]
+mod hubs_dump_tests;
+
+#[cfg(test)]
 #[path = "library_bookmark_tests.rs"]
 mod library_bookmark_tests;
+
+#[cfg(test)]
+#[path = "library_push_capture_tests.rs"]
+mod library_push_capture_tests;
 
 #[cfg(test)]
 #[path = "library_diagnostic_tests.rs"]
@@ -3442,6 +3533,10 @@ mod library_host_freeze_tests;
 #[cfg(test)]
 #[path = "library_shelf_action_tests.rs"]
 mod library_shelf_action_tests;
+
+#[cfg(test)]
+#[path = "opener_route_tests.rs"]
+mod opener_route_tests;
 
 #[cfg(test)]
 #[path = "library_tab_arrival_tests.rs"]

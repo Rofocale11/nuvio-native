@@ -1,7 +1,7 @@
 //! Search's document geometry. Both engine placement and rendering use these expressions.
 use plx_data::search::Kind;
-use plx_ui::card_row::{self, RowStyle};
-use plx_ui::consts::{CARD_H, CARD_W, MARGIN_X, MARGIN_Y, SCR_H, SCR_W};
+use plx_ui::cards::RowStyle;
+use plx_ui::consts::{CARD_H, CARD_W, MARGIN_X, SCR_H, SCR_W};
 use plx_machine::machine::GroupId;
 use plx_ui::Rect;
 
@@ -16,7 +16,8 @@ pub const FIELD: Rect = Rect {
 };
 pub(super) const SCOPE_Y: f32 = FIELD.y + FIELD.h + 12.0;
 /// See [`FIELD`]'s doc: also reachable as `crate::search::CONTENT_TOP`. Value pinned at
-/// 300.0 — the overscan audit and `top()`'s own layering both depend on it.
+/// 300.0 — the overscan audit and the page's `Head` section height (`Stack` stacks the shelves
+/// below it) both depend on it.
 pub const CONTENT_TOP: f32 = 300.0;
 pub(super) const HEAD_TO_ROW: f32 = 60.0;
 pub(super) const KEYBOARD_H: f32 = 324.0;
@@ -36,48 +37,27 @@ pub(super) fn ordinal(kind: Kind) -> u32 {
 pub(super) fn group(kind: Kind) -> GroupId {
     GroupId(0x5345_4200 + ordinal(kind))
 }
-pub(super) fn style(kind: Kind) -> RowStyle {
-    let (w, h, circular) = match kind {
-        Kind::Episode => (420.0, 236.0, false),
-        Kind::Person => (250.0, 250.0, true),
-        _ => (CARD_W, CARD_H, false),
-    };
-    RowStyle {
-        w,
-        h,
-        circular,
-        ..RowStyle::HOME
+static EPISODE: RowStyle = RowStyle { w: 420.0, h: 236.0, ..RowStyle::HOME };
+static PERSON: RowStyle = RowStyle { w: 250.0, h: 250.0, circular: true, ..RowStyle::HOME };
+static POSTER: RowStyle = RowStyle { w: CARD_W, h: CARD_H, ..RowStyle::HOME };
+
+/// The row style of `kind`'s shelf: the poster shelf's, with the still and the headshot sized to
+/// their own aspect.
+pub(super) fn style(kind: Kind) -> &'static RowStyle {
+    match kind {
+        Kind::Episode => &EPISODE,
+        Kind::Person => &PERSON,
+        _ => &POSTER,
     }
 }
-pub(super) fn block_h(kind: Kind, expansion: f32) -> f32 {
-    HEAD_TO_ROW + style(kind).h + caption_band(expansion)
+/// A shelf block's height under a caption band of `band` px (a shelf's live
+/// [`Shelf::under_band`](plx_ui::cards::Shelf::under_band), or [`card_row::under_band`] of a
+/// settled 0 / 1).
+pub(super) fn block_h(kind: Kind, band: f32) -> f32 {
+    HEAD_TO_ROW + style(kind).h + caption_band(band)
 }
-pub(super) fn caption_band(expansion: f32) -> f32 {
-    plx_ui::consts::UNDER_LABEL_AIR + card_row::under_band(expansion)
-}
-pub(super) fn top(kinds: &[Kind], index: usize, expansion: impl Fn(usize) -> f32) -> f32 {
-    CONTENT_TOP
-        + kinds
-            .iter()
-            .take(index)
-            .enumerate()
-            .map(|(i, kind)| block_h(*kind, expansion(i)))
-            .sum::<f32>()
-}
-pub(super) fn reveal(scroll: f32, kinds: &[Kind], focused: usize) -> f32 {
-    if focused >= kinds.len() {
-        return 0.0;
-    }
-    let expansion = |i| if i == focused { 1.0 } else { 0.0 };
-    let origin = top(kinds, focused, expansion);
-    let height = block_h(kinds[focused], 1.0);
-    let content = top(kinds, kinds.len(), expansion) + MARGIN_Y;
-    card_row::reveal(
-        scroll,
-        origin + height - (SCR_H - MARGIN_Y),
-        origin - CONTENT_TOP,
-        (content - SCR_H).max(0.0),
-    )
+pub(super) fn caption_band(band: f32) -> f32 {
+    plx_ui::consts::UNDER_LABEL_AIR + band
 }
 pub(super) fn recent(slot: usize, scroll: f32) -> Rect {
     Rect::new(
@@ -88,6 +68,10 @@ pub(super) fn recent(slot: usize, scroll: f32) -> Rect {
     )
 }
 pub(super) fn clear(terms: usize, scroll: f32, measure: &dyn plx_machine::machine::Measure) -> Rect {
+    clear_below(recent(terms.min(RECENT_CAP), scroll).y, measure)
+}
+/// The Clear control under a recents block whose last row ends at `list_end`.
+pub(super) fn clear_below(list_end: f32, measure: &dyn plx_machine::machine::Measure) -> Rect {
     let width = plx_ui::widgets::Button::pill_w_measured(
         plx_platform::i18n::msg::browse_search_clear_c(),
         plx_ui::theme::size::BODY,
@@ -97,14 +81,10 @@ pub(super) fn clear(terms: usize, scroll: f32, measure: &dyn plx_machine::machin
     );
     Rect::new(
         MARGIN_X + plx_ui::table::CONTENT_X,
-        recent_block_bottom(terms, scroll) - CLEAR_H,
+        list_end + plx_ui::theme::space::MD,
         width,
         CLEAR_H,
     )
-}
-
-pub(super) fn recent_block_bottom(terms: usize, scroll: f32) -> f32 {
-    recent(terms.min(RECENT_CAP), scroll).y + plx_ui::theme::space::MD + CLEAR_H
 }
 
 pub(super) fn empty_band(editing: bool) -> Rect {
@@ -137,112 +117,40 @@ mod tests {
         assert_eq!(overlong.y, capped.y);
     }
 
-    const OPEN: fn(usize) -> f32 = |_| 1.0;
+    fn full() -> f32 {
+        plx_ui::cards::under_band(1.0)
+    }
     const ALL: [Kind; 5] = plx_data::search::KINDS;
 
     #[test]
     fn the_reserved_caption_band_holds_the_block_the_shared_component_draws() {
-        let drawn = plx_ui::card_row::TileLabel::height(true);
+        let drawn = plx_ui::cards::TileLabel::height(true);
         assert!(
-            drawn <= caption_band(1.0),
+            drawn <= caption_band(full()),
             "the label block draws {drawn}px into a band of {}px",
-            caption_band(1.0)
+            caption_band(full())
         );
     }
 
     #[test]
-    fn shelves_stack_by_their_own_block_heights_from_the_content_top() {
-        assert_eq!(top(&ALL, 0, OPEN), CONTENT_TOP);
-        for i in 1..ALL.len() {
-            assert_eq!(
-                top(&ALL, i, OPEN) - top(&ALL, i - 1, OPEN),
-                block_h(ALL[i - 1], 1.0),
-                "shelf {i} did not start one block below shelf {}",
-                i - 1
-            );
-        }
-        assert_eq!(block_h(Kind::Movie, 1.0), plx_ui::consts::ROW_PITCH);
-        assert_eq!(block_h(Kind::Show, 1.0), plx_ui::consts::ROW_PITCH);
-        assert_eq!(block_h(Kind::Collection, 1.0), plx_ui::consts::ROW_PITCH);
-        assert_eq!(
-            block_h(Kind::Episode, 1.0),
-            HEAD_TO_ROW + 236.0 + caption_band(1.0)
-        );
-        assert_eq!(
-            block_h(Kind::Person, 1.0),
-            HEAD_TO_ROW + 250.0 + caption_band(1.0)
-        );
-        assert_eq!(
-            block_h(Kind::Movie, 1.0) - block_h(Kind::Episode, 1.0),
-            CARD_H - 236.0
-        );
-        assert_eq!(
-            top(&[Kind::Episode, Kind::Movie], 1, OPEN),
-            CONTENT_TOP + block_h(Kind::Episode, 1.0)
-        );
-        assert_eq!(top(&[], 99, OPEN), CONTENT_TOP);
-        assert_eq!(top(&ALL, 99, OPEN), top(&ALL, ALL.len(), OPEN));
+    fn block_heights_are_the_row_pitch_for_posters_and_follow_the_style_otherwise() {
+        assert_eq!(block_h(Kind::Movie, full()), plx_ui::consts::ROW_PITCH);
+        assert_eq!(block_h(Kind::Show, full()), plx_ui::consts::ROW_PITCH);
+        assert_eq!(block_h(Kind::Collection, full()), plx_ui::consts::ROW_PITCH);
+        assert_eq!(block_h(Kind::Episode, full()), HEAD_TO_ROW + 236.0 + caption_band(full()));
+        assert_eq!(block_h(Kind::Person, full()), HEAD_TO_ROW + 250.0 + caption_band(full()));
+        assert_eq!(block_h(Kind::Movie, full()) - block_h(Kind::Episode, full()), CARD_H - 236.0);
     }
 
     #[test]
     fn the_first_shelfs_whole_row_clears_the_raised_keyboard() {
         let floor = SCR_H - KEYBOARD_H;
         for kind in ALL {
-            let bottom = top(&[kind], 0, OPEN) + HEAD_TO_ROW + style(kind).h;
-            assert!(
-                bottom <= floor,
-                "{kind:?}: the first row ends at {bottom}, under the keyboard at {floor}"
-            );
+            let bottom = CONTENT_TOP + HEAD_TO_ROW + style(kind).h;
+            assert!(bottom <= floor, "{kind:?}: the first row ends at {bottom}, under the keyboard at {floor}");
         }
-        assert_eq!(top(&[Kind::Movie], 0, OPEN) + HEAD_TO_ROW + CARD_H, 735.0);
+        assert_eq!(CONTENT_TOP + HEAD_TO_ROW + CARD_H, 735.0);
         assert_eq!(floor, 756.0);
-    }
-
-    #[test]
-    fn a_shelf_scrolls_only_as_far_as_its_own_block_needs() {
-        assert_eq!(
-            reveal(0.0, &ALL, 0),
-            0.0,
-            "the first shelf is already on screen"
-        );
-        let want = reveal(0.0, &ALL, 2);
-        assert!(
-            want > 0.0,
-            "the third shelf is below the fold and must be revealed"
-        );
-        let e = |i| (i == 2) as i32 as f32;
-        let shelf_top = top(&ALL, 2, e);
-        assert!(
-            shelf_top + block_h(ALL[2], 1.0) - want <= SCR_H,
-            "its block bottom is still off screen"
-        );
-        assert!(
-            shelf_top - want >= CONTENT_TOP,
-            "it scrolled past the minimum — the shelf overshot upward"
-        );
-        assert_eq!(reveal(want, &ALL, 2), want);
-        let one = reveal(0.0, &ALL, 1);
-        let one_top = top(&ALL, 1, |i| (i == 1) as i32 as f32);
-        assert!(
-            one < one_top - CONTENT_TOP,
-            "the reveal must undercut the pin, or it IS the pin"
-        );
-        assert_eq!(one, one_top + block_h(ALL[1], 1.0) - (SCR_H - MARGIN_Y));
-        let last = ALL.len() - 1;
-        let end = reveal(0.0, &ALL, last);
-        let last_top = top(&ALL, last, |i| (i == last) as i32 as f32);
-        let content = last_top + block_h(ALL[last], 1.0) + MARGIN_Y;
-        assert_eq!(
-            content - end,
-            SCR_H,
-            "the last block rests one panel above the flow's end"
-        );
-        assert_eq!(last_top + block_h(ALL[last], 1.0) - end, SCR_H - MARGIN_Y);
-        assert_eq!(
-            reveal(0.0, &ALL, 99),
-            0.0,
-            "a shelf that is not there cannot scroll the page"
-        );
     }
 
     /// Legacy `ui/search/mod.rs`'s `the_content_line_clears_the_documents_head`: the document's
@@ -261,11 +169,11 @@ mod tests {
     #[test]
     fn a_full_block_finishes_clear_of_the_raised_keyboard() {
         let kbd_top = SCR_H - KEYBOARD_H;
-        let clearance = kbd_top - recent_block_bottom(RECENT_CAP, 0.0);
+        let bottom = clear(RECENT_CAP, 0.0, &Measure).y + CLEAR_H;
+        let clearance = kbd_top - bottom;
         assert!(
             clearance >= plx_ui::theme::space::LG,
-            "a full block ends at {} and the keyboard starts at {kbd_top} — {clearance}px",
-            recent_block_bottom(RECENT_CAP, 0.0)
+            "a full block ends at {bottom} and the keyboard starts at {kbd_top} — {clearance}px"
         );
     }
 }

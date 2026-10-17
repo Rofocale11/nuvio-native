@@ -366,11 +366,23 @@ mod seam_order_tests {
 ///
 /// One door rather than a branch at each of the five call sites, so the platform question is
 /// asked once and the call sites read the same on both.
+///
+/// Resolved at runtime rather than linked: webOS 3.4 ships SDL 2.0.3, which has none of LG's
+/// `SDL_webOS*` extensions, and a strong reference there is a lazily-bound PLT slot that kills
+/// the process on the first D-pad press (`tools/fwcompat.py --release 3.4.0`).
 #[inline]
 pub(crate) unsafe fn hide_cursor() {
     #[cfg(not(feature = "hostsim"))]
     {
-        SDL_webOSCursorVisibility(0);
+        type CursorVisibility = unsafe extern "C" fn(c_int) -> c_int;
+        static SYM: std::sync::OnceLock<Option<CursorVisibility>> = std::sync::OnceLock::new();
+        let f = SYM.get_or_init(|| {
+            let p = plx_base::dynlib::Handle::self_handle().sym("SDL_webOSCursorVisibility")?;
+            (!p.is_null()).then(|| std::mem::transmute::<*mut std::ffi::c_void, CursorVisibility>(p))
+        });
+        if let Some(f) = f {
+            f(0);
+        }
     }
 }
 /// Advance the once-per-second LOOP-RATE window: bump `iters_ct` and, when a full second has
@@ -710,7 +722,14 @@ pub(crate) unsafe fn construct(
     let title = c"PlxNative";
     #[cfg(not(feature = "hostsim"))]
     let title = c"plxnative";
-    let win = SDL_CreateWindow(title.as_ptr(), wx, wy, ww_req, wh_req, SDL_WINDOW_FLAGS);
+    // A frame dump's drawable is exactly the window's size in points: ALLOW_HIGHDPI (0x2000) would
+    // make a Retina display's drawable 3840x2160 for a 1920x1080 window, which the master cannot
+    // be, and which differs from the canonical Linux host. (Absent from every shipping build.)
+    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    let window_flags = if crate::dev::framedump::requested() { SDL_WINDOW_FLAGS & !0x2000 } else { SDL_WINDOW_FLAGS };
+    #[cfg(not(all(feature = "hostsim", feature = "devtriggers")))]
+    let window_flags = SDL_WINDOW_FLAGS;
+    let win = SDL_CreateWindow(title.as_ptr(), wx, wy, ww_req, wh_req, window_flags);
     if win.is_null() {
         log("CreateWindow failed");
         return Err(1);
@@ -724,7 +743,13 @@ pub(crate) unsafe fn construct(
     // vsync on → the frame rate locks to the panel refresh. `/tmp/plxnative-novsync` uncaps it so
     // `fps=` reports the true GPU render rate. WSLg's X11/GLX swap accepts interval 1 without
     // blocking, so the software budget in `run` follows the same switch.
-    let vsync_enabled = controlled || !crate::dev::scenarios::novsync_armed();
+    // A frame dump never waits on the display: every iteration is a render, at swap interval 0 and
+    // with the Linux software pacer off (`vsync_enabled` also gates `wslg_frame_pacing`).
+    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    let dumping = crate::dev::framedump::requested();
+    #[cfg(not(all(feature = "hostsim", feature = "devtriggers")))]
+    let dumping = false;
+    let vsync_enabled = !dumping && (controlled || !crate::dev::scenarios::novsync_armed());
     SDL_GL_SetSwapInterval(if vsync_enabled { 1 } else { 0 });
     #[cfg(all(feature = "hostsim", target_os = "linux"))]
     let wslg_frame_pacing = vsync_enabled
@@ -789,6 +814,12 @@ pub(crate) unsafe fn construct(
     // means this device has no libcurl we can bind, so plex.tv sign-in will not work — the app
     // still runs, and `net::global_init` has already said so in the event log.
     let _ = plx_net::net::global_init();
+    // NuvioNative: the PMS shim over the user's Stremio addons becomes the one server — before the
+    // token/origin below are read and before anything asks for plex.tv (`app::nuvio`). A controlled
+    // (replay) boot keeps upstream's recorded server.
+    if initial.is_none() {
+        super::nuvio::boot();
+    }
     // Drain whatever the LAST session left behind, on a worker — and **after `global_init`,
     // which is the whole reason this line is here and not beside `telemetry::boot()` 170 lines
     // up.** It was there first, and the end-to-end run showed why that was wrong: the worker
@@ -930,6 +961,13 @@ pub(crate) unsafe fn construct(
     // television. Armed after the projection above, whose sign-out arm only clears bound hosts.
     #[cfg(feature = "devtriggers")]
     crate::dev::scenarios::clock_fact::arm_at_boot();
+    // dev: /tmp/plxnative-hintoff — the hold hint taught for this run, on every screen kind, read
+    // once here on the frame thread (the hint's latches are thread-local). The site demo film is
+    // shot with it: the capsule is a one-time teaching overlay, and a film has no viewer to teach.
+    #[cfg(feature = "devtriggers")]
+    if plx_base::devtrig::flag("hintoff") {
+        plx_ui::hold_hint::teach_all_for_dev();
+    }
     #[cfg(not(test))]
     plx_platform::i18n::initialize(session.language, controlled);
     let forced_login = !controlled && crate::dev::scenarios::login_forced();
@@ -1299,6 +1337,12 @@ pub(crate) unsafe fn construct(
         .then(crate::dev::scenarios::herobench_value)
         .flatten()
         .map(|(n, period, target)| crate::dev::scenarios::bench::HeroBench::new(n, period, target));
+    // dev: /tmp/plxnative-holdbench[=<n>[,<period_ms>[,tap]]] — a REAL press-and-hold (or press-and-
+    // cancel) on the focused card, cycle after cycle (`bench::PressBench`).
+    let hold_bench = (!controlled)
+        .then(crate::dev::scenarios::holdbench_value)
+        .flatten()
+        .map(|(n, period, kind)| crate::dev::scenarios::bench::PressBench::new(n, period, kind));
 
     // dev: /tmp/plxnative-framedrop — the FRAME-DROP DETECTOR. When present, each frame is timed with
     // the high-res perf counter (pump / draw / swap, NO glFinish so it doesn't perturb the pipeline),
@@ -1526,6 +1570,7 @@ pub(crate) unsafe fn construct(
         menu_play_await: None,
         prev,
         refresh_hubs_at,
+        refresh_detail: None,
         plaintext_upgrade: Default::default(),
         ev,
         remote,
@@ -1577,6 +1622,7 @@ pub(crate) unsafe fn construct(
             modal_bench,
             deep_bench,
             hero_bench,
+            hold_bench,
             marker_tried,
             press_tried,
             press_release_at,

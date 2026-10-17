@@ -8,8 +8,11 @@ Nothing is compiled and no real source file is edited. What this pins:
 
 * the Markdown table and the `--json` document have the documented shape, every timed scenario
   ran `--runs` times, interleaved, and a no-op build that recompiled the app crate is flagged;
-* the edit targets are restored byte for byte even when cargo FAILS mid-edit, and a target that is
-  dirty at the start is refused before any cargo runs;
+* the edit targets are restored byte for byte AND with their original mtime (so the tree reads fresh
+  again and the next row needs no untimed rebuild) even when cargo FAILS mid-edit, and a target that
+  is dirty at the start is refused before any cargo runs;
+* a red unit test is a failed scenario that names the tests (and exits 1) without costing the other
+  scenarios, and a red gate is reported by the steps that failed, with their own output;
 * RELEASE=1 is refused (environment, Makefile config, and `make build-bench` itself);
 * an absent target-fast tree or ARM archive is a SKIP with a note, never a build;
 * the load / swap noise warning fires and stays quiet;
@@ -30,6 +33,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import check_steps
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "tools" / "build-bench.py"
@@ -57,11 +62,14 @@ if os.environ.get("FAKE_FAIL_ON_EDIT") and "build-bench edit" in "".join(read(p)
     sys.stderr.write("error: fake cargo failed on the edited tree\n")
     sys.exit(101)
 if "--no-run" in args:
-    # cargo judges a path package by mtime: a restored file is stale until the next build
-    sig = "".join(read(p) for p in EDITED) + str([os.stat(p).st_mtime_ns for p in EDITED])
+    # cargo judges a path package by mtime: stale when a source file is NEWER than what the last build
+    # wrote (the state file's own mtime stands for the dependency info), fresh otherwise
     state = os.environ["FAKE_STATE"] + "." + (os.environ.get("CARGO_TARGET_DIR") or "target").replace("/", "_")
-    fresh = read(state) == sig and not os.environ.get("FAKE_ALWAYS_DIRTY")
-    open(state, "w").write(sig)
+    fresh = (os.path.exists(state) and all(os.stat(p).st_mtime_ns <= os.stat(state).st_mtime_ns for p in EDITED if os.path.exists(p))
+             and not os.environ.get("FAKE_ALWAYS_DIRTY"))
+    open(state, "w").write("built")
+    if os.environ.get("FAKE_COUNT_BUILDS"):
+        open(os.environ["FAKE_COUNT_BUILDS"], "a").write("fresh\n" if fresh else "rebuilt\n")
     print("   Compiling noise on stdout that is not JSON")
     # The unit suite goes through tools/cargo-test-parallel.py, which runs the test executables this
     # build reports: one per package, each printing its own `test result:` line.
@@ -70,8 +78,12 @@ if "--no-run" in args:
         exe = os.path.join(os.environ["FAKE_STATE"] + ".bins", name)
         os.makedirs(os.path.dirname(exe), exist_ok=True)
         with open(exe, "w") as f:
-            f.write("#!/bin/sh\necho 'test result: ok. %d passed; 0 failed; %d ignored; 0 measured; 0 filtered out; finished in 0.10s'\n"
-                    % (exes.get(name, 0), 7 if name == "plx_base" else 0))
+            if os.environ.get("FAKE_TEST_FAIL") and name == "plx_base":
+                f.write("#!/bin/sh\necho 'test a::b ... FAILED'\necho 'test c::d ... FAILED'\necho 'test e::f ... ok'\n"
+                        "echo 'test result: FAILED. 5298 passed; 2 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.10s'\nexit 101\n")
+            else:
+                f.write("#!/bin/sh\necho 'test result: ok. %d passed; 0 failed; %d ignored; 0 measured; 0 filtered out; finished in 0.10s'\n"
+                        % (exes.get(name, 0), 7 if name == "plx_base" else 0))
         os.chmod(exe, 0o755)
         print(json.dumps({"reason": "compiler-artifact", "package_id": "path+file:///r/rust-modules%s#%s@%s" % (pkg_path, name, version),
                           "fresh": fresh, "manifest_path": os.getcwd() + "/Cargo.toml", "target": {"name": name},
@@ -164,7 +176,7 @@ class Sandbox:
         self._tmp.cleanup()
 
     def run(self, *args, env=None):
-        full = {k: v for k, v in os.environ.items() if k not in ("RELEASE", "CARGO_TARGET_DIR", "MAKEFLAGS")}
+        full = {k: v for k, v in os.environ.items() if k not in ("RELEASE", "CARGO_TARGET_DIR", "MAKEFLAGS", "CARGO_BUILD_RUSTFLAGS", "RUSTFLAGS")}   # a benchmark started by `make build-bench` hands its own -Zthreads down: the fake run must not inherit it
         full.update(HOME=str(self.home), FAKE_LOG=str(self.log), FAKE_STATE=str(self.state))
         full.update(env or {})
         return subprocess.run([sys.executable, str(SCRIPT), "--repo", str(self.repo), *args],
@@ -299,6 +311,93 @@ class ShapeTests(unittest.TestCase):
             self.assertIn("archive 0.0 MiB, sha256 ", proc.stdout)
 
 
+class EditRestoreTests(unittest.TestCase):
+    """The edit rows put the file back with its original mtime, so only the first build of a run is untimed."""
+
+    SCENARIOS = "noop,leaf,ui,screens,app,tests"
+
+    def test_the_mtime_comes_back_with_the_bytes(self):
+        with Sandbox() as sb:
+            old = 1_700_000_000_123_456_789   # long before the fake cargo's state file, as a checkout is before a build
+            for rel in SRC_FILES:
+                os.utime(sb.repo / rel, ns=(old, old))
+            proc = sb.run("--runs", "2", "--only", self.SCENARIOS)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            for rel in (LEAF, UI_LEAF, SCREENS_LEAF, APP_LEAF):
+                self.assertEqual((sb.repo / rel).stat().st_mtime_ns, old, rel)
+            sb.assert_sources_untouched(self)
+
+    def test_the_mtime_is_restored_when_cargo_fails(self):
+        with Sandbox() as sb:
+            old = 1_700_000_000_000_000_000
+            os.utime(sb.repo / LEAF, ns=(old, old))
+            proc = sb.run("--runs", "1", "--only", "noop,leaf", env={"FAKE_FAIL_ON_EDIT": "1"})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual((sb.repo / LEAF).stat().st_mtime_ns, old)
+
+    def test_only_the_first_build_is_an_untimed_warm_up(self):
+        # Four edit rows and a no-op and the suite, two rounds. Every edit rebuilds (it is the measurement);
+        # nothing else does but the very first build, and the benchmark says "warming" once.
+        with Sandbox() as sb:
+            counts = sb.repo.parent / "builds.txt"
+            old = 1_700_000_000_000_000_000
+            for rel in SRC_FILES:
+                os.utime(sb.repo / rel, ns=(old, old))
+            proc = sb.run("--runs", "2", "--only", self.SCENARIOS, env={"FAKE_COUNT_BUILDS": str(counts)})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stderr.count("warming the non-incremental test build"), 1, proc.stderr)
+            builds = counts.read_text().split()
+            self.assertEqual(builds.count("rebuilt"), 1 + 4 * 2, builds)   # the warm-up, then four edit rows twice
+            self.assertEqual(builds[0], "rebuilt")
+
+    def test_an_edit_row_really_rebuilds(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "e.json"
+            proc = sb.run("--runs", "2", "--only", "noop,leaf,ui", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            by_id = {s["id"]: s for s in json.loads(out.read_text())["scenarios"]}
+            self.assertTrue(all(s["app_rebuilt"] for s in by_id["leaf"]["samples"]))
+            self.assertTrue(all(s["app_rebuilt"] for s in by_id["ui"]["samples"]))
+            self.assertFalse(any(s["app_rebuilt"] for s in by_id["noop"]["samples"]))
+
+
+class RedTests(unittest.TestCase):
+    """A red unit test is a failed scenario with names, not a timing, and not the end of the run."""
+
+    def test_failing_tests_are_named_and_the_run_still_reports_the_rest(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "red.json"
+            proc = sb.run("--runs", "2", "--only", "noop,leaf,tests", "--json", str(out), env={"FAKE_TEST_FAIL": "1"})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("unit suite: 2 test(s) FAILED: a::b, c::d", proc.stderr)
+            self.assertIn("RED: " + bb.TITLES["tests"] + ": 2 unit test(s) failed: a::b, c::d", proc.stdout)
+            doc = json.loads(out.read_text())
+            by_id = {s["id"]: s for s in doc["scenarios"]}
+            self.assertEqual(by_id["tests"]["status"], "failed")
+            self.assertEqual(by_id["tests"]["note"], "2 unit test(s) failed: a::b, c::d")
+            self.assertEqual(doc["red"], ["tests"])
+            self.assertIsNone(doc["failure"])
+            self.assertEqual(by_id["leaf"]["status"], "ok")
+            self.assertEqual(len(by_id["leaf"]["samples"]), 2)   # the second round still ran
+            sb.assert_sources_untouched(self)
+
+    def test_a_green_suite_is_not_red(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "green.json"
+            proc = sb.run("--runs", "1", "--only", "tests", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["red"], [])
+            self.assertEqual(doc["scenarios"][0]["status"], "ok")
+
+    def test_the_parsers(self):
+        text = "test a::b ... ok\ntest a::c ... FAILED\ntest a::c ... FAILED\ntest d ... FAILED\n    test e ... FAILED\n"
+        self.assertEqual(bb.failed_tests(text), ["a::c", "d"])   # once each, at the start of a line only
+        unit = "ERROR: test_a (__main__.A.test_a)\nok\nFAIL: test_b (mod.B.test_b)\nERROR: test_a (__main__.A.test_a)\nFAIL: setUpClass (mod.C)\n"
+        self.assertEqual(bb.failed_unittests(unit), ["test_a (__main__.A.test_a)", "test_b (mod.B.test_b)"])
+        self.assertIn("2 python test(s) failed: test_a (__main__.A.test_a), test_b (mod.B.test_b)", bb.check_failure_summary(2, unit))
+
+
 class FenceTests(unittest.TestCase):
     def test_edit_targets_are_restored_when_cargo_fails(self):
         with Sandbox() as sb:
@@ -365,8 +464,8 @@ class SkipTests(unittest.TestCase):
             self.assertFalse((sb.repo / "rust-modules" / "target-fast").exists())
 
     def test_an_edit_in_one_tree_does_not_make_the_next_noop_look_stale(self):
-        # The restored file carries a new mtime, which stales BOTH target dirs, so every row that
-        # needs a built tree rebuilds it first, untimed. Without that the no-op row timed a rebuild.
+        # The restored file keeps its original mtime, so neither target dir is stale after an edit and
+        # the no-op row (and every row after it) starts from a built tree without rebuilding it.
         with Sandbox() as sb:
             out = sb.repo.parent / "m.json"
             proc = sb.run("--runs", "3", "--only", "noop,leaf-inc", "--cold", "--json", str(out))
@@ -382,6 +481,173 @@ class SkipTests(unittest.TestCase):
             self.assertNotIn("skipped", proc.stdout)
             self.assertTrue([c for c in sb.calls() if c["incr"] == "1"])
             sb.assert_sources_untouched(self)
+
+
+DASH = "—"
+# The gate in the scratch repository is the REAL runner, tools/check-parallel.py, started the way the
+# Makefile's `check-unlocked` starts it: two branches named `cargo` and `python`, the python one itself a
+# step-mode run of a manifest. Nothing here prints a banner by hand: a parser tested against banners a
+# test author typed is how the first green gate on a runner came back "unreadable" (the parser looked for
+# `==== step: cargo`, the runner prints `==== check: cargo`).
+FAKE_CHECK_MAKEFILE = SCRATCH_MAKEFILE + (
+    "check-unlocked:\n"
+    "\t@echo \"$$PLX_CHECK_LOCK|$$MAKEFLAGS|$$PLXNATIVE_RUNTIME_DIR\" > $(CURDIR)/../check-env.txt\n"
+    "\t@python3 tools/check-parallel.py \\\n"
+    "\t  cargo='python3 -c \"print(\\\"cargo ran\\\")\"' \\\n"
+    "\t  python='python3 tools/check-parallel.py --steps steps-$(if $(FAKE_CHECK_FAIL),red,ok).txt'\n")
+
+
+def install_gate(sb):
+    """Write the scratch repository's gate: the real step runner, a manifest that passes and one that does not."""
+    shutil.copy(ROOT / "tools" / "check-parallel.py", sb.repo / "tools" / "check-parallel.py")
+    (sb.repo / "ci").mkdir(exist_ok=True)
+    (sb.repo / "ci" / "test_y.py").write_text("print('fine')\n")
+    (sb.repo / "ci" / "test_x.py").write_text("import sys\nprint('AssertionError: the gate said no')\nsys.exit(1)\n")
+    (sb.repo / "steps-ok.txt").write_text("python3 ci/test_y.py\n")
+    (sb.repo / "steps-red.txt").write_text("python3 ci/test_x.py\npython3 ci/test_y.py\n")
+    (sb.repo / "Makefile").write_text(FAKE_CHECK_MAKEFILE, encoding="utf-8")
+
+
+class CheckScenarioTests(unittest.TestCase):
+    """`--only check`: the whole host gate, opt-in, without taking the lock this process already holds."""
+
+    def test_it_is_opt_in(self):
+        self.assertNotIn("check", bb.ALL_SCENARIOS)
+        self.assertNotIn("check", bb.QUICK_SCENARIOS)
+        self.assertIn("check", bb.OPTIONAL_SCENARIOS)
+        self.assertIn("check", bb.TITLES)
+
+    def test_wall_time_and_branch_times_are_reported(self):
+        with Sandbox() as sb:
+            install_gate(sb)
+            out = sb.repo.parent / "check.json"
+            proc = sb.run("--runs", "2", "--only", "check", "--json", str(out),
+                          env={"MAKEFLAGS": "-j9", "PLXNATIVE_RUNTIME_DIR": "/should/not/leak"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertRegex(proc.stdout, re.escape(f"| {bb.TITLES['check']} | 2 | ") + r"[\d.]+ s \| [\d.]+ s \| [\d.]+ s \|")
+            self.assertRegex(proc.stdout, r"cargo branch \d+ s, python branch \d+ s")
+            doc = json.loads(out.read_text())
+            (sc,) = doc["scenarios"]
+            self.assertEqual(sc["id"], "check")
+            self.assertEqual(len(sc["samples"]), 2)
+            for branch in bb.CHECK_BRANCHES:   # the times the REAL runner printed for each branch
+                self.assertGreaterEqual(sc["branches"][branch]["median"], 0)
+                self.assertTrue(all(f"{branch}_seconds" in sample for sample in sc["samples"]), branch)
+            # No lock (this process holds it exclusively), and nothing of the bench's environment leaks in.
+            lock, makeflags, runtime = (sb.repo.parent / "check-env.txt").read_text().strip().split("|")
+            self.assertEqual(lock, "off")
+            self.assertNotIn("-j9", makeflags)   # make adds its own flags (--no-print-directory); ours are not inherited
+            self.assertEqual(runtime, "")
+            self.assertEqual(sb.calls(), [])   # the gate runs through make, not through this script's cargo
+
+    def test_a_red_gate_is_a_failed_run_and_records_no_number(self):
+        with Sandbox() as sb:
+            install_gate(sb)
+            out = sb.repo.parent / "red.json"
+            proc = sb.run("--runs", "1", "--only", "check", "--json", str(out), env={"FAKE_CHECK_FAIL": "1"})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("FAILED: check: the gate exited", proc.stdout)
+            # the report names the step that failed, not the tail of the log...
+            self.assertIn("check: the gate exited 2: 1 step(s) failed: python3 ci/test_x.py", proc.stdout)
+            # ...and the step's own output reaches the log, where the runner's job log can show it
+            self.assertIn("the gate's step `python3 ci/test_x.py` failed (exit 1)", proc.stderr)
+            self.assertIn("AssertionError: the gate said no", proc.stderr)
+            self.assertNotIn("fine", proc.stderr.split("the gate's step")[1].split("the gate's output")[0])
+            doc = json.loads(out.read_text())
+            self.assertTrue(doc["failure"])
+            self.assertNotIn("median", doc["scenarios"][0])
+            self.assertEqual(doc["scenarios"][0]["status"], "failed")
+
+    def test_what_the_gate_printed_is_read_back_as_steps_branches_and_tests(self):
+        text = (f"==== step: python3 ci/a.py {DASH} FAILED, exit 1 (9.0s, cpu 1.0s) ====\nTraceback...\nTimeoutExpired\n"
+                f"==== step: python3 ci/b.py {DASH} ok (1.0s, cpu 1.0s) ====\nfine\n"
+                f"==== step: python3 ci/c.py {DASH} FAILED, exit -9 (2.0s) ====\nkilled\n"
+                f"==== check: cargo {DASH} ALSO FAILED, exit 101 (30s) ====\ntest m::t ... FAILED\n")
+        self.assertEqual(bb.failed_steps(text), [("python3 ci/a.py", 1, "Traceback...\nTimeoutExpired"),
+                                                 ("python3 ci/c.py", -9, "killed")])
+        summary = bb.check_failure_summary(2, text)
+        self.assertEqual(summary, "check: the gate exited 2: 2 step(s) failed: python3 ci/a.py; python3 ci/c.py"
+                                  " | branch(es) failed: cargo | 1 test(s) failed: m::t")
+        # nothing readable: the tail of the output is all there is
+        self.assertIn("no failed step or test could be read", bb.check_failure_summary(2, "make: *** [x] Error 2"))
+
+    def test_a_gate_that_passed_but_printed_no_branch_banner_is_recorded_as_a_total(self):
+        # Exit 0 is the verdict. A banner that cannot be read costs the two branch rows, nothing else.
+        with Sandbox() as sb:
+            (sb.repo / "Makefile").write_text(SCRATCH_MAKEFILE + "check-unlocked:\n\t@echo nothing useful\n")
+            out = sb.repo.parent / "unread.json"
+            proc = sb.run("--runs", "1", "--only", "check", "--json", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("the gate PASSED but no", proc.stderr)
+            self.assertIn("the gate passed; its branch times could not be read, only the total is recorded", proc.stdout)
+            (sc,) = json.loads(out.read_text())["scenarios"]
+            self.assertEqual(sc["status"], "ok")
+            self.assertIn("median", sc)
+            self.assertEqual(sc["branches"], {b: {} for b in bb.CHECK_BRANCHES})
+
+    def test_the_parser_reads_what_the_real_runner_prints(self):
+        # tools/check-parallel.py itself, branch mode around a nested step-mode run: the shape of `make check`.
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "steps.txt"
+            manifest.write_text(f"{shlex.join([sys.executable, '-c', 'print(1)'])}\n")
+            nested = shlex.join([sys.executable, str(ROOT / "tools" / "check-parallel.py"), "--steps", str(manifest)])
+            green = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "check-parallel.py"),
+                 "cargo=" + shlex.join([sys.executable, "-c", "import time; time.sleep(1.2); print('c')"]), "python=" + nested],
+                capture_output=True, text=True)
+            self.assertEqual(green.returncode, 0, green.stdout + green.stderr)
+            read = bb.parse_check_branches(green.stdout)
+            self.assertEqual(sorted(read), ["cargo", "python"], green.stdout)
+            self.assertGreaterEqual(read["cargo"], 1)       # whole seconds, as the runner prints them
+            # a branch that failed or was stopped has no time to read
+            red = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "check-parallel.py"),
+                 "cargo=" + shlex.join([sys.executable, "-c", "import time; time.sleep(30)"]),
+                 "python=" + shlex.join([sys.executable, "-c", "import sys; sys.exit(3)"])],
+                capture_output=True, text=True)
+            self.assertNotEqual(red.returncode, 0)
+            self.assertEqual(bb.parse_check_branches(red.stdout), {}, red.stdout)
+
+    def test_the_makefiles_gate_names_the_branches_the_parser_reads(self):
+        recipe = (ROOT / "Makefile").read_text()
+        body = recipe[recipe.index("\ncheck-unlocked:") + 1:]
+        body = body[:body.index("\n\n")]
+        self.assertEqual(re.findall(r"(?m)^\s+(\w+)='\$\(MAKE\)", body), list(bb.CHECK_BRANCHES))
+        self.assertIn("tools/check-parallel.py", body)
+
+    def test_the_banner_parser_takes_the_last_banner_of_each_branch(self):
+        # the python branch's own output nests the banners of its halves; its own comes after them
+        text = (f"==== check: cargo {DASH} ok (338s) ====\ncheck: still running: rest (120s)\n"
+                f"==== check: rest {DASH} ok (157s) ====\n==== check: 76 steps {DASH} all ok (157s wall) ====\n"
+                f"==== check: harness {DASH} ok (223s) ====\n==== check: python {DASH} ok (224s) ====\n")
+        self.assertEqual(bb.parse_check_branches(text), {"cargo": 338.0, "python": 224.0})
+        failed = f"==== check: cargo {DASH} stopped, a sibling branch failed (254s) ====\n==== check: python {DASH} FAILED, exit 2 (254s) ====\n"
+        self.assertEqual(bb.parse_check_branches(failed), {})
+        self.assertEqual(bb.parse_check_branches("no banners"), {})
+
+
+class RunnerBlockTests(unittest.TestCase):
+    ALLOWED = {"cpu", "cores", "system", "arch", "runner_os", "runner_arch", "image_os", "image_version"}
+
+    def test_the_json_names_the_machine_without_identifying_it(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "r.json"
+            proc = sb.run("--runs", "1", "--only", "noop", "--json", str(out),
+                          env={"RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "ImageOS": "macos15", "ImageVersion": "20260101.1"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            runner = json.loads(out.read_text())["runner"]
+            self.assertLessEqual(set(runner), self.ALLOWED)
+            self.assertTrue(runner["cpu"])
+            self.assertEqual((runner["runner_os"], runner["runner_arch"], runner["image_os"], runner["image_version"]),
+                             ("macOS", "ARM64", "macos15", "20260101.1"))
+
+    def test_off_a_runner_only_the_machine_fields_are_present(self):
+        with Sandbox() as sb:
+            out = sb.repo.parent / "r2.json"
+            env = {k: "" for k in ("RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")}
+            proc = sb.run("--runs", "1", "--only", "noop", "--json", str(out), env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(set(json.loads(out.read_text())["runner"]), {"cpu", "cores", "system", "arch"})
 
 
 class NoiseTests(unittest.TestCase):
@@ -507,7 +773,7 @@ class MakefileWiringTests(unittest.TestCase):
         m = re.search(r"^SIDE_EFFECT_FREE = (.*)$", self.makefile, re.M)
         self.assertIsNotNone(m)
         self.assertTrue({"build-bench", "build-bench-quick"} <= set(m.group(1).split()))
-        self.assertIn("python3 ci/test_build_bench.py", self.recipe("check-python-rest:"))
+        self.assertIn("python3 ci/test_build_bench.py", check_steps.commands())
 
 
 if __name__ == "__main__":

@@ -3,20 +3,24 @@
 //! [`GridBands`] is the collapsing caption band every grid row uses (lifted from the Library's
 //! All grid, which still owns its own rail-aware layout and reads the bands through
 //! [`GridBand`]): only the focused row reserves `card_row::UNDER_LABEL_H` under its posters, and
-//! rows below it move down by what that row grows. The free functions are the six-column grid
+//! rows below it move down by what that row grows. The default-geometry free functions (test-only now that
+//! `cards::Grid` computes its own) are the six-column grid
 //! of a page without an alphabet rail (the Collection page) — row pitch, band-aware cell
 //! placement, culling window and reveal arithmetic, so draw, focus placement, scrolling and
 //! paging all describe the same cells. [`neighbour`], [`settled`] and [`growth_before`] are
 //! column-count agnostic, and the Library's rail-aware layout uses them too.
 
 use crate::card_row::{self, RowStyle, LABEL_BAND_COLLAPSED, UNDER_LABEL_H};
-use crate::consts::{CARD_H, CARD_W, MARGIN_X, MARGIN_Y, SCR_H, SCR_W, UNDER_LABEL_AIR};
+#[cfg(test)]
+use crate::consts::CARD_H;
+use crate::consts::{CARD_W, MARGIN_X, MARGIN_Y, SCR_H, SCR_W, UNDER_LABEL_AIR};
 use crate::{Rect, Spring};
 
 pub const COLS: usize = 6;
 pub const GAP: f32 = (SCR_W - 2.0 * MARGIN_X - COLS as f32 * CARD_W) / (COLS as f32 - 1.0);
 pub const STYLE: RowStyle = RowStyle { gap: GAP, ..RowStyle::HOME };
 /// A COLLAPSED row's pitch; a row whose band is open adds its share of `card_row::BAND_OPEN`.
+#[cfg(test)]
 pub const ROW_PITCH: f32 = CARD_H + LABEL_BAND_COLLAPSED + UNDER_LABEL_AIR;
 
 /// Only the focused and closing bands are represented, independent of catalog size.
@@ -119,6 +123,40 @@ impl GridPop {
         self.pop = (Some(index), Spring::at(1.0));
     }
 
+    /// The cell whose let-go is still running, if one is.
+    pub(crate) fn shrinking(&self) -> Option<usize> {
+        self.shrink.0
+    }
+
+    /// The shrinking tile's element is now at cell `to` (`None`: gone), so its let-go follows it.
+    pub(crate) fn move_shrink(&mut self, to: Option<usize>) {
+        self.shrink.0 = to;
+    }
+
+    /// The cell the pop currently belongs to.
+    pub fn cell(&self) -> Option<usize> {
+        self.pop.0
+    }
+
+    /// The focused element moved to cell `to` because the CONTENT changed (a landing): the pop
+    /// spring, velocity and all, goes with it, and a let-go already running on `to` is dropped
+    /// (that cell now holds the element that is popped).
+    pub fn relocate(&mut self, to: usize) {
+        if self.pop.0.is_some() {
+            self.pop.0 = Some(to);
+        }
+        if self.shrink.0 == Some(to) {
+            self.shrink.0 = None;
+        }
+    }
+
+    /// Cell `to` is focused with no deliberate move (a restore, a reconcile): FULL scale at once
+    /// and nothing lets go, the cell it left is simply at rest.
+    pub fn adopt(&mut self, to: usize, style: &RowStyle) {
+        self.shrink = (None, Spring::at(1.0));
+        self.pop = (Some(to), Spring::at(style.focus_scale));
+    }
+
     /// Advance the pop one tick; `focused` is the focused cell's index, if focus is in the grid.
     pub fn tick(&mut self, focused: Option<usize>, style: &RowStyle, dt: f32) {
         if focused != self.pop.0 {
@@ -169,6 +207,32 @@ pub fn settled(row: Option<usize>) -> [GridBand; 1] {
     [row.map_or(GridBand::CLOSED, |row| GridBand { row, expansion: 1.0 })]
 }
 
+/// A grid's column geometry: the free functions below are this with [`Geom::DEFAULT`] (the six
+/// columns of a page without an alphabet rail); a page with another column count, card size or
+/// left edge (the Library's rail-aware grid) passes its own to the `_in` variants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Geom {
+    pub cols: usize,
+    /// The x of column 0's card.
+    pub left: f32,
+    pub w: f32,
+    pub h: f32,
+    pub gap: f32,
+}
+
+impl Geom {
+    #[cfg(test)]
+    pub const DEFAULT: Self = Self { cols: COLS, left: MARGIN_X, w: CARD_W, h: CARD_H, gap: GAP };
+
+    pub const fn of(cols: usize, left: f32, style: &RowStyle) -> Self {
+        Self { cols, left, w: style.w, h: style.h, gap: style.gap }
+    }
+
+    /// A COLLAPSED row's pitch.
+    pub fn pitch(&self) -> f32 { self.h + LABEL_BAND_COLLAPSED + UNDER_LABEL_AIR }
+}
+
+#[cfg(test)]
 pub fn rows(len: usize) -> usize { len.div_ceil(COLS) }
 
 /// How far every open band above row `row` pushes it down.
@@ -178,26 +242,40 @@ pub fn growth_before(row: usize, bands: &[GridBand]) -> f32 {
 }
 
 /// Row `row`'s top in document space (before scroll), with every open band above it counted.
-pub fn row_top(row: usize, top: f32, bands: &[GridBand]) -> f32 {
-    top + row as f32 * ROW_PITCH + growth_before(row, bands)
+#[cfg(test)]
+pub fn row_top(row: usize, top: f32, bands: &[GridBand]) -> f32 { row_top_in(&Geom::DEFAULT, row, top, bands) }
+
+pub fn row_top_in(g: &Geom, row: usize, top: f32, bands: &[GridBand]) -> f32 {
+    top + row as f32 * g.pitch() + growth_before(row, bands)
 }
 
+#[cfg(test)]
 pub fn cell(index: usize, top: f32, scroll: f32, bands: &[GridBand]) -> Rect {
-    let col = index % COLS;
-    Rect::new(MARGIN_X + col as f32 * (CARD_W + GAP), row_top(index / COLS, top, bands) - scroll,
-        CARD_W, CARD_H)
+    cell_in(&Geom::DEFAULT, index, top, scroll, bands)
 }
 
+pub fn cell_in(g: &Geom, index: usize, top: f32, scroll: f32, bands: &[GridBand]) -> Rect {
+    let col = index % g.cols;
+    Rect::new(g.left + col as f32 * (g.w + g.gap), row_top_in(g, index / g.cols, top, bands) - scroll, g.w, g.h)
+}
+
+#[cfg(test)]
 pub fn max_scroll(len: usize, top: f32, bands: &[GridBand]) -> f32 {
-    let rows = rows(len);
-    (row_top(rows, top, bands) - (SCR_H - MARGIN_Y)).max(0.0)
+    max_scroll_in(&Geom::DEFAULT, len, top, bands)
+}
+
+#[cfg(test)]
+pub fn max_scroll_in(g: &Geom, len: usize, top: f32, bands: &[GridBand]) -> f32 {
+    (row_top_in(g, len.div_ceil(g.cols), top, bands) - (SCR_H - MARGIN_Y)).max(0.0)
 }
 
 /// The scroll that shows row `row` focused — its posters AND its open caption band above the
 /// bottom margin — computed from the settled bands of that focus.
+#[cfg(test)]
 pub fn reveal_row(current: f32, row: usize, len: usize, top: f32) -> f32 {
+    let g = Geom::DEFAULT;
     let bands = settled(Some(row));
-    let row_top = row_top(row, top, &bands);
+    let row_top = row_top_in(&g, row, top, &bands);
     card_row::reveal(current,
         row_top + CARD_H + UNDER_LABEL_H - (SCR_H - MARGIN_Y),
         row_top - MARGIN_Y,
@@ -209,14 +287,19 @@ pub fn reveal_row(current: f32, row: usize, len: usize, top: f32) -> f32 {
 /// caption band, rounded UP to the scroll that puts some row's top exactly at `edge`, so the page
 /// never rests with a row cut by the edge. Row 0 reveals the document's head (scroll 0), as the
 /// Library's `row_reveal(0)` does; no rounding passes `row` itself, so the focused row always shows.
+#[cfg(test)]
 pub fn snap_row(current: f32, row: usize, len: usize, top: f32, edge: f32) -> f32 {
+    snap_row_in(&Geom::DEFAULT, current, row, len, top, edge)
+}
+
+pub fn snap_row_in(g: &Geom, current: f32, row: usize, len: usize, top: f32, edge: f32) -> f32 {
     if row == 0 || len == 0 { return 0.0; }
     let bands = settled(Some(row));
-    let focused_top = row_top(row, top, &bands);
-    let min = card_row::reveal(current, focused_top + CARD_H + UNDER_LABEL_H - (SCR_H - MARGIN_Y),
+    let focused_top = row_top_in(g, row, top, &bands);
+    let min = card_row::reveal(current, focused_top + g.h + UNDER_LABEL_H - (SCR_H - MARGIN_Y),
         focused_top - edge, f32::INFINITY);
     if min <= 0.0 { return 0.0; }
-    (0..=row).map(|k| row_top(k, top, &bands) - edge).find(|&at| at >= min - 0.5)
+    (0..=row).map(|k| row_top_in(g, k, top, &bands) - edge).find(|&at| at >= min - 0.5)
         .unwrap_or(focused_top - edge)
 }
 
@@ -236,11 +319,17 @@ pub fn neighbour(index: usize, len: usize, cols: usize, dir: crate::screen::Dir)
 
 /// The members that can touch the screen at `scroll` — one row wider on each side than the
 /// collapsed pitch alone says, so an open band shifting rows down never culls a visible one.
+#[cfg(test)]
 pub fn visible(len: usize, top: f32, scroll: f32) -> std::ops::Range<usize> {
+    visible_in(&Geom::DEFAULT, len, top, scroll)
+}
+
+pub fn visible_in(g: &Geom, len: usize, top: f32, scroll: f32) -> std::ops::Range<usize> {
     if len == 0 { return 0..0; }
-    let first = ((scroll - top - CARD_H - UNDER_LABEL_H) / ROW_PITCH).floor().max(0.0) as usize;
-    let last = ((scroll + SCR_H - top) / ROW_PITCH).ceil().max(0.0) as usize + 1;
-    first.saturating_mul(COLS)..last.saturating_mul(COLS).min(len)
+    let pitch = g.pitch();
+    let first = ((scroll - top - g.h - UNDER_LABEL_H) / pitch).floor().max(0.0) as usize;
+    let last = ((scroll + SCR_H - top) / pitch).ceil().max(0.0) as usize + 1;
+    first.saturating_mul(g.cols)..last.saturating_mul(g.cols).min(len)
 }
 
 #[cfg(test)]

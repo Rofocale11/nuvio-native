@@ -106,10 +106,10 @@ base
 
 | layer | members | prod lines | an edit there recompiles |
 |---|---|---:|---:|
-| base | `eventlog paths task cbuf sha256 b64 spki dynlib checkpoint storage_worker fontcov surface tile devtrig diag::{zlib,spans,heartbeat} testlock testnet` | 9k | everything |
+| base | `eventlog paths task cbuf sha256 b64 spki dynlib checkpoint storage_worker fontcov surface tile devtrig diag::{zlib,spans,heartbeat} testlock testnet testscratch` | 9k | everything |
 | machine | `ui::{machine,present,idle,landgate,landing,motion}` | 4k | 97% |
 | platform | `webos storage keymanager devcaps imgcache i18n labcfg tv` | 11k | 96% |
-| gfx | `gfx egl text img svg gpu_timer hwcnt overdraw` | 15k | 68% |
+| gfx | `gfx egl text img svg gpu_timer hwcnt overdraw dump` | 15k | 68% |
 | net | `net stream` | 6k | 74% |
 | plex | `plex http` | 26k | 72% |
 | telemetry | `telemetry diag` (the event schema) | 16k | 64% |
@@ -161,7 +161,7 @@ tables say so, but `check-deps.sh`'s `layer` gate scans only `screens/`.
 
 ## The gate
 
-`make check-python` runs `ci/check-module-layers.py` (about 3 s, no cargo) after its own suite,
+`make check-python` runs `ci/check-module-layers.py` (about 3 s, no cargo) beside its own suite,
 `ci/test_module_graph.py`. It fails when:
 
 - a reference, production **or** `cfg(test)`, names a layer its own layer does not `use`, and

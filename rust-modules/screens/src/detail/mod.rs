@@ -6,6 +6,7 @@
 //! (springs, metrics and caches). User input cancels restoration, never the reconciliation owed.
 
 mod about;
+mod cards;
 mod cast;
 mod collection;
 mod episodes;
@@ -17,11 +18,15 @@ mod section;
 mod trailer;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod cards_harness; // Tier 2 card conformance (cards_conformance_tests.rs)
 
 #[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
 mod identity_tests;
+#[cfg(test)]
+mod placeholder_tests;
 
 use plx_data::metadata::{Detail, Extra, Spot};
 use crate::registry::PlayIntent;
@@ -29,7 +34,8 @@ use plx_plex::plex::ServerId;
 use plx_data::stores::metadata::MetadataCmd;
 use plx_data::stores::viewstate::ViewStateCmd;
 use plx_data::stores::{StoreCmd, StoreId};
-use plx_ui::card_row::{self, CardRow, RowStyle};
+use plx_ui::cards as ui_cards;
+use plx_ui::cards::{SectionFrame, Shelf};
 use plx_ui::frame::Budget;
 use plx_ui::hero_logo::{HeroLogo, LogoRung};
 use plx_ui::label::HAlign;
@@ -80,7 +86,7 @@ const EP_SCALE_MAX: usize = 40;
 const K_SCROLL: f32 = plx_ui::consts::K_SCROLL;
 const K_STRIP_SCROLL: f32 = 240.0;
 
-pub const SHAPE: &str = "DetailScreen{return_pending:bool,next_elem:u32,keys:[DetailKey{identity:DetailIdentity,elem:u32}],sid:u32,rk:str,pending_season:opt<u32>,season_settle:f32,refresh:u32,restore:opt<RestoreIntent{spot:Spot{section:u32,col:u32,ep_text:bool,saved_col:[u32;8],season:opt<u64>},episode:opt<str>,season_requested:bool}>}";
+pub const SHAPE: &str = "DetailScreen{list_pending:bool,list_error:bool,list_state:opt<{signed_in:bool,saved:bool}>,return_pending:bool,next_elem:u32,keys:[DetailKey{identity:DetailIdentity,elem:u32}],sid:u32,rk:str,pending_season:opt<u32>,season_settle:f32,refresh:u32,restore:opt<RestoreIntent{spot:Spot{section:u32,col:u32,ep_text:bool,saved_col:[u32;8],season:opt<u64>},episode:opt<str>,season_requested:bool}>}";
 
 const _: () = assert!(hero::HERO_ELEM_RANGE_END == season::SEASON_ELEM_RANGE_START);
 const _: () = assert!(season::SEASON_ELEM_RANGE_END == episodes::EPISODES_ELEM_RANGE_START);
@@ -100,6 +106,10 @@ struct RestoreIntent {
 
 pub struct DetailScreen {
     entry: EntryId,
+    list_state: Option<plx_plex::plex::nuvio::LibraryState>,
+    list_pending: bool,
+    list_error: bool,
+    list_mailbox: std::sync::Arc<std::sync::Mutex<Option<Option<plx_plex::plex::nuvio::LibraryState>>>>,
     sid: ServerId,
     rk: String,
     keys: Vec<DetailKey>,
@@ -107,6 +117,10 @@ pub struct DetailScreen {
     // Published identity projections, rebuilt only at mount/landings, never while drawing.
     key_by_local: std::collections::HashMap<u32, u32>,
     local_by_key: std::collections::HashMap<u32, u32>,
+    /// Where each card-shelf card that left the page last stood (engine key to local key), kept so
+    /// `reconcile` can put focus on the same position in that shelf; dropped if the card returns.
+    /// Not logical state: it is a projection of past publications, like the two maps above.
+    gone: std::collections::HashMap<u32, u32>,
     return_pending: bool,
 
     // Logical decisions. None is a focus cursor.
@@ -207,13 +221,13 @@ pub struct DetailScreen {
     /// The About card's and the Languages column's focus lifts (`Located::About(0)` / `(1)`).
     about_card_lift: TextLift,
     about_lang_lift: TextLift,
-    related: CardRow,
-    collection: CardRow,
-    extras: CardRow,
-    cast: CardRow,
+    related: Shelf,
+    collection: Shelf,
+    extras: Shelf,
+    cast: Shelf,
     tabs: TabStrip,
     season_pop: CtlPop<1>,
-    ctl_pop: CtlPop<5>,
+    ctl_pop: CtlPop<6>,
     disc_unfurl: [Spring; 3],
     season_metrics: season::Metrics,
     about_rows: about::Rows,
@@ -254,6 +268,10 @@ pub struct DetailScreen {
     /// it can answer without constructing a throwaway empty owner. Derived, not logical state —
     /// deliberately absent from [`SHAPE`].
     spot_facts: SpotFacts,
+    /// The standing "Hold OK for options" hint over a Related or Collection card
+    /// (`plx_ui::hold_hint`, the rarer cadence of a non-Home card screen). Paint-only: not hashed,
+    /// not in [`SHAPE`].
+    hold_hint: plx_ui::hold_hint::HoldHint,
 }
 
 /// Snapshot of every metadata-dependent read [`DetailScreen::spot`] needs, taken while a real
@@ -346,7 +364,7 @@ impl LayoutStamp {
         if d.is_show {
             flags |= 1;
         }
-        if !d.ratings.is_empty() {
+        if !d.shown_ratings().is_empty() {
             flags |= 2;
         }
         Self {
@@ -389,12 +407,17 @@ impl DetailScreen {
         }
         Self {
             entry,
+            list_state: None,
+            list_pending: false,
+            list_error: false,
+            list_mailbox: Default::default(),
             sid,
             rk,
             keys: Vec::new(),
             next_elem: FIRST_ITEM_ELEM,
             key_by_local: Default::default(),
             local_by_key: Default::default(),
+            gone: Default::default(),
             return_pending: false,
             pending_season: None,
             season_settle: 0.0,
@@ -424,10 +447,10 @@ impl DetailScreen {
             episode_text_lift: [TextLift::new(); EP_SCALE_MAX],
             about_card_lift: TextLift::new(),
             about_lang_lift: TextLift::new(),
-            related: CardRow::new(),
-            collection: CardRow::new(),
-            extras: CardRow::new(),
-            cast: CardRow::new(),
+            related: Shelf::new(entry, cards::Which::Related.style()),
+            collection: Shelf::new(entry, cards::Which::Collection.style()),
+            extras: Shelf::new(entry, cards::Which::Extras.style()),
+            cast: Shelf::new(entry, cards::Which::Cast.style()),
             tabs: TabStrip::new(),
             season_pop: CtlPop::new(),
             ctl_pop: CtlPop::new(),
@@ -441,6 +464,7 @@ impl DetailScreen {
             layout: Cell::new(None),
             layout_pinned: Cell::new(false),
             spot_facts: SpotFacts::default(),
+            hold_hint: plx_ui::hold_hint::HoldHint::once_per_run(plx_ui::hold_hint::Kind::Detail),
         }
     }
 
@@ -529,7 +553,7 @@ impl DetailScreen {
         }
         let mut interned: std::collections::HashMap<DetailIdentity, u32> = self.keys.iter().map(|key| (key.identity.clone(), key.elem)).collect();
         self.key_by_local.clear();
-        self.local_by_key.clear();
+        let before = std::mem::take(&mut self.local_by_key);
         for (local, identity) in identities {
             let identity = match &identity {
                 DetailIdentity::Season { rk, .. } | DetailIdentity::Episode { rk, .. } | DetailIdentity::Related { rk, .. } | DetailIdentity::Extra { rk, .. }
@@ -546,10 +570,40 @@ impl DetailScreen {
             self.key_by_local.insert(local, elem);
             self.local_by_key.insert(elem, local);
         }
+        for (elem, local) in before {
+            if !self.local_by_key.contains_key(&elem) && Self::card_shelf_of(local) {
+                self.gone.insert(elem, local);
+            }
+        }
+        let present = &self.local_by_key;
+        self.gone.retain(|elem, _| !present.contains_key(elem));
         if let Some(key) = pending_key {
             self.pending_season = self.local_by_key.get(&key).and_then(|local| season::locate(*local));
         }
         self.spot_facts = SpotFacts::of(self, meta);
+    }
+
+    /// Whether `local` is a card on one of the four card shelves (Related, Collection, Extras, Cast).
+    fn card_shelf_of(local: u32) -> bool {
+        matches!(
+            Self::locate_local(local, false),
+            Some(Located::Related(_) | Located::Collection(_) | Located::Extras(_) | Located::Cast(_))
+        )
+    }
+
+    /// The shared recovery rule for a card shelf's focused card that is no longer there: the slot it
+    /// held, clamped to the shelf's new length. `None` for any other element, and for a shelf that
+    /// is now empty or gone, which fall to the page's own fallback.
+    fn shelf_recovery(&self, elem: u32, meta: plx_data::metadata::MetadataView<'_>) -> Option<u32> {
+        let d = self.detail(meta)?;
+        let local = match Self::locate_local(*self.gone.get(&elem)?, false)? {
+            Located::Related(i) => related::elem(ui_cards::clamp_slot(i, d.related.len().min(512))?),
+            Located::Collection(i) => collection::elem(ui_cards::clamp_slot(i, collection::len(d))?),
+            Located::Extras(i) => extras::elem(ui_cards::clamp_slot(i, extras::len(d))?),
+            Located::Cast(i) => cast::elem(ui_cards::clamp_slot(i, d.credits_len().min(512))?),
+            _ => None,
+        }?;
+        self.engine_key(local)
     }
 
     pub fn restore(&mut self, spot: &Spot, meta: plx_data::metadata::MetadataView<'_>) {
@@ -677,41 +731,50 @@ impl DetailScreen {
                 row,
                 self.section_top(2, d, measure) - self.scroll.pos,
                 self.episode_scroll.pos,
-                self.episode_scale.get(i).map(|s| s.pos).unwrap_or(1.0) * f.press.scale,
+                self.episode_scale.get(i).map(|s| s.pos).unwrap_or(1.0) * focus.map_or(1.0, |k| f.press.dip_of(&k)),
                 &self.episode_lift(i),
                 f.measure,
                 meta,
             ),
-            Some(Located::Related(i)) => related::draw_focused(
-
+            Some(Located::Related(_)) => self.related.redraw_focused(
+                f,
                 f.painter,
-                d,
-                &self.related,
-                i,
-                self.section_top(3, d, measure) - self.scroll.pos,
-                f.press.scale,
-                f.measure,
+                &self.cards(cards::Which::Related, d),
+                SectionFrame { y: self.section_top(3, d, measure) - self.scroll.pos + related::LABEL_H, clip: Rect::FULL },
+                focus,
             ),
-            Some(Located::Extras(i)) => extras::draw_focused(
+            Some(Located::Extras(_)) => self.extras.redraw_focused(
+                f,
                 f.painter,
-                d,
-                &self.extras,
-                i,
-                self.section_top(6, d, measure) - self.scroll.pos,
-                f.press.scale,
-                f.measure,
+                &self.cards(cards::Which::Extras, d),
+                SectionFrame { y: self.section_top(6, d, measure) - self.scroll.pos + extras::LABEL_H, clip: Rect::FULL },
+                focus,
             ),
-            Some(Located::Collection(i)) => collection::draw_focused(
+            Some(Located::Collection(_)) => self.collection.redraw_focused(
+                f,
                 f.painter,
-                d,
-                &self.collection,
-                i,
-                self.section_top(7, d, measure) - self.scroll.pos,
-                f.press.scale,
-                f.measure,
+                &self.cards(cards::Which::Collection, d),
+                SectionFrame { y: self.section_top(7, d, measure) - self.scroll.pos + related::LABEL_H, clip: Rect::FULL },
+                focus,
             ),
             _ => {}
         }
+    }
+
+    /// Shelf `which`'s cards over the published item `d` and the page's key projections.
+    fn cards<'a>(&'a self, which: cards::Which, d: &'a Detail) -> cards::Cards<'a> {
+        Self::cards_of(&self.key_by_local, &self.local_by_key, which, d)
+    }
+
+    /// [`cards`](Self::cards) without borrowing the whole screen, for a call that also borrows a
+    /// shelf mutably.
+    fn cards_of<'a>(
+        key_by_local: &'a std::collections::HashMap<u32, u32>,
+        local_by_key: &'a std::collections::HashMap<u32, u32>,
+        which: cards::Which,
+        d: &'a Detail,
+    ) -> cards::Cards<'a> {
+        cards::Cards::new(which, d, key_by_local, local_by_key)
     }
 
     fn detail<'a>(&self, meta: plx_data::metadata::MetadataView<'a>) -> Option<&'a Detail> {
@@ -742,7 +805,7 @@ impl DetailScreen {
             .measure_h(plx_ui::detail_layout::HERO_TEXT_W);
         plx_ui::detail_layout::hero_chain(
             synopsis_h,
-            d.is_some_and(|detail| !detail.ratings.is_empty()),
+            d.is_some_and(|detail| !detail.shown_ratings().is_empty()),
             measure,
         )
     }
@@ -806,13 +869,13 @@ impl DetailScreen {
     fn band_open(&self, section: i32) -> f32 {
         // Cast is deliberately absent: it prints a name under every headshot, so its band is
         // occupied whether or not it holds focus (`cast::block_h`).
-        let row = match section {
-            3 => &self.related,
-            6 => &self.extras,
-            7 => &self.collection,
+        let expand = match section {
+            3 => self.related.band_expand(),
+            6 => self.extras.band_expand(),
+            7 => self.collection.band_expand(),
             _ => return 0.0,
         };
-        card_row::BAND_OPEN * row.band_expand().clamp(0.0, 1.0)
+        ui_cards::BAND_OPEN * expand.clamp(0.0, 1.0)
     }
 
     /// Sum of [`DetailScreen::band_open`] over every section that flows ABOVE `section` — the whole
@@ -1311,24 +1374,20 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
                 Dir::Up if row == episodes::Row::Text => episodes::elem(i, episodes::Row::Still),
                 _ => None,
             },
-            Located::Related(i) => {
-                row_move(i, self.detail(meta).map(|d| d.related.len()).unwrap_or(0), dir)
-                    .and_then(related::elem)
-            }
-            Located::Extras(i) => {
-                row_move(i, self.detail(meta).map(extras::len).unwrap_or(0), dir)
-                    .and_then(extras::elem)
-            }
-            Located::Collection(i) => {
-                row_move(i, self.detail(meta).map(collection::len).unwrap_or(0), dir)
-                    .and_then(collection::elem)
-            }
+            Located::Related(_) => return self.detail(meta).map_or(Step::Edge, |d| {
+                self.related.neighbour::<H, _>(&self.cards(cards::Which::Related, d), key, dir)
+            }),
+            Located::Extras(_) => return self.detail(meta).map_or(Step::Edge, |d| {
+                self.extras.neighbour::<H, _>(&self.cards(cards::Which::Extras, d), key, dir)
+            }),
+            Located::Collection(_) => return self.detail(meta).map_or(Step::Edge, |d| {
+                self.collection.neighbour::<H, _>(&self.cards(cards::Which::Collection, d), key, dir)
+            }),
             // A lone stop: UP leaves by the heading group's own edge, DOWN by the shelf link.
             Located::CollectionHeading => None,
-            Located::Cast(i) => {
-                row_move(i, self.detail(meta).map(|d| d.credits_len()).unwrap_or(0), dir)
-                    .and_then(cast::elem)
-            }
+            Located::Cast(_) => return self.detail(meta).map_or(Step::Edge, |d| {
+                self.cast.neighbour::<H, _>(&self.cards(cards::Which::Cast, d), key, dir)
+            }),
             Located::About(i) => match (i, dir, self.tracks_available(meta)) {
                 (0, Dir::Down, true) => Some(about::LANGUAGES_ELEM),
                 (1, Dir::Up, _) => Some(about::CARD_ELEM),
@@ -1411,46 +1470,38 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
                 };
                 (drawn, rest, Some(i as u32))
             }
-            Located::Related(i) => {
-                let top = self.section_top_at(3, d?, measure, at) - vertical;
-                (
-                    related::rect(&self.related, i, top, at == At::Drawn),
-                    related::rect(&self.related, i, top, false),
-                    Some(i as u32),
-                )
+            Located::Related(_) => {
+                let d = d?;
+                let top = self.section_top_at(3, d, measure, at) - vertical;
+                let frame = SectionFrame { y: top + related::LABEL_H, clip: Rect::FULL };
+                return self.related.place(cx, &self.cards(cards::Which::Related, d), key, frame, at);
             }
-            Located::Extras(i) => {
-                let top = self.section_top_at(6, d?, measure, at) - vertical;
-                (
-                    extras::rect(&self.extras, i, top, at == At::Drawn),
-                    extras::rect(&self.extras, i, top, false),
-                    Some(i as u32),
-                )
+            Located::Extras(_) => {
+                let d = d?;
+                let top = self.section_top_at(6, d, measure, at) - vertical;
+                let frame = SectionFrame { y: top + extras::LABEL_H, clip: Rect::FULL };
+                return self.extras.place(cx, &self.cards(cards::Which::Extras, d), key, frame, at);
             }
-            Located::Collection(i) => {
-                let top = self.section_top_at(7, d?, measure, at) - vertical;
-                (
-                    collection::rect(&self.collection, i, top, at == At::Drawn),
-                    collection::rect(&self.collection, i, top, false),
-                    Some(i as u32),
-                )
+            Located::Collection(_) => {
+                let d = d?;
+                let top = self.section_top_at(7, d, measure, at) - vertical;
+                let frame = SectionFrame { y: top + related::LABEL_H, clip: Rect::FULL };
+                return self.collection.place(cx, &self.cards(cards::Which::Collection, d), key, frame, at);
             }
             Located::CollectionHeading => {
                 let d = d?;
                 let c = d.collection.as_ref()?;
                 let top = self.section_top_at(7, d, measure, at) - vertical;
-                let lift = if at == At::Drawn { self.collection.lift() } else { 0.0 };
+                let lift = if at == At::Drawn { self.collection.heading_lift() } else { 0.0 };
                 let focused = cx.focus.current.is_some_and(|k| k.elem == collection::HEADING_ELEM);
                 let rect = collection::heading_rect(c, top, lift, focused, measure);
                 (rect, collection::heading_rect(c, top, 0.0, true, measure), Some(0))
             }
-            Located::Cast(i) => {
-                let top = self.section_top_at(4, d?, measure, at) - vertical;
-                (
-                    cast::rect(&self.cast, i, top, at == At::Drawn),
-                    cast::rect(&self.cast, i, top, false),
-                    Some(i as u32),
-                )
+            Located::Cast(_) => {
+                let d = d?;
+                let top = self.section_top_at(4, d, measure, at) - vertical;
+                let frame = SectionFrame { y: top + cast::LABEL_H, clip: Rect::FULL };
+                return self.cast.place(cx, &self.cards(cards::Which::Cast, d), key, frame, at);
             }
             Located::About(i) => {
                 let d = d?;
@@ -1547,6 +1598,9 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
         {
             return want;
         }
+        if let Some(elem) = self.shelf_recovery(want.elem, meta) {
+            return FocusKey { entry: want.entry, elem };
+        }
         FocusKey {
             entry: want.entry,
             elem: hero::HeroCtl::Play.elem(),
@@ -1573,7 +1627,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
                 .map(|d| d.episodes.len())
                 .unwrap_or(0)
                 .min(episodes::MAX_ITEMS);
-            let i = card_row::column_near_x(
+            let i = ui_cards::column_near_x(
                 from.rect.cx(),
                 plx_ui::consts::MARGIN_X,
                 episodes::W + episodes::GAP,
@@ -1591,55 +1645,27 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
             };
             episodes::elem(i, row).unwrap_or(episodes::EPISODES_ELEM_RANGE_START)
         } else if group == extras::EXTRAS_GROUP {
-            let n = d.map(extras::len).unwrap_or(0);
-            extras::elem(card_row::column_near_x(
-                from.rect.cx(),
-                plx_ui::consts::MARGIN_X,
-                RowStyle::EPISODE.w + RowStyle::EPISODE.gap,
-                RowStyle::EPISODE.w,
-                self.extras.scroll_x(),
-                n,
-                from_i,
-            ))
-            .unwrap_or(extras::EXTRAS_ELEM_RANGE_START)
+            match d.and_then(|d| self.extras.seat::<H, _>(&self.cards(cards::Which::Extras, d), from)) {
+                Some(key) => return key,
+                None => extras::EXTRAS_ELEM_RANGE_START,
+            }
         } else if group == related::RELATED_GROUP {
-            let n = d.map(|d| d.related.len()).unwrap_or(0).min(512);
-            related::elem(card_row::column_near_x(
-                from.rect.cx(),
-                plx_ui::consts::MARGIN_X,
-                RowStyle::HOME.w + RowStyle::HOME.gap,
-                RowStyle::HOME.w,
-                self.related.scroll_x(),
-                n,
-                from_i,
-            ))
-            .unwrap_or(related::RELATED_ELEM_RANGE_START)
+            match d.and_then(|d| self.related.seat::<H, _>(&self.cards(cards::Which::Related, d), from)) {
+                Some(key) => return key,
+                None => related::RELATED_ELEM_RANGE_START,
+            }
         } else if group == collection::HEADING_GROUP {
             collection::HEADING_ELEM
         } else if group == collection::COLLECTION_GROUP {
-            let n = d.map(collection::len).unwrap_or(0);
-            collection::elem(card_row::column_near_x(
-                from.rect.cx(),
-                plx_ui::consts::MARGIN_X,
-                RowStyle::HOME.w + RowStyle::HOME.gap,
-                RowStyle::HOME.w,
-                self.collection.scroll_x(),
-                n,
-                from_i,
-            ))
-            .unwrap_or(collection::COLLECTION_ELEM_RANGE_START + 1)
+            match d.and_then(|d| self.collection.seat::<H, _>(&self.cards(cards::Which::Collection, d), from)) {
+                Some(key) => return key,
+                None => collection::COLLECTION_ELEM_RANGE_START + 1,
+            }
         } else if group == cast::CAST_GROUP {
-            let n = d.map(|d| d.credits_len()).unwrap_or(0).min(512);
-            cast::elem(card_row::column_near_x(
-                from.rect.cx(),
-                plx_ui::consts::MARGIN_X,
-                RowStyle::CAST.w + RowStyle::CAST.gap,
-                RowStyle::CAST.w,
-                self.cast.scroll_x(),
-                n,
-                from_i,
-            ))
-            .unwrap_or(cast::CAST_ELEM_RANGE_START)
+            match d.and_then(|d| self.cast.seat::<H, _>(&self.cards(cards::Which::Cast, d), from)) {
+                Some(key) => return key,
+                None => cast::CAST_ELEM_RANGE_START,
+            }
         } else {
             about::CARD_ELEM
         };
@@ -1691,6 +1717,15 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
 
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         let meta = H::metadata(cx);
+        // The cards component's one entry: every event reaches every shelf it owns (its pop,
+        // scroll and let-go ride the Tick, its placement the FocusMoved). What a card DOES stays
+        // in `activate` below.
+        if let Some(d) = self.detail(meta) {
+            self.related.on(ev, cx, &Self::cards_of(&self.key_by_local, &self.local_by_key, cards::Which::Related, d), fx);
+            self.collection.on(ev, cx, &Self::cards_of(&self.key_by_local, &self.local_by_key, cards::Which::Collection, d), fx);
+            self.extras.on(ev, cx, &Self::cards_of(&self.key_by_local, &self.local_by_key, cards::Which::Extras, d), fx);
+            self.cast.on(ev, cx, &Self::cards_of(&self.key_by_local, &self.local_by_key, cards::Which::Cast, d), fx);
+        }
         match ev {
             ScreenEvent::Mount => {
                 self.sync_keys(meta);
@@ -1701,6 +1736,16 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 Handled::Yes
             }
             ScreenEvent::Tick(t) => {
+                let reply = self.list_mailbox.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(state) = reply {
+                    self.list_pending = false;
+                    self.list_error = state.is_none();
+                    self.list_state = state;
+                    if state.is_some() {
+                        fx.push(Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))));
+                    }
+                    fx.invalidate(Provenance::Landing(fx.from()));
+                }
                 self.tick(*t, cx, fx);
                 Handled::Yes
             }
@@ -1718,8 +1763,16 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 // watched state, progress — instead of showing the stale store entry the item's
                 // identity still matches. The only thing that suppresses it is a fetch for this
                 // item already in flight. Restored enters (and every other case) keep reusing the
-                // cached detail instead of duplicating a request.
+                // cached detail instead of duplicating a request. A return from the PLAYER is the
+                // one restored enter that is re-read from outside this arm:
+                // `app::content::refresh_after_playback` delivers a `DetailRestore` with a
+                // `Requested` obligation once the stop report has been POSTed (#575), so Play
+                // resumes from what the stop committed, not from the `viewOffset` the page
+                // opened with.
                 let fresh_open = matches!(kind, Enter::Fresh { .. });
+                if fresh_open || self.list_state.is_none() && !self.list_pending && !self.list_error {
+                    self.request_list(None);
+                }
                 let request = refresh == DetailRefreshPhase::Deferred
                     || refresh == DetailRefreshPhase::Requested && request_status.is_none()
                     || refresh == DetailRefreshPhase::None
@@ -1948,6 +2001,12 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 self.content(fx, ContentReq::Present(arg.clone()));
                 Handled::Yes
             }
+            ScreenEvent::App(AppMsg::NuvioStreamSelected) => {
+                self.selected = None;
+                self.start_reconciliation(fx, meta);
+                fx.invalidate(Provenance::Landing(fx.from()));
+                Handled::Yes
+            }
             // Dismissed: the page under this surface has just been entered again, and it decided
             // what to ask for on the store as it stands. A request of this page's still in flight
             // would land on top of the item that page found loaded — and this page's teardown,
@@ -2044,6 +2103,12 @@ impl DetailScreen {
 }
 
 impl<H: ContentLike + crate::registry::MetadataLike> Screen<H> for DetailScreen {
+    /// The Related / collection shelf card only; a season tab or an episode is not a catalog item.
+    fn focused_card<'a>(&self, cx: &Cx<'a, H>, focus: Option<plx_machine::machine::FocusKey<u32>>, at: Option<At>) -> Option<plx_ui::screen::FocusedCard<'a>> {
+        let item = self.focused_related(focus, <H as crate::registry::MetadataLike>::metadata(cx))?;
+        let placed = focus.zip(at).and_then(|(key, at)| Focusable::<H>::place(self, &key.elem, cx, at));
+        Some(plx_ui::screen::FocusedCard::new(item, placed))
+    }
     fn redraw_focused(&self, f: &mut DrawFrame<'_, '_, H>, focus: Option<plx_machine::machine::FocusKey<u32>>) {
         DetailScreen::redraw_focused::<H>(self, f, focus)
     }
@@ -2129,6 +2194,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Screen<H> for DetailScreen 
                             meta,
                         );
                         if meta.season_loading() {
+                            plx_ui::placeholder::note(below_hero, plx_ui::placeholder::Reason::SeasonSpinner, &self.rk);
                             plx_ui::widgets::Spinner::new(
                                 plx_ui::consts::SCR_W * 0.5,
                                 top + episodes::H * 0.5,
@@ -2139,51 +2205,55 @@ impl<H: ContentLike + crate::registry::MetadataLike> Screen<H> for DetailScreen 
                             .draw(&Env::inert(), below_hero);
                         }
                     }
-                    6 => extras::draw(
-                        below_hero,
-                        d,
-                        &self.extras,
-                        top,
-                        match focus {
-                            Some(Located::Extras(i)) => Some(i),
-                            _ => None,
-                        },
-                        f.measure,
-                    ),
-                    7 => collection::draw(
-                        below_hero,
-                        d,
-                        &self.collection,
-                        top,
-                        match focus {
-                            Some(Located::Collection(i)) => Some(i),
-                            _ => None,
-                        },
-                        focus == Some(Located::CollectionHeading),
-                        f.measure,
-                    ),
-                    3 => related::draw(
-                        below_hero,
-                        d,
-                        &self.related,
-                        top,
-                        match focus {
-                            Some(Located::Related(i)) => Some(i),
-                            _ => None,
-                        },
-                        f.measure,
-                    ),
-                    4 => cast::draw(
-                        below_hero,
-                        d,
-                        &self.cast,
-                        top,
-                        match focus {
-                            Some(Located::Cast(i)) => Some(i),
-                            _ => None,
-                        },
-                        f.measure,
-                    ),
+                    6 => {
+                        extras::draw_heading(below_hero, top, self.extras.heading_lift());
+                        self.extras.draw(
+                            f,
+                            below_hero,
+                            &self.cards(cards::Which::Extras, d),
+                            SectionFrame { y: top + extras::LABEL_H, clip: Rect::FULL },
+                        );
+                    }
+                    7 => {
+                        collection::draw_heading(
+                            below_hero,
+                            d,
+                            top,
+                            self.collection.heading_lift(),
+                            focus == Some(Located::CollectionHeading),
+                            f.measure,
+                        );
+                        self.collection.draw(
+                            f,
+                            below_hero,
+                            &self.cards(cards::Which::Collection, d),
+                            SectionFrame { y: top + related::LABEL_H, clip: Rect::FULL },
+                        );
+                    }
+                    3 => {
+                        related::draw_heading(below_hero, top, self.related.heading_lift());
+                        self.related.draw(
+                            f,
+                            below_hero,
+                            &self.cards(cards::Which::Related, d),
+                            SectionFrame { y: top + related::LABEL_H, clip: Rect::FULL },
+                        );
+                    }
+                    4 => {
+                        let row_y = top + cast::LABEL_H;
+                        cast::draw_heading(
+                            below_hero,
+                            top,
+                            self.cast.heading_lift(),
+                            matches!(focus, Some(Located::Cast(_))),
+                        );
+                        self.cast.draw(
+                            f,
+                            below_hero,
+                            &self.cards(cards::Which::Cast, d).drawn_at(row_y, self.entry, f.press),
+                            SectionFrame { y: row_y, clip: Rect::FULL },
+                        );
+                    }
                     5 => self.about_rows.draw(
                         below_hero,
                         d,
@@ -2197,6 +2267,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Screen<H> for DetailScreen 
                 }
             }
         } else if meta.detail_loading() {
+            plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::DetailSpinner, &self.rk);
             plx_ui::widgets::Spinner::new(
                 plx_ui::consts::SCR_W * 0.5,
                 (self.content_top(measure, meta) + plx_ui::consts::SCR_H) * 0.5 - self.scroll.pos,
@@ -2222,6 +2293,8 @@ impl<H: ContentLike + crate::registry::MetadataLike> Screen<H> for DetailScreen 
         );
 
         self.record_stops(f);
+        // A standing note, never a target: over the page, records no stop and no hit rect.
+        self.hold_hint.draw(f.painter, f.measure);
         // **This page draws no panel at all any more.** All three of its own — *Also available*,
         // *Track information* and *About* — are `ModalStack` surfaces since phase 10, so the
         // container draws each after this page, with its scrim, on its own appear spring.
@@ -2331,6 +2404,11 @@ impl DetailScreen {
         } else {
             (0, 0.0, 0.0)
         };
+        // The backdrop is DRAWN only when its alpha is visible (`art_alpha`), and a path with no
+        // texture behind it is art that has not arrived: the bare wash is the placeholder.
+        if backdrop_pending(art_alpha, texture, &path) {
+            plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::DetailBackdrop, &path);
+        }
         let ground_flat = self
             .ground
             .is_flat(theme::SURFACE_APP, AmbientWash::FLAT_EPS);
@@ -2392,7 +2470,11 @@ impl DetailScreen {
         let title = d
             .map(|d| d.title.as_str())
             .or_else(|| self.selected().map(|m| m.title.as_str()))
-            .unwrap_or(plx_platform::i18n::msg::browse_library_loading());
+            .unwrap_or_else(|| {
+                // No item has landed: the hero's title IS the "Loading" message (counted at the draw).
+                plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::DetailTitle, &self.rk);
+                plx_platform::i18n::msg::browse_library_loading()
+            });
         let chrome = p.alpha(self.preview_chrome);
         // NOT `self.preview_chrome * self.preview_synopsis`: synopsis_target already tracks
         // chrome_target exactly (both states — background autoplay, full-trailer — target the
@@ -2542,14 +2624,14 @@ impl DetailScreen {
         let cy = y + (top + base) * 0.5;
         let mut x = plx_ui::consts::MARGIN_X;
         let mut i = 0;
-        while i < d.ratings.len() {
-            let provider = d.ratings[i].art.provider();
-            let end = i + d.ratings[i..].partition_point(|r| r.art.provider() == provider);
-            let scores: Vec<String> = d.ratings[i..end]
+        while i < d.shown_ratings().len() {
+            let provider = d.shown_ratings()[i].art.provider();
+            let end = i + d.shown_ratings()[i..].partition_point(|r| r.art.provider() == provider);
+            let scores: Vec<String> = d.shown_ratings()[i..end]
                 .iter()
                 .map(|r| plx_ui::fmt::rating_score(rating_scale(r.art), r.value))
                 .collect();
-            let cells: Vec<plx_ui::widgets::RatingCell<'_>> = d.ratings[i..end]
+            let cells: Vec<plx_ui::widgets::RatingCell<'_>> = d.shown_ratings()[i..end]
                 .iter()
                 .zip(scores.iter())
                 .map(|(r, score)| plx_ui::widgets::RatingCell {
@@ -2625,6 +2707,10 @@ impl DetailScreen {
                 .ground(ground)
                 .scale(scale)
                 .draw(&Env::inert(), p),
+                hero::HeroCtl::MyList => {
+                    Button::new(self.list_label().as_ptr(), theme::size::BODY, rect)
+                        .focused(focused).palette(palette).ground(ground).scale(scale).draw(&Env::inert(), p)
+                }
                 hero::HeroCtl::Alt => {
                     Button::new(hero::alt_label().as_ptr(), theme::size::BODY, rect)
                         .trailing_icon(plx_ui::icons::Icon::ChevronDown)
@@ -2726,27 +2812,15 @@ impl DetailScreen {
                     elems.push((e, Activate::Immediate));
                 }
             }
-            elems.extend(
-                (0..extras::len(d))
-                    .filter_map(|i| extras::elem(i).map(|e| (e, Activate::Press))),
-            );
-            elems.extend(
-                (0..collection::len(d))
-                    .filter_map(|i| collection::elem(i).map(|e| (e, Activate::Press))),
-            );
-            // After the member cards, so the heading wins wherever its focused face overlaps
-            // them (`LinkedHeading::stop`).
+            // The shelf cards registered inside `draw`'s section loop, before every stop here, and
+            // a later stop wins an overlap. For the hero, seasons, episodes and About that order
+            // is immaterial: none of their stops shares a pixel with a card's (pinned from the
+            // real draw by `no_shelf_card_stop_overlaps_the_hero_season_episode_or_about_stops`).
+            // The heading is the one stop that DOES overlap the cards, and it wins them by being
+            // registered after (`LinkedHeading::stop`).
             if collection::len(d) > 0 {
                 elems.push((collection::HEADING_ELEM, Activate::Direct));
             }
-            elems.extend(
-                (0..d.related.len().min(512))
-                    .filter_map(|i| related::elem(i).map(|e| (e, Activate::Press))),
-            );
-            elems.extend(
-                (0..d.credits_len().min(512))
-                    .filter_map(|i| cast::elem(i).map(|e| (e, Activate::Press))),
-            );
             elems.push((about::CARD_ELEM, Activate::Press));
             if self.tracks_available(meta) {
                 elems.push((about::LANGUAGES_ELEM, Activate::Press));
@@ -3007,6 +3081,8 @@ impl Located {
 impl LogicalState for DetailScreen {
     fn write(&self, w: &mut Canon) {
         debug_assert!(!SHAPE.is_empty());
+        w.bool(self.list_pending).bool(self.list_error).bool(self.list_state.is_some());
+        if let Some(state) = self.list_state { w.bool(state.signed_in).bool(state.saved); }
         w.bool(self.return_pending).u32(self.next_elem).seq(self.keys.len());
         for key in &self.keys { key.identity.write(w); w.u32(key.elem); }
         w.u32(u32::from(self.sid.raw())).str(&self.rk);
@@ -3226,36 +3302,11 @@ impl DetailScreen {
         self.about_lang_lift.step(focused == Some(Located::About(1)), dt);
 
         if let Some(d) = d {
-            let related_focus = match focused {
-                Some(Located::Related(i)) => Some(i),
-                _ => None,
-            };
-            self.related
-                .update(d.related.len(), related_focus, &RowStyle::HOME, dt);
-            let collection_focus = match focused {
-                Some(Located::Collection(i)) => Some(i),
-                _ => None,
-            };
-            self.collection
-                .update(collection::len(d), collection_focus, &RowStyle::HOME, dt);
-            let extras_focus = match focused {
-                Some(Located::Extras(i)) => Some(i),
-                _ => None,
-            };
-            self.extras
-                .update(extras::len(d), extras_focus, &RowStyle::EPISODE, dt);
-            let cast_focus = match focused {
-                Some(Located::Cast(i)) => Some(i),
-                _ => None,
-            };
-            self.cast
-                .update(d.credits_len(), cast_focus, &RowStyle::CAST, dt);
-
             if let Some(i) = match focused {
                 Some(Located::Episode(i, _)) => Some(i),
                 _ => None,
             } {
-                let target = card_row::scroll_into_view(
+                let target = ui_cards::scroll_into_view(
                     self.episode_scroll.pos,
                     i,
                     d.episodes.len(),
@@ -3336,6 +3387,39 @@ impl DetailScreen {
             fx.note(PresentEvent::Motion);
         }
         self.preview_tick(t.ms, dt, focused, fx, meta);
+        let hint = self.hint_input(cx, focused);
+        self.hold_hint.step(hint, t.ms, dt, &mut |ev| fx.note(ev));
+    }
+
+    /// The two screen-specific answers the hold hint needs (`ui::hold_hint`, "Adopting it"): the
+    /// CARD focus rests on, only on the shelves whose held OK opens an item menu (Related and the
+    /// member Collection — Extras and Cast have no hold action, and neither do the hero, a
+    /// heading or the about rows) and whose item `registry::item_has_menu`, never while full-trailer mode has taken the page off screen;
+    /// and whether it has arrived (the page scroll and the card's own glide).
+    fn hint_input<H: ContentLike + crate::registry::MetadataLike>(
+        &self,
+        cx: &Cx<'_, H>,
+        focused: Option<Located>,
+    ) -> plx_ui::hold_hint::HintInput {
+        let none = plx_ui::hold_hint::HintInput::default();
+        if !self.hold_hint.wants_input(cx.press.held_ms.is_some()) {
+            return none;
+        }
+        let (Some(key), Some(Located::Related(_) | Located::Collection(_))) = (cx.focus.current, focused) else {
+            return none;
+        };
+        if key.entry != self.entry || self.preview_chrome < 0.99 {
+            return none;
+        }
+        let has_menu = self
+            .focused_related(Some(key), <H as crate::registry::MetadataLike>::metadata(cx))
+            .is_some_and(crate::registry::item_has_menu);
+        if !has_menu {
+            return none;
+        }
+        let Some(drawn) = <Self as Focusable<H>>::place(self, &key.elem, cx, At::Drawn) else { return none };
+        let still = (self.scroll.pos - self.scroll_target).abs() < 0.5 && self.scroll.vel.abs() < 0.5;
+        plx_ui::hold_hint::HintInput::for_placed(key.elem, drawn, still, cx.press.held_ms)
     }
 
     fn preview_tick<H: ContentLike>(
@@ -3617,6 +3701,27 @@ impl DetailScreen {
         true
     }
 
+    fn list_label(&self) -> &'static std::ffi::CStr {
+        use plx_platform::i18n::msg;
+        if self.list_pending { msg::browse_list_saving_c() }
+        else if self.list_error { msg::browse_list_retry_c() }
+        else if self.list_state.is_some_and(|s| !s.signed_in) { msg::browse_list_signin_c() }
+        else if self.list_state.is_some_and(|s| s.saved) { msg::browse_list_remove_c() }
+        else { msg::browse_list_add_c() }
+    }
+
+    fn request_list(&mut self, saved: Option<bool>) {
+        if self.list_pending || !plx_plex::plex::client_for(self.sid).is_some_and(|c| c.is_nuvio()) { return; }
+        self.list_pending = true;
+        self.list_error = false;
+        let (sid, rk, mailbox) = (self.sid, self.rk.clone(), self.list_mailbox.clone());
+        if plx_base::task::spawn("nuvio-my-list", move || {
+            let state = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_library(&rk, saved));
+            *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
+            plx_machine::idle::invalidate();
+        }).is_none() { self.list_pending = false; self.list_error = true; }
+    }
+
     fn hero_set(&self, meta: plx_data::metadata::MetadataView<'_>) -> hero::HeroSet {
         let (restart, mark) = self
             .detail(meta)
@@ -3633,6 +3738,7 @@ impl DetailScreen {
         // `!hero_set().trailer` and then drive `ELEM_TRAILER` directly to prove `activate_hero`'s
         // handling stays correct even though the disc itself is never shown.)
         hero::HeroSet {
+            list: self.detail(meta).is_some_and(|d| d.guid.starts_with("nuvio://movie/") || d.guid.starts_with("nuvio://series/")),
             restart,
             trailer: false,
             alt: self.alt_available(meta),
@@ -3650,7 +3756,9 @@ impl DetailScreen {
     /// four controls' worth of geometry and three drawn) is exactly the class of bug this
     /// publication exists to remove.
     pub fn alt_available(&self, meta: plx_data::metadata::MetadataView<'_>) -> bool {
-        meta.alt_available(self.sid, &self.rk)
+        plx_plex::plex::client_for(self.sid).is_some_and(|c| c.is_nuvio())
+            && self.detail(meta).is_some_and(|d| !d.is_show)
+            || meta.alt_available(self.sid, &self.rk)
     }
 
     /// **Is there a file for the *Track information* sheet to describe?** — the Languages column's
@@ -3773,6 +3881,14 @@ impl DetailScreen {
     ) {
         let measure = cx.measure;
         match ctl {
+            hero::HeroCtl::MyList => {
+                if self.list_state.is_some_and(|s| !s.signed_in) && !self.list_pending {
+                    fx.push(Fx::App(AppFx::Loop(crate::registry::LoopReq::AccountSignIn)));
+                } else if !self.list_pending {
+                    let saved = self.list_state.filter(|s| s.signed_in).map(|s| !s.saved);
+                    self.request_list(if self.list_error { None } else { saved });
+                }
+            }
             hero::HeroCtl::Play => {
                 self.play_hero(false, fx, meta);
             }
@@ -3862,7 +3978,7 @@ impl DetailScreen {
                 ),
             }
         } else {
-            let play = self.selected().map_or_else(
+            let play = self.selected().filter(|m| !m.part.is_empty()).map_or_else(
                 || PlayIntent::Item {
                     sid: plx_media::route::item_sid(d.sid),
                     rk: d.rk.clone(),
@@ -3963,6 +4079,13 @@ impl DetailScreen {
 /// full-screen sheet over the plane (sound, no picture).
 fn preview_punch_through(picture: bool) -> bool {
     picture
+}
+
+/// Is the Detail backdrop a WAIT this frame: its art is drawn at a visible alpha, it names a path,
+/// and that path has no texture yet (the bare wash stands in)? A path of `""` is an item with no
+/// artwork: nothing will arrive, so it is absence, not a wait.
+fn backdrop_pending(art_alpha: f32, texture: u32, path: &str) -> bool {
+    art_alpha > 0.01 && texture == 0 && !path.is_empty()
 }
 
 /// The keyed ambient wash is an opaque stand-in for the clear. Over a live plane it is the same

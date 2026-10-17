@@ -9,7 +9,7 @@ use plx_machine::machine::{Chrome, Host, InputEvent, PressRead, ScreenId};
 use plx_ui::screen::{At, Focusable, ScreenArg};
 
 #[derive(Clone, PartialEq, Eq)]
-struct TestArg;
+pub(super) struct TestArg;
 impl LogicalState for TestArg {
     fn write(&self, c: &mut Canon) { c.u32(0); }
     fn probe(&self, _: &mut String) {}
@@ -30,7 +30,7 @@ impl ScreenArg for TestArg {
     }
 }
 
-struct TestHost;
+pub(super) struct TestHost;
 
 impl Host for TestHost {
     type Arg = TestArg;
@@ -58,7 +58,7 @@ thread_local! {
         std::cell::UnsafeCell::new(plx_data::stores::metadata::MetadataStore::default());
 }
 
-fn test_store() -> &'static mut plx_data::stores::metadata::MetadataStore {
+pub(super) fn test_store() -> &'static mut plx_data::stores::metadata::MetadataStore {
     TEST_METADATA.with(|cell| unsafe { &mut *cell.get() })
 }
 
@@ -86,13 +86,34 @@ fn cx<'a>(measure: &'a dyn plx_machine::machine::Measure, elem: Option<u32>) -> 
 
 // Synchronizing the identity registry and querying/hash-writing a screen read shared stores
 // and legacy panels. Require the caller's guard; acquiring one here would deadlock install().
+/// The stops one REAL `Screen::draw` of `screen` registers, in registration order. A host test has
+/// no GL, so the draw runs through a recording painter with its stops switched on
+/// (`record_stops_while_recording`); the frame clear is kept off the framebuffer.
+pub(super) fn drawn_stops(screen: &mut DetailScreen, context: &Cx<'_, TestHost>) -> Vec<Stop<u32>> {
+    let mut f = DrawFrame::new(context, plx_ui::Painter::recording());
+    plx_ui::screen::record_stops_while_recording(|| {
+        plx_gfx::gfx::without_frame_clear(|| Screen::<TestHost>::draw(screen, &mut f));
+    });
+    f.into_stops()
+}
+
 fn bare(_guard: &plx_base::testlock::Serial, sid: ServerId, rk: &str) -> DetailScreen {
+    bare_held(sid, rk)
+}
+
+/// [`bare`] for a caller that already holds the serial guard in a way the type cannot show (the
+/// card-conformance matrix runs every harness inside `run_all`'s guard, `cards_harness`).
+pub(super) fn bare_held(sid: ServerId, rk: &str) -> DetailScreen {
     let mut screen = DetailScreen {
+        list_state: None,
+        list_pending: false,
+        list_error: false,
+        list_mailbox: Default::default(),
         entry: EntryId(7),
         sid,
         rk: rk.into(),
         keys: vec![], next_elem: FIRST_ITEM_ELEM, key_by_local: Default::default(),
-        local_by_key: Default::default(), return_pending: false,
+        local_by_key: Default::default(), gone: Default::default(), return_pending: false,
         pending_season: None,
         season_settle: 0.0,
         preview_dwell: 0.0,
@@ -121,10 +142,10 @@ fn bare(_guard: &plx_base::testlock::Serial, sid: ServerId, rk: &str) -> DetailS
         episode_text_lift: [plx_ui::text_lift::TextLift::new(); EP_SCALE_MAX],
         about_card_lift: plx_ui::text_lift::TextLift::new(),
         about_lang_lift: plx_ui::text_lift::TextLift::new(),
-        related: CardRow::new(),
-        collection: CardRow::new(),
-        extras: CardRow::new(),
-        cast: CardRow::new(),
+        related: plx_ui::cards::Shelf::new(EntryId(7), &plx_ui::cards::RowStyle::HOME),
+        collection: plx_ui::cards::Shelf::new(EntryId(7), &plx_ui::cards::RowStyle::HOME),
+        extras: plx_ui::cards::Shelf::new(EntryId(7), &plx_ui::cards::RowStyle::EPISODE),
+        cast: plx_ui::cards::Shelf::new(EntryId(7), &plx_ui::cards::RowStyle::CAST),
         tabs: TabStrip::new(),
         season_pop: CtlPop::new(),
         ctl_pop: CtlPop::new(),
@@ -143,6 +164,7 @@ fn bare(_guard: &plx_base::testlock::Serial, sid: ServerId, rk: &str) -> DetailS
         layout: std::cell::Cell::new(None),
         layout_pinned: std::cell::Cell::new(false),
         spot_facts: SpotFacts::default(),
+        hold_hint: plx_ui::hold_hint::HoldHint::once_per_run(plx_ui::hold_hint::Kind::Detail),
     };
     screen.sync_keys(test_store().view());
     screen
@@ -844,6 +866,74 @@ fn a_crew_only_item_still_gets_the_cast_and_crew_shelf() {
     assert!(sections[..n].contains(&4));
 }
 
+/// A card shelf's focused card vanishing lands on the same place in THAT shelf, not on the hero.
+/// `fill` writes the shelf's cards (one per name) into a Detail; `elem` is the shelf's local key.
+fn shelf_recovery(fill: fn(&mut Detail, &[&str]), elem: fn(usize) -> Option<u32>) {
+    let sid = ServerId::UNSET;
+    let names = ["a", "b", "c", "d", "e"];
+    let shelf = |names: &[&str]| {
+        let mut d = detail(sid, "show");
+        fill(&mut d, names);
+        d
+    };
+    let _guard = install(shelf(&names));
+    let mut screen = bare(&_guard, sid, "show");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let at = |screen: &DetailScreen, i: usize| screen.engine_key(elem(i).unwrap()).unwrap();
+    let want = FocusKey { entry: EntryId(7), elem: at(&screen, 3) };
+    let publish = |screen: &mut DetailScreen, d: Detail| {
+        plx_data::metadata::set_current_for_test(test_store().state_mut(), Some(d));
+        screen.sync_keys(test_store().view());
+    };
+    let recovered = |screen: &DetailScreen| Focusable::<TestHost>::reconcile(screen, want, &cx(&measure, None)).elem;
+
+    // the card moved: still there, so still focused
+    publish(&mut screen, shelf(&["d", "a"]));
+    assert_eq!(recovered(&screen), want.elem, "a card still on the shelf keeps focus when its index moves");
+    // the card is gone and the shelf shrank past its index: the last card of the shelf
+    publish(&mut screen, shelf(&names));
+    publish(&mut screen, shelf(&["a", "b", "c"]));
+    assert_eq!(recovered(&screen), at(&screen, 2), "the same index clamped to the shelf's new length");
+    // the card is gone but its index survives: whoever now stands there
+    publish(&mut screen, shelf(&names));
+    publish(&mut screen, shelf(&["a", "b", "c", "x", "e"]));
+    assert_eq!(recovered(&screen), at(&screen, 3), "the same index in the shelf");
+    // the shelf emptied: the page's fallback
+    publish(&mut screen, shelf(&names));
+    publish(&mut screen, shelf(&[]));
+    assert_eq!(recovered(&screen), hero::ELEM_PLAY, "an emptied shelf falls to the hero");
+    clear();
+}
+
+#[test]
+fn a_vanished_related_card_falls_to_the_same_place_in_the_shelf() {
+    shelf_recovery(
+        |d, names| d.related = names.iter().map(|rk| plx_data::metadata::Related { rk: (*rk).into(), ..Default::default() }).collect(),
+        related::elem,
+    );
+}
+
+#[test]
+fn a_vanished_extra_falls_to_the_same_place_in_the_shelf() {
+    shelf_recovery(
+        |d, names| d.extras = names.iter().map(|rk| plx_data::metadata::Extra { rk: (*rk).into(), ..Default::default() }).collect(),
+        extras::elem,
+    );
+}
+
+#[test]
+fn a_vanished_credit_falls_to_the_same_place_in_the_shelf() {
+    shelf_recovery(
+        |d, names| {
+            d.cast = names
+                .iter()
+                .map(|key| plx_data::metadata::Cast { tag: (*key).into(), role: String::new(), thumb: String::new(), id: 0, tag_key: (*key).into() })
+                .collect()
+        },
+        cast::elem,
+    );
+}
+
 #[test]
 fn hero_focus_is_clamped_when_the_control_set_shrinks_under_it() {
     let sid = ServerId::UNSET;
@@ -893,12 +983,14 @@ fn hero_focus_follows_its_control_when_the_set_grows_under_it() {
 #[test]
 fn hero_focus_survives_a_control_appearing_in_the_middle_of_the_row() {
     let before = hero::HeroSet {
+        list: false,
         restart: true,
         trailer: false,
         alt: false,
         mark: PosterMark::None,
     };
     let after = hero::HeroSet {
+        list: false,
         alt: true,
         ..before
     };
@@ -1055,6 +1147,7 @@ fn a_landed_view_state_refresh_puts_the_browsed_season_back_and_never_steers_ano
 fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
     let y = 812.0;
     let set = hero::HeroSet {
+        list: false,
         restart: true,
         trailer: false,
         alt: false,
@@ -1065,6 +1158,7 @@ fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
     for unfurl in [0.2, 0.6, 1.0] {
         let disc = hero::disc_caps_at(set, 230.0, 0.0, [0.0, 0.0, unfurl], [201.0, 0.0, 267.0]);
         let widths = hero::HeroWidths {
+            list: 0.0,
             pill: 230.0,
             alt: 0.0,
             disc,
@@ -2201,6 +2295,25 @@ fn play_item(effects: &[plx_machine::machine::Stamped<TestHost>]) -> Option<(&Pl
 }
 
 #[test]
+fn a_catalog_movie_without_a_part_plays_its_loaded_detail() {
+    let _guard = install(Detail {
+        sid: ServerId::UNSET, rk: "movie".into(), kind: "movie".into(),
+        title: "Movie".into(), part: "/library/parts/42/1/file.mkv".into(),
+        vcodec: "hevc".into(), acodec: "eac3".into(), ..Default::default()
+    });
+    let mut screen = bare(&_guard, ServerId::UNSET, "movie");
+    screen.selected = Some(plx_data::pms::PmsMovie {
+        rk: "movie".into(), title: "Movie".into(), ..Default::default()
+    });
+    let (_, effects) = step(&mut screen, &ScreenEvent::Activate(hero::ELEM_PLAY), Some(hero::ELEM_PLAY));
+    match play_item(&effects).unwrap() {
+        (PlayIntent::Item { part, .. }, _) => assert_eq!(part, "/library/parts/42/1/file.mkv"),
+        _ => panic!("a catalog row has no playable part; use the loaded detail"),
+    }
+    clear();
+}
+
+#[test]
 fn a_movie_trailer_disc_plays_the_extra_from_the_start() {
     let extra = trailer_extra();
     let _guard = install(Detail {
@@ -3221,6 +3334,33 @@ fn a_page_without_a_collection_declares_no_collection_stops() {
     clear();
 }
 
+/// The page's focus groups are the frame the engine keeps its remembered cursors against: their ids
+/// and their order in `groups()` are frozen, and a page with nothing remembered seats on Play.
+#[test]
+fn the_pages_focus_group_ids_and_order_and_its_first_focus_are_frozen() {
+    let sid = ServerId::UNSET;
+    let mut d = collection_movie(sid);
+    d.cast = vec![plx_data::metadata::Cast {
+        tag: "Person".into(), role: String::new(), thumb: String::new(), id: 5, tag_key: String::new(),
+    }];
+    d.extras = vec![plx_data::metadata::Extra { rk: "x1".into(), ..Default::default() }];
+    let _guard = install(d);
+    let screen = bare(&_guard, sid, "m1");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let context = cx(&measure, None);
+    let mut groups = Vec::new();
+    Focusable::<TestHost>::groups(&screen, &context, &mut groups);
+    let ids: Vec<u32> = groups.iter().map(|g| g.id.0).collect();
+    assert_eq!(ids, [hero::HERO_GROUP.0, 4, 6, 8, 7, 3, about::ABOUT_GROUP.0],
+        "hero, cast, extras, collection heading, collection, related, about");
+    assert_eq!(
+        (cast::CAST_GROUP.0, extras::EXTRAS_GROUP.0, collection::HEADING_GROUP.0, collection::COLLECTION_GROUP.0, related::RELATED_GROUP.0),
+        (4, 6, 8, 7, 3));
+    let first = Focusable::<TestHost>::reconcile(&screen, FocusKey { entry: EntryId(7), elem: 0 }, &context);
+    assert_eq!(first.elem, hero::ELEM_PLAY, "a page with nothing remembered seats on Play");
+    clear();
+}
+
 #[test]
 fn up_from_a_member_reaches_the_heading_and_down_returns_to_that_member() {
     use plx_ui::focus::{FocusEngine, Outcome};
@@ -3257,6 +3397,77 @@ fn up_from_a_member_reaches_the_heading_and_down_returns_to_that_member() {
     clear();
 }
 
+/// The item-menu opener asks the page for its focused card (`Screen::focused_card`) instead of
+/// downcasting to it: for a Related or collection card it must name the item `focused_related`
+/// does and the rect `focused_rect` measures, and for anything else (Play, a heading) it names none.
+#[test]
+fn the_focused_card_is_the_related_item_and_the_rect_the_opener_measured_before() {
+    let sid = ServerId::UNSET;
+    let _guard = install(collection_movie(sid));
+    let screen = bare(&_guard, sid, "m1");
+    let meta = test_store().view();
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let key = |elem| FocusKey { entry: EntryId(7), elem };
+    for (elem, rk) in [
+        (screen.engine_key(related::elem(1).unwrap()).unwrap(), "r2"),
+        (screen.engine_key(collection::elem(2).unwrap()).unwrap(), "m3"),
+    ] {
+        let context = cx(&measure, Some(elem));
+        let card = Screen::<TestHost>::focused_card(&screen, &context, Some(key(elem)), Some(At::Drawn))
+            .expect("a related card is a focused card");
+        let item = card.item.downcast_ref::<plx_data::pms::PmsMovie>().unwrap();
+        assert_eq!(item.rk, rk);
+        assert_eq!(item.rk, screen.focused_related(Some(key(elem)), meta).unwrap().rk);
+        assert!(card.rect.is_some());
+        assert_eq!(card.rect, screen.focused_rect::<TestHost>(Some(key(elem)), &context, At::Drawn));
+        assert!(Screen::<TestHost>::focused_card(&screen, &context, Some(key(elem)), None).unwrap().rect.is_none());
+    }
+    for elem in [hero::ELEM_PLAY, collection::HEADING_ELEM] {
+        let context = cx(&measure, Some(elem));
+        assert!(Screen::<TestHost>::focused_card(&screen, &context, Some(key(elem)), Some(At::Drawn)).is_none());
+    }
+    clear();
+}
+
+/// A season tab, an episode, an Extras card and a Cast card are not catalog items the item menu
+/// acts on through `Screen::focused_card`: none of them names a card, whatever the host asks.
+#[test]
+fn the_focused_card_is_none_for_season_episode_extras_and_cast() {
+    let sid = ServerId::UNSET;
+    let mut d = detail(sid, "show");
+    d.related = vec![Default::default()];
+    d.extras = vec![Default::default()];
+    d.cast.push(plx_data::metadata::Cast {
+        tag: "Actor".into(),
+        role: "Role".into(),
+        thumb: String::new(),
+        id: 1,
+        tag_key: String::new(),
+    });
+    let _guard = install(d);
+    let screen = bare(&_guard, sid, "show");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let key = |elem| FocusKey { entry: EntryId(7), elem };
+    let related = screen.engine_key(related::elem(0).unwrap()).unwrap();
+    let context = cx(&measure, Some(related));
+    assert!(Screen::<TestHost>::focused_card(&screen, &context, Some(key(related)), Some(At::Drawn)).is_some(),
+        "the fixture's Related card is a focused card, so the negatives below are the page's answer");
+    for (name, local) in [
+        ("season", season::elem(0).unwrap()),
+        ("episode still", episodes::elem(0, episodes::Row::Still).unwrap()),
+        ("episode text", episodes::elem(0, episodes::Row::Text).unwrap()),
+        ("extras", extras::elem(0).unwrap()),
+        ("cast", cast::elem(0).unwrap()),
+    ] {
+        let elem = screen.engine_key(local).unwrap_or(local);
+        let context = cx(&measure, Some(elem));
+        for at in [Some(At::Drawn), None] {
+            assert!(Screen::<TestHost>::focused_card(&screen, &context, Some(key(elem)), at).is_none(), "{name}");
+        }
+    }
+    clear();
+}
+
 #[test]
 fn ok_on_the_heading_opens_the_collection_and_ok_on_a_member_opens_its_detail() {
     let sid = ServerId::UNSET;
@@ -3290,9 +3501,8 @@ fn the_heading_is_a_hover_focus_stop_that_wins_over_the_member_cards() {
     screen.scroll_target = top;
     let heading = FocusKey { entry: EntryId(7), elem: collection::HEADING_ELEM };
     let context = cx(&measure, Some(heading.elem));
-    let mut draw = DrawFrame::new(&context, plx_ui::Painter::root());
-    screen.record_stops(&mut draw);
-    let stops = draw.into_stops();
+    // the shelf registers its cards as the page draws it; the page registers the rest after
+    let stops = drawn_stops(&mut screen, &context);
     let at = stops.iter().position(|s| s.key == heading).expect("the heading registers a stop");
     assert_eq!(stops[at].hover, Hover::Focus);
     let last_member = screen.engine_key(collection::elem(3).unwrap()).unwrap();
@@ -3306,6 +3516,134 @@ fn the_heading_is_a_hover_focus_stop_that_wins_over_the_member_cards() {
     map.swap();
     let hit = map.resolve(Some(heading.entry), PointerKind::Click, placed.rect.cx(), placed.rect.cy(), None);
     assert_eq!(hit.hit, Some(heading));
+    clear();
+}
+
+/// **The hero, season, episode and about stops never overlap a shelf card's.** The shelves register
+/// their cards inside the section loop of `draw`, BEFORE `record_stops` adds the hero, seasons,
+/// episodes, the collection heading and About, and a later stop wins an overlap. The order is only
+/// immaterial if those groups never share a pixel; this draws a page with all four shelves and
+/// every other group, at a sweep of scroll positions and with each shelf's first card focused
+/// (popped), and holds every shelf-card stop apart from every other on-screen stop but the heading
+/// (which is meant to win over the cards under it).
+#[test]
+fn no_shelf_card_stop_overlaps_the_hero_season_episode_or_about_stops() {
+    let sid = ServerId::UNSET;
+    let mut page = detail(sid, "show");
+    page.episodes = (1..=6).map(|i| episode(&format!("e{i}"), i)).collect();
+    page.related = (1..=12).map(|i| collection_member(sid, &format!("r{i}"))).collect();
+    page.collection = Some(plx_data::metadata::CollectionShelf {
+        title: "Example Trilogy".into(),
+        section: 1,
+        tag: 812,
+        members: (1..=12).map(|i| collection_member(sid, &format!("m{i}"))).collect(),
+        count: 12,
+    });
+    page.extras = (1..=12)
+        .map(|i| plx_data::metadata::Extra { rk: format!("x{i}"), ..Default::default() })
+        .collect();
+    page.cast = (1..=12)
+        .map(|i| plx_data::metadata::Cast {
+            tag: format!("c{i}"),
+            id: 100 + i,
+            role: String::new(),
+            thumb: String::new(),
+            tag_key: String::new(),
+        })
+        .collect();
+    let _guard = install(page);
+    let mut screen = bare(&_guard, sid, "show");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let shelves: [Vec<u32>; 4] = [
+        (0..12).filter_map(|i| related::elem(i)).collect(),
+        (0..12).filter_map(|i| collection::elem(i)).collect(),
+        (0..12).filter_map(|i| extras::elem(i)).collect(),
+        (0..12).filter_map(|i| cast::elem(i)).collect(),
+    ];
+    let keyed: Vec<Vec<u32>> = shelves
+        .iter()
+        .map(|s| s.iter().map(|&e| screen.engine_key(e).expect("every card has a key")).collect())
+        .collect();
+    let is_card = |elem: u32| keyed.iter().any(|s| s.contains(&elem));
+    let last = {
+        let d = screen.detail(test_store().view()).unwrap();
+        let (sections, n) = screen.sections(Some(d));
+        screen.section_top(sections[n - 1], d, &measure)
+    };
+    let mut focuses: Vec<Option<u32>> = vec![None];
+    focuses.extend(keyed.iter().map(|s| Some(s[0])));
+    focuses.push(season::elem(0).and_then(|e| screen.engine_key(e)));
+    focuses.push(Some(hero::ELEM_PLAY));
+    let screen_rect = plx_ui::Rect::FULL;
+    let (mut cards_seen, mut others_seen) = ([0usize; 4], 0usize);
+    for step_at in 0..=((last / 120.0).ceil() as i32) {
+        let scroll = (step_at as f32 * 120.0).min(last);
+        screen.scroll.jump(scroll);
+        screen.scroll_target = scroll;
+        for focus in &focuses {
+            let context = cx(&measure, *focus);
+            let stops = drawn_stops(&mut screen, &context);
+            let shown = |s: &Stop<u32>| s.rect.intersect(s.clip).intersect(screen_rect);
+            let on_screen = |s: &&Stop<u32>| {
+                let r = shown(s);
+                r.w > 0.0 && r.h > 0.0
+            };
+            let cards: Vec<_> = stops.iter().filter(|s| is_card(s.key.elem)).filter(on_screen).collect();
+            let others: Vec<_> = stops
+                .iter()
+                .filter(|s| !is_card(s.key.elem) && s.key.elem != collection::HEADING_ELEM)
+                .filter(on_screen)
+                .collect();
+            for (i, shelf) in keyed.iter().enumerate() {
+                cards_seen[i] += cards.iter().filter(|s| shelf.contains(&s.key.elem)).count();
+            }
+            others_seen += others.len();
+            for c in &cards {
+                for o in &others {
+                    let (a, b) = (shown(c), shown(o));
+                    assert!(
+                        a.intersect(b).w <= 0.0 || a.intersect(b).h <= 0.0,
+                        "scroll {scroll}, focus {focus:?}: shelf card {} {a:?} overlaps stop {} {b:?}",
+                        c.key.elem, o.key.elem
+                    );
+                }
+            }
+        }
+    }
+    assert!(cards_seen.iter().all(|&n| n > 0), "every shelf must show cards somewhere in the sweep: {cards_seen:?}");
+    assert!(others_seen > 0, "the sweep must show hero, season, episode or About stops");
+    clear();
+}
+
+/// **A draw between a landing and its `StoreChanged` still shows the cards that have keys.** The
+/// app pumps the Metadata store AFTER the frame's dispatcher steps and draws in the same loop turn
+/// (`app::run`: `loop_requests` then `draw`), while the store's notice reaches the screen as
+/// `StoreChanged` only in the NEXT frame's `frame_ingest`. For that one draw the published list
+/// can be longer than the key projection; the shelf must keep the keyed prefix rather than vanish.
+#[test]
+fn a_draw_before_the_landing_is_synced_keeps_the_keyed_prefix_of_the_shelf() {
+    let sid = ServerId::UNSET;
+    let mut page = collection_movie(sid);
+    page.collection = None;
+    let mut grown = page.clone();
+    page.related = ["r1", "r2"].iter().map(|rk| collection_member(sid, rk)).collect();
+    grown.related = ["r1", "r2", "r3", "r4", "r5"].iter().map(|rk| collection_member(sid, rk)).collect();
+    let _guard = install(page);
+    let mut screen = bare(&_guard, sid, "m1");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let context = cx(&measure, None);
+    let keys: Vec<u32> = (0..2).map(|i| screen.engine_key(related::elem(i).unwrap()).unwrap()).collect();
+    let shown = |stops: &[Stop<u32>]| stops.iter().filter(|s| keys.contains(&s.key.elem)).count();
+    assert_eq!(shown(&drawn_stops(&mut screen, &context)), 2, "the synced shelf shows its cards");
+
+    // the landing publishes five cards; `StoreChanged` has not reached the screen yet
+    plx_data::metadata::set_current_for_test(test_store().state_mut(), Some(grown));
+    assert_eq!(shown(&drawn_stops(&mut screen, &context)), 2,
+        "the cards that have keys keep drawing while the rest wait for their keys");
+    screen.sync_keys(test_store().view());
+    let all: Vec<u32> = (0..5).map(|i| screen.engine_key(related::elem(i).unwrap()).unwrap()).collect();
+    let stops = drawn_stops(&mut screen, &context);
+    assert_eq!(stops.iter().filter(|s| all.contains(&s.key.elem)).count(), 5, "all five once synced");
     clear();
 }
 
@@ -3414,4 +3752,88 @@ fn record_stops_places_nothing_outside_the_visible_walk() {
     }
     assert_eq!(walk(plx_ui::Painter::recording()), (0, 0), "the text prewarm walk placed stops");
     clear();
+}
+
+/// The hold hint (`ui::hold_hint`) on a Detail card shelf whose held OK opens an item menu
+/// (Related, Collection): it stands after the dwell on a settled card, not on the hero, not while
+/// a menu owns focus, and not a second time on a Detail page this run.
+#[test]
+fn the_hold_hint_stands_on_a_resting_related_card_once_per_run() {
+    let sid = ServerId::UNSET;
+    let _guard = install(collection_movie(sid));
+    plx_ui::hold_hint::reset_learned_for_test();
+    plx_ui::hold_hint::reset_shown_for_test();
+    let mut screen = bare(&_guard, sid, "m1");
+    screen.sync_keys(test_store().view());
+    let card = screen.engine_key(related::elem(1).unwrap()).unwrap();
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let mut ms = 100;
+    let mut rest = |screen: &mut DetailScreen, focus: Option<FocusKey<u32>>, secs: f32| {
+        for _ in 0..(secs * 60.0) as u32 {
+            ms += 17;
+            let mut context = cx(&measure, None);
+            context.focus.current = focus;
+            context.tick = plx_machine::machine::Tick { ms, dt_us: 16_667 };
+            let mut effects = Vec::new();
+            let mut present = plx_machine::present::Present::new();
+            let mut sink = Effects::new(&mut effects,
+                plx_machine::machine::MachineId::Instance(plx_machine::machine::InstanceId(1)), &mut present);
+            Machine::<TestHost>::step(screen, &ScreenEvent::Tick(context.tick), &context, &mut sink);
+        }
+    };
+    let on = |elem| Some(FocusKey { entry: EntryId(7), elem });
+    rest(&mut screen, on(card), 1.2);
+    assert!(!screen.hold_hint.visible(), "not before the dwell");
+    // negatives first: a stand spends the kind's latch and would make them vacuous
+    rest(&mut screen, Some(FocusKey { entry: EntryId(900), elem: 0 }), 4.0);
+    assert!(!screen.hold_hint.visible() && !plx_ui::hold_hint::shown_this_run(plx_ui::hold_hint::Kind::Detail), "never while a menu owns focus");
+    rest(&mut screen, on(hero::ELEM_PLAY), 4.0);
+    assert!(!screen.hold_hint.visible() && !plx_ui::hold_hint::shown_this_run(plx_ui::hold_hint::Kind::Detail), "never on a hero control");
+    rest(&mut screen, on(card), 3.6);
+    assert!(screen.hold_hint.visible(), "after the dwell, on a settled Related card");
+    rest(&mut screen, Some(FocusKey { entry: EntryId(900), elem: 0 }), 1.0);
+    assert!(!screen.hold_hint.visible(), "a menu taking focus hides it");
+    rest(&mut screen, on(card), 4.0);
+    assert!(!screen.hold_hint.visible(), "and not a second time on a Detail page this run");
+    clear();
+}
+
+#[test]
+fn my_list_is_nuvio_only_and_failed_sync_does_not_claim_success() {
+    let sid = ServerId::UNSET;
+    let guard = install(Detail { sid, rk:"list-test".into(), guid:"nuvio://movie/tt0133093".into(), ..Default::default() });
+    let mut screen = bare(&guard,sid,"list-test");
+    assert!(screen.hero_set(test_store().view()).list);
+    screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:false });
+    screen.list_pending = true;
+    *screen.list_mailbox.lock().unwrap() = Some(None);
+    step(&mut screen,&ScreenEvent::Tick(Tick { ms:16, dt_us:16_000 }),None);
+    assert!(screen.list_error);
+    assert!(!screen.list_pending);
+    assert_eq!(screen.list_label(),plx_platform::i18n::msg::browse_list_retry_c());
+    *screen.list_mailbox.lock().unwrap() = Some(Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:true }));
+    let (_,effects) = step(&mut screen,&ScreenEvent::Tick(Tick { ms:32, dt_us:16_000 }),None);
+    assert_eq!(screen.list_label(),plx_platform::i18n::msg::browse_list_remove_c());
+    assert!(effects.iter().any(|e| matches!(e.fx,Fx::App(AppFx::Store(StoreId::Hubs,StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))))));
+    screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:false,saved:false });
+    let (_,effects) = step(&mut screen,&ScreenEvent::Activate(hero::ELEM_MY_LIST),None);
+    assert!(effects.iter().any(|e| matches!(e.fx,Fx::App(AppFx::Loop(crate::registry::LoopReq::AccountSignIn)))));
+    plx_data::metadata::set_current_for_test(test_store().state_mut(),Some(Detail { sid,rk:"list-test".into(),guid:"plex://movie/test".into(),..Default::default() }));
+    assert!(!screen.hero_set(test_store().view()).list);
+    clear();
+}
+
+#[test]
+fn my_list_button_fits_beside_streams_in_every_language() {
+    let measure = plx_ui::fixture::FixtureMeasure;
+    for language in plx_platform::i18n::SHIPPED {
+        let _guard = plx_platform::i18n::language_on_this_thread_for_test(language);
+        for restart in [false,true] {
+            let set = hero::HeroSet { list:true,restart,alt:true,..Default::default() };
+            let widths = hero::hero_widths(&measure,set,restart,[1.0;3],false);
+            let (_,n) = hero::hero_ctls(set);
+            let last = hero::hero_btn_rect_at(set,n-1,0.0,widths);
+            assert!(last.x+last.w < plx_ui::consts::SCR_W-plx_ui::consts::MARGIN_X-plx_ui::detail_layout::PEOPLE_W,"{} My List overlaps people: end={} list={} play={} streams={}",language.tag(),last.x+last.w,widths.list,widths.pill,widths.alt);
+        }
+    }
 }

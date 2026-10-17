@@ -79,7 +79,7 @@ use crate::pms::{parse_item, PmsMovie};
 use std::panic::catch_unwind;
 use std::sync::Arc;
 
-/// Per-shelf item cap. A `CardRow` owns exactly `ui::card_row::MAX_ROW_ITEMS` focus-scale
+/// Per-shelf item cap. A `CardRow` owns exactly `ui::cards::MAX_ROW_ITEMS` focus-scale
 /// springs and `scale(i)` clamps past the end, so an item beyond the cap would draw with the last
 /// cell's pop and — worse — never pop at all when focused (`update`'s loop can't reach its index).
 /// It is also the perf ceiling the A53 budget wants: a shelf is a horizontal strip, not a grid.
@@ -297,11 +297,22 @@ impl Person {
 #[derive(Clone, Copy, Default)]
 pub struct PersonView<'a> {
     current: Option<&'a Person>,
+    revision: u64,
 }
 
 impl<'a> PersonView<'a> {
     pub fn current(self) -> Option<&'a Person> {
         self.current
+    }
+
+    /// The content counter: bumped whenever the open person's content changes (a landing that
+    /// applies, a roster rebuild, a local watched edit) or the person itself is opened, closed or
+    /// replaced. A reader derives its per-card state again when this moves. It is NOT the request
+    /// epoch (`generation`, which a session change or a fresh open moves with no content change,
+    /// and which a landing never moves), and a shelf length can stay put while the items behind
+    /// it change.
+    pub fn revision(self) -> u64 {
+        self.revision
     }
 
     pub fn loading(self) -> bool {
@@ -315,6 +326,8 @@ impl<'a> PersonView<'a> {
 pub struct PersonState {
     current: Option<Person>,
     generation: u32,
+    /// The content counter [`PersonView::revision`] reads.
+    revision: u64,
     retry_cd: [u32; NFETCH],
     dev_held: usize,
     session_watch: plx_plex::plex::session::VisibleSessionWatch,
@@ -326,6 +339,7 @@ impl Default for PersonState {
         Self {
             current: None,
             generation: 0,
+            revision: 0,
             retry_cd: [0; NFETCH],
             dev_held: usize::MAX,
             session_watch: Default::default(),
@@ -336,7 +350,7 @@ impl Default for PersonState {
 
 impl PersonState {
     pub fn view(&self) -> PersonView<'_> {
-        PersonView { current: self.current.as_ref() }
+        PersonView { current: self.current.as_ref(), revision: self.revision }
     }
 
     fn current(&self) -> Option<&Person> {
@@ -365,7 +379,11 @@ pub fn facts_pending(p: &Person) -> bool {
     // arriving. One failed attempt is enough to say "this is what the page is": the band degrades
     // to the name it already has, which is exactly the finished-not-broken read the doc above asks
     // for. A later success still fills it in — `profiled` is what draws the content.
-    !p.profiled && !p.profile_tried
+    //
+    // **And only when there is something to ask.** A person with no plex.tv guid is never
+    // addressed (`address` has nothing to send), so no attempt can ever turn `profile_tried`; the
+    // wait would be unbounded in exactly the way the paragraph above rules out.
+    !p.profiled && !p.profile_tried && !p.guid.is_empty()
 }
 
 // Shelves have their OWN pending question already — [`loading`], just below — which is `!landed`
@@ -737,6 +755,7 @@ fn set_watched_local(state: &mut PersonState, sid: ServerId, rk: &str, on: bool)
     }
     if hit {
         resettle(p);
+        state.revision += 1;
     }
     hit
 }
@@ -785,6 +804,7 @@ fn open(
         }
     }
     state.supersede(adapter);
+    state.revision += 1;
     let srcs = sources(sid, key, name);
     state.current = Some(Person {
         sid,
@@ -902,6 +922,7 @@ const DEV_BIO: &str = "";
 /// screen is now mounted (the bug `metadata::clear` carries the same guard for).
 fn close(state: &mut PersonState, adapter: &PersonAdapter) {
     state.supersede(adapter);
+    state.revision += u64::from(state.current.is_some());
     state.current = None;
 }
 
@@ -991,13 +1012,19 @@ impl PersonState {
             if self.retry_cd[i] > 0 {
                 self.retry_cd[i] -= 1;
             }
-            // The take releases the single-flight claim with the mail, whatever the landing turns
-            // out to be. Under replay it happens on the recorded frame; spawning remains outside
+            // The take releases the single-flight claim with the mail that answers it; a
+            // superseded request's late answer is dropped inside the take and leaves the new
+            // claim alone (`Fetch::take_current`). Under replay it happens on the recorded frame; spawning remains outside
             // that gate so the request still leaves on time.
             let reply = crate::stores::tape::take_store_landing(
-                gate, crate::stores::StoreId::Person, "person", i as u32, &adapter.fetch[i]);
+                gate, crate::stores::StoreId::Person, "person", i as u32, &adapter.fetch[i], |m| m.gen);
             if let Some(reply) = reply {
-                adapter.fetch[i].release();
+                if reply.gen == self.generation {
+                    // a live reply already released through the take; a replay's supplied one
+                    // never touched the mailbox. A superseded one must not free the NEW
+                    // request's claim.
+                    adapter.fetch[i].release();
+                }
                 // Every landing repaints, failures included: a shelf or stopped spinner must not
                 // wait for the next keypress to become visible.
                 plx_machine::idle::invalidate();
@@ -1015,6 +1042,7 @@ impl PersonState {
         if self.current.is_some() {
             changed |= seed_dev_credits(self);
         }
+        self.revision += u64::from(changed);
         changed
     }
 
@@ -1421,7 +1449,7 @@ fn maybe_spawn(state: &mut PersonState, adapter: &Arc<PersonAdapter>, i: usize) 
         let session = if controlled { None } else { plx_plex::plex::session::peek_settled() };
         if !controlled && session.as_ref().is_none_or(|s| s.client_id.is_empty()) { return; }
         let profile = i == F_PROFILE;
-        adapter.fetch[i].claim();
+        adapter.fetch[i].claim(generation);
         let worker_adapter = Arc::clone(adapter);
         let spawned = crate::stores::tape::admit(serde_json::json!({
             "store":"person","slot":i,"gen":generation,"arg":arg,"guid":guid}), ||
@@ -1461,7 +1489,7 @@ fn maybe_spawn(state: &mut PersonState, adapter: &Arc<PersonAdapter>, i: usize) 
         .find(|s| s.sid == sid)
         .and_then(|s| s.local.clone())
         .unwrap_or_default();
-    adapter.fetch[i].claim();
+    adapter.fetch[i].claim(generation);
     let worker_adapter = Arc::clone(adapter);
     let spawned = crate::stores::tape::admit(serde_json::json!({
         "store":"person","slot":i,"gen":generation,"arg":arg,"guid":guid,
@@ -1838,6 +1866,19 @@ pub fn install_credits_for_test(&mut self, groups: &[(&str, usize)]) {
         })
         .collect();
     p.credited = true;
+    self.revision += 1;
+}
+
+/// TEST ONLY: settle the plex.tv profile question as a landed (empty) answer does, so the header
+/// is no longer waiting on facts ([`facts_pending`]) and its placeholder sweep is not running. A
+/// harness that never pumps the store's fetches has no other way to end that wait.
+pub fn install_profile_for_test(&mut self) {
+    let Some(p) = self.current.as_mut() else {
+        return;
+    };
+    p.profiled = true;
+    p.profile_tried = true;
+    self.revision += 1;
 }
 
 /// TEST ONLY: publish shelves onto the open person exactly as a successful landing would, so the
@@ -1875,6 +1916,7 @@ pub fn install_for_test(&mut self, movies: Vec<PmsMovie>, shows: Vec<PmsMovie>) 
     p.srcs[0].landed = true;
     p.srcs[0].roled = false;
     resettle(p);
+    self.revision += 1;
 }
 
 /// TEST ONLY: land one named source's shelves through the same per-source ownership and merge
@@ -1895,11 +1937,12 @@ pub fn install_source_for_test(&mut self, sid: ServerId, movies: Vec<PmsMovie>, 
     source.landed = true;
     source.roled = false;
     resettle(p);
+    self.revision += 1;
 }
 
 pub fn seed_ownership_fixture_for_test(&mut self, adapter: &Arc<PersonAdapter>) {
     self.retry_cd[0] = 17;
-    adapter.fetch[1].claim();
+    adapter.fetch[1].claim(self.generation.max(1));
     adapter.land(1, self.generation.max(1), Landing::Media(None));
 }
 
@@ -2510,7 +2553,7 @@ mod tests {
         let f = &owner.adapter.fetch[at(S0, K_ROLES)];
         f.clear();
 
-        f.claim();
+        f.claim(1);
         assert!(f.take().is_none(), "nothing has landed");
         assert!(
             f.busy(),
@@ -2532,17 +2575,19 @@ mod tests {
     }
 
     /// A late landing for the actor you already left must not repopulate the one you are looking
-    /// at. `open` bumps the generation; `pump` drops anything older — and it must still clear the
-    /// single-flight flag while doing so, or the NEW person can never fetch.
+    /// at. `open` bumps the generation; the take drops anything older WITHOUT releasing the
+    /// single-flight claim, which now belongs to the NEW person's request still out: releasing it
+    /// would spawn a duplicate request (and, in dump mode, land the new answer by timing). The
+    /// new person's own answer releases it, so the new person can still fetch.
     #[test]
-    fn a_landing_from_the_previous_person_is_discarded_but_still_releases_the_fetch() {
+    fn a_landing_from_the_previous_person_is_discarded_and_leaves_the_new_claim_held() {
         let mut owner = Owner::default();
         let _serial = plx_base::testlock::serial();
         owner.open(S0, "161", "5d776", "Idina Menzel", "");
         let stale = owner.gen();
         owner.open(S0, "465", "5d777", "Cynthia Erivo", ""); // supersedes: the fetch above is now obsolete
 
-        owner.adapter.fetch[at(S0, K_MEDIA)].claim();
+        owner.adapter.fetch[at(S0, K_MEDIA)].claim(owner.gen());
         owner.hold_off();
         owner.land(
             at(S0, K_MEDIA),
@@ -2559,9 +2604,74 @@ mod tests {
         );
         assert!(!p.landed, "a discarded landing must not settle the spinner");
         assert!(
-            !owner.adapter.fetch[at(S0, K_MEDIA)].busy(),
-            "the take must release the single-flight even for a landing it drops"
+            owner.adapter.fetch[at(S0, K_MEDIA)].busy(),
+            "a dropped stale landing must leave the new request's claim held"
         );
+        let current = owner.gen();
+        owner.land(at(S0, K_MEDIA), current, media(vec![PmsMovie::default()], Vec::new()));
+        assert!(owner.pump(), "the new request's own answer lands");
+        assert!(
+            !owner.adapter.fetch[at(S0, K_MEDIA)].busy(),
+            "and its take releases the single-flight"
+        );
+        owner.close();
+    }
+
+    /// DUMP MODE at the Person site, through the real pump: a request that is out when the pump
+    /// runs lands on THAT pump however late the worker posts. The worker here posts 25 ms after the
+    /// pump has started; a plain take (the site's conversion reverted) returns empty and this
+    /// fails on the first assertion. A superseded request is the next test.
+    #[test]
+    fn dump_mode_a_request_out_lands_on_the_pump_that_runs_whatever_the_worker() {
+        let mut owner = Owner::default();
+        let _serial = plx_base::testlock::serial();
+        owner.open(S0, "161", "5d776", "Idina Menzel", "");
+        let gen = owner.gen();
+        owner.hold_off();
+        owner.adapter.fetch[at(S0, K_MEDIA)].claim(gen);
+        let gate = plx_machine::landgate::Gate::default();
+        gate.arm_dump(std::time::Duration::from_secs(20));
+        let worker = Arc::clone(&owner.adapter);
+        let join = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            worker.land(at(S0, K_MEDIA), gen, media(vec![PmsMovie::default()], Vec::new()));
+        });
+        assert!(owner.state.pump_with_gate(&owner.adapter, &gate),
+            "the answer the pump owed must be taken by the pump that asked");
+        assert_eq!(owner.current().unwrap().shelf(0).len(), 1);
+        assert!(!owner.adapter.fetch[at(S0, K_MEDIA)].busy(), "the TAKE released the claim");
+        join.join().unwrap();
+        owner.close();
+    }
+
+    /// A superseded request's stale answer arrives FIRST: it must neither end the dump wait nor
+    /// release the NEW request's claim, so the new answer lands on the pump that was owed it.
+    #[test]
+    fn dump_mode_a_superseded_requests_stale_answer_does_not_release_the_new_claim() {
+        let mut owner = Owner::default();
+        let _serial = plx_base::testlock::serial();
+        owner.open(S0, "161", "5d776", "Idina Menzel", "");
+        let stale = owner.gen();
+        owner.adapter.fetch[at(S0, K_MEDIA)].claim(stale); // request A is out
+        owner.open(S0, "465", "5d777", "Cynthia Erivo", ""); // supersedes A
+        let current = owner.gen();
+        assert_ne!(stale, current);
+        owner.hold_off();
+        owner.adapter.fetch[at(S0, K_MEDIA)].claim(current); // request B is out
+        let gate = plx_machine::landgate::Gate::default();
+        gate.arm_dump(std::time::Duration::from_secs(20));
+        let worker = Arc::clone(&owner.adapter);
+        let join = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            worker.land(at(S0, K_MEDIA), stale, media(Vec::new(), Vec::new()));
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            worker.land(at(S0, K_MEDIA), current, media(vec![PmsMovie::default()], Vec::new()));
+        });
+        assert!(owner.state.pump_with_gate(&owner.adapter, &gate),
+            "B was out when the pump ran, so B's answer must land on this pump");
+        assert_eq!(owner.current().unwrap().shelf(0).len(), 1);
+        assert!(!owner.adapter.fetch[at(S0, K_MEDIA)].busy(), "B's own answer released B's claim");
+        join.join().unwrap();
         owner.close();
     }
 
@@ -2609,7 +2719,7 @@ mod tests {
         let _serial = plx_base::testlock::serial();
         owner.open(S0, "161", "5d776", "Idina Menzel", "");
         for i in 0..NFETCH {
-            owner.adapter.fetch[i].claim();
+            owner.adapter.fetch[i].claim(owner.gen());
             owner.state.retry_cd[i] = RETRY_FRAMES;
         }
 
@@ -2713,6 +2823,67 @@ mod tests {
             "a failure must back off before retrying"
         );
         owner.close();
+    }
+
+    /// A person with no plex.tv guid is never ASKED for a profile (`address` has nothing to send),
+    /// so `profile_tried` can never turn: if `facts_pending` stayed true the header would sweep its
+    /// placeholders, and the page would repaint at 60 fps, for an answer that cannot arrive.
+    #[test]
+    fn a_person_without_a_guid_is_not_waiting_on_facts() {
+        let mut owner = Owner::default();
+        let _serial = plx_base::testlock::serial();
+        owner.open(S0, "7", "", "Nobody", "");
+        let p = owner.current().unwrap();
+        assert!(address(F_PROFILE, p).is_none(), "nothing can be asked");
+        assert!(!facts_pending(p), "so there is nothing to wait for");
+        owner.open(S0, "8", "00000000000000000000aaaa", "Somebody", "");
+        assert!(facts_pending(owner.current().unwrap()), "a guid-bearing person still waits for its profile");
+        owner.close();
+    }
+
+    /// `revision` is the content counter, not the request epoch: a landing moves it and no
+    /// request does, an opening of the identity already held moves neither, a failed landing
+    /// changes no content, and a same-length shelf replacement still moves it (the case a
+    /// length stamp misses).
+    #[test]
+    fn the_revision_follows_content_and_not_requests() {
+        let mut owner = Owner::default();
+        let _serial = plx_base::testlock::serial();
+        owner.open(S0, "6059", "0000000000000000000000ff", "Nobody", "");
+        let (rev, gen) = (owner.state.view().revision(), owner.gen());
+        assert!(rev > 0, "opening a person is a content change");
+
+        owner.open(S0, "6059", "0000000000000000000000ff", "Nobody", "");
+        assert_eq!((owner.state.view().revision(), owner.gen()), (rev, gen), "a redundant open is a no-op");
+
+        owner.supersede();
+        assert!(owner.gen() > gen, "a request epoch moved");
+        assert_eq!(owner.state.view().revision(), rev, "...and the content did not");
+
+        let gen = owner.gen();
+        owner.land(F_PROFILE, gen, Landing::Profile(None));
+        assert!(!owner.pump());
+        assert_eq!(owner.state.view().revision(), rev, "a failed landing changes no content");
+
+        owner.land(F_PROFILE, gen, Landing::Profile(Some(plx_plex::plex::discover::PersonProfile::default())));
+        assert!(owner.pump());
+        let after_landing = owner.state.view().revision();
+        assert!(after_landing > rev, "an applied landing is a content change");
+        assert_eq!(owner.gen(), gen, "...and no request epoch moved with it");
+
+        let mk = |rk: &str| PmsMovie { sid: S0, rk: rk.into(), ..Default::default() };
+        owner.state.install_for_test(vec![mk("a"), mk("b")], vec![]);
+        let two = owner.state.view().revision();
+        assert!(two > after_landing);
+        owner.state.install_for_test(vec![mk("a"), mk("c")], vec![]);
+        assert!(owner.state.view().revision() > two, "same length, different items: still a change");
+
+        let before_close = owner.state.view().revision();
+        owner.close();
+        assert!(owner.state.view().revision() > before_close, "closing the person is a content change");
+        let closed = owner.state.view().revision();
+        owner.close();
+        assert_eq!(owner.state.view().revision(), closed, "closing nothing is not");
     }
 
     /// `roles_from` keeps exactly THIS person's credit per row — matched by the tag's numeric id

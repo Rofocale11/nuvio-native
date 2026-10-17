@@ -441,7 +441,9 @@ impl super::BrowseState {
 
     pub fn hubs_land(&mut self, adapter: &Arc<super::BrowseAdapter>,
         gate: &plx_machine::landgate::Gate) -> bool {
-        let taken = crate::stores::take_landing(gate, crate::stores::StoreId::Browse, || {
+        // DUMP MODE: owed while the section-hubs claim (`hubs.fetching`) is held.
+        let taken = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Browse,
+            || adapter.hubs.fetching.load(Ordering::SeqCst), || {
             adapter.hubs.result.lock().unwrap_or_else(|e| e.into_inner()).take()
         });
         let Some(result) = taken else {
@@ -695,6 +697,35 @@ pub fn seed_named_shelves_for_owner_test(
     st.hubs.commit_staged(true);
 }
 
+/// Replace the items of section `sec`'s first published shelf with one card per `rks` entry, in
+/// that order, and publish the result (the revision moves). The content landing a hub shelf has on
+/// the set (a refetch that reorders, inserts or drops a title) without a worker: the card's rating
+/// key is the entry, so a test names which title moved.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_first_shelf_items_for_owner_test(
+    state: &mut super::BrowseState,
+    sec: usize,
+    rks: &[String],
+) {
+    let Some(st) = state.state_mut(sec) else {
+        return;
+    };
+    let mut shelves = st.hubs.committed.as_ref().clone();
+    if let Some(first) = shelves.first_mut() {
+        first.total = rks.len();
+        first.items = rks
+            .iter()
+            .map(|rk| PmsMovie {
+                rk: rk.clone(),
+                title: rk.clone(),
+                ..Default::default()
+            })
+            .collect();
+    }
+    st.hubs.land_ok(shelves);
+    st.hubs.commit_staged(true);
+}
+
 /// A worker success held behind the Library's publication gate, without starting a worker.
 #[cfg(any(test, feature = "test-support"))]
 pub fn stage_shelves_for_owner_test(state: &mut super::BrowseState, sec: usize) {
@@ -747,6 +778,15 @@ pub(super) struct HubResult {
     /// `None` is a FAILED fetch — kept distinguishable from a successful answer that happens to be
     /// empty, which on this endpoint is a common and legitimate reply.
     shelves: Option<Parsed>,
+}
+
+#[cfg(test)]
+impl HubResult {
+    /// A FAILED fetch for `sec` on `client`, as a worker posts it.
+    pub(super) fn failed_for_test(epoch: u32, sec: usize, client: &'static plx_plex::plex::Client,
+        token_gen: u32) -> Self {
+        Self { epoch, sec, client, token_gen, shelves: None }
+    }
 }
 
 // ---- the pure half --------------------------------------------------------------------------

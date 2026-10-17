@@ -277,7 +277,7 @@ pub struct Split<'a, H: Host> {
 #[derive(Clone)]
 pub struct CxParts<K> {
     pub tick: Tick,
-    pub press: PressRead,
+    pub press: PressRead<K>,
     pub focus: FocusRead<K>,
     pub owner: InputOwner,
 }
@@ -347,6 +347,14 @@ pub struct Dispatcher<H: Host> {
     pub page_snapshot: Box<dyn super::containers::transition::PageSnapshot>,
     page_image: super::containers::transition::PageImage,
     page_stops: Vec<Stop<H::Elem>>,
+    /// The placeholders the held page image carries, noted while the page was drawn live into the
+    /// snapshot (`placeholder::since`), and the entry they belong to. Re-noted on every frame the
+    /// image is painted without the live page, so the counter does not read 0 over a captured
+    /// spinner.
+    page_debt: Option<(plx_machine::machine::EntryId, super::placeholder::Debt)>,
+    /// The alpha the last visible pass painted the page image at, `None` when the page was drawn
+    /// live (or not at all). See [`Dispatcher::held_page_image`].
+    page_image_alpha: Option<f32>,
     pub budget: Budget,
     pub nav: Navigation<H>,
     /// The Input machine (§2.2): the engine, the hit map, the press and its arm.
@@ -368,6 +376,9 @@ pub struct Dispatcher<H: Host> {
     pending_back: bool,
     /// The tick of the last `frame_with`, for a `draw` the caller runs later in its own frame.
     last_tick: Tick,
+    /// The page element the surface pass lifted out of the dim on the previous drawn frame
+    /// ([`Self::lifted_opener`]); a change re-takes the host snapshot (`draw_with`).
+    lifted_last: Option<FocusKey<H::Elem>>,
     /// This frame's prepare pass ran (a `draw` after a non-presenting frame runs it itself).
     prepared: bool,
     /// The previous frame's page-owned motion/resource verdict, retained past `Present::take` so
@@ -408,6 +419,8 @@ where
             page_snapshot: Box::new(super::popover::host::TransitionSnapshot::default()),
             page_image: Default::default(),
             page_stops: Vec::new(),
+            page_debt: None,
+            page_image_alpha: None,
             focus_override: None,
             frame: 0,
             carried_streak: 0,
@@ -417,6 +430,7 @@ where
             render_breach_logged: false,
             pending_back: false,
             last_tick: Tick::default(),
+            lifted_last: None,
             prepared: false,
             page_quiescent: false,
         }
@@ -637,6 +651,29 @@ where
             .and_then(|e| self.input.engine.current(InputOwner::Entry(e)))
     }
 
+    /// **Which page element, if any, the opener lift repaints this frame** — the ONE decision the
+    /// lift and the page pass share (`(host page, element)`; the application's `opener_lift` is
+    /// this). The lift is the opener tile drawn again above the dim *because it is the focused
+    /// one*. That stops being true the moment the menu is dismissed: `ModalStack::dismiss` hands
+    /// input back to the page on the same frame, but the surface stays in the stack until its fade
+    /// settles, so a D-pad press during the fade moves the page's focus to a neighbour while the
+    /// lift would still paint the OLD tile fully popped and captioned. So while the surface is
+    /// `Closing`, the lift is painted only if the engine's focus on the host page is still the
+    /// opener element (or there is none to compare); once focus has moved, the page draws the tiles
+    /// itself and the lift stands down. While the menu is open the engine's focus is on the menu's
+    /// own rows, so the lift always paints then.
+    pub fn lifted_opener(&self) -> Option<(EntryId, Option<FocusKey<H::Elem>>)> {
+        use super::containers::modal::Phase;
+        let (surface, (entry, opener)) = self.nav.modals.surfaces.iter()
+            .find_map(|s| Some((s, s.entry.inst.as_ref()?.screen.opener()?)))?;
+        if self.nav.top_page().map(|e| e.id) != Some(entry) { return None; }
+        if surface.phase == Phase::Closing {
+            let live = self.focus().filter(|k| k.entry == entry);
+            if live.is_some() && live != opener { return None; }
+        }
+        Some((entry, opener))
+    }
+
     /// Feed the owner's focus from outside a step: a test's premise (no group is remembered).
     pub fn set_focus(&mut self, k: Option<FocusKey<H::Elem>>) {
         self.set_focus_in(k, None);
@@ -695,6 +732,7 @@ where
                 scale: self.input.press.scale(),
                 is_long: self.input.press.was_long(),
                 held_ms: self.input.press.held_ms(tick.ms),
+                owner: self.input.dip_owner,
             },
             focus: self.input.engine.read(owner),
             owner,
@@ -732,6 +770,29 @@ where
     pub fn video_plane_frame(&self) -> bool {
         self.present.video_plane()
             && self.top_screen().map(|s| s.render()) == Some(super::screen::RenderStrategy::VideoPlane)
+    }
+
+    /// **Is the page on screen a held image?** `Some(alpha)` when the last visible pass painted the
+    /// top page as its captured snapshot instead of drawing it (a `PageDip` push's IN half and the
+    /// hold after it), `None` when it drew the page live. The placeholders such an image contained
+    /// are re-counted on it (`placeholder::renote`); the demo-video driver reports this as a fact
+    /// and holds only on that debt, since a capture with debt is re-captured until it is clean.
+    pub fn held_page_image(&self) -> Option<f32> {
+        self.page_image_alpha
+    }
+
+    /// Is a modal surface or a popover's held image up? The frame dump fails closed on it: the dim
+    /// field behind a modal is sampled on a cadence of presented iterations.
+    pub fn overlay_open(&self) -> bool {
+        !self.nav.modals.surfaces.is_empty() || crate::popover::host::held_ceiling().is_some()
+    }
+
+    /// Does the dispatcher carry work into its next iteration: a queued step, a parked structural
+    /// op or lifecycle step (one nav commit per iteration), a pending back? The frame dump holds a
+    /// virtual frame on it, so an input's whole effect lands within the frame it was pressed in
+    /// rather than on whichever later iteration the holds happened to leave.
+    pub fn work_carried(&self) -> bool {
+        !self.queue.is_empty() || !self.parked.is_empty() || !self.parked_life.is_empty() || self.pending_back
     }
 
     /// Whether this frame may show the page as a frozen image at all: a freezing transition, a
@@ -1286,6 +1347,18 @@ where
         use super::frame::backdrop::{self, Z};
         let strip_owner = self.owner_entry();
         let navigation = rig.navigation_presentation();
+        // The element the opener lift draws live above the host snapshot is NOT part of the page
+        // pass (`DrawFrame::lifted`). When it changes (the menu mounts, or the lift stands down
+        // because focus moved off the opener while the menu fades) the snapshot no longer matches
+        // what the page should show, so it is re-taken and the card sections say again whether
+        // they left a card out (`popover::set_lift_owns`). Source and discovery walks neither
+        // decide nor re-take: they redraw the page the visible pass is about to show.
+        let lifted = self.lifted_opener().and_then(|(_, key)| key);
+        if !backdrop::source_walk() && !plx_gfx::gfx::blur_source_pass() && lifted != self.lifted_last {
+            self.lifted_last = lifted;
+            super::popover::set_lift_owns(false);
+            super::popover::host::invalidate();
+        }
         let (_, host_render) = self.nav.modals.host_policy();
         // §9: armed for the LENGTH OF THE DRAW, and restored rather than cleared, exactly as the
         // page freeze is. Every framebuffer-sampling door is refused while it is up.
@@ -1313,6 +1386,7 @@ where
             if matches!(paint, super::containers::transition::PagePaint::Live) {
                 self.page_snapshot.release();
                 self.page_image = Default::default();
+                self.page_debt = None;
             }
             if matches!(paint, super::containers::transition::PagePaint::Held(_)
                 | super::containers::transition::PagePaint::ReplacementCapture) {
@@ -1325,7 +1399,8 @@ where
                 plx_machine::idle::invalidate();
             }
         }
-        let Dispatcher { nav, input, page_snapshot, page_image, page_stops, .. } = self;
+        let Dispatcher { nav, input, page_snapshot, page_image, page_stops, page_debt, page_image_alpha, .. } = self;
+        if !source_pass { *page_image_alpha = None; }
         let mut stops = Vec::new();
         let mut set = RenderSet {
             // the shared poster/logo residency (ui/tex.rs) is the one pool rule (c) sums beside
@@ -1424,8 +1499,11 @@ where
                         let mut page_navigation = navigation;
                         if full_alpha { page_navigation.page_alpha = 1.0; }
                         let mut f = DrawFrame::with_navigation(&page_cx, Painter::root(), page_navigation);
+                        f.lifted = lifted;
                         if !full_alpha { f.page_alpha *= nav.tabs.stack.transition.page_alpha(); }
+                        let drawn_from = super::placeholder::mark();
                         backdrop::draw_span("page", || inst.screen.draw(&mut f));
+                        if capture { *page_debt = Some((e.id, super::placeholder::since(drawn_from))); }
                         report.drawn.push(inst.id);
                         let drawn_stops = f.into_stops();
                         if capture { *page_stops = drawn_stops.clone(); }
@@ -1444,6 +1522,12 @@ where
                             else { nav.tabs.stack.transition.page_alpha() };
                         backdrop::draw_span("page.image", || page_snapshot.draw(alpha, true));
                     } else if let Some(alpha) = paint.frozen_alpha() {
+                        if !source_pass { *page_image_alpha = Some(alpha); }
+                        // The image stands in for a page nothing draws this frame: it carries the
+                        // placeholders it was captured with (see `placeholder::Debt`).
+                        if let Some((id, debt)) = page_debt.as_ref() {
+                            if *id == e.id { super::placeholder::renote(debt); }
+                        }
                         let _image_layer = backdrop::layer(Z(Z::CHROME.0 - 1), false);
                         let source_alpha = if source_pass { 1.0 } else { alpha };
                         backdrop::draw_span("page.image", || page_snapshot.draw(source_alpha, !visible_live));
@@ -2003,10 +2087,15 @@ where
                         rig.log("focus: no current focus — seated by the first group's policy");
                     }
                     match outcome {
-                        Outcome::Moved { from, to, by } => out.push(Stamped {
-                            from: MachineId::Input,
-                            fx: Fx::Deliver(MachineId::Instance(id), Delivery::Screen(ScreenEvent::FocusMoved { from, to, by })),
-                        }),
+                        Outcome::Moved { from, to, by } => {
+                            // Navigation abandons the press (§7.4): the pressed card springs back
+                            // where it is while focus moves on, and the tap never commits.
+                            self.input.abandon_if_off(entry, to);
+                            out.push(Stamped {
+                                from: MachineId::Input,
+                                fx: Fx::Deliver(MachineId::Instance(id), Delivery::Screen(ScreenEvent::FocusMoved { from, to, by })),
+                            });
+                        }
                         Outcome::Edge(EdgeRule::Screen) => {
                             if let ScreenEvent::Input(iev) = ev {
                                 let mut again = iev.clone();
@@ -2192,11 +2281,9 @@ where
         let outcome = self.focus_resolution(rig, parts, entry, 2, tap,
             |engine, view, cx| engine.reconcile(owner, view, cx));
         if let Outcome::Moved { from, to, by } = outcome {
-            if self.input.arm.is_some_and(|arm| arm.key.entry == entry && arm.key != to) {
-                // A catalog reconciliation changes the cursor, not the identity of an ongoing
-                // gesture. Never let release activate the fallback item that replaced its arm.
-                self.input.cancel_press();
-            }
+            // A catalog reconciliation changes the cursor, not the identity of an ongoing
+            // gesture. Never let release activate the fallback item that replaced its arm.
+            self.input.abandon_if_off(entry, to);
             if let Some(id) = self.nav.instance_of(entry) {
                 let mut out = Vec::new();
                 self.execute_deliver(rig, parts, MachineId::Instance(id), Delivery::Screen(ScreenEvent::FocusMoved { from, to, by }), &mut out, report, tap);

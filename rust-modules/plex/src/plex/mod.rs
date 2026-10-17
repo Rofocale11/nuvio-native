@@ -29,6 +29,7 @@ mod servers;
 // type across a crate) — declared here so those methods compile onto `Client`.
 mod hubs;
 mod library;
+pub mod nuvio;
 pub mod collections;
 /// Agent-backed subtitle search & download. `docs/pms-api.md` §8 is the verified contract; the
 /// bundled OpenAPI spec is wrong about this endpoint and must not be read as authority for it.
@@ -88,6 +89,7 @@ pub mod discover;
 pub mod retry;
 
 // The re-exports are the public surface the call sites import.
+pub use hubs::is_pageable_hub_key;
 pub use client::ArtFetch;
 pub use client::JsonDeadlineOutcome;
 // The one percent-encoder (RFC 3986 unreserved passthrough) — see its doc.
