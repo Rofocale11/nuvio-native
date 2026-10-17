@@ -218,11 +218,16 @@ fn root_form(
     current: plx_media::route::Quality,
 ) -> MoreForm {
     let mut options = FormSection::new(plx_platform::i18n::msg::widgets_menu_options());
-    for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetQuality(_))) {
+    
+    // FORK: Filter out BOTH SetQuality and SetStream so they don't show in Options
+    for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetQuality(_)) && !matches!(a, Action::SetStream(_))) {
         options = options.item(MoreRow::Act(a), RowKind::Button, a, row_for(ps, a));
     }
+    
+    // FORK: Show the Source button if we have EITHER qualities OR streams
+    let has_sources = rows.iter().any(|a| matches!(a, Action::SetQuality(_) | Action::SetStream(_)));
     let quality = FormSection::new("").item_if(
-        quality_offered(rows, forced),
+        has_sources && !forced,
         MoreRow::OpenQuality,
         RowKind::Nav(MorePage::Quality),
         Action::None,
@@ -237,11 +242,17 @@ fn quality_form(
     rows: &[Action],
     current: plx_media::route::Quality,
 ) -> MoreForm {
-    let sec = rows.iter().copied().filter(|a| matches!(a, Action::SetQuality(_))).fold(
+    let sec = rows.iter().copied().filter(|a| matches!(a, Action::SetQuality(_) | Action::SetStream(_))).fold(
         FormSection::new(""),
         |sec, a| {
             sec.choice(MoreRow::Act(a), a, row_for(ps, a), |id| {
-                *id == MoreRow::Act(Action::SetQuality(current))
+                match id {
+                    // Check the current quality rung
+                    MoreRow::Act(Action::SetQuality(q)) => *q == current,
+                    // We don't track the current stream index perfectly in the UI yet, so no checkmark
+                    MoreRow::Act(Action::SetStream(_)) => false,
+                    _ => false,
+                }
             })
         },
     );
@@ -727,6 +738,9 @@ fn quality_detail(q: plx_media::route::Quality, source_decodable: bool) -> &'sta
 fn row_for(ps: &plx_media::route::PlaybackSession, a: Action) -> Row {
     match a {
         Action::SetQuality(q) => Row::new(label(a)).detail(quality_detail(q, plx_media::route::source_decodable(ps))),
+        // FORK (RichiL10): Streams are standard choices, not toggle switches. 
+        // We just render the label and let `.choice()` handle the selection mark.
+        Action::SetStream(_) => Row::new(label(a)), 
         _ => Row::new(label(a)).toggle(is_on(a)),
     }
 }
