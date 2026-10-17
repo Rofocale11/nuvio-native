@@ -122,6 +122,16 @@ pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: 
                 plx_media::route::set_quality(ps, q);
             }
         }
+        
+        // FORK (RichiL10): User picked a specific Addon stream from the menu
+        plx_appkit::more_menu::Action::SetStream(index) => {
+            // 1. Tell the Nuvio Shim to update the mediaIndex
+            if plx_media::route::set_stream_index(ps, index) {
+                // 2. Force the player to reload the stream from the new URL
+                retry_failed_playback(ps, pa, bridge.metadata_mut(), None);
+            }
+        }
+
         // Lab builds only. Nothing about playback changes: the snapshot is taken and the toast
         // reports, over whatever the player is doing.
         plx_appkit::more_menu::Action::SendDiagnostics => crate::lab::request_upload("menu", ps),
