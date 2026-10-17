@@ -1,0 +1,126 @@
+name: build-ipk
+
+on:
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: "FLAVOR (stable or debug)"
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - debug
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # The webOS NDK only ships for linux-aarch64, darwin-arm64, darwin-x86_64.
+    # ubuntu-24.04-arm gives us a native ARM64 Linux runner with the
+    # linux-aarch64 toolchain, so `make setup-env` works as designed.
+    # Free on public repos. Private repos need a paid plan for ARM64 runners.
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 curl tar xz-utils bzip2 \
+            libssl-dev pkg-config file
+
+      - name: Install Rust nightly + rust-src
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          source "$HOME/.cargo/env"
+          rustup toolchain install nightly --component rust-src
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the webOS NDK
+        # Downloads, extracts, and relocates the webosbrew buildroot SDK
+        # into ~/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot.
+        # On ubuntu-24.04-arm, NDK_PLAT resolves to linux-aarch64 and the
+        # sha256 in the Makefile is checked.
+        run: make setup-env
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-modules/target-release
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/Cargo.lock', 'rust-modules/.cargo/config.toml', 'Makefile') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build the IPK
+        shell: bash
+        run: |
+          source "$HOME/.cargo/env"
+          FLAVOR="${{ github.event.inputs.flavor || 'stable' }}"
+          echo "Building FLAVOR=$FLAVOR RELEASE=1"
+          make FLAVOR="$FLAVOR" RELEASE=1 ipk
+        env:
+          NUVIO_SUPABASE_URL: ${{ vars.NUVIO_SUPABASE_URL }}
+          NUVIO_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
+          NUVIO_SUPABASE_FALLBACK_URL: ${{ vars.NUVIO_SUPABASE_FALLBACK_URL }}
+          DEVICE_LOGIN_WEB_BASE_URL: ${{ vars.DEVICE_LOGIN_WEB_BASE_URL }}
+          TV_LOGIN_WEB_BASE_URL: ${{ vars.TV_LOGIN_WEB_BASE_URL }}
+
+      - name: Probe AVFrame layout
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib
+          h = pathlib.Path("vendor/ffmpeg-prefix/include/libavutil/frame.h")
+          if not h.exists():
+              print("frame.h not found — did the FFmpeg build run?")
+              raise SystemExit(0)
+          src = h.read_text()
+          m = re.search(r"typedef struct AVFrame\s*\{(.*?)\}\s*AVFrame\s*;", src, re.DOTALL)
+          if not m:
+              print("AVFrame struct not matched"); raise SystemExit(0)
+          body = m.group(1)
+          lines = [l.strip() for l in body.splitlines()
+                   if l.strip() and not l.strip().startswith(('/*', '*', '//'))]
+          print("=== AVFrame fields, in order ===")
+          for i, l in enumerate(lines):
+              print(f"{i:3}  {l[:110]}")
+          print("=== end ===")
+          EOF
+      
+      - name: List build outputs
+        if: always()
+        run: |
+          echo "--- pkg/ ---"
+          ls -la pkg/ || true
+          echo "--- ipkroot/ ---"
+          find ipkroot -type f 2>/dev/null | head -50 || true
+
+      - name: Upload IPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-native-ipk-${{ github.event.inputs.flavor || 'stable' }}
+          path: |
+            pkg/*.ipk
+            pkg/ipk.sha256
+          if-no-files-found: error
+
+      - name: Attach IPK to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            pkg/*.ipk
+            pkg/ipk.sha256
+          generate_release_notes: true
