@@ -285,10 +285,12 @@ impl Caps {
 
     /// FORK (RichiL10): the fork lane for a track of `rate` Hz (0 = not known), or `None` for a
     /// codec the television decodes itself or a track no lane takes. Pure; `encode` is the knob.
-    pub fn audio_lane(&self, codec: &str, channels: i64, _rate: i64, encode: bool) -> Option<AudioLane> {
+    pub fn audio_lane(&self, codec: &str, channels: i64, rate: i64, encode: bool) -> Option<AudioLane> {
         if self.enc_lane_candidate(codec, channels, encode) {
-            // FORK (RichiL10): Force the encode lane, ignoring sample rate
-            return Some(AudioLane::Ac3Encode); 
+            // FORK (RichiL10): Only force the lane if it's 48kHz (or unknown)
+            if rate == 0 || rate == ENC_LANE_RATE {
+                return Some(AudioLane::Ac3Encode);
+            }
         }
         let codec = dp_audio_key(codec);
         (matches!(codec, "flac" | "pcm") && self.pcm_lane_admits(codec, channels)).then_some(AudioLane::Pcm)
