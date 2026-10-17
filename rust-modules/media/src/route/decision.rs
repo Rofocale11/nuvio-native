@@ -20,6 +20,19 @@ use std::sync::Mutex;
 use super::flight::*;
 use super::plan::*;
 
+/// Global storage for the last fetched Nuvio streams so the in-player menu can read them.
+pub static AVAILABLE_STREAMS: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
+
+/// Tell the Nuvio Shim to switch to a specific stream index, and restart playback.
+pub fn set_stream_index(ps: &mut PlaybackSession, index: usize) -> bool {
+    if let Some(req) = &ps.request {
+        if let Some(c) = plx_plex::plex::client_for(req.sid) {
+            return c.nuvio_select(&req.rk, index);
+        }
+    }
+    false
+}
+
 // ---- ONE playback session, as ONE value -----------------------------------------------------
 
 /// Everything needed to resolve the item again after a terminal playback failure.

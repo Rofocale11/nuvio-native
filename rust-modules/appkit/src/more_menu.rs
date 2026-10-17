@@ -77,7 +77,7 @@ use plx_ui::panel_motion::PanelMotion;
 use plx_ui::table::Row;
 use plx_ui::{theme, Rect};
 
-/// What the highlighted row does on OK.
+// What the highlighted row does on OK.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     None,
@@ -85,6 +85,8 @@ pub enum Action {
     ToggleStats,
     /// select a rung of the playback-quality ladder ([`plx_media::route::set_quality`])
     SetQuality(plx_media::route::Quality),
+    /// select a specific Addon stream by index
+    SetStream(usize), // <--- Just the index, no String!
     /// **Lab builds only** — snapshot and upload the diagnostic ring (`crate::lab`). Here as well
     /// as in `account_menu` because the account menu is unreachable during playback, and playback
     /// is what a Cloud Test Lab session is usually reproducing.
@@ -185,6 +187,7 @@ impl FormId for Action {
             Action::SetQuality(Quality::P720) => 14,
             Action::SetQuality(Quality::P720Low) => 15,
             Action::SetQuality(Quality::P480) => 16,
+            Action::SetStream(i) => 100 + *i as u32, 
         })
     }
 }
@@ -618,14 +621,20 @@ where
 /// a row that cannot change the outcome is not offered (the same rule as the failure read-out's
 /// `player::failure_actions`). Pure over the flag so both shapes are testable without a session.
 fn rows_for(forced: bool) -> Vec<Action> {
-    let mut v: Vec<Action> = if forced {
-        Vec::new()
-    } else {
-        plx_media::route::available_quality_ladder()
+    let mut v: Vec<Action> = Vec::new();
+    
+    let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
+    
+    if !streams.is_empty() {
+        for (index, _) in streams.iter() {
+            v.push(Action::SetStream(*index)); // <--- No String here!
+        }
+    } else if !forced {
+        v.extend(plx_media::route::available_quality_ladder()
             .iter()
-            .map(|q| Action::SetQuality(*q))
-            .collect()
-    };
+            .map(|q| Action::SetQuality(*q)));
+    }
+    
     v.push(Action::ToggleStats);
     if plx_platform::labcfg::menu_row_enabled() {
         v.push(Action::SendDiagnostics);
@@ -636,9 +645,15 @@ fn rows_for(forced: bool) -> Vec<Action> {
 fn label(a: Action) -> std::borrow::Cow<'static, str> {
     match a {
         Action::ToggleStats => plx_platform::i18n::msg::widgets_menu_stats().into(),
-        // the rung names itself — rate and frame in one string, because the row already carries
-        // the picker's leading mark (see this module's doc)
         Action::SetQuality(q) => q.label().into(),
+        Action::SetStream(index) => {
+            let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
+            streams.iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| format!("Stream #{}", index))
+                .into()
+        }
         Action::SendDiagnostics => plx_platform::i18n::msg::widgets_menu_diagnostics().into(),
         Action::None => "".into(),
     }
@@ -671,7 +686,7 @@ fn is_on(a: Action) -> bool {
     match a {
         Action::ToggleStats => stats_on(),
         // a rung is not a switch — see `row_for`, which gives it the leading mark instead
-        Action::SetQuality(_) | Action::SendDiagnostics | Action::None => false,
+        Action::SetQuality(_) | Action::SendDiagnostics | Action::None | Action::SetStream(_) => false,
     }
 }
 

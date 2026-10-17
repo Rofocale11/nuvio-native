@@ -16,7 +16,7 @@
     "description": "Option or section label in the player overflow menu."
   },
   "widgets.menu.quality": {
-    "value": "Quality",
+    "value": "Source",
     "description": "Option or section label in the player overflow menu."
   },
   "widgets.menu.stats": {
@@ -1069,7 +1069,7 @@
     "description": "Failed-playback button: sets Direct Play back to Auto (the Settings value, saved) and plays the item again."
   },
   "widgets.failure.change_quality": {
-    "value": "Change quality",
+    "value": "Change Source",
     "description": "Failed-playback button: opens the quality ladder; picking a rung retries at it."
   }
 }
