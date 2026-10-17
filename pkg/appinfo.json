@@ -13,7 +13,7 @@
   "nativeLifeCycleInterfaceVersion": 2,
   "handlesRelaunch": false,
   "transparent": true,
-  "requiredMemory": 280,
+  "requiredMemory": 168,
   "requiredPermissions": [
     "database.operation",
     "securitykey.operation"
