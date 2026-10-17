@@ -60,7 +60,7 @@ pub mod dv;
 /// the app and leaves it as PCM, native PCM tracks are converted to the declared sample width,
 /// and Opus is fed as-is with its `opusInfo` (`player::engine::with_audio_info`). Each is admitted
 /// only with a MEASURED channel row in the device table, like DTS.
-pub const DP_AUDIO_CODECS: &str = "aac,ac3,eac3,dts,flac,pcm,opus";
+pub const DP_AUDIO_CODECS: &str = "aac,ac3,eac3,dts,flac,pcm,opus,truehd,mlp";
 
 /// FORK (RichiL10): the lanes that are admitted only with a measured channel ceiling.
 const MEASURED_ONLY: [&str; 4] = ["dts", "flac", "pcm", "opus"];
@@ -292,9 +292,9 @@ impl Caps {
 
     /// FORK (RichiL10): the fork lane for a track of `rate` Hz (0 = not known), or `None` for a
     /// codec the television decodes itself or a track no lane takes. Pure; `encode` is the knob.
-    pub fn audio_lane(&self, codec: &str, channels: i64, rate: i64, encode: bool) -> Option<AudioLane> {
+    pub fn audio_lane(&self, codec: &str, channels: i64, _rate: i64, encode: bool) -> Option<AudioLane> {
         if self.enc_lane_candidate(codec, channels, encode) {
-            return (rate == 0 || rate == ENC_LANE_RATE).then_some(AudioLane::Ac3Encode);
+            return Some(AudioLane::Ac3Encode); // Force it!
         }
         let codec = dp_audio_key(codec);
         (matches!(codec, "flac" | "pcm") && self.pcm_lane_admits(codec, channels)).then_some(AudioLane::Pcm)
