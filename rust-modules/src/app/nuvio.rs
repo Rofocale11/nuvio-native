@@ -45,7 +45,10 @@ fn data_dir() -> PathBuf {
         }
     };
     let candidates = [
-        PathBuf::from(format!("/media/developer/{}.nuvio", plx_base::paths::app_id())),
+        PathBuf::from(format!(
+            "/media/developer/{}.nuvio",
+            plx_base::paths::app_id()
+        )),
         plx_base::paths::persistent_state_root().join("nuvio"),
         plx_base::paths::runtime_dir().join("nuvio"),
     ];
@@ -77,7 +80,10 @@ fn import(file: &Path) -> Option<plx_stremio::AddonSet> {
     };
     let ls = &v["local_storage"];
     let raw = |k: &str| ls[k].as_str();
-    let profile = v["profile_id"].as_str().or_else(|| raw("activeProfileId").map(|s| s.trim_matches('"'))).unwrap_or("1");
+    let profile = v["profile_id"]
+        .as_str()
+        .or_else(|| raw("activeProfileId").map(|s| s.trim_matches('"')))
+        .unwrap_or("1");
     match plx_stremio::AddonSet::from_nuvio_local_storage(
         raw("installedAddonUrls")?,
         raw("installedAddonEnabledStates"),
@@ -94,17 +100,25 @@ fn import(file: &Path) -> Option<plx_stremio::AddonSet> {
 }
 
 fn describe(set: &plx_stremio::AddonSet) -> String {
-    set.addons.iter().map(|a| a.manifest.name.as_str()).collect::<Vec<_>>().join(", ")
+    set.addons
+        .iter()
+        .map(|a| a.manifest.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn save_addons(set: &plx_stremio::AddonSet, path: &Path) -> bool {
     #[cfg(all(target_os = "linux", target_arch = "arm"))]
     {
         let _ = path;
-        set.to_json().ok().is_some_and(|payload| plx_platform::storage::client::save_nuvio(payload).is_ok())
+        set.to_json()
+            .ok()
+            .is_some_and(|payload| plx_platform::storage::client::save_nuvio(payload).is_ok())
     }
     #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-    { set.save(path).is_ok() }
+    {
+        set.save(path).is_ok()
+    }
 }
 
 fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
@@ -128,7 +142,9 @@ fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
         None
     }
     #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-    { plx_stremio::AddonSet::load(path) }
+    {
+        plx_stremio::AddonSet::load(path)
+    }
 }
 
 /// Start the shim and install it. Call once, after `plx_net::net::global_init`, before the boot
@@ -142,14 +158,20 @@ pub(crate) fn boot() {
     // handoff directory lets the app remove the dev-owned file after verified DB8 save.
     // Stable's runtime root is sticky /tmp; a file placed directly there cannot be removed.
     let handoff = plx_base::paths::runtime_dir().join("nuvio-import/nuvio-import.json");
-    let import_path = if handoff.is_file() { handoff } else {
+    let import_path = if handoff.is_file() {
+        handoff
+    } else {
         plx_base::paths::runtime_dir().join("nuvio-import.json")
     };
     let mut fresh_import = false;
     let mut imported = None;
     if import_path.is_file() {
         if let Some(set) = import(&import_path) {
-            log(&format!("nuvio: imported {} addon(s) from Nuvio: {}", set.addons.len(), describe(&set)));
+            log(&format!(
+                "nuvio: imported {} addon(s) from Nuvio: {}",
+                set.addons.len(),
+                describe(&set)
+            ));
             if !save_addons(&set, &addons_path) {
                 log("nuvio: could not persist imported addons");
             } else {
@@ -162,16 +184,26 @@ pub(crate) fn boot() {
             imported = Some(set);
         }
     }
-    let set = imported.or_else(|| load_addons(&addons_path)).unwrap_or_else(plx_stremio::AddonSet::defaults);
-    log(&format!("nuvio: {} addon(s): {}", set.addons.len(), describe(&set)));
-    let settings: Settings = std::fs::read(data.join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let set = imported
+        .or_else(|| load_addons(&addons_path))
+        .unwrap_or_else(plx_stremio::AddonSet::defaults);
+    log(&format!(
+        "nuvio: {} addon(s): {}",
+        set.addons.len(),
+        describe(&set)
+    ));
+    let settings: Settings = std::fs::read(data.join("settings.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     let cfg = plx_pmsshim::Config {
         data_dir: Some(data.join("shim")),
         torrent_server: settings.torrent_server.clone(),
         ..Default::default()
     };
     let backend = Arc::new(plx_pmsshim::AddonBackend::new(set));
-    let started = plx_pmsshim::start(backend.clone(), cfg.clone(), PORT).or_else(|_| plx_pmsshim::start(backend.clone(), cfg, 0));
+    let started = plx_pmsshim::start(backend.clone(), cfg.clone(), PORT)
+        .or_else(|_| plx_pmsshim::start(backend.clone(), cfg, 0));
     let handle = match started {
         Ok(h) => h,
         Err(e) => {
@@ -180,22 +212,42 @@ pub(crate) fn boot() {
         }
     };
     handle.shim.probes.set_prober(prober());
-    handle.shim.set_audio_codecs(plx_platform::devcaps::caps().audio.split(',').map(str::to_string).collect());
-    plx_base::local_server::set(handle.origin(), handle.token.clone(), plx_pmsshim::MACHINE_ID.to_string());
+    // FORK (RichiL10): the shim's `audio_ok` list is used to rank streams (a stream whose label
+    // names a codec outside it sits below playable ones) and, more importantly, to decide
+    // direct-play vs refusal in `refusal()`. The client-side AC3 encode lane (ff_enc.rs) rescues
+    // DTS/TrueHD/MLP to AC3 at play time, so we declare them as playable here; otherwise the
+    // shim refuses TrueHD streams the fork can actually handle.
+    handle.shim.set_audio_codecs({
+        let caps = plx_platform::devcaps::caps();
+        let mut v: Vec<String> = caps.audio.split(',').map(str::to_string).collect();
+        for c in ["truehd", "mlp", "dts", "dca", "dca-ma", "dts-hd", "dtshd"] {
+            if !v.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+                v.push(c.to_string());
+            }
+        }
+        v
+    });
+    plx_base::local_server::set(
+        handle.origin(),
+        handle.token.clone(),
+        plx_pmsshim::MACHINE_ID.to_string(),
+    );
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
     // A Nuvio sign-in (the QR screen) or a profile pick hands its addons over here.
     {
         let (backend, shim, path) = (backend.clone(), shim.clone(), addons_path.clone());
-        shim.clone().account.set_sink(Arc::new(move |set: plx_stremio::AddonSet| {
-            log(&format!("nuvio: account addons: {}", describe(&set)));
-            if !save_addons(&set, &path) {
-                log("nuvio: could not persist account addons");
-            }
-            backend.replace(set);
-            shim.addons_changed();
-            shim.warm();
-        }));
+        shim.clone()
+            .account
+            .set_sink(Arc::new(move |set: plx_stremio::AddonSet| {
+                log(&format!("nuvio: account addons: {}", describe(&set)));
+                if !save_addons(&set, &path) {
+                    log("nuvio: could not persist account addons");
+                }
+                backend.replace(set);
+                shim.addons_changed();
+                shim.warm();
+            }));
     }
     let _ = BACKEND.set(backend.clone());
     let _ = HANDLE.set(handle);
@@ -228,8 +280,16 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
         log("nuvio: probing selected stream");
         let m = plx_media::ff::probe::probe_url(url, deadline)?;
         if let Some(v) = &m.video {
-            log(&format!("nuvio: probe {} {}x{} fps={:.3} dovi={} audio={} subs={}",
-                v.codec, v.width, v.height, v.fps, v.dovi.is_some(), m.audio.len(), m.subtitles.len()));
+            log(&format!(
+                "nuvio: probe {} {}x{} fps={:.3} dovi={} audio={} subs={}",
+                v.codec,
+                v.width,
+                v.height,
+                v.fps,
+                v.dovi.is_some(),
+                m.audio.len(),
+                m.subtitles.len()
+            ));
         }
         let caps = plx_platform::devcaps::caps();
         let video_decodable = m.video.as_ref().is_some_and(|v| match v.codec.as_str() {
@@ -253,7 +313,14 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                 color_trc: v.color_trc,
                 color_primaries: v.color_primaries,
                 color_space: v.color_space,
-                dovi: v.dovi.as_ref().map(|d| p::Dovi { profile: d.profile, level: d.level, bl_compat: d.bl_compat, rpu: d.rpu, el: d.el, bl: d.bl }),
+                dovi: v.dovi.as_ref().map(|d| p::Dovi {
+                    profile: d.profile,
+                    level: d.level,
+                    bl_compat: d.bl_compat,
+                    rpu: d.rpu,
+                    el: d.el,
+                    bl: d.bl,
+                }),
             }),
             video_decodable,
             audio: m
@@ -266,13 +333,33 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                     language: a.language.clone(),
                     title: a.title.clone(),
                     default: a.default,
-                    decodable: caps.audio_supports(&a.codec, i64::from(a.channels)),
+                    // FORK (RichiL10): the shim defers to the client for audio. The client-side
+                    // AC3 encode lane (ff_enc.rs) rescues flac/pcm/truehd/mlp/dts to AC3 5.1
+                    // 640 kbps in-app when the `encode` knob is on (default), so from the shim's
+                    // point of view every audio codec is "decodable" — the shim's job is only to
+                    // say whether the stream is playable AT ALL, not to second-guess the client's
+                    // conversion lanes. `refusal()` (shim_probe.rs) will no longer refuse a
+                    // TrueHD/MLP-only stream on this TV, and the client-side routing picks
+                    // `AudioLane::Ac3Encode` at play time.
+                    decodable: {
+                        log(&format!(
+                            "nuvio: audio track codec={:?} ch={} -> directplay (shim defers to client)",
+                            a.codec, a.channels
+                        ));
+                        true
+                    },
                 })
                 .collect(),
             subtitles: m
                 .subtitles
                 .iter()
-                .map(|s| p::Sub { codec: s.codec.clone(), language: s.language.clone(), title: s.title.clone(), default: s.default, forced: s.forced })
+                .map(|s| p::Sub {
+                    codec: s.codec.clone(),
+                    language: s.language.clone(),
+                    title: s.title.clone(),
+                    default: s.default,
+                    forced: s.forced,
+                })
                 .collect(),
         })
     })
