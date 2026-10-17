@@ -1181,9 +1181,14 @@ impl AudioLaneInfo {
         pcm_hi: Option<&str>,
     ) -> Option<AudioLaneInfo> {
         if caps.enc_lane_candidate(acodec, channels, encode) {
-            // FORK (RichiL10): Force the AC3 encode lane for DTS/TrueHD regardless of sample rate!
-            // Stremio streams often report 44.1kHz or 0, which caused ff_enc to be bypassed.
-            return Some(AudioLaneInfo::Ac3Encode(crate::ff::EncSpec { channels: channels.max(0) as u32 }));
+            // FORK (RichiL10): Only use the encode lane at 48kHz. 
+            // 96kHz streams will fail the encoder and crash the app with OOM.
+            if rate == 0 || rate == plx_platform::devcaps::ENC_LANE_RATE {
+                return Some(AudioLaneInfo::Ac3Encode(crate::ff::EncSpec { channels: channels.max(0) as u32 }));
+            } else {
+                plx_base::eventlog::log("ff_enc: skipping encode, unsupported sample rate");
+                return None; 
+            }
         }
         match plx_platform::devcaps::dp_audio_key(acodec) {
             "flac" | "pcm" => crate::ff::PcmSpec::for_track(rate, channels, bit_depth, pcm_hi).map(AudioLaneInfo::Pcm),
