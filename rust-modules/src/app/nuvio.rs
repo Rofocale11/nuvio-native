@@ -333,21 +333,7 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                     language: a.language.clone(),
                     title: a.title.clone(),
                     default: a.default,
-                    // FORK (RichiL10): the shim defers to the client for audio. The client-side
-                    // AC3 encode lane (ff_enc.rs) rescues flac/pcm/truehd/mlp/dts to AC3 5.1
-                    // 640 kbps in-app when the `encode` knob is on (default), so from the shim's
-                    // point of view every audio codec is "decodable" — the shim's job is only to
-                    // say whether the stream is playable AT ALL, not to second-guess the client's
-                    // conversion lanes. `refusal()` (shim_probe.rs) will no longer refuse a
-                    // TrueHD/MLP-only stream on this TV, and the client-side routing picks
-                    // `AudioLane::Ac3Encode` at play time.
-                    decodable: {
-                        log(&format!(
-                            "nuvio: audio track codec={:?} ch={} -> directplay (shim defers to client)",
-                            a.codec, a.channels
-                        ));
-                        true
-                    },
+                    decodable: true, // <--- Make sure this is still here!
                 })
                 .collect(),
             subtitles: m
