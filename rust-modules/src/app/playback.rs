@@ -403,26 +403,30 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     bridge: &mut super::bridge::Bridge,
     resources: &mut R,
 ) -> bool {
-    // FORK (RichiL10): Fetch streams synchronously during the loading spinner
+    // FORK (RichiL10): Fetch streams in the background (does not block video start)
     *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = Vec::new();
     if let Some(req) = &ps.request {
-        if let Some(client) = plx_plex::plex::client_for(req.sid) {
-            if client.is_nuvio() {
-                // Wait up to 5 seconds for the Shim to finish fetching streams
-                for _attempt in 1..=10 {
-                    if let Some(list) = client.nuvio_streams(&req.rk) {
-                        if !list.streams.is_empty() {
-                            let saved: Vec<(usize, String)> = list.streams.iter()
-                                .map(|s| (s.index, s.label.clone()))
-                                .collect();
-                            *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
-                            break;
+        let fetch_sid = req.sid;
+        let fetch_rk = req.rk.clone();
+        let _ = plx_base::task::spawn("fetch-nuvio-streams", move || {
+            if let Some(client) = plx_plex::plex::client_for(fetch_sid) {
+                if client.is_nuvio() {
+                    for _attempt in 1..=10 {
+                        if let Some(list) = client.nuvio_streams(&fetch_rk) {
+                            if !list.streams.is_empty() {
+                                let saved: Vec<(usize, String)> = list.streams.iter()
+                                    .map(|s| (s.index, s.label.clone()))
+                                    .collect();
+                                *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
+                                plx_machine::idle::invalidate(); // <--- THIS TRIGGERS THE LIVE UPDATE!
+                                break;
+                            }
                         }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }
-        }
+        });
     }
 
     let entering = resources.prepare_start(ps, pa, resume_ns);

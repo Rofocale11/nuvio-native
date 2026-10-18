@@ -168,6 +168,7 @@ pub struct MoreMenuState {
     /// menu uses: a row set that changes height animates the top edge, bottom and right stay on the
     /// anchor, and a push or pop slides the two pages.
     motion: PanelMotion,
+    last_stream_count: usize,
 }
 
 /// The hand-assigned focus key of each row. `SetQuality` rungs are an exhaustive match, so a new
@@ -268,7 +269,7 @@ impl MoreMenuState {
         form.table.compact = true; // a short action list — BODY labels, like the profile menu
         form.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
         form.set_or_open(root_form(ps, &rows, forced, current), None);
-        let mut st = MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new() };
+        let mut st = MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new(), last_stream_count: 0 };
         // A quality entry (the failure screen's OK) opens straight on the Quality page with the
         // active rung focused, no slide: the viewer is fixing a bad decision, not browsing. Under
         // Force Direct Play there is no ladder, so it is the ordinary root.
@@ -631,19 +632,18 @@ where
 /// the server to convert, and Force forbids conversion, so under it no rung can change what plays:
 /// a row that cannot change the outcome is not offered (the same rule as the failure read-out's
 /// `player::failure_actions`). Pure over the flag so both shapes are testable without a session.
-fn rows_for(forced: bool) -> Vec<Action> {
+fn rows_for(_forced: bool) -> Vec<Action> {
     let mut v: Vec<Action> = Vec::new();
     
     let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
     
     if !streams.is_empty() {
         for (index, _) in streams.iter() {
-            v.push(Action::SetStream(*index)); // <--- No String here!
+            v.push(Action::SetStream(*index));
         }
-    } else if !forced {
-        v.extend(plx_media::route::available_quality_ladder()
-            .iter()
-            .map(|q| Action::SetQuality(*q)));
+    } else {
+        // FORK (RichiL10): Add a fake action to show a loading state
+        v.push(Action::SetStream(9999)); 
     }
     
     v.push(Action::ToggleStats);
@@ -658,6 +658,11 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
         Action::ToggleStats => plx_platform::i18n::msg::widgets_menu_stats().into(),
         Action::SetQuality(q) => q.label().into(),
         Action::SetStream(index) => {
+            // FORK (RichiL10): Show "Finding sources..." if we are waiting for the background fetch
+            if index == 9999 {
+                return "Finding sources...".into();
+            }
+            
             let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
             streams.iter()
                 .find(|(i, _)| *i == index)
