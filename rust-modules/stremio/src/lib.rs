@@ -18,7 +18,7 @@ pub use addons::AddonSet;
 
 pub mod classify;
 pub use classify::{classify_stream, StreamInfo};
-
+pub mod stremio;
 pub mod nuvio;
 
 /// The HTTP door. Named `addon_http` because the module-layer gate reads every workspace crate as

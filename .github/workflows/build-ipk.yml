@@ -76,28 +76,6 @@ jobs:
           NUVIO_SUPABASE_FALLBACK_URL: ${{ vars.NUVIO_SUPABASE_FALLBACK_URL }}
           DEVICE_LOGIN_WEB_BASE_URL: ${{ vars.DEVICE_LOGIN_WEB_BASE_URL }}
           TV_LOGIN_WEB_BASE_URL: ${{ vars.TV_LOGIN_WEB_BASE_URL }}
-
-      - name: Probe AVFrame layout
-        if: always()
-        run: |
-          python3 - <<'EOF'
-          import re, pathlib
-          h = pathlib.Path("vendor/ffmpeg-prefix/include/libavutil/frame.h")
-          if not h.exists():
-              print("frame.h not found — did the FFmpeg build run?")
-              raise SystemExit(0)
-          src = h.read_text()
-          m = re.search(r"typedef struct AVFrame\s*\{(.*?)\}\s*AVFrame\s*;", src, re.DOTALL)
-          if not m:
-              print("AVFrame struct not matched"); raise SystemExit(0)
-          body = m.group(1)
-          lines = [l.strip() for l in body.splitlines()
-                   if l.strip() and not l.strip().startswith(('/*', '*', '//'))]
-          print("=== AVFrame fields, in order ===")
-          for i, l in enumerate(lines):
-              print(f"{i:3}  {l[:110]}")
-          print("=== end ===")
-          EOF
       
       - name: List build outputs
         if: always()

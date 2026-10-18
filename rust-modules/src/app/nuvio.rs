@@ -240,18 +240,26 @@ pub(crate) fn boot() {
         shim.clone()
             .account
             .set_sink(Arc::new(move |set: plx_stremio::AddonSet| {
-                log(&format!("nuvio: account addons: {}", describe(&set)));
-                if !save_addons(&set, &path) {
-                    log("nuvio: could not persist account addons");
-                }
-                backend.replace(set);
-                shim.addons_changed();
-                shim.warm();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    log(&format!("nuvio: account addons: {}", describe(&set)));
+                    if !save_addons(&set, &path) {
+                        log("nuvio: could not persist account addons");
+                    }
+                    backend.replace(set);
+                    shim.addons_changed();
+                    shim.warm();
+                }));
             }));
     }
     let _ = BACKEND.set(backend.clone());
     let _ = HANDLE.set(handle);
     shim.warm();
+        // Sync Stremio addons on every app launch
+    let shim_sync = shim.clone();
+    let _ = plx_base::task::spawn("stremio-boot-sync", move || {
+        log("stremio: Syncing addons on boot...");
+        shim_sync.account.load_profile(None);
+    });
     // Off the boot path: manifests an import could not carry, and a streaming server on this TV.
     let need_server = settings.enable_torrents && settings.torrent_server.is_none();
     let _ = plx_base::task::spawn("nuvio-boot", move || {

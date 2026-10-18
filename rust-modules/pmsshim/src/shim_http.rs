@@ -60,6 +60,12 @@ impl Response {
     pub fn redirect(location: &str) -> Response {
         Response { status: 302, content_type: "text/plain", headers: vec![("Location".into(), location.into())], body: Vec::new() }
     }
+    pub fn no_cache(mut self) -> Response {
+        self.headers.push(("Cache-Control".into(), "no-store, no-cache, must-revalidate".into()));
+        self.headers.push(("Pragma".into(), "no-cache".into()));
+        self
+    }
+
     pub fn not_found() -> Response {
         Response::bytes(404, "text/plain", b"not found".to_vec())
     }

@@ -707,6 +707,8 @@ impl Shim {
             if let Some(d) = media.first().and_then(|m| m["duration"].as_i64()).filter(|d| *d > 0) {
                 row["duration"] = json!(d);
             }
+            // FORK: Force the UI to invalidate its cache on every request
+            row["updatedAt"] = json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
             row["Media"] = Value::Array(media);
         }
         Some((row, verdict))
@@ -942,9 +944,14 @@ impl Shim {
             (_, ["library", "metadata", rk]) => {
                 let rows: Vec<Value> = rk.split(',').filter_map(|x| x.parse().ok()).filter_map(|k| self.item(k)).collect();
                 if rows.is_empty() {
-                    return Response::json_status(404, &container(json!({"Metadata": []})));
+                    return Response::json_status(404, &container(json!({"Metadata": []}))).no_cache();
                 }
-                Response::json(&container(json!({"Metadata": rows})))
+                // FORK: Add `updatedAt` and `no_cache` so the UI is forced to refetch streams 
+                // when opening the movie, preventing the "stuck stream list" bug.
+                Response::json(&container(json!({
+                    "Metadata": rows,
+                    "updatedAt": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+                }))).no_cache()
             }
             (_, ["library", "metadata", rk, "children"]) => Response::json(&container(json!({"Metadata": self.children(rk.parse().unwrap_or(0))}))),
             (_, ["library", "metadata", rk, "allLeaves"]) => Response::json(&container(json!({"Metadata": self.leaves(rk.parse().unwrap_or(0))}))),
@@ -961,8 +968,16 @@ impl Shim {
                 if req.q("excludeContinueWatching") == Some("1") {
                     hubs.clear();
                 }
-                if let Some(list) = self.saved_hub(count) { hubs.push(list); }
+                
+                // 1. Add all Stremio catalogs first
                 hubs.extend(self.catalog_hubs(|_| true, count, true, HUBS_BUDGET));
+                
+                // 2. Insert "My List" at the 5th position (index 4)
+                if let Some(list) = self.saved_hub(count) {
+                    let pos = std::cmp::min(4, hubs.len()); // <--- Change 3 to 4
+                    hubs.insert(pos, list);
+                }
+                
                 Response::json(&container(json!({"Hub": hubs})))
             }
             (_, ["hubs", "continueWatching"]) => {

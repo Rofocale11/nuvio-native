@@ -1773,11 +1773,11 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 if fresh_open || self.list_state.is_none() && !self.list_pending && !self.list_error {
                     self.request_list(None);
                 }
+                // FORK: Force a fresh fetch every time the Detail page is entered
+                // so empty/stuck streams are always retried.
                 let request = refresh == DetailRefreshPhase::Deferred
                     || refresh == DetailRefreshPhase::Requested && request_status.is_none()
-                    || refresh == DetailRefreshPhase::None
-                        && request_status != Some(true)
-                        && (fresh_open || self.detail(meta).is_none());
+                    || refresh == DetailRefreshPhase::None;
                 if request && refresh == DetailRefreshPhase::None {
                     fx.push(Fx::App(AppFx::Store(
                         StoreId::Metadata,
