@@ -400,6 +400,29 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     bridge: &mut super::bridge::Bridge,
     resources: &mut R,
 ) -> bool {
+    // FORK (RichiL10): Clear old streams from the previous movie/episode immediately
+    *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = Vec::new();
+
+    // Fetch the new streams in the background so the player menu has them ready
+    if let Some(req) = &ps.request {
+        let fetch_sid = req.sid;
+        let fetch_rk = req.rk.clone();
+        let _ = plx_base::task::spawn("fetch-nuvio-streams", move || {
+            if let Some(client) = plx_plex::plex::client_for(fetch_sid) {
+                if client.is_nuvio() {
+                    if let Some(list) = client.nuvio_streams(&fetch_rk) {
+                        plx_base::eventlog::log(&format!("nuvio: fetched {} streams for menu", list.streams.len()));
+                        let saved: Vec<(usize, String)> = list.streams.iter()
+                            .map(|s| (s.index, s.label.clone()))
+                            .collect();
+                        *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
+                        plx_machine::idle::invalidate(); 
+                    }
+                }
+            }
+        });
+    }
+
     let entering = resources.prepare_start(ps, pa, resume_ns);
     if entering {
         enter_player(pages, bridge, from, ret);
@@ -1048,30 +1071,6 @@ pub(super) fn play_item_now_with<R: PlaybackResources>(
     if mm.rk.is_empty() {
         return;
     }
-    // FORK (RichiL10): Clear old streams from the previous movie/episode immediately
-    *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = Vec::new();
-
-    // Fetch the new streams in the background so the player menu has them ready
-    let fetch_sid = mm.sid;
-    let fetch_rk = mm.rk.clone();
-    let _ = plx_base::task::spawn("fetch-nuvio-streams", move || {
-        if let Some(client) = plx_plex::plex::client_for(fetch_sid) {
-            if client.is_nuvio() {
-                if let Some(list) = client.nuvio_streams(&fetch_rk) {
-                    plx_base::eventlog::log(&format!("nuvio: fetched {} streams for menu", list.streams.len()));
-                    let saved: Vec<(usize, String)> = list.streams.iter()
-                        .map(|s| (s.index, s.label.clone()))
-                        .collect();
-                    *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
-                    plx_machine::idle::invalidate(); 
-                } else {
-                    plx_base::eventlog::log("nuvio: fetch streams returned None");
-                }
-            } else {
-                plx_base::eventlog::log("nuvio: client is not nuvio");
-            }
-        }
-    });
     
     if !resources.request_movie(ps, bridge.metadata_mut(), mm) {
         return;

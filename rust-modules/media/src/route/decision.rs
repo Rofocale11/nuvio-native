@@ -62,9 +62,9 @@ pub fn set_stream_index(ps: &mut PlaybackSession, index: usize) -> bool {
 /// even a plan that returns no URL must remain retryable, and a numeric Part id alone cannot
 /// reconstruct the source key PMS expects.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PlaybackRequest {
-    sid: ServerId,
-    rk: String,
+pub struct PlaybackRequest {
+    pub sid: ServerId,
+    pub rk: String,
     part: String,
     vcodec: String,
     acodec: String,
@@ -139,7 +139,7 @@ pub struct PlaybackSession {
     /// The request which produced this attempt, retained for terminal Retry / Choose quality.
     /// Written synchronously by [`request_play`] rather than by [`apply_plan`], because the
     /// server can refuse before a playable plan exists.
-    request: Option<PlaybackRequest>,
+    pub request: Option<PlaybackRequest>,
     /// Resume target which has not yet been proven by a presented frame.  It survives a refused
     /// retry plan so the next quality choice does not restart a two-hour film at zero; cleared by
     /// [`confirm_resume_presented`] once the replacement actually shows a frame.
