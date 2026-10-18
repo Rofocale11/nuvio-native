@@ -71,11 +71,11 @@ jobs:
           echo "Building FLAVOR=$FLAVOR RELEASE=1"
           make FLAVOR="$FLAVOR" RELEASE=1 ipk
         env:
-          NUVIO_SUPABASE_URL: ${{ vars.NUVIO_SUPABASE_URL }}
-          NUVIO_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
-          NUVIO_SUPABASE_FALLBACK_URL: ${{ vars.NUVIO_SUPABASE_FALLBACK_URL }}
-          DEVICE_LOGIN_WEB_BASE_URL: ${{ vars.DEVICE_LOGIN_WEB_BASE_URL }}
-          TV_LOGIN_WEB_BASE_URL: ${{ vars.TV_LOGIN_WEB_BASE_URL }}
+          NUVIO_SUPABASE_URL: ${{ secrets.NUVIO_SUPABASE_URL }}
+          NUVIO_SUPABASE_ANON_KEY: ${{ secrets.NUVIO_SUPABASE_ANON_KEY }}
+          NUVIO_SUPABASE_FALLBACK_URL: ${{ secrets.NUVIO_SUPABASE_FALLBACK_URL }}
+          DEVICE_LOGIN_WEB_BASE_URL: ${{ secrets.DEVICE_LOGIN_WEB_BASE_URL }}
+          TV_LOGIN_WEB_BASE_URL: ${{ secrets.TV_LOGIN_WEB_BASE_URL }}
 
       - name: Probe AVFrame layout
         if: always()
