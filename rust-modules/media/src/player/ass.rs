@@ -673,18 +673,28 @@ impl Native {
         for font in fonts.iter() {
             native.font(&font.name, &font.data)?;
         }
-        let (data, script) = match &source.content {
+                let (data, script) = match &source.content {
             Content::Embedded { header, .. } => (header.as_ref(), 0),
             Content::Script { bytes, .. } => (bytes.as_ref(), 1),
         };
 
-        // FORK (RichiL10): Force a thicker outline for all subtitles.
-        // Standard thin outlines are 1 or 2. We replace them with 4.
+        // FORK (RichiL10): Force a thicker outline and scale it to the 4K resolution
         let mut modified_data = data.to_vec();
         if let Ok(text) = std::str::from_utf8(&modified_data) {
-            let replaced = text
+            let mut replaced = text
                 .replace("Outline=1", "Outline=4")
                 .replace("Outline=2", "Outline=4");
+            
+            // If the file has a Script Info section, inject the scaling flag
+            if replaced.contains("[Script Info]") {
+                if !replaced.contains("ScaledBorderAndShadow") {
+                    replaced = replaced.replace("[Script Info]", "[Script Info]\nScaledBorderAndShadow: yes");
+                }
+            } else {
+                // For SRT/WebVTT converted by the C library, we prepend a fake header
+                replaced = format!("[Script Info]\nScriptType: v4.00+\nScaledBorderAndShadow: yes\n\n{}", replaced);
+            }
+
             if replaced != text {
                 modified_data = replaced.into_bytes();
             }
