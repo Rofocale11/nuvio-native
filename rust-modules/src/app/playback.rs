@@ -409,7 +409,7 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
         if let Some(client) = plx_plex::plex::client_for(req.sid) {
             if client.is_nuvio() {
                 // Wait up to 5 seconds for the Shim to finish fetching streams
-                for attempt in 1..=10 {
+                for _attempt in 1..=10 {
                     if let Some(list) = client.nuvio_streams(&req.rk) {
                         if !list.streams.is_empty() {
                             let saved: Vec<(usize, String)> = list.streams.iter()
