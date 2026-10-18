@@ -1,7 +1,7 @@
 {
   "id": "com.stremionative.app",
   "version": "0.8.0",
-  "vendor": "nuvionative",
+  "vendor": "stremionative",
   "type": "native",
   "main": "plxnative",
   "title": "Nuvio Native",
