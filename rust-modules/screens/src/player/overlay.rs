@@ -854,7 +854,17 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                 }
                 Handled::No
             }
-            ScreenEvent::Tick(tick) => {
+                ScreenEvent::Tick(tick) => {
+                // FORK (RichiL10): Live-update the Source Picker when background fetch finishes
+                if let Panel::More(ref mut p) = self.panel {
+                    let current_count = plx_media::route::AVAILABLE_STREAMS.lock().unwrap().len();
+                    if current_count != p.last_stream_count {
+                        p.last_stream_count = current_count;
+                        // Rebuild the menu rows now that we have new data
+                        p.refresh(ps);  
+                        fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
+                    }
+                }
                 let dt = tick.dt();
                 let mut installed = false;
                 match &mut self.panel {
