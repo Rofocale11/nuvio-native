@@ -97,8 +97,8 @@ mod tests {
 
     #[test]
     fn payload_carries_source_id_noaction_and_message() {
-        let v = parsed(&payload("com.nuvionative.app.debug", "Hello"));
-        assert_eq!(v["sourceId"], "com.nuvionative.app.debug");
+        let v = parsed(&payload("com.stremionative.app.debug", "Hello"));
+        assert_eq!(v["sourceId"], "com.stremionative.app.debug");
         assert_eq!(v["noaction"], true);
         assert_eq!(v["message"], "Hello");
         assert_eq!(v.as_object().unwrap().len(), 3, "no stray fields: {v}");
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn payload_escapes_quotes_backslashes_and_newlines() {
         let message = "say \"hi\"\\ back\nnext line\ttab";
-        let text = payload("com.nuvionative.app", message);
+        let text = payload("com.stremionative.app", message);
         assert!(!text.contains('\n'), "a raw newline would break the line-oriented bus log: {text}");
         assert_eq!(parsed(&text)["message"], message);
     }
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn payload_keeps_non_ascii_text_intact() {
         let message = "Гадзіннік тэлевізара ідзе няправільна — 時計";
-        assert_eq!(parsed(&payload("com.nuvionative.app", message))["message"], message);
+        assert_eq!(parsed(&payload("com.stremionative.app", message))["message"], message);
     }
 
     #[test]

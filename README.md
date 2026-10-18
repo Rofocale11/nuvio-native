@@ -5,7 +5,7 @@ This is a fork of [PlxNative](https://github.com/GLinnik21/plx-native); its upst
 
 See [the Nuvio handoff](docs/nuvio/HANDOFF.md), [architecture](docs/nuvio/ARCHITECTURE.md),
 [playback](docs/nuvio/PLAYBACK.md), and [validation](docs/nuvio/VALIDATION.md) for this fork's build and TV instructions.
-The native debug and stable app IDs are `com.nuvionative.app.debug` and `com.nuvionative.app`.
+The native debug and stable app IDs are `com.stremionative.app.debug` and `com.stremionative.app`.
 
 The following documentation describes the upstream Plex client and may not apply to the Nuvio addon backend.
 

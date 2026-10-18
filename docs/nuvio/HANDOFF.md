@@ -8,14 +8,14 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
 
 ## Build and TV
 
-- Debug: `source ~/.cargo/env; make ipk` → `pkg/com.nuvionative.app.debug_0.8.0_arm.ipk`.
+- Debug: `source ~/.cargo/env; make ipk` → `pkg/com.stremionative.app.debug_0.8.0_arm.ipk`.
 - Stable: `source ~/.cargo/env; make FLAVOR=stable RELEASE=1 ipk` →
-  `pkg/com.nuvionative.app_0.8.0_arm.ipk`.
+  `pkg/com.stremionative.app_0.8.0_arm.ipk`.
 - TV: ares device `tv`, LG CX, webOS 5, Developer Mode, not rooted. Use
   `tools/nv-tv.py` under `NV_DEVICE=tv tools/tv-lock.sh with …`.
 - With the original Nuvio running, import its configuration using
-  `node tools/nv-import-nuvio.mjs 10.0.0.73 --appid com.nuvionative.app.debug`
-  (use `com.nuvionative.app` for stable). This reads the original app's localStorage.
+  `node tools/nv-import-nuvio.mjs 10.0.0.73 --appid com.stremionative.app.debug`
+  (use `com.stremionative.app` for stable). This reads the original app's localStorage.
 - Debug UI captures require the `capture` trigger at launch. `shot --frames 6`
   while navigating skips cached frames. Captures exclude the hardware video plane.
   Stable releases have no capture listener or remote FIFO; use the physical remote.

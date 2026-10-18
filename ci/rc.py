@@ -2,7 +2,7 @@
 """Release candidates: plan the next `rc/vX.Y.Z-rc.N`, and render its prerelease body. Stdlib only;
 the one subprocess it runs is `git`, over the checkout the workflow already has.
 
-A release candidate is the STABLE package (`com.nuvionative.app`, the id users install) of a version
+A release candidate is the STABLE package (`com.stremionative.app`, the id users install) of a version
 that has not shipped yet, built exactly the way `.github/workflows/release.yml` builds the release
 and published as a GitHub prerelease. Three things set it apart from the release, and nothing else:
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Import the addon configuration of the Nuvio web app (space.nuvio.webos) into Nuvio Native.
 //
-//   node tools/nv-import-nuvio.mjs <tv-ip> [--appid com.nuvionative.app] [--device tv] [--profile ID] [--out FILE [--no-push]]
+//   node tools/nv-import-nuvio.mjs <tv-ip> [--appid com.stremionative.app] [--device tv] [--profile ID] [--out FILE [--no-push]]
 //
 // Nuvio must be RUNNING on the TV (Developer Mode exposes its WebView on DevTools port 9998). This
 // reads — never writes — the active profile's per-profile localStorage keys and pushes them, raw,
@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 const [, , host, ...rest] = process.argv;
 if (!host) { console.error("usage: nv-import-nuvio.mjs <tv-ip> [--appid ID] [--device NAME] [--profile ID]"); process.exit(2); }
 const opt = (n, d) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : d; };
-const appid = opt("--appid", "com.nuvionative.app");
+const appid = opt("--appid", "com.stremionative.app");
 const device = opt("--device", "tv");
 const KEYS = ["installedAddonUrls", "installedAddonEnabledStates", "installedAddonDisplayNames", "addonManifestCacheV2", "activeProfileId", "profiles"];
 

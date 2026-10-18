@@ -1350,12 +1350,12 @@ mod tests {
                 calls: vec![],
             },
             Flavor::Stable,
-            "com.nuvionative.app.storage".into(),
+            "com.stremionative.app.storage".into(),
         )
     }
     fn addon_record(rev: u64, payload: &str) -> Value {
         json!({"returnValue":true,"results":[{"_id":"nvaddons.stable",
-            "_kind":"com.nuvionative.app.storage:1","_rev":rev,"nuvio":payload}]})
+            "_kind":"com.stremionative.app.storage:1","_rev":rev,"nuvio":payload}]})
     }
     #[test]
     fn addon_configuration_survives_restart_as_opaque_json() {
@@ -1398,7 +1398,7 @@ mod tests {
         let state = CanonicalState::new(Flavor::Stable, Generation([1; 16]));
         let mut value = serde_json::to_value(state).unwrap();
         value["_rev"] = json!(rev);
-        value["_kind"] = json!("com.nuvionative.app.storage:1");
+        value["_kind"] = json!("com.stremionative.app.storage:1");
         json!({"returnValue":true,"results":[value]})
     }
     fn commit(expected: Expectation) -> Request {
@@ -1429,7 +1429,7 @@ mod tests {
         .unwrap();
         let current = initial.apply(&operation).unwrap().0;
         let mut object = serde_json::to_value(&current).unwrap();
-        object["_kind"] = json!("com.nuvionative.app.storage:1");
+        object["_kind"] = json!("com.stremionative.app.storage:1");
         object["_rev"] = json!(9);
         object["operations"][0]["_id"] = json!("B3K8aZ");
         (json!({"returnValue":true,"results":[object]}), current)
@@ -1437,7 +1437,7 @@ mod tests {
     fn wrapped_record(state: &CanonicalState, rev: u64) -> Value {
         json!({"returnValue":true,"results":[{
             "_id":state.id,
-            "_kind":"com.nuvionative.app.storage:1",
+            "_kind":"com.stremionative.app.storage:1",
             "_rev":rev,
             "state":String::from_utf8(state.encode().unwrap()).unwrap()
         }]})
@@ -1630,8 +1630,8 @@ mod tests {
             (
                 "luna://com.palm.db/putKind".into(),
                 json!({
-                    "id":"com.nuvionative.app.storage:1",
-                    "owner":"com.nuvionative.app.storage",
+                    "id":"com.stremionative.app.storage:1",
+                    "owner":"com.stremionative.app.storage",
                     "private":true,
                     "indexes":[]
                 })
@@ -1882,7 +1882,7 @@ mod tests {
                 removed: vec![],
             },
             Flavor::Stable,
-            "com.nuvionative.app.storage".into(),
+            "com.stremionative.app.storage".into(),
         )
     }
     fn changing_request(mutation: WireMutation) -> Request {
@@ -2043,7 +2043,7 @@ mod tests {
                 repair_failure: None,
             },
             Flavor::Stable,
-            "com.nuvionative.app.storage".into(),
+            "com.stremionative.app.storage".into(),
         )
     }
     fn protected_auth(public: state::PublicPayload) -> WireMutation {
@@ -3433,7 +3433,7 @@ mod tests {
         let wrapped = wrapped_record(&current, 20);
         let mut object = serde_json::to_value(current).unwrap();
         object["_rev"] = json!(20);
-        object["_kind"] = json!("com.nuvionative.app.storage:1");
+        object["_kind"] = json!("com.stremionative.app.storage:1");
         add_db8_array_ids(&mut object);
         let record = json!({"returnValue":true,"results":[object]});
         let reconcile = Request::Reconcile {
@@ -3482,7 +3482,7 @@ mod tests {
         }
         let mut object = serde_json::to_value(current).unwrap();
         object["_rev"] = json!(20);
-        object["_kind"] = json!("com.nuvionative.app.storage:1");
+        object["_kind"] = json!("com.stremionative.app.storage:1");
         let record = json!({"returnValue":true,"results":[object]});
         let mut b = backend(vec![Ok(record.clone()), Ok(record)]);
         assert!(matches!(

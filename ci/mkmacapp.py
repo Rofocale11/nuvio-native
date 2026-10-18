@@ -156,7 +156,7 @@ def write_plist(contents: Path, ver: str):
         "CFBundleName": "PlxNative",
         "CFBundleDisplayName": "PlxNative",
         "CFBundleExecutable": "PlxNative",
-        "CFBundleIdentifier": "com.nuvionative.app",
+        "CFBundleIdentifier": "com.stremionative.app",
         "CFBundleIconFile": "AppIcon",
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundlePackageType": "APPL",

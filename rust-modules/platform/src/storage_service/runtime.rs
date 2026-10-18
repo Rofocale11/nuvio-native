@@ -261,16 +261,16 @@ mod tests {
 
     #[test]
     fn nightly_app_identity() {
-        assert_eq!(app_identity(Path::new("/media/developer/apps/usr/palm/services/com.nuvionative.app.nightly.storage/plxnative-storage")), Ok("com.nuvionative.app.nightly"));
+        assert_eq!(app_identity(Path::new("/media/developer/apps/usr/palm/services/com.stremionative.app.nightly.storage/plxnative-storage")), Ok("com.stremionative.app.nightly"));
     }
 
     #[test]
     fn rejects_foreign_or_malformed_install_paths() {
         for path in [
-            "/usr/palm/services/com.nuvionative.app.typo.storage/plxnative-storage",
-            "/usr/palm/services/com.nuvionative.app.nightly/plxnative-storage",
-            "/usr/palm/applications/com.nuvionative.app.nightly.storage/plxnative-storage",
-            "/usr/palm/services/com.nuvionative.app.nightly.storage/other",
+            "/usr/palm/services/com.stremionative.app.typo.storage/plxnative-storage",
+            "/usr/palm/services/com.stremionative.app.nightly/plxnative-storage",
+            "/usr/palm/applications/com.stremionative.app.nightly.storage/plxnative-storage",
+            "/usr/palm/services/com.stremionative.app.nightly.storage/other",
             "plxnative-storage",
         ] {
             assert_eq!(app_identity(Path::new(path)), Err(ErrorCode::Invalid));

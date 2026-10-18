@@ -848,7 +848,7 @@ mod tests {
     fn fixture() -> Snapshot {
         Snapshot {
             seq: 1,
-            app_id: Identifier::new("com.nuvionative.app"),
+            app_id: Identifier::new("com.stremionative.app"),
             flavour: Identifier::new("stable"),
             version: Identifier::new("0.6.0"),
             uid: 6303,

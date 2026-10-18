@@ -495,8 +495,8 @@ mod log_sink_tests {
         }
 
         let mut sink = Sink::default();
-        write_log_line(&mut sink, "install: id=com.nuvionative.app.debug").unwrap();
+        write_log_line(&mut sink, "install: id=com.stremionative.app.debug").unwrap();
         assert_eq!(sink.calls, 1);
-        assert_eq!(sink.bytes, b"install: id=com.nuvionative.app.debug\n");
+        assert_eq!(sink.bytes, b"install: id=com.stremionative.app.debug\n");
     }
 }

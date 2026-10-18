@@ -80,5 +80,5 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
 ## App identity
 
-- appid `com.nuvionative.app`, title "Nuvio Native". Installs beside `space.nuvio.webos`; never
+- appid `com.stremionative.app`, title "Nuvio Native". Installs beside `space.nuvio.webos`; never
   touches it.

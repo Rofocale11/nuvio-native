@@ -79,14 +79,14 @@ class StorageServicePackage(unittest.TestCase):
     def test_archive_checker_rejects_obsolete_state_and_foreign_service(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "usr/palm/applications/com.nuvionative.app/state").mkdir(parents=True)
-            foreign = root / "usr/palm/services/com.nuvionative.app.debug.storage"
+            (root / "usr/palm/applications/com.stremionative.app/state").mkdir(parents=True)
+            foreign = root / "usr/palm/services/com.stremionative.app.debug.storage"
             foreign.mkdir(parents=True)
             (foreign / "auth.json").write_text('{"token":"synthetic-fixture"}')
             archive = root.parent / (root.name + ".tar.gz")
             try:
                 mkipk.write_targz(archive, root, "")
-                errors = mkipk.storage_archive_errors(archive.read_bytes(), "com.nuvionative.app")
+                errors = mkipk.storage_archive_errors(archive.read_bytes(), "com.stremionative.app")
                 self.assertIn("obsolete writable app state is forbidden", errors)
                 self.assertIn("runtime credentials or rendezvous files must not be packaged", errors)
                 self.assertIn("service payload must contain exactly this flavor's descriptor and helper", errors)
@@ -97,18 +97,18 @@ class StorageServicePackage(unittest.TestCase):
         for name in ("session.json", "consent.json"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                data = root / "data/usr/palm/applications/com.nuvionative.app"
+                data = root / "data/usr/palm/applications/com.stremionative.app"
                 data.mkdir(parents=True)
                 (data / name).write_text("{}")
                 archive = root / "data.tar.gz"
                 mkipk.write_targz(archive, root / "data", "")
-                errors = mkipk.storage_archive_errors(archive.read_bytes(), "com.nuvionative.app")
+                errors = mkipk.storage_archive_errors(archive.read_bytes(), "com.stremionative.app")
                 self.assertIn("runtime credentials or rendezvous files must not be packaged", errors)
 
     def test_missing_helper_is_a_build_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit):
-                mkipk.stage_storage_service(Path(tmp), Path(tmp) / "data", {"id": "com.nuvionative.app"})
+                mkipk.stage_storage_service(Path(tmp), Path(tmp) / "data", {"id": "com.stremionative.app"})
 
 
 if __name__ == "__main__":

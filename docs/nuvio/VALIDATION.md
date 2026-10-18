@@ -56,10 +56,10 @@ all three fresh synthetic fixtures passed both replay modes with zero difference
 
 ## Stable release
 
-Package: `pkg/com.nuvionative.app_0.8.0_arm.ipk`, built with
+Package: `pkg/com.stremionative.app_0.8.0_arm.ipk`, built with
 `source ~/.cargo/env; make FLAVOR=stable RELEASE=1 ipk`.
 
-Install `com.nuvionative.app` with `tools/nv-tv.py`, import the same addons into that
+Install `com.stremionative.app` with `tools/nv-tv.py`, import the same addons into that
 app ID, and launch it. Verify the installed binary against the packaged binary and
 the event log's `features=release` identity. Check Home, then use the physical remote
 to play a 4K Dolby Vision source, seek, pause/resume and enable subtitles. Collect

@@ -688,7 +688,7 @@ fn production_client_coordinator_and_helper_backend_reconcile_committed_lost_rep
     let mut backend = plx_platform::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
-        "com.nuvionative.app.storage".into(),
+        "com.stremionative.app.storage".into(),
     );
     let session = fixture();
     let mut lose_reply = true;
@@ -766,7 +766,7 @@ fn production_client_coordinator_and_helper_backend_reconcile_committed_lost_rep
 #[test]
 fn helper_signout_retains_the_language_and_only_the_delete_all_reset_removes_it() {
     let mut backend = plx_platform::storage::backend::Backend::new(
-        Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
+        Db8::default(), state::Flavor::Stable, "com.stremionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
     let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
     assert!(matches!(
@@ -822,7 +822,7 @@ fn stored_preferences(transport: &mut dyn client::Transport) -> Value {
 #[test]
 fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite() {
     let mut backend = plx_platform::storage::backend::Backend::new(
-        Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
+        Db8::default(), state::Flavor::Stable, "com.stremionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
     let session = Session {
         subtitle_size: SubtitleSize::Large,
@@ -860,7 +860,7 @@ fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite
 #[test]
 fn helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_none() {
     let mut backend = plx_platform::storage::backend::Backend::new(
-        Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
+        Db8::default(), state::Flavor::Stable, "com.stremionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
     let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
     commit_fresh(&session, &mut transport);
@@ -912,7 +912,7 @@ fn helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_
 #[test]
 fn helper_signout_forgets_the_plaintext_answers_and_signing_back_in_asks_again() {
     let mut backend = plx_platform::storage::backend::Backend::new(
-        Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
+        Db8::default(), state::Flavor::Stable, "com.stremionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
     let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
     commit_fresh(&session, &mut transport);
@@ -1029,7 +1029,7 @@ fn check_v1_extension_bootstrap_roundtrip(keys: &[String]) {
     let mut backend = plx_platform::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
-        "com.nuvionative.app.storage".into(),
+        "com.stremionative.app.storage".into(),
     );
     let mut transport = |request| Ok(backend.dispatch(request));
     assert!(matches!(
@@ -1129,7 +1129,7 @@ fn helper_migration_keeps_opened_session_typed_through_exact_readback() {
     let mut backend = plx_platform::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
-        "com.nuvionative.app.storage".into(),
+        "com.stremionative.app.storage".into(),
     );
     let mut transport = |request| Ok(backend.dispatch(request));
     let result = persistence::bootstrap_with(

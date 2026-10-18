@@ -24,7 +24,7 @@ import sys
 import time
 
 DEVICE = __import__("os").environ.get("NV_DEVICE", "tv")
-DEFAULT_APPID = "com.nuvionative.app.debug"
+DEFAULT_APPID = "com.stremionative.app.debug"
 
 
 def redact(text):

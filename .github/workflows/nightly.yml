@@ -212,7 +212,7 @@ jobs:
       # than on every push, so the cache's turnaround benefit is smaller and not worth the same
       # trade here either.
       caches: false
-      # The nightly package's own manifest (`com.nuvionative.app.nightly.manifest.json`), which
+      # The nightly package's own manifest (`com.stremionative.app.nightly.manifest.json`), which
       # `ci/nightly.py repo-json` turns into the project's Homebrew Channel repository. It is
       # NOT the webosbrew catalogue's stable listing — that one is keyed to the stable app id
       # and release.yml alone feeds it.
@@ -267,13 +267,13 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           ipk="plxnative-v${LABEL}.ipk"
-          cp raw/com.nuvionative.app.nightly_*_arm.ipk "dist/$ipk"
+          cp raw/com.stremionative.app.nightly_*_arm.ipk "dist/$ipk"
           ( cd dist && sha256sum "$ipk" > nightly.sha256 )
           # The package's manifest, with its bare `ipkUrl` pointed at the name the .ipk has on the
           # release, so the release's own copy resolves (a bare filename is relative to the
           # manifest's URL). `ci/nightly.py repo-json` later makes it absolute for the site.
-          python3 - "raw/com.nuvionative.app.nightly.manifest.json" "$ipk" \
-            "dist/com.nuvionative.app.nightly.manifest.json" <<'PYEOF'
+          python3 - "raw/com.stremionative.app.nightly.manifest.json" "$ipk" \
+            "dist/com.stremionative.app.nightly.manifest.json" <<'PYEOF'
           import hashlib, json, sys
           src, ipk, dst = sys.argv[1:4]
           manifest = json.load(open(src))
@@ -321,7 +321,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$TAG" \
-            "dist/$IPK" dist/nightly.sha256 dist/com.nuvionative.app.nightly.manifest.json dist/ffmpeg-*.tar.xz dist/build-ffmpeg.sh dist/plxnative-source-*.tar.gz* \
+            "dist/$IPK" dist/nightly.sha256 dist/com.stremionative.app.nightly.manifest.json dist/ffmpeg-*.tar.xz dist/build-ffmpeg.sh dist/plxnative-source-*.tar.gz* \
             --target "$SHA" \
             --title "PlxNative $LABEL" \
             --prerelease \
@@ -339,8 +339,8 @@ jobs:
           test "$(sha256sum "verify/$IPK" | cut -d' ' -f1)" = "$(cut -d' ' -f1 dist/nightly.sha256)"
           # The published manifest must name the published package's hash — the one thing the
           # television checks on install.
-          gh release download "$TAG" --pattern com.nuvionative.app.nightly.manifest.json --dir verify
-          test "$(python3 -c "import json;print(json.load(open('verify/com.nuvionative.app.nightly.manifest.json'))['ipkHash']['sha256'])")" = "$(cut -d' ' -f1 dist/nightly.sha256)"
+          gh release download "$TAG" --pattern com.stremionative.app.nightly.manifest.json --dir verify
+          test "$(python3 -c "import json;print(json.load(open('verify/com.stremionative.app.nightly.manifest.json'))['ipkHash']['sha256'])")" = "$(cut -d' ' -f1 dist/nightly.sha256)"
 
   pages:
     name: refresh site latest-nightly pointer

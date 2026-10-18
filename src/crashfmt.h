@@ -15,19 +15,19 @@
  * `bin:` line naming the wrong mapping, from which `tools/crash-report.sh` computes an offset and
  * answers with a confident wrong function. That is worse than no answer, it is silent, and it is
  * decidable from a string with no television in the room. Its twin is recorded in that script: the
- * app id `com.nuvionative.app` is a PREFIX of `com.nuvionative.app.debug`, so triaging the stable
+ * app id `com.stremionative.app` is a PREFIX of `com.stremionative.app.debug`, so triaging the stable
  * install would accept the debug install's load base.
  *
  * **A correction, because this file inherited an invented justification and it is exactly the kind
  * that makes a reader distrust the rest.** `src/main.c` carried, for as long as the tracer existed:
  *
- *     the app dir is itself named ...com.nuvionative.app/, so a bare substring test also matches
+ *     the app dir is itself named ...com.stremionative.app/, so a bare substring test also matches
  *     libraries deployed beside the binary (libturbojpeg.so.0)
  *
  * It does not. The needle is `/plxnative`, with the slash, and the directory component is
- * `/com.nuvionative.app` — slash, then `c`. Measured rather than reasoned: a bare
- * `strstr(line, "/plxnative")` answers no on `…/com.nuvionative.app/libturbojpeg.so.0` and yes on
- * `…/com.nuvionative.app/plxnative`, which is the right answer for the wrong reason. What the
+ * `/com.stremionative.app` — slash, then `c`. Measured rather than reasoned: a bare
+ * `strstr(line, "/plxnative")` answers no on `…/com.stremionative.app/libturbojpeg.so.0` and yes on
+ * `…/com.stremionative.app/plxnative`, which is the right answer for the wrong reason. What the
  * separator test actually buys is the two cases below, and the test file asserts those and not the
  * one that was written down.
  *

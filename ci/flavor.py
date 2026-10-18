@@ -2,9 +2,9 @@
 """Which install a package is for — a transform from the tracked descriptors to a flavour's.
 
 Three builds of this app live on one television: `stable` is what users install
-(`com.nuvionative.app` — the id in every release, every manifest and the webosbrew channel listing),
-`debug` is the day-to-day developer build beside it (`com.nuvionative.app.debug`), with its own
-launcher tile, its own sign-in and its own `/tmp` root, and `nightly` (`com.nuvionative.app.nightly`)
+(`com.stremionative.app` — the id in every release, every manifest and the webosbrew channel listing),
+`debug` is the day-to-day developer build beside it (`com.stremionative.app.debug`), with its own
+launcher tile, its own sign-in and its own `/tmp` root, and `nightly` (`com.stremionative.app.nightly`)
 is a third install beside both — always a `RELEASE=1` build (no dev triggers, ever), with its own
 tile ("PlxNative Nightly"), its own sign-in and its own `/tmp` root, that additionally carries a
 PACKAGE version ahead of the tracked one (see `appinfo_for`'s nightly arm) and a dated REPORTED
@@ -67,7 +67,7 @@ def _release_line_content() -> "str | None":
 
 
 def app_id(flavor: str) -> str:
-    """`com.nuvionative.app` for stable, `com.nuvionative.app.<flavour>` otherwise."""
+    """`com.stremionative.app` for stable, `com.stremionative.app.<flavour>` otherwise."""
     if flavor not in FLAVORS:
         raise SystemExit(f"unknown flavour {flavor!r} — one of: {', '.join(FLAVORS)}")
     return next(identity["app_id"] for identity in INSTALL_IDENTITIES

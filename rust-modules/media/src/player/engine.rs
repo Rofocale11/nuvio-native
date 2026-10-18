@@ -3447,7 +3447,7 @@ mod payload_tests {
     /// composed bytes here is the only gate available for it.
     #[test]
     fn the_shipped_app_composes_the_payload_it_always_did() {
-        let want = r#""appId":"com.nuvionative.app""#;
+        let want = r#""appId":"com.stremionative.app""#;
         for (name, p) in [
             ("PAYLOAD_V", PAYLOAD_V),
             ("PAYLOAD_AV", PAYLOAD_AV),
