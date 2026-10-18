@@ -551,12 +551,6 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                         StreamReply::List(list) => {
                             self.stream_error = list.is_none();
                             if let Some(list) = list {
-                                // FORK (RichiL10): Save the streams globally so the in-player menu can show them
-                                let saved: Vec<(usize, String)> = list.streams.iter()
-                                    .map(|s| (s.index, s.label.clone())) // If this fails to compile, try s.name or s.title
-                                    .collect();
-                                *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
-
                                 self.stream_choices = list.streams;
                                 if !list.complete && self.stream_attempts < 60 { self.request_streams(); }
                             }
