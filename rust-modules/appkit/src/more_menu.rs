@@ -158,7 +158,7 @@ pub struct MoreMenuState {
     /// it — Auto's readiness gate opening, Force Direct Play flipping — is noticed and the panel
     /// rebuilt and RESIZED ([`Self::refresh`]) rather than left showing a ladder that has moved.
     rows: Vec<Action>,
-    forced: bool,
+    pub forced: bool,
     /// The rung the root's Quality row reads out and the Quality page checks, as of the last build.
     current: plx_media::route::Quality,
     /// The pages pushed above the root, outermost first (empty = the root): each remembers the row
@@ -168,7 +168,7 @@ pub struct MoreMenuState {
     /// menu uses: a row set that changes height animates the top edge, bottom and right stay on the
     /// anchor, and a push or pop slides the two pages.
     motion: PanelMotion,
-    last_stream_count: usize,
+    pub last_stream_count: usize,
 }
 
 /// The hand-assigned focus key of each row. `SetQuality` rungs are an exhaustive match, so a new
