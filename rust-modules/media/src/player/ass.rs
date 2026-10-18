@@ -677,7 +677,20 @@ impl Native {
             Content::Embedded { header, .. } => (header.as_ref(), 0),
             Content::Script { bytes, .. } => (bytes.as_ref(), 1),
         };
-        if unsafe { plx_ass_load(native.0, data.as_ptr(), data.len(), script) } < 0 {
+
+        // FORK (RichiL10): Force a thicker outline for all subtitles.
+        // Standard thin outlines are 1 or 2. We replace them with 4.
+        let mut modified_data = data.to_vec();
+        if let Ok(text) = std::str::from_utf8(&modified_data) {
+            let replaced = text
+                .replace("Outline=1", "Outline=4")
+                .replace("Outline=2", "Outline=4");
+            if replaced != text {
+                modified_data = replaced.into_bytes();
+            }
+        }
+
+        if unsafe { plx_ass_load(native.0, modified_data.as_ptr(), modified_data.len(), script) } < 0 {
             return Err(Fault::Unreadable);
         }
         native.append(source, 0)?;

@@ -58,6 +58,7 @@ impl AssSubtitles {
         let render_h = if coded_h > 0 { coded_h } else { viewport.height };
         if let Some(frame) =
             ass::request(source, clock, render_w, render_h, coded_w, coded_h)
+        {
             self.frame = Some(frame);
         }
     }
@@ -129,7 +130,8 @@ impl AssSubtitles {
                 ink,
             );
         }
-
+    }
+    
     pub fn error(&self) -> Option<&'static str> {
         self.frame.as_ref().and_then(|f| f.error).map(plx_media::player::ass::Fault::message)
     }
