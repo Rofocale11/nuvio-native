@@ -54,10 +54,8 @@ impl AssSubtitles {
         
         // FORK (RichiL10): Render subtitles at the video's native resolution (e.g., 4K) 
         // to make them crisp and thick, instead of upscaling a 1080p image.
-        let render_w = if coded_w > 0 { coded_w } else { viewport.width };
-        let render_h = if coded_h > 0 { coded_h } else { viewport.height };
         if let Some(frame) =
-            ass::request(source, clock, render_w, render_h, coded_w, coded_h)
+            ass::request(source, clock, viewport.width, viewport.height, coded_w, coded_h)
         {
             self.frame = Some(frame);
         }
@@ -111,27 +109,21 @@ impl AssSubtitles {
             self.uploaded = frame.serial;
         }
         let ink = plx_appkit::player_hud::subtitle_ink();
-        let (coded_w, coded_h) = plx_media::player::video_raster();
-        
-        // FORK (RichiL10): Scale the 4K subtitle texture down to fit the 1080p UI viewport
-        let scale_x = if coded_w > 0 { self.viewport.width as f32 / coded_w as f32 } else { 1.0 };
-        let scale_y = if coded_h > 0 { self.viewport.height as f32 / coded_h as f32 } else { 1.0 };
-
         for (texture, rect) in self.textures.iter().zip(&frame.rects) {
             Painter::root().tex(
                 texture.id,
                 Rect::new(
-                    (self.viewport.x as f32) + (rect.x as f32 * scale_x),
-                    (self.viewport.y as f32) + (rect.y as f32 * scale_y),
-                    (rect.width as f32) * scale_x,
-                    (rect.height as f32) * scale_y,
+                    (self.viewport.x + rect.x) as f32,
+                    (self.viewport.y + rect.y) as f32,
+                    rect.width as f32,
+                    rect.height as f32,
                 ),
                 0.0,
                 ink,
             );
         }
     }
-    
+
     pub fn error(&self) -> Option<&'static str> {
         self.frame.as_ref().and_then(|f| f.error).map(plx_media::player::ass::Fault::message)
     }
