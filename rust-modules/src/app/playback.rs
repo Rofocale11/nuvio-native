@@ -405,6 +405,7 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
 
     // Fetch the new streams in the background so the player menu has them ready
     if let Some(req) = &ps.request {
+<<<<<<< HEAD
         let fetch_sid = req.sid;
         let fetch_rk = req.rk.clone();
         let _ = plx_base::task::spawn("fetch-nuvio-streams", move || {
@@ -417,6 +418,20 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
                             .collect();
                         *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
                         plx_machine::idle::invalidate(); 
+=======
+        if let Some(client) = plx_plex::plex::client_for(req.sid) {
+            if client.is_nuvio() {
+                // Wait up to 5 seconds for the Shim to finish fetching streams
+                for _attempt in 1..=10 {
+                    if let Some(list) = client.nuvio_streams(&req.rk) {
+                        if !list.streams.is_empty() {
+                            let saved: Vec<(usize, String)> = list.streams.iter()
+                                .map(|s| (s.index, s.label.clone()))
+                                .collect();
+                            *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
+                            break;
+                        }
+>>>>>>> 6c399849 (Fix: Unused variable warning in stream fetch loop)
                     }
                 }
             }
