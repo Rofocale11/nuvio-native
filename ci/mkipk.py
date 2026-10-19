@@ -96,6 +96,24 @@ def stage_storage_service(repo: Path, data: Path, app: dict) -> Path:
         "engine": "native", "executable": "plxnative-storage",
         "services": [{"name": service_id, "commands": []}],
     }, indent=4) + "\n")
+
+    # FORK: Use webOS Configurator to auto-register DB8 permissions on install
+    kind_dir = target / "configuration" / "db" / "kinds"
+    kind_dir.mkdir(parents=True, exist_ok=True)
+    (kind_dir / f"{service_id}.json").write_text(json.dumps({
+        "id": f"{service_id}:1",
+        "owner": service_id,
+        "private": True
+    }, indent=4) + "\n")
+
+    perm_dir = target / "configuration" / "db" / "permissions"
+    perm_dir.mkdir(parents=True, exist_ok=True)
+    (perm_dir / f"{service_id}.json").write_text(json.dumps({
+        "permissions": [
+            {"type": "db.kind", "object": f"{service_id}:1", "caller": app["id"]}
+        ]
+    }, indent=4) + "\n")
+
     return target
 
 
