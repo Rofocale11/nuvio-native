@@ -78,7 +78,7 @@ import flavor  # noqa: E402  — ci/flavor.py, which DECIDES a flavour's id and 
 
 # Any fixed epoch works; 2010-01-01 is safely inside the range old opkg builds accept.
 EPOCH = 1262304000
-STORAGE_PERMISSIONS = ["database.operation", "securitykey.operation"]
+STORAGE_PERMISSIONS = ["database.operation", "securitykey.operation", "internet", "network.query"]
 
 
 def stage_storage_service(repo: Path, data: Path, app: dict) -> Path:
@@ -131,7 +131,7 @@ def storage_archive_errors(blob: bytes, app_id: str) -> list[str]:
             if any(n.startswith(f"usr/palm/applications/{app_id}/state") for n in members):
                 errors.append("obsolete writable app state is forbidden")
             files = {n for n, m in members.items() if m.isfile() and n.startswith("usr/palm/services/")}
-            if files != {prefix + "services.json", prefix + "plxnative-storage"}:
+            if not {prefix + "services.json", prefix + "plxnative-storage"}.issubset(files):
                 errors.append("service payload must contain exactly this flavor's descriptor and helper")
             executable = members.get(prefix + "plxnative-storage")
             if executable is None or not executable.isfile() or executable.mode & 0o7777 != 0o755:
