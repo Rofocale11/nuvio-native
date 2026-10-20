@@ -211,3 +211,4 @@ tests/fixtures/softfloat/arm.tbl
 # Node tools (tools/package.json): `npm ci --prefix tools`
 tools/node_modules/
 rust-modules/stremio/nuvio.local.env
+.env

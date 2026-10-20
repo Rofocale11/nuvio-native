@@ -42,13 +42,16 @@ const PLEX_TV: &str = "https://plex.tv";
 /// able to point the account API, and the token it carries, at another host. Read once. A redirected
 /// plex.tv also moves Discover ([`discover`]): the mock answers both.
 pub fn plex_tv() -> &'static str {
-    static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    // NuvioNative: there is no plex.tv. The in-process shim answers the account surface, so every
-    // account call stays on loopback.
+    // NuvioNative: the in-process shim always answers the account surface.
+    // Do NOT cache the loopback vs fallback decision in a single OnceLock: on cold boot
+    // the shim may call `LocalServer::set()` *after* the first caller, and a cached
+    // "https://plex.tv" would stick forever (real Plex -> 401 -> "Sign in again").
     if let Some(local) = plx_base::local_server::get() {
-        return BASE.get_or_init(|| local.origin.trim_end_matches('/').to_string());
+        static LOOPBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        return LOOPBACK.get_or_init(|| local.origin.trim_end_matches('/').to_string());
     }
-    BASE.get_or_init(|| match plx_base::devtrig::read("plextv") {
+    static FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FALLBACK.get_or_init(|| match plx_base::devtrig::read("plextv") {
         Some(v) if loopback_http(&v) => {
             #[cfg(feature = "devtriggers")]
             plx_base::eventlog::log("account: plex.tv replaced by a loopback stand-in (/tmp/plxnative-plextv)");

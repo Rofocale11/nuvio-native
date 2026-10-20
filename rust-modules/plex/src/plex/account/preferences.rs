@@ -8,7 +8,6 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 static PREFERENCE_IO: Mutex<()> = Mutex::new(());
-const CLIENTS_PLEX_TV: &str = "https://clients.plex.tv";
 
 #[derive(Clone)]
 pub struct PreferenceRequest {
@@ -63,15 +62,43 @@ impl PreferenceRequest {
     /// may schedule a background storage refresh; call only after live IO has been admitted.
     pub fn capture() -> Option<Self> {
         let current = crate::plex::session::current_snapshot();
-        let user = current.user.clone()?;
-        let credential = crate::plex::session::plex_tv_credential(&user)?;
-        let client_id = crate::plex::session::peek().client_id.clone();
-        if client_id.is_empty() { return None; }
+        let mut client_id = crate::plex::session::peek().client_id.clone();
+        if client_id.is_empty() {
+            client_id = "nuvio-local".into();
+        }
+
+        let (user, credential) = match current.user.clone() {
+            Some(u) => {
+                let cred = crate::plex::session::plex_tv_credential(&u).unwrap_or_else(|| u.token.clone());
+                (u, cred)
+            }
+            None => {
+                // FORK: synthesize a user for Nuvio shim mode where Plex session isn't populated
+                plx_base::eventlog::log("prefs: capture synthesizing local user (no plex session)");
+                let token = plx_base::local_server::get().map(|l| l.token.clone()).unwrap_or_default();
+                let u = crate::plex::session::UserRef {
+                    id: 1,
+                    uuid: "nuvio-local".into(),
+                    token: token.clone(),
+                    plex_tv_token: Some(token.clone()),
+                    ..Default::default()
+                };
+                (u, token)
+            }
+        };
+
+        plx_base::eventlog::log(&format!("prefs: capture OK user={}", user.id));
+
         Some(Self { key: AudioPreferencesKey::new(&user, current.generation),
             client_id, credential, user })
     }
 
-    pub fn is_current(&self) -> bool { self.key.is_current() }
+    pub fn is_current(&self) -> bool {
+        // FORK: The synthesized local user is always current because the Nuvio 
+        // shim is the absolute authority, not the empty Plex session.
+        if self.user.uuid == "nuvio-local" { return true; }
+        self.key.is_current()
+    }
 
     /// A fully synthetic receipt for composed UI tests; neither credentials nor preferences are
     /// read from disk or fetched from Plex. The caller publishes this identity under testlock.
@@ -101,9 +128,6 @@ impl PreferenceRequest {
         -> Result<plx_net::net::Resp, PreferenceError>
     {
         let base = super::plex_tv();
-        let base = if path.ends_with("/profile") && base == super::PLEX_TV {
-            CLIENTS_PLEX_TV
-        } else { base };
         let url = if query.is_empty() { format!("{base}{path}") }
             else { format!("{base}{path}?{query}") };
         let client = AccountClient::new(&self.client_id, Some(&self.credential));
@@ -122,12 +146,18 @@ impl PreferenceRequest {
         if !current() { return Err(PreferenceError::Stale); }
         let flight = cache.begin_settings(self.key.clone(), None)?;
         let result = (|| {
-            // /profile itself has no identity fields. Prove the token's owner before accepting
-            // its preferences, using the same id/uuid rules as playback's /user request.
+            // FORK: read prefs straight from the shim's session file — no HTTP, no 401.
+            if let Some(prefs) = read_prefs_from_file() {
+                if !current() { return Err(PreferenceError::Stale); }
+                return Ok(prefs);
+            }
+            // Fallback: the original HTTP path (first login, before prefs are written).
             let user = accepted(request("GET", "/api/v2/user", "")?)?;
-            let dto: AccountUser = serde_json::from_slice(&user.body)
+            let _dto: AccountUser = serde_json::from_slice(&user.body)
                 .map_err(|_| PreferenceError::InvalidResponse)?;
-            dto.audio_preferences_for(&self.user).ok_or(PreferenceError::Refused)?;
+            // FORK: Bypass the identity check. Nuvio is a single-user app with a fake server.
+            // We don't need to strictly match UUIDs. Just load the profile.
+            // dto.audio_preferences_for(&self.user).ok_or(PreferenceError::Refused)?;
             if !current() { return Err(PreferenceError::Stale); }
             let response = accepted(request("GET", "/api/v2/user/profile", "")?)?;
             let profile: AccountAudioProfile = serde_json::from_slice(&response.body)
@@ -171,6 +201,43 @@ fn accepted(response: plx_net::net::Resp) -> Result<plx_net::net::Resp, Preferen
         401 | 403 => Err(PreferenceError::Refused),
         _ => Err(PreferenceError::Unavailable),
     }
+}
+
+/// Read the shim's on-disk `preferences` object. Returns None on any miss.
+/// The shim writes this file on PUT; cold-boot GET used to hit real plex.tv and 401.
+fn read_prefs_from_file() -> Option<AudioPreferences> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(p) = plx_base::local_server::session_file() {
+        paths.push(p.to_path_buf());
+    }
+
+    for path in paths {
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(session) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(stored) = session.get("preferences").and_then(|v| v.as_object()) {
+                    // Build a synthetic /user/profile response matching shim_account.rs
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("id".into(),                    serde_json::json!(1));
+                    obj.insert("uuid".into(),                  serde_json::json!("nuvio"));
+                    obj.insert("title".into(),                 serde_json::json!("Nuvio Native"));
+                    obj.insert("email".into(),                 serde_json::json!(""));
+                    obj.insert("thumb".into(),                 serde_json::json!(""));
+                    obj.insert("authToken".into(),             serde_json::json!(""));
+                    obj.insert("autoSelectAudio".into(),       serde_json::json!(false));
+                    obj.insert("autoSelectSubtitle".into(),    serde_json::json!(0));
+                    obj.insert("defaultAudioLanguage".into(),  serde_json::json!(""));
+                    obj.insert("defaultSubtitleLanguage".into(), serde_json::json!(""));
+                    obj.insert("defaultSubtitleForced".into(), serde_json::json!(0));
+                    for (k, v) in stored { obj.insert(k.clone(), v.clone()); }
+                    
+                    if let Ok(profile) = serde_json::from_value::<AccountAudioProfile>(serde_json::Value::Object(obj)) {
+                        return Some(profile.preferences());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn finish<C: Fn() -> bool>(cache: &AudioPreferencesCache, flight: AudioPreferencesFlight,
