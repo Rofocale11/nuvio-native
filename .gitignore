@@ -195,3 +195,4 @@ tests/fixtures/softfloat/arm.tbl
 # Independent native DB8 storage helper (built by Makefile).
 /pkg/plxnative-storage
 rust-modules/stremio/nuvio.local.env
+.env

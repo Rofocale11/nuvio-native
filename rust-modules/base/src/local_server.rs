@@ -26,3 +26,15 @@ pub fn set(origin: String, token: String, machine_id: String) -> bool {
 pub fn get() -> Option<&'static LocalServer> {
     SLOT.get()
 }
+
+
+/// Path to the shim's on-disk session (nuvio-session.json), registered by Account::new.
+static SESSION_FILE: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+pub fn set_session_file(p: std::path::PathBuf) -> bool {
+    SESSION_FILE.set(p).is_ok()
+}
+
+pub fn session_file() -> Option<&'static std::path::Path> {
+    SESSION_FILE.get().map(|p| p.as_path())
+}

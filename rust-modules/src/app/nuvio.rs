@@ -232,6 +232,12 @@ pub(crate) fn boot() {
         handle.token.clone(),
         plx_pmsshim::MACHINE_ID.to_string(),
     );
+
+    // FORK: register the shim's session file with plx_base so plx_plex can read
+    // account preferences (audio/subtitle) straight off disk instead of HTTP.
+    if let Some(p) = handle.shim.account.session_file() {
+        plx_base::local_server::set_session_file(p.to_path_buf());
+    }
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
     // A Nuvio sign-in (the QR screen) or a profile pick hands its addons over here.

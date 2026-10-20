@@ -34,6 +34,7 @@ pub struct Account {
     pins: Mutex<HashMap<i64, PendingPin>>,
     /// The selected profile and library cache share a lock: profile switches cannot race a write.
     library: Arc<Mutex<LibraryContext>>,
+    prefs: Arc<Mutex<serde_json::Map<String, Value>>>,
     next_pin: AtomicI64,
     sink: Mutex<Option<AddonSink>>,
     /// The token handed to the app in place of a plex.tv account token.
@@ -72,16 +73,24 @@ impl Account {
         let stored = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         let session = stored.as_ref().and_then(session_from_json);
         let profile = stored.as_ref().and_then(|v| v["profile_id"].as_str()).filter(|s| s.parse::<u32>().is_ok_and(|n| n > 0)).map(str::to_string);
+        let prefs = stored.as_ref().and_then(|v| v.get("preferences").and_then(|p| p.as_object()).cloned()).unwrap_or_default();
         Account {
             file,
             session: Mutex::new(session),
             pins: Mutex::new(HashMap::new()),
             library: Arc::new(Mutex::new(LibraryContext { profile, ..Default::default() })),
+            prefs: Arc::new(Mutex::new(prefs)),
             next_pin: AtomicI64::new(1_000_001),
             sink: Mutex::new(None),
             token: token.to_string(),
             origin: Mutex::new(String::new()),
         }
+    }
+
+    /// Path to this account's on-disk session file, if any. Used by the app to
+    /// register the path with `plx_base::local_server` after `Account::new`.
+    pub fn session_file(&self) -> Option<&std::path::Path> {
+        self.file.as_deref()
     }
 
     pub fn set_sink(&self, sink: AddonSink) {
@@ -99,7 +108,8 @@ impl Account {
     fn save(&self, s: Option<&plx_stremio::nuvio::Session>) {
         let Some(f) = &self.file else { return };
         let profile = if s.is_some() { self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() } else { None };
-        save_session_file(f, s, profile.as_deref());
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        save_session_file(f, s, profile.as_deref(), &prefs);
     }
 
     /// The stored session, refreshed when it is near expiry.
@@ -120,7 +130,8 @@ impl Account {
     pub fn sign_out(&self) {
         let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if let Some(file) = &self.file { save_session_file(file, None, None); }
+        if let Some(file) = &self.file { save_session_file(file, None, None, &serde_json::Map::new()); }
+        *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
         context.generation = context.generation.wrapping_add(1);
         context.profile = None;
         context.cached = None;
@@ -178,7 +189,7 @@ impl Account {
             (_, ["pins", "qr", code]) => self.qr(code),
             (_, ["pins", id]) => self.poll_pin(id.parse().unwrap_or(-1)),
             (_, ["user"]) => self.user(),
-            (_, ["user", "profile"]) => Response::json(&json!({"autoSelectAudio": true, "autoSelectSubtitle": 0, "defaultSubtitleLanguage": "en"})),
+            (_, ["user", "profile"]) => self.user_profile(req),
             (_, ["resources"]) => self.resources(),
             (_, ["home", "users"]) => self.home_users(),
             ("POST", ["home", "users", uuid, "switch"]) => self.switch(uuid),
@@ -245,13 +256,50 @@ impl Account {
     }
 
     fn user(&self) -> Response {
-        let signed_in = self.signed_in();
         Response::json(&json!({
-            "id": 1, "uuid": "nuvio-local", "username": "nuvio", "title": if signed_in { "Nuvio account" } else { "Nuvio" },
-            "friendlyName": "Nuvio", "email": "", "thumb": "", "authToken": self.token,
-            "profile": {"autoSelectAudio": true, "defaultSubtitleLanguage": "en", "autoSelectSubtitle": 0},
-            "subscription": {"active": true, "status": "Active", "plan": "lifetime"},
+            "id": 1, "uuid": "nuvio", "title": "Nuvio Native", "name": "Nuvio Native", "email": "",
+            "thumb": "", "authToken": self.token, "plex_tv_token": self.token,
+            "subscription": {"active": true, "features": []}
         }))
+    }
+
+    fn user_profile(&self, req: &Request) -> Response {
+        match req.method.as_str() {
+            "GET" => {
+                let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                Response::json(&json!({
+                    "id": 1, "uuid": "nuvio", "title": "Nuvio Native", "email": "",
+                    "thumb": "", "authToken": self.token,
+                    "autoSelectAudio":         prefs.get("autoSelectAudio").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "defaultAudioLanguage":    prefs.get("defaultAudioLanguage").and_then(|v| v.as_str()).unwrap_or(""),
+                    "defaultSubtitleLanguage": prefs.get("defaultSubtitleLanguage").and_then(|v| v.as_str()).unwrap_or(""),
+                    "autoSelectSubtitle":      prefs.get("autoSelectSubtitle").and_then(|v| v.as_i64()).unwrap_or(0),
+                    "defaultSubtitleForced":   prefs.get("defaultSubtitleForced").and_then(|v| v.as_i64()).unwrap_or(0),
+                }))
+            }
+            "PUT" => {
+                let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                for (k, v) in req.query.iter() {
+                    match k.as_str() {
+                        "autoSelectAudio" => { prefs.insert(k.clone(), Value::Bool(v.as_str() == "true")); }
+                        "autoSelectSubtitle" | "defaultSubtitleForced" => {
+                            if let Ok(n) = v.parse::<i64>() { prefs.insert(k.clone(), json!(n)); }
+                        }
+                        "defaultAudioLanguage" | "defaultSubtitleLanguage" => {
+                            prefs.insert(k.clone(), Value::String(v.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+                let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let (Some(s), Some(file)) = (session.as_ref(), &self.file) {
+                    let profile = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone();
+                    save_session_file(file, Some(s), profile.as_deref(), &prefs);
+                }
+                Response::json(&json!({}))
+            }
+            _ => Response::json_status(405, &json!({"error": "method not allowed"})),
+        }
     }
 
     fn resources(&self) -> Response {
@@ -267,18 +315,9 @@ impl Account {
     }
 
     fn home_users(&self) -> Response {
-        let profiles = self.fresh_session().and_then(|s| plx_stremio::nuvio::profiles(&s).ok()).unwrap_or_default();
-        let users: Vec<Value> = if profiles.is_empty() {
-            vec![json!({"id": 1, "uuid": "nuvio-local", "title": "Nuvio", "thumb": "", "admin": true, "restricted": false, "protected": false})]
-        } else {
-            profiles
-                .iter()
-                .enumerate()
-                .map(|(i, p)| json!({"id": i + 1, "uuid": format!("{PROFILE_UUID_PREFIX}{}", p.id), "title": p.name, "thumb": "",
-                                      "admin": i == 0, "restricted": false, "protected": false}))
-                .collect()
-        };
-        Response::json(&json!({"users": users}))
+        Response::json(&json!([
+            {"id": 1, "uuid": "nuvio", "title": "Nuvio Native", "name": "Nuvio Native", "thumb": "", "admin": true, "guest": false, "restricted": false, "authToken": self.token, "plex_tv_token": self.token}
+        ]))
     }
 
     fn switch(&self, uuid: &str) -> Response {
@@ -295,6 +334,7 @@ impl Account {
         let profile = profile.map(str::to_string);
         let library = self.library.clone();
         let file = self.file.clone();
+        let prefs = self.prefs.clone();
         // Mark unresolved immediately, so no request can retain the previous profile's library.
         let generation = {
             let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,7 +348,7 @@ impl Account {
             let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
             if context.generation != generation { return; }
             context.profile = Some(pid.clone());
-            if let Some(file) = file { save_session_file(&file, Some(&session), Some(&pid)); }
+            if let Some(file) = file { let p = prefs.lock().unwrap_or_else(|e| e.into_inner()).clone(); save_session_file(&file, Some(&session), Some(&pid), &p); }
             if let Ok(addons) = plx_stremio::nuvio::addons(&session, &pid) {
                 if !addons.is_empty() {
                     sink(plx_stremio::addons::AddonSet { addons });
@@ -360,13 +400,21 @@ fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
 }
 
 
-fn save_session_file(file: &std::path::Path, session: Option<&plx_stremio::nuvio::Session>, profile: Option<&str>) {
+fn save_session_file(
+    file: &std::path::Path,
+    session: Option<&plx_stremio::nuvio::Session>,
+    profile: Option<&str>,
+    prefs: &serde_json::Map<String, Value>,
+) {
     match session {
         Some(session) => {
             let mut value = session_to_json(session);
             value["profile_id"] = json!(profile);
+            value["preferences"] = Value::Object(prefs.clone());
             let tmp = file.with_extension("json.tmp");
-            if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() { let _ = std::fs::rename(&tmp,file); }
+            if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() {
+                let _ = std::fs::rename(&tmp, file);
+            }
         }
         None => { let _ = std::fs::remove_file(file); }
     }
