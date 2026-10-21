@@ -1,0 +1,38 @@
+{
+ "generated": "2026-10-21T16:06:14Z",
+ "metrics": [],
+ "regressions": [],
+ "schema": 2,
+ "slowest_ci": [],
+ "slowest_local": [],
+ "thresholds": {
+  "bench": {
+   "percent": 25.0,
+   "seconds": 5.0
+  },
+  "ci_job": {
+   "percent": 20.0,
+   "seconds": 20.0
+  },
+  "minutes": {
+   "percent": 15.0,
+   "seconds": 240.0
+  },
+  "nightly": {
+   "percent": 25.0,
+   "seconds": 120.0
+  },
+  "pr_wait": {
+   "percent": 25.0,
+   "seconds": 90.0
+  },
+  "push_wait": {
+   "percent": 15.0,
+   "seconds": 60.0
+  },
+  "sim_job": {
+   "percent": 20.0,
+   "seconds": 30.0
+  }
+ }
+}

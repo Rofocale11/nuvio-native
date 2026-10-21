@@ -1,0 +1,9 @@
+{"updated":"2026-10-21T16:06:09Z",
+"ci":[
+{"id":39036965296,"at":"2026-10-17T13:32:11Z","sha":"30d9c3c8b","title":"Add files via upload","pr":null,"conclusion":"failure","attempt":1,"jobs":{"host harness tests":170,"host unit tests (default features)":538,"cross-build (armv7) + artifact assertions":382,"host unit tests (hostsim)":272,"host lint + type-checks":199},"failed":["host checks (NOT a device gate)","host python/shell/C gates"]},
+{"id":39094738903,"at":"2026-10-18T03:45:28Z","sha":"69ae07617","title":"Change environment variables to use vars instead of secrets","pr":null,"conclusion":"failure","attempt":1,"jobs":{"host lint + type-checks":203,"host unit tests (hostsim)":283,"host unit tests (default features)":389,"cross-build (armv7) + artifact assertions":332,"host harness tests":118},"failed":["host checks (NOT a device gate)","host python/shell/C gates"]}
+],
+"sim":[],
+"nightly":[],
+"cancelled":{"2026-10-18":{"push":2,"pull_request":0},"2026-10-21":{"push":1,"pull_request":0}},
+"daily":[]}
