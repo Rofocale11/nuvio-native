@@ -2,16 +2,16 @@
   {
     "name": "stable",
     "app_id": "com.nuvionative.app",
-    "object_id": "nuvio.stable"
+    "object_id": "plxstate.nuvio"
   },
   {
     "name": "debug",
     "app_id": "com.nuvionative.app.debug",
-    "object_id": "nuvio.debug"
+    "object_id": "plxstate.dbg"
   },
   {
     "name": "nightly",
     "app_id": "com.nuvionative.app.nightly",
-    "object_id": "nuvio.night"
+    "object_id": "plxstate.ngt"
   }
 ]
