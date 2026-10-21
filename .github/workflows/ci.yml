@@ -8,7 +8,6 @@ name: CI
 # against the real television remains the only evidence for any of that.
 
 on:
-  push:
     # A maintenance line (`release/vX.Y`, cut from a tag for a patch release) is a trunk of its own
     # for `release.yml`'s `line` input, so it gets the same push gate `main` does — otherwise the
     # first time a hotfix's changes are compiled in a clean checkout is the release run itself.
