@@ -212,3 +212,9 @@ tests/fixtures/softfloat/arm.tbl
 tools/node_modules/
 rust-modules/stremio/nuvio.local.env
 .env
+
+# Ignore compiled local FFmpeg libs
+pkg/*.so
+
+# Ignore downloaded vendor tarballs
+vendor/downloads/
