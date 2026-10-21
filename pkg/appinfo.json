@@ -13,14 +13,9 @@
   "nativeLifeCycleInterfaceVersion": 2,
   "handlesRelaunch": false,
   "transparent": true,
-  "requiredMemory": 168,
+  "requiredMemory": 160,
   "requiredPermissions": [
     "database.operation",
-    "securitykey.operation",
-    "internet",
-    "network.query"
-  ],
-  "requiredACG": [
-    "database.operation"
+    "securitykey.operation"
   ]
 }
