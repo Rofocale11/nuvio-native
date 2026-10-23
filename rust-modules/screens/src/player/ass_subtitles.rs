@@ -74,13 +74,7 @@ impl AssSubtitles {
             self.viewport = viewport;
             self.frame = None;
         }
-<<<<<<< HEAD
         let origin = source.origin;
-=======
-        
-        // FORK (RichiL10): Render subtitles at the video's native resolution (e.g., 4K) 
-        // to make them crisp and thick, instead of upscaling a 1080p image.
->>>>>>> 0e5a06a1 (Revert: Subtitle rendering back to 1080p to save RAM (keeps thick outline))
         if let Some(frame) =
             ass::request(source, clock, viewport.width, viewport.height, coded_w, coded_h)
         {
@@ -165,21 +159,13 @@ impl AssSubtitles {
         self.spans.extend(frame.rects.iter().map(|r| (r.y, r.height)));
         lift_dys(origin, lift, &self.spans, aligns, &mut self.dys);
         let ink = plx_appkit::player_hud::subtitle_ink();
-<<<<<<< HEAD
         for (i, (texture, rect)) in self.textures.iter().zip(&frame.rects).enumerate() {
             let dy = self.dys[i];
-=======
-        for (texture, rect) in self.textures.iter().zip(&frame.rects) {
->>>>>>> 0e5a06a1 (Revert: Subtitle rendering back to 1080p to save RAM (keeps thick outline))
             Painter::root().tex(
                 texture.id,
                 Rect::new(
                     (self.viewport.x + rect.x) as f32,
-<<<<<<< HEAD
                     (self.viewport.y + rect.y) as f32 + dy,
-=======
-                    (self.viewport.y + rect.y) as f32,
->>>>>>> 0e5a06a1 (Revert: Subtitle rendering back to 1080p to save RAM (keeps thick outline))
                     rect.width as f32,
                     rect.height as f32,
                 ),

@@ -128,7 +128,7 @@ pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: 
             // 1. Tell the Nuvio Shim to update the mediaIndex
             if plx_media::route::set_stream_index(ps, index) {
                 // 2. Force the player to reload the stream from the new URL
-                retry_failed_playback(ps, pa, bridge.metadata_mut(), None);
+                retry_failed_playback(ps, pa, bridge.metadata_mut(), None, AttemptOrigin::UserRetry);
             }
         }
 
@@ -400,60 +400,30 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     bridge: &mut super::bridge::Bridge,
     resources: &mut R,
 ) -> bool {
-<<<<<<< HEAD
-    // FORK (RichiL10): Clear old streams from the previous movie/episode immediately
-=======
     // FORK (RichiL10): Fetch streams in the background (does not block video start)
->>>>>>> 0e63a98a (Fix: unused variable warning in rows_for)
     *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = Vec::new();
 
     // Fetch the new streams in the background so the player menu has them ready
     if let Some(req) = &ps.request {
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 0e63a98a (Fix: unused variable warning in rows_for)
         let fetch_sid = req.sid;
         let fetch_rk = req.rk.clone();
         let _ = plx_base::task::spawn("fetch-nuvio-streams", move || {
             if let Some(client) = plx_plex::plex::client_for(fetch_sid) {
                 if client.is_nuvio() {
-<<<<<<< HEAD
-                    if let Some(list) = client.nuvio_streams(&fetch_rk) {
-                        plx_base::eventlog::log(&format!("nuvio: fetched {} streams for menu", list.streams.len()));
-                        let saved: Vec<(usize, String)> = list.streams.iter()
-                            .map(|s| (s.index, s.label.clone()))
-                            .collect();
-                        *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
-                        plx_machine::idle::invalidate(); 
-=======
-        if let Some(client) = plx_plex::plex::client_for(req.sid) {
-            if client.is_nuvio() {
-                // Wait up to 5 seconds for the Shim to finish fetching streams
-                for _attempt in 1..=10 {
-                    if let Some(list) = client.nuvio_streams(&req.rk) {
-                        if !list.streams.is_empty() {
-                            let saved: Vec<(usize, String)> = list.streams.iter()
-                                .map(|s| (s.index, s.label.clone()))
-                                .collect();
-                            *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
-                            break;
-                        }
->>>>>>> 6c399849 (Fix: Unused variable warning in stream fetch loop)
-=======
+                    // Wait up to 5 seconds (10 attempts * 500ms) for the Shim to finish fetching streams
                     for _attempt in 1..=10 {
                         if let Some(list) = client.nuvio_streams(&fetch_rk) {
                             if !list.streams.is_empty() {
+                                plx_base::eventlog::log(&format!("nuvio: fetched {} streams for menu", list.streams.len()));
                                 let saved: Vec<(usize, String)> = list.streams.iter()
                                     .map(|s| (s.index, s.label.clone()))
                                     .collect();
                                 *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
-                                plx_machine::idle::invalidate(); // <--- THIS TRIGGERS THE LIVE UPDATE!
-                                break;
+                                plx_machine::idle::invalidate(); // THIS TRIGGERS THE LIVE UPDATE!
+                                break; // Stop retrying once we get the streams
                             }
                         }
                         std::thread::sleep(std::time::Duration::from_millis(500));
->>>>>>> 0e63a98a (Fix: unused variable warning in rows_for)
                     }
                 }
             }

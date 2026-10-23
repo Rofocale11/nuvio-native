@@ -158,7 +158,7 @@ pub struct MoreMenuState {
     /// it — Auto's readiness gate opening, Force Direct Play flipping — is noticed and the panel
     /// rebuilt and RESIZED ([`Self::refresh`]) rather than left showing a ladder that has moved.
     rows: Vec<Action>,
-    pub forced: bool,
+    forced: bool,
     /// The rung the root's Quality row reads out and the Quality page checks, as of the last build.
     current: plx_media::route::Quality,
     /// The pages pushed above the root, outermost first (empty = the root): each remembers the row
@@ -168,6 +168,8 @@ pub struct MoreMenuState {
     /// menu uses: a row set that changes height animates the top edge, bottom and right stay on the
     /// anchor, and a push or pop slides the two pages.
     motion: PanelMotion,
+    // ─── ADD THIS LINE HERE ───
+    /// Tracks the number of streams to know when to refresh the Source Picker menu.
     pub last_stream_count: usize,
 }
 
@@ -275,15 +277,11 @@ fn quality_form(
     let sec = rows.iter().copied().filter(|a| matches!(a, Action::SetQuality(_) | Action::SetStream(_))).fold(
         FormSection::new(""),
         |sec, a| {
-<<<<<<< HEAD
             let mut row = row_for(ps, a);
             if a == Action::SetQuality(current) && quality_conversion_note(ps, current) {
                 row = row.detail(plx_platform::i18n::msg::widgets_menu_quality_converted_note());
             }
             sec.choice(MoreRow::Act(a), a, row, |id| {
-                *id == MoreRow::Act(Action::SetQuality(current))
-=======
-            sec.choice(MoreRow::Act(a), a, row_for(ps, a), |id| {
                 match id {
                     // Check the current quality rung
                     MoreRow::Act(Action::SetQuality(q)) => *q == current,
@@ -291,7 +289,6 @@ fn quality_form(
                     MoreRow::Act(Action::SetStream(_)) => false,
                     _ => false,
                 }
->>>>>>> 83df2c7a (Feature: Implement Addon Source Picker in player menu)
             })
         },
     );
@@ -670,18 +667,19 @@ where
 /// the server to convert, and Force forbids conversion, so under it no rung can change what plays:
 /// a row that cannot change the outcome is not offered (the same rule as the failure read-out's
 /// `player::failure_actions`). Pure over the flag so both shapes are testable without a session.
-fn rows_for(_forced: bool) -> Vec<Action> {
+fn rows_for(forced: bool) -> Vec<Action> {
     let mut v: Vec<Action> = Vec::new();
     
     let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
     
     if !streams.is_empty() {
         for (index, _) in streams.iter() {
-            v.push(Action::SetStream(*index));
+            v.push(Action::SetStream(*index)); // <--- No String here!
         }
-    } else {
-        // FORK (RichiL10): Add a fake action to show a loading state
-        v.push(Action::SetStream(9999)); 
+    } else if !forced {
+        v.extend(plx_media::route::available_quality_ladder()
+            .iter()
+            .map(|q| Action::SetQuality(*q)));
     }
     
     v.push(Action::ToggleStats);
@@ -696,11 +694,6 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
         Action::ToggleStats => plx_platform::i18n::msg::widgets_menu_stats().into(),
         Action::SetQuality(q) => q.label().into(),
         Action::SetStream(index) => {
-            // FORK (RichiL10): Show "Finding sources..." if we are waiting for the background fetch
-            if index == 9999 {
-                return "Finding sources...".into();
-            }
-            
             let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
             streams.iter()
                 .find(|(i, _)| *i == index)
