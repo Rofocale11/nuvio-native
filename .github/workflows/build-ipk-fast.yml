@@ -1,0 +1,33 @@
+name: Build IPK (fast)
+on:
+  workflow_dispatch:
+  push:
+    branches: [drvitality-stremio]
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        run: |
+          rustup toolchain install nightly-2026-07-02 --profile minimal --component rust-src
+          rustup default nightly-2026-07-02
+      - name: Install webOS NDK
+        id: ndk
+        uses: ./.github/actions/webos-ndk
+      - name: Build + package
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+          RUST_NIGHTLY: nightly-2026-07-02
+          RELEASE: "1"
+          FLAVOR: stable          # coexists with your existing install on the TV
+        run: |
+          make -j"$(nproc)"
+          make ipk
+          ls -la pkg/*.ipk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stremio-bridge-ipk
+          path: pkg/*.ipk
+          if-no-files-found: error
