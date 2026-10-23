@@ -91,7 +91,7 @@ use super::{
 /// because this plant must not depend on the app's own model of itself (see the module note). If
 /// that constant moves, [`tests::the_plant_constants_still_match_the_pipeline`] fails — and it did,
 /// which is how the Phase 0 enlargement reached this file rather than being forgotten in it.
-pub(super) const VIDEO_QUEUE_BYTES: u64 = 50 * 1024 * 1024;
+pub(super) const VIDEO_QUEUE_BYTES: u64 = 15 * 1024 * 1024;
 /// **The video cap the M4 census was taken at**, 8 MiB, and the reason it has to be written down.
 ///
 /// [`tests::the_calibration_reproduces_the_device_census`] grades a MODEL against a MEASUREMENT,
@@ -101,7 +101,7 @@ pub(super) const VIDEO_QUEUE_BYTES: u64 = 50 * 1024 * 1024;
 /// while [`Plant::default`] models what ships. Re-censusing at 10 MiB is a device job and the
 /// prediction to check against is `1600 + 83886080/R_v`, about 25% above every video-bound row of
 /// the current table.
-pub(super) const CENSUS_VIDEO_QUEUE_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const CENSUS_VIDEO_QUEUE_BYTES: u64 = 2  1024 * 1024;
 /// **The audio cap the M4 census was taken at**, 1 MiB, for the same reason: the audio lane is the
 /// binding one at the low rungs (320, 720), so the census reproduction has to run at the audio
 /// size it was measured with, not at the size that ships.

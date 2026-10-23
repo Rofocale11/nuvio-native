@@ -134,8 +134,8 @@ pub const fn feed_leads_ms() -> (i64, i64) {
 // levers are one decision and neither is worth landing alone.
 // `docs/measurements/p0-plant-sizing.md` is the record; `requiredMemory` is 160 MB, so +2 MiB RSS
 // on a 32-bit set is inside the budget already declared.
-const AQ_VIDEO_BYTES: c_long = 50 * 1024 * 1024;
-const AQ_AUDIO_BYTES: c_long = 4 * 1024 * 1024;
+const AQ_VIDEO_BYTES: c_long = 15 * 1024 * 1024;
+const AQ_AUDIO_BYTES: c_long = 2 * 1024 * 1024;
 // **96 MiB / 8 MiB, up from 10 MiB / 1 MiB (fork, measured 2026-09-22 on an LG B4 / webOS
 // 10.3.1).** Sized for a UHD remux over Wi-Fi: at 90 Mbit/s the old video cap held 0.9 s, so with
 // the 1.6 s feed lead the whole reserve was ~2.5 s and every Wi-Fi hiccup longer than that
