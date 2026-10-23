@@ -2,7 +2,7 @@
   {
     "name": "stable",
     "app_id": "com.beb.plxnative",
-    "object_id": "plxstate.nuvio"
+    "object_id": "plxstate.stbl"
   },
   {
     "name": "debug",
