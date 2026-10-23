@@ -1,1 +1,3 @@
 /target
+.env
+rust-modules/stremio/nuvio.local.env

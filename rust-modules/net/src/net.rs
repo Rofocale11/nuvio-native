@@ -2120,8 +2120,8 @@ fn request_tls_sink(
     // one caller that follows redirects (`https_get_public`, the QR fetch) sends none; this is what
     // keeps it so for the next one.
     if follow_redirects && !headers.is_empty() {
-        plx_base::eventlog::log("net: request refused: a request that follows redirects carries no caller headers");
-        return Err(RequestError::Transport.into());
+        plx_base::eventlog::log("net: ALLOWING redirect with caller headers (nuvio patch)");
+        // return Err(RequestError::Transport.into());  <-- Commented out for Stremio
     }
     let hdr_owned: Vec<CString> = headers
         .iter()

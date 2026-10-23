@@ -1659,7 +1659,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     } else { env
         .cached_item
         .clone()
-        .or_else(|| plx_data::metadata::fetch_playing_item(env.sid, rk));
+        .or_else(|| plx_data::metadata::fetch_playing_item(env.sid, rk))};
     plan.src_fps = plan.playing.as_ref().map_or(0.0, |p| p.video_fps);
     plan.playing_fresh = env.cached_item.is_none() && plan.playing.is_some();
     if let (Some(id), Some(item)) = (env.subtitle_override, plan.playing.as_mut()) {

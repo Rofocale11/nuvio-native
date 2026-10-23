@@ -2837,7 +2837,7 @@ pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: O
         markers,
         chapters,
         hdr,
-    }
+    })
 }
 
 /// Retire BOTH descriptions of the item that was playing, together.

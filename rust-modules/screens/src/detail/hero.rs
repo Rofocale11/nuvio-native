@@ -1978,5 +1978,5 @@ mod tests {
 pub fn my_list_width(measure: &dyn Measure) -> f32 {
     use plx_platform::i18n::msg;
     [msg::browse_list_add_c(),msg::browse_list_remove_c(),msg::browse_list_saving_c(),msg::browse_list_retry_c(),msg::browse_list_signin_c()]
-        .into_iter().map(|label| pill_w(measure,label,theme::size::BODY,false,false)).fold(0.0,f32::max)
+        .into_iter().map(|label| plx_appkit::hero_layout::pill_w(measure, label, theme::size::BODY, false, None)).fold(0.0, f32::max)
 }
