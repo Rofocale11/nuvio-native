@@ -1355,7 +1355,7 @@ mod tests {
     }
     fn addon_record(rev: u64, payload: &str) -> Value {
         json!({"returnValue":true,"results":[{"_id":"nvaddons.stable",
-            "_kind":"com.nuvionative.app.storage:1","_rev":rev,"nuvio":payload}]})
+            "_kind":"com.beb.plxnative.storage:1","_rev":rev,"nuvio":payload}]})
     }
     #[test]
     fn addon_configuration_survives_restart_as_opaque_json() {
