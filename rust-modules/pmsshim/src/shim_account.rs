@@ -183,36 +183,7 @@ impl Account {
     }
 
     /// The plex.tv surface. `segs` are the path segments after `api/v2`.
-        pub fn handle(&self, req: &Request, segs: &[&str]) -> Response {
-        // ─── WATCHLIST BRIDGE ────────────────────────────────────────────────
-        if segs.starts_with(&["library", "sections", "watchlist"]) {
-            let mut rows = Vec::new();
-            if let Ok(items) = self.saved_library(false) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                for p in items {
-                    rows.push(serde_json::json!({
-                        "ratingKey": format!("{}_{}", p.type_, p.id),
-                        "guid": format!("nuvio://{}/{}", p.type_, p.id),
-                        "type": if p.type_ == "series" { "show" } else { "movie" },
-                        "title": p.name,
-                        "year": 2024,
-                        "watchlistedAt": now
-                    }));
-                }
-            }
-            return Response::json(&serde_json::json!({
-                "MediaContainer": {
-                    "size": rows.len(),
-                    "totalSize": rows.len(),
-                    "Metadata": rows
-                }
-            }));
-        }
-        // ─────────────────────────────────────────────────────────────────────
-
+    pub fn handle(&self, req: &Request, segs: &[&str]) -> Response {
         match (req.method.as_str(), segs) {
             ("POST", ["pins"]) => self.create_pin(),
             (_, ["pins", "qr", code]) => self.qr(code),
@@ -226,7 +197,7 @@ impl Account {
             _ => Response::json_status(404, &json!({"error": "not available"})),
         }
     }
-    
+
     fn create_pin(&self) -> Response {
         match plx_stremio::nuvio::start_login() {
             Ok(login) => {

@@ -6,12 +6,12 @@
   },
   {
     "name": "debug",
-    "app_id": "com.beb.plxnative",
+    "app_id": "com.beb.plxnative.debug",
     "object_id": "plxstate.dbg"
   },
   {
     "name": "nightly",
-    "app_id": "com.beb.plxnative",
-    "object_id": "plxstate.ngt"
+    "app_id": "com.beb.plxnative.nightly",
+    "object_id": "plxstate.nigt"
   }
 ]
