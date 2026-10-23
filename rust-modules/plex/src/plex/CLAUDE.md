@@ -241,8 +241,10 @@ landed, and whatever was in flight (a hub fetch, the picker's first avatar) fail
 #95's fix is that eligibility is decided once, at synthesis, not asked again at activation:
 `probe::candidates` stamps each `Candidate::credential_eligible` from the `CredentialPolicy` the
 plan was built with, and only an eligible answer can become `first`/`best`/get activated — a
-verified plaintext answer in a store build does **not** count as reached and does not hold back the
-relay leg. If nothing eligible verifies, the result is `Reach::InsecureOnly` (plan §4's precedence:
+verified plaintext answer in a store build does **not** count as reached unless it is the
+Stremio bridge's exact loopback origin, which the shared policy admits in every build. An ineligible
+answer does not hold back the relay leg. If nothing eligible verifies, the result is
+`Reach::InsecureOnly` (plan §4's precedence:
 `At` > `InsecureOnly` > `Refused` > `TlsUntrusted` > `No`), which becomes `Outcome::InsecureOnly` /
 `Discovery::InsecureOnly` / `SourceState::InsecureOnly` ("Not secure") — a fifth sentence, told
 apart from `Unreachable`, that **outranks a 401**. Before this it counted as reached, which was
@@ -270,10 +272,9 @@ existing lines instead.
 particular SERVER's token on an origin — registry and endpoint admission — asks
 `grant::allowed_for(policy, machine_id, origin)`: a grant admits only the machine it was minted
 for. A remembered (cached) origin asks `grant::remembered_allowed`: the policy alone, never a
-grant. Nothing else
-asks `CredentialPolicy::may_carry_credential` or `Origin::is_tls` for a credential decision —
-`grep -rn may_carry_credential . --include=*.rs` (from `rust-modules/`) finds only `grant.rs` (plus doc links). `probe::candidates`
-stamps the policy half at synthesis, and `auth::settle_plaintext` adds the grant half after the
+grant. `probe::candidates` also asks `CredentialPolicy::may_carry_credential` to stamp candidate
+eligibility at synthesis; `grant` owns the live-grant half, which `auth::settle_plaintext` adds
+after the
 race. A grant is minted only by discovery, from a FRESH verdict `InsecureEvidence::
 plaintext_eligibility` calls eligible, when the person's recorded answer (`Session::
 plaintext_consent`, captured at the spawn site as `grant::PlaintextAsk`) allows it; it is bound to

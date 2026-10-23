@@ -88,13 +88,14 @@ pub struct Candidate {
     pub port: i64,
     pub ipv6: bool,
     /// May this candidate's origin carry a credential under the [`CredentialPolicy`] `candidates`
-    /// was built with? TLS always; plaintext only under
-    /// [`CredentialPolicy::AllowPlaintext`](super::origin::CredentialPolicy::AllowPlaintext) —
-    /// [`CredentialPolicy::may_carry_credential`](super::origin::CredentialPolicy::may_carry_credential)'s
-    /// answer, computed once here rather than re-derived by every consumer. This is the POLICY half
-    /// only: a consented plaintext grant (`super::grant`) is never known at synthesis — the race
-    /// holds an ineligible-but-verified answer aside as `Reach::InsecureOnly`, and
-    /// `auth::settle_plaintext` turns it into a reached origin exactly when a grant is minted for it.
+    /// was built with? The answer comes from
+    /// [`CredentialPolicy::may_carry_credential`](super::origin::CredentialPolicy::may_carry_credential):
+    /// TLS always, the Stremio bridge's exact loopback origin always, and other plaintext only
+    /// under [`CredentialPolicy::AllowPlaintext`](super::origin::CredentialPolicy::AllowPlaintext).
+    /// This is the POLICY half only: a consented plaintext grant (`super::grant`) is never known at
+    /// synthesis — the race holds an ineligible-but-verified answer aside as `Reach::InsecureOnly`,
+    /// and `auth::settle_plaintext` turns it into a reached origin exactly when a grant is minted
+    /// for it.
     pub credential_eligible: bool,
 }
 
@@ -438,6 +439,8 @@ pub fn candidates(res: &Resource, policy: CredentialPolicy) -> Vec<Candidate> {
             if out.iter().any(|e| e.url == url) {
                 return; // plex.tv can advertise the same origin twice; a probe slot is not free
             }
+            let credential_eligible = Origin::parse(&url)
+                .is_some_and(|origin| policy.may_carry_credential(&origin));
             out.push(Candidate {
                 url,
                 scheme,
@@ -445,8 +448,7 @@ pub fn candidates(res: &Resource, policy: CredentialPolicy) -> Vec<Candidate> {
                 address: c.address.clone(),
                 port: c.port,
                 ipv6,
-                credential_eligible: scheme == Scheme::Https
-                    || policy == CredentialPolicy::AllowPlaintext,
+                credential_eligible,
             });
         };
         let unmatched_shared_lan = c.local && !res.owned && !res.public_address_matches;
@@ -1619,6 +1621,41 @@ mod tests {
         assert!(
             allow_plain.iter().all(|c| c.credential_eligible),
             "every candidate is eligible under AllowPlaintext: {allow_plain:#?}"
+        );
+    }
+
+    /// The exact Stremio bridge origin is the one plaintext exception in every build. Candidate
+    /// synthesis must use the shared credential policy rather than reimplementing its TLS/dev
+    /// shortcut, or sign-in marks the app's own bridge insecure-only.
+    #[test]
+    fn the_stremio_bridge_candidate_is_eligible_under_the_store_policy() {
+        let port = super::super::account::STREMIO_BRIDGE_PORT;
+        let resource: Resource = serde_json::from_value(serde_json::json!({
+            "name": "Stremio",
+            "clientIdentifier": "stremio-bridge",
+            "provides": "server",
+            "owned": true,
+            "publicAddressMatches": true,
+            "httpsRequired": false,
+            "accessToken": "test-token",
+            "connections": [{
+                "protocol": "http",
+                "address": "127.0.0.1",
+                "port": port,
+                "uri": format!("http://127.0.0.1:{port}"),
+                "local": true,
+                "relay": false,
+                "IPv6": false
+            }]
+        }))
+        .expect("the bridge resource parses");
+
+        let cs = candidates(&resource, CredentialPolicy::HttpsOnly);
+        assert_eq!(cs.len(), 1, "the advertised origin and twin are identical");
+        assert_eq!(cs[0].url, format!("http://127.0.0.1:{port}"));
+        assert!(
+            cs[0].credential_eligible,
+            "the bridge's Stremio key must reach its own loopback listener"
         );
     }
 
