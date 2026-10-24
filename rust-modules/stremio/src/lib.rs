@@ -26,6 +26,8 @@ pub mod nuvio;
 pub mod addon_http;
 pub use addon_http as http;
 
+pub mod addons_tmdb;
+
 pub mod torrent;
 pub use torrent::playable_url;
 

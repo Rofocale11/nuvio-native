@@ -196,6 +196,7 @@ pub struct Meta {
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_id: Option<String>,
     pub trailers: Vec<serde_json::Value>,
+    pub trailer_streams: Vec<serde_json::Value>,
     pub behavior_hints: serde_json::Value,
 }
 
