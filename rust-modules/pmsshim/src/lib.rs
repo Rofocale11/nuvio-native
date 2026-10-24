@@ -7,10 +7,8 @@
 //! - sections `1` Movies and `2` TV Shows list the first movie/series catalog;
 //! - Home hubs are Continue Watching plus one hub per home catalog (`/hubs/nuvio/{i}`, paged);
 //! - a Stremio title, a season and an episode each get a stable numeric ratingKey ([`store::Keys`]);
-//!   synthetic trailer clips use a separate numeric ratingKey derived from their movie key;
-//! - a movie's or episode's `Media[]` is its playable streams, best first ([`media`]); ordinary
-//!   Part keys redirect to the stream's real URL, and trailer Part keys resolve a YouTube ID to
-//!   an MP4 stream URL and redirect there;
+//! - a movie's or episode's `Media[]` is its playable streams, best first ([`media`]); a Part key
+//!   redirects to the stream's real URL;
 //! - movie detail rows can add TMDB cast, trailer and related-movie metadata when `TMDB_API_KEY`
 //!   is configured; the addon crate performs those requests through its existing HTTP client;
 //! - the transcoder decision always answers direct play; watch state is kept locally.

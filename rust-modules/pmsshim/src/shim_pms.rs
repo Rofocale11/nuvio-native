@@ -23,8 +23,6 @@ const HUBS_BUDGET: Duration = Duration::from_secs(4);
 /// Catalog fetches in flight at once (the TV's network and CPU are shared with the UI).
 const CATALOG_PARALLEL: usize = 8;
 const STREAM_TTL: Duration = Duration::from_secs(30 * 60);
-/// Trailer rating keys occupy a separate range from the shim's persisted item keys.
-const TRAILER_RATING_KEY_BASE: i64 = 9_000_000;
 static TRAILER_URLS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 fn trailer_url_cache() -> &'static Mutex<HashMap<String, String>> {
@@ -369,24 +367,14 @@ fn youtube_id(value: &Value) -> Option<String> {
     .then(|| id.to_string())
 }
 
-fn trailer_rating_key(parent_rk: i64) -> Option<i64> {
-    (parent_rk > 0)
-        .then(|| TRAILER_RATING_KEY_BASE.checked_add(parent_rk))
-        .flatten()
-}
-
-fn trailer_parent_key(trailer_rk: i64) -> Option<i64> {
-    (trailer_rk > TRAILER_RATING_KEY_BASE)
-        .then(|| trailer_rk.checked_sub(TRAILER_RATING_KEY_BASE))
-        .flatten()
-}
-
-fn trailer_metadata(rk: i64, youtube_id: &str, title: &str) -> Option<Value> {
-    let trailer_rk = trailer_rating_key(rk)?;
-    let part_key = format!("/library/metadata/{rk}/trailer");
-    Some(json!({
-        "ratingKey": trailer_rk.to_string(),
-        "key": format!("/library/metadata/{trailer_rk}"),
+fn trailer_metadata(rk: i64, youtube_id: &str, title: &str) -> Value {
+    let trailer_key = format!("/library/metadata/{rk}/trailer");
+    json!({
+        // The native client's MDE request uses ratingKey as the numeric
+        // /library/metadata/{ratingKey} path. "trailer" makes the shim's
+        // decision route reject the item before it ever requests the Part.
+        "ratingKey": rk.to_string(),
+        "key": trailer_key,
         "type": "clip",
         "subtype": "trailer",
         "extraType": 1,
@@ -397,17 +385,17 @@ fn trailer_metadata(rk: i64, youtube_id: &str, title: &str) -> Option<Value> {
             "videoCodec": "h264",
             "audioCodec": "aac",
             "Part": [{
-                "key": part_key,
+                "key": trailer_key,
                 "container": "mp4"
             }]
         }]
-    }))
+    })
 }
 
-fn trailer_extras(rk: i64, youtube_id: &str, title: &str) -> Option<Value> {
-    Some(json!({
-        "Metadata": [trailer_metadata(rk, youtube_id, title)?]
-    }))
+fn trailer_extras(rk: i64, youtube_id: &str, title: &str) -> Value {
+    json!({
+        "Metadata": [trailer_metadata(rk, youtube_id, title)]
+    })
 }
 
 fn preview_from_meta(meta: &Meta, id: &str) -> MetaPreview {
@@ -462,13 +450,13 @@ mod tmdb_metadata_tests {
                 "thumb": "https://image.tmdb.org/t/p/w300/actor.jpg"
             })
         );
-        let extras = trailer_extras(42, "youtube123", "Official Trailer").unwrap();
+        let extras = trailer_extras(42, "youtube123", "Official Trailer");
         assert_eq!(
             extras,
             json!({
                 "Metadata": [{
-                    "ratingKey": "9000042",
-                    "key": "/library/metadata/9000042",
+                    "ratingKey": "42",
+                    "key": "/library/metadata/42/trailer",
                     "type": "clip",
                     "subtype": "trailer",
                     "extraType": 1,
@@ -489,7 +477,7 @@ mod tmdb_metadata_tests {
         let parsed: plx_plex::plex::ExtrasHub = serde_json::from_value(extras).unwrap();
         let trailer = &parsed.metadata[0];
         assert_eq!(trailer.kind, "clip");
-        assert_eq!(trailer.rating_key, "9000042");
+        assert_eq!(trailer.rating_key, "42");
         assert_eq!(trailer.subtype, "trailer");
         assert_eq!(trailer.extra_type, 1);
         assert_eq!(
@@ -498,16 +486,9 @@ mod tmdb_metadata_tests {
         );
         assert_eq!(
             trailing_key(&format!("/library/metadata/{}", trailer.rating_key)),
-            Some(9_000_042),
+            Some(42),
             "the MDE request must address a numeric rating key"
         );
-        assert_eq!(trailer_parent_key(9_000_042), Some(42));
-        assert_eq!(
-            trailer_rating_key(10_003),
-            Some(9_010_003),
-            "the trailer key is 9,000,000 plus the full parent key"
-        );
-        assert_eq!(trailer_rating_key(i64::MAX), None);
     }
 
     #[test]
@@ -1025,9 +1006,7 @@ impl Shim {
                 .chain(&meta.trailers)
                 .find_map(youtube_id)
             {
-                if let Some(extras) = trailer_extras(rk, &youtube_id, "Official Trailer") {
-                    row["Extras"] = extras;
-                }
+                row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
             }
             return;
         };
@@ -1045,9 +1024,7 @@ impl Shim {
                 .chain(&meta.trailers)
                 .find_map(youtube_id)
             {
-                if let Some(extras) = trailer_extras(rk, &youtube_id, "Official Trailer") {
-                    row["Extras"] = extras;
-                }
+                row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
             }
             return;
         };
@@ -1097,29 +1074,8 @@ impl Shim {
                 .map(|id| (id, "Official Trailer".into()))
         });
         if let Some((youtube_id, title)) = trailer {
-            if let Some(extras) = trailer_extras(rk, &youtube_id, &title) {
-                row["Extras"] = extras;
-            }
+            row["Extras"] = trailer_extras(rk, &youtube_id, &title);
         }
-    }
-
-    /// Resolve the synthetic trailer rating key back to its movie's Plex-shaped extra row.
-    fn trailer_row(&self, trailer_rk: i64) -> Option<Value> {
-        let parent_rk = trailer_parent_key(trailer_rk)?;
-        if !matches!(
-            self.keys.ident(parent_rk),
-            Some(Ident::Title { type_, .. }) if type_ == "movie"
-        ) {
-            return None;
-        }
-        let mut parent = self.row(parent_rk)?;
-        self.enrich_movie_row(parent_rk, &mut parent);
-        let rating_key = trailer_rk.to_string();
-        parent["Extras"]["Metadata"]
-            .as_array()?
-            .iter()
-            .find(|row| row["ratingKey"].as_str() == Some(rating_key.as_str()))
-            .cloned()
     }
 
     fn trailer_part(&self, parent_rk: i64) -> Response {
@@ -1127,14 +1083,14 @@ impl Shim {
         if let Some(response) = cached_trailer_redirect(trailer_url_cache(), &cache_key) {
             return response;
         }
-        let Some(trailer_rk) = trailer_rating_key(parent_rk) else {
+        let Some(mut parent) = self.row(parent_rk) else {
             return Response::not_found();
         };
-        let Some(row) = self.trailer_row(trailer_rk) else {
-            return Response::not_found();
-        };
-        let Some(youtube_id) = row
-            .get("thumb")
+        self.enrich_movie_row(parent_rk, &mut parent);
+        let Some(youtube_id) = parent["Extras"]["Metadata"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("thumb"))
             .and_then(Value::as_str)
             .and_then(|thumb| youtube_id(&Value::String(thumb.to_string())))
         else {
@@ -1521,20 +1477,6 @@ impl Shim {
                 "transcodeDecisionCode": 4005, "transcodeDecisionText": why, "mdeDecisionCode": 2000, "Metadata": []}),
             ))
         };
-        if let Some(mut row) = self.trailer_row(rk) {
-            if index != 0 {
-                return refuse("This trailer stream is no longer available.".into());
-            }
-            if let Some(part) = row["Media"][0]["Part"][0].as_object_mut() {
-                part.insert("decision".into(), json!("directplay"));
-            }
-            return Response::json(&container(json!({
-                "generalDecisionCode": 1000,
-                "generalDecisionText": "Direct play OK",
-                "mdeDecisionCode": 1000,
-                "Metadata": [row]
-            })));
-        }
         let Some((mut row, verdict)) = self.item_probed(rk, Some(index)) else {
             return refuse("This title is no longer available from your addons.".into());
         };
@@ -1843,7 +1785,7 @@ impl Shim {
                 let mut rows: Vec<Value> = rk
                     .split(',')
                     .filter_map(|x| x.parse().ok())
-                    .filter_map(|k| self.trailer_row(k).or_else(|| self.item(k)))
+                    .filter_map(|k| self.item(k))
                     .collect();
                 if rows.is_empty() {
                     return Response::json_status(404, &container(json!({"Metadata": []})));
@@ -1859,9 +1801,6 @@ impl Shim {
                 Response::json(&container(json!({"Metadata": rows})))
             }
             (_, ["library", "metadata", rk, "extras"]) => self.extras(rk.parse().unwrap_or(-1)),
-            (_, ["library", "metadata", rk, "trailer"]) => {
-                self.trailer_part(rk.parse().unwrap_or(-1))
-            }
             (_, ["library", "metadata", rk, "children"]) => Response::json(&container(
                 json!({"Metadata": self.children(rk.parse().unwrap_or(0))}),
             )),
@@ -1870,6 +1809,9 @@ impl Shim {
             )),
             (_, ["library", "metadata", rk, "related"]) => {
                 self.related_hub(rk.parse().unwrap_or(-1))
+            }
+            (_, ["library", "metadata", parent_rk, "trailer"]) => {
+                self.trailer_part(parent_rk.parse().unwrap_or(-1))
             }
             (_, ["library", "metadata", _, ..]) => ok_empty(),
             ("PUT", ["library", "parts", ..]) => ok_empty(),
@@ -2217,10 +2159,7 @@ impl Shim {
             .unwrap_or(-1);
         // The play is about to start: wait for the streams and probe the lead, so the queue's row
         // carries the real fields rather than the detail page's early guesses.
-        let first = self
-            .trailer_row(rk)
-            .or_else(|| self.item_probed(rk, Some(0)).map(|(row, _)| row));
-        let Some(first) = first else {
+        let Some((first, _)) = self.item_probed(rk, Some(0)) else {
             return Response::json(&container(json!({"Metadata": [], "playQueueID": 1})));
         };
         let mut rows = vec![first];
@@ -2443,77 +2382,26 @@ mod playback_regressions {
     use super::*;
 
     #[test]
-    fn trailer_rating_key_resolves_metadata_and_mde_without_aliasing_the_movie() {
+    fn trailer_part_route_redirects_to_cached_youtube_mp4() {
         let shim = Arc::new(Shim::new(
             Arc::new(crate::shim_fake::FakeBackend),
             Config::default(),
         ));
-        let parent_rk = shim.keys.key_of(&Ident::Title {
-            type_: "movie".into(),
-            id: "tmdb:not-an-id".into(),
-        });
-        shim.metas.lock().unwrap().insert(
-            ("movie".into(), "tmdb:not-an-id".into()),
-            (
-                Instant::now(),
-                Arc::new(Meta {
-                    id: "tmdb:not-an-id".into(),
-                    type_: "movie".into(),
-                    name: "Trailer fixture".into(),
-                    trailer_streams: vec![json!({"youtubeId": "youtube123"})],
-                    ..Default::default()
-                }),
-            ),
-        );
-        let trailer_rk = trailer_rating_key(parent_rk).unwrap();
-
-        let metadata = shim.handle(&Request {
-            method: "GET".into(),
-            path: format!("/library/metadata/{trailer_rk}"),
-            query: HashMap::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-        });
-        let metadata: Value = serde_json::from_slice(&metadata.body).unwrap();
-        let trailer = &metadata["MediaContainer"]["Metadata"][0];
-        assert_eq!(trailer["ratingKey"], trailer_rk.to_string());
-        assert_eq!(trailer["title"], "Official Trailer");
-        assert_eq!(
-            trailer["Media"][0]["Part"][0]["key"],
-            format!("/library/metadata/{parent_rk}/trailer")
-        );
-
-        let decision = shim.handle(&Request {
-            method: "GET".into(),
-            path: "/video/:/transcode/universal/decision".into(),
-            query: HashMap::from([("path".into(), format!("/library/metadata/{trailer_rk}"))]),
-            headers: HashMap::new(),
-            body: Vec::new(),
-        });
-        let decision: Value = serde_json::from_slice(&decision.body).unwrap();
-        assert_eq!(decision["MediaContainer"]["generalDecisionCode"], 1000);
-        let decided = &decision["MediaContainer"]["Metadata"][0];
-        assert_eq!(decided["ratingKey"], trailer_rk.to_string());
-        assert_eq!(decided["Media"][0]["Part"][0]["decision"], "directplay");
-
+        let parent_rk = 987_654_321;
         let cache_key = parent_rk.to_string();
         let stream_url = "https://video.example/trailer.mp4?expire=4102444800";
-        trailer_url_cache()
-            .lock()
-            .unwrap()
-            .insert(cache_key.clone(), stream_url.into());
-        let part = shim.handle(&Request {
+        cache_trailer_url(trailer_url_cache(), cache_key.clone(), stream_url.into());
+
+        let response = shim.handle(&Request {
             method: "GET".into(),
             path: format!("/library/metadata/{parent_rk}/trailer"),
             query: HashMap::new(),
             headers: HashMap::new(),
             body: Vec::new(),
         });
-        assert_eq!(part.status, 302);
-        assert_eq!(
-            part.headers,
-            [("Location".into(), stream_url.into())]
-        );
+
+        assert_eq!(response.status, 302);
+        assert_eq!(response.headers, [("Location".into(), stream_url.into())]);
         trailer_url_cache().lock().unwrap().remove(&cache_key);
     }
 
