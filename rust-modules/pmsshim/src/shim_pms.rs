@@ -6,7 +6,7 @@ use crate::shim_core::{Config, MACHINE_ID};
 use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
-use plx_stremio::addons_tmdb::{TmdbCast, TmdbClient, TmdbVideo};
+use plx_stremio::addons_tmdb::{TmdbCast, TmdbClient, TmdbMovie, TmdbVideo};
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -892,21 +892,27 @@ impl Shim {
             return;
         };
 
-        let (credits, videos) = std::thread::scope(|scope| {
-            let credits = scope.spawn(|| client.credits(tmdb_id));
+        let (details, videos) = std::thread::scope(|scope| {
+            let details = scope.spawn(|| client.movie_details(tmdb_id));
             let videos = scope.spawn(|| client.videos(tmdb_id));
-            (credits.join(), videos.join())
+            (details.join(), videos.join())
         });
 
-        match credits {
-            Ok(Ok(cast)) => {
-                let roles: Vec<Value> = cast.iter().filter_map(tmdb_role).take(10).collect();
+        match details {
+            Ok(Ok(details)) => {
+                let roles: Vec<Value> = details
+                    .credits
+                    .cast
+                    .iter()
+                    .filter_map(tmdb_role)
+                    .take(10)
+                    .collect();
                 if !roles.is_empty() {
                     row["Role"] = Value::Array(roles);
                 }
             }
-            Ok(Err(error)) => eprintln!("pmsshim: TMDB credits lookup failed: {error}"),
-            Err(_) => eprintln!("pmsshim: TMDB credits lookup thread panicked"),
+            Ok(Err(error)) => eprintln!("pmsshim: TMDB movie details lookup failed: {error}"),
+            Err(_) => eprintln!("pmsshim: TMDB movie details lookup thread panicked"),
         }
 
         let trailer = match videos {
@@ -980,69 +986,56 @@ impl Shim {
                 );
             }
         };
-        let recommendations = match client.recommendations(tmdb_id) {
-            Ok(movies) => movies,
+        let details = match client.movie_details(tmdb_id) {
+            Ok(details) => details,
             Err(error) => {
                 return Response::json_status(
                     503,
                     &container(json!({
-                        "Hub": [empty_hub()], "error": format!("TMDB recommendations lookup failed: {error}")
+                        "Hub": [empty_hub()], "error": format!("TMDB movie details lookup failed: {error}")
                     })),
                 );
             }
         };
-        let candidates: Vec<_> = recommendations
-            .into_iter()
+        let rows: Vec<_> = details
+            .recommendations
+            .results
+            .iter()
             .filter(|movie| movie.id > 0)
             .take(10)
+            .map(|movie| self.tmdb_recommendation_row(movie))
             .collect();
-        let rows = std::thread::scope(|scope| {
-            let handles: Vec<_> = candidates
-                .into_iter()
-                .map(|recommendation| {
-                    let client = client.clone();
-                    scope.spawn(move || {
-                        let tmdb_stremio_id = format!("tmdb:{}", recommendation.id);
-                        let imdb_id = match client.external_ids(recommendation.id) {
-                            Ok(imdb_id) => imdb_id,
-                            Err(error) => {
-                                eprintln!("pmsshim: TMDB external ID lookup failed: {error}");
-                                None
-                            }
-                        };
-                        let resolved = imdb_id
-                            .as_deref()
-                            .and_then(|imdb_id| {
-                                self.meta("movie", imdb_id)
-                                    .map(|meta| (meta, imdb_id.to_string()))
-                            })
-                            .or_else(|| {
-                                self.meta("movie", &tmdb_stremio_id)
-                                    .map(|meta| (meta, tmdb_stremio_id))
-                            });
-                        resolved.map(|(meta, stremio_id)| {
-                            let preview = preview_from_meta(&meta, &stremio_id);
-                            self.preview_row(&preview)
-                        })
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .filter_map(|handle| match handle.join() {
-                    Ok(row) => row,
-                    Err(_) => {
-                        eprintln!("pmsshim: related movie lookup thread panicked");
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
         let hub = json!({
             "title": "More Like This", "type": "movie", "hubIdentifier": "movie.related",
             "size": rows.len(), "Metadata": rows
         });
         Response::json(&container(json!({"Hub": [hub]})))
+    }
+
+    fn tmdb_recommendation_row(&self, movie: &TmdbMovie) -> Value {
+        let id = format!("tmdb:{}", movie.id);
+        let poster = movie.poster_path.as_deref().and_then(|path| {
+            path.starts_with('/')
+                .then(|| format!("https://image.tmdb.org/t/p/w300{path}"))
+        });
+        let preview = MetaPreview {
+            id,
+            type_: "movie".into(),
+            name: movie.title.clone(),
+            poster: poster.clone(),
+            background: movie
+                .backdrop_path
+                .as_deref()
+                .map(|path| format!("https://image.tmdb.org/t/p/w300{path}")),
+            description: movie.overview.clone(),
+            release_info: movie.release_date.clone(),
+            ..MetaPreview::default()
+        };
+        let mut row = self.preview_row(&preview);
+        if let Some(poster) = poster {
+            row["thumb"] = json!(poster);
+        }
+        row
     }
 
     fn episode_key(&self, series: &str, video: &str) -> i64 {

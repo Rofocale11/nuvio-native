@@ -202,3 +202,4 @@ pkg/*.so
 
 # Ignore downloaded vendor tarballs
 vendor/downloads/
+pkg/lib*

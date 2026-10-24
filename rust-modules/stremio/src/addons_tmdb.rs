@@ -56,16 +56,23 @@ pub struct TmdbVideo {
     pub type_: String,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
-struct CreditsResponse {
-    cast: Vec<TmdbCast>,
+pub struct TmdbCredits {
+    pub cast: Vec<TmdbCast>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
-struct MoviesResponse {
-    results: Vec<TmdbMovie>,
+pub struct TmdbRecommendations {
+    pub results: Vec<TmdbMovie>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbMovieDetails {
+    pub credits: TmdbCredits,
+    pub recommendations: TmdbRecommendations,
 }
 
 #[derive(Default, Deserialize)]
@@ -100,8 +107,9 @@ impl TmdbClient {
     }
 
     fn url(&self, path: &str) -> String {
+        let separator = if path.contains('?') { '&' } else { '?' };
         format!(
-            "{API_BASE}{path}?api_key={}",
+            "{API_BASE}{path}{separator}api_key={}",
             addon_http::encode_component(&self.api_key)
         )
     }
@@ -158,13 +166,20 @@ impl TmdbClient {
     }
 
     pub fn credits(&self, movie_id: u64) -> Result<Vec<TmdbCast>> {
-        let response: CreditsResponse = self.get(&format!("/movie/{movie_id}/credits"))?;
+        let response: TmdbCredits = self.get(&format!("/movie/{movie_id}/credits"))?;
         Ok(response.cast)
     }
 
     pub fn recommendations(&self, movie_id: u64) -> Result<Vec<TmdbMovie>> {
-        let response: MoviesResponse = self.get(&format!("/movie/{movie_id}/recommendations"))?;
+        let response: TmdbRecommendations =
+            self.get(&format!("/movie/{movie_id}/recommendations"))?;
         Ok(response.results)
+    }
+
+    pub fn movie_details(&self, movie_id: u64) -> Result<TmdbMovieDetails> {
+        self.get(&format!(
+            "/movie/{movie_id}?append_to_response=credits,recommendations"
+        ))
     }
 
     pub fn external_ids(&self, movie_id: u64) -> Result<Option<String>> {
@@ -213,18 +228,18 @@ mod tests {
 
     #[test]
     fn decodes_tmdb_movie_endpoint_shapes() {
-        let credits: CreditsResponse = serde_json::from_value(serde_json::json!({
-            "cast": [{"name": "Actor", "character": "Role", "profile_path": "/actor.jpg"}]
+        let details: TmdbMovieDetails = serde_json::from_value(serde_json::json!({
+            "credits": {
+                "cast": [{"name": "Actor", "character": "Role", "profile_path": "/actor.jpg"}]
+            },
+            "recommendations": {
+                "results": [{"id": 603, "title": "Movie", "poster_path": "/poster.jpg"}]
+            }
         }))
         .unwrap();
-        assert_eq!(credits.cast[0].name, "Actor");
-        assert_eq!(credits.cast[0].character, "Role");
-
-        let movies: MoviesResponse = serde_json::from_value(serde_json::json!({
-            "results": [{"id": 603, "title": "Movie", "poster_path": "/poster.jpg"}]
-        }))
-        .unwrap();
-        assert_eq!(movies.results[0].id, 603);
+        assert_eq!(details.credits.cast[0].name, "Actor");
+        assert_eq!(details.credits.cast[0].character, "Role");
+        assert_eq!(details.recommendations.results[0].id, 603);
 
         let videos: VideosResponse = serde_json::from_value(serde_json::json!({
             "results": [{"id": "video-id", "key": "youtube-id", "site": "YouTube", "type": "Trailer"}]
@@ -248,6 +263,10 @@ mod tests {
         assert_eq!(
             client.url("/movie/603/credits"),
             "https://api.themoviedb.org/3/movie/603/credits?api_key=key%20%2B"
+        );
+        assert_eq!(
+            client.url("/movie/603?append_to_response=credits,recommendations"),
+            "https://api.themoviedb.org/3/movie/603?append_to_response=credits,recommendations&api_key=key%20%2B"
         );
         assert_eq!(client.movie_id("tmdb:603:1:2").unwrap(), Some(603));
         assert_eq!(client.movie_id("603").unwrap(), Some(603));
