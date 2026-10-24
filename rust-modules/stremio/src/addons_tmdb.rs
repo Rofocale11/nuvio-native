@@ -43,6 +43,15 @@ pub struct TmdbMovie {
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
     pub release_date: Option<String>,
+    pub runtime: Option<u32>,
+    pub genres: Vec<TmdbGenre>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbGenre {
+    pub id: u64,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -71,6 +80,8 @@ pub struct TmdbRecommendations {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TmdbMovieDetails {
+    #[serde(flatten)]
+    pub movie: TmdbMovie,
     pub credits: TmdbCredits,
     pub recommendations: TmdbRecommendations,
 }
@@ -229,6 +240,13 @@ mod tests {
     #[test]
     fn decodes_tmdb_movie_endpoint_shapes() {
         let details: TmdbMovieDetails = serde_json::from_value(serde_json::json!({
+            "id": 123,
+            "title": "Movie",
+            "overview": "Overview",
+            "backdrop_path": "/backdrop.jpg",
+            "release_date": "2024-01-02",
+            "runtime": 123,
+            "genres": [{"id": 18, "name": "Drama"}],
             "credits": {
                 "cast": [{"name": "Actor", "character": "Role", "profile_path": "/actor.jpg"}]
             },
@@ -237,6 +255,9 @@ mod tests {
             }
         }))
         .unwrap();
+        assert_eq!(details.movie.id, 123);
+        assert_eq!(details.movie.runtime, Some(123));
+        assert_eq!(details.movie.genres[0].name, "Drama");
         assert_eq!(details.credits.cast[0].name, "Actor");
         assert_eq!(details.credits.cast[0].character, "Role");
         assert_eq!(details.recommendations.results[0].id, 603);

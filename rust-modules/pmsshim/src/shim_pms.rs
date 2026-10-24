@@ -6,7 +6,7 @@ use crate::shim_core::{Config, MACHINE_ID};
 use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
-use plx_stremio::addons_tmdb::{TmdbCast, TmdbClient, TmdbMovie, TmdbVideo};
+use plx_stremio::addons_tmdb::{TmdbCast, TmdbClient, TmdbMovie, TmdbMovieDetails, TmdbVideo};
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -34,6 +34,11 @@ const DEFAULT_EPISODE_MS: i64 = 45 * 60_000;
 const DEFAULT_MOVIE_MS: i64 = 110 * 60_000;
 const SECTION_MOVIES: i64 = 1;
 const SECTION_SHOWS: i64 = 2;
+const TMDB_FALLBACK_KEY_BASE: i64 = 9_500_000;
+
+fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
+    (rk >= TMDB_FALLBACK_KEY_BASE).then_some((rk - TMDB_FALLBACK_KEY_BASE) as u64)
+}
 
 struct CatalogCache {
     at: Instant,
@@ -69,6 +74,7 @@ pub struct Shim {
     streams: Mutex<HashMap<i64, Arc<StreamSlot>>>,
     sub_urls: Mutex<HashMap<i64, String>>,
     poster_fallbacks: Mutex<HashMap<String, String>>,
+    tmdb_fallbacks: Mutex<HashMap<i64, TmdbMovie>>,
     next_sub: AtomicI64,
     permits: (Mutex<usize>, Condvar),
     /// Real stream metadata from the app's FFmpeg (installed at boot; absent on the host bin).
@@ -331,6 +337,51 @@ fn resolve_tmdb_movie_id(
 mod tmdb_metadata_tests {
     use super::*;
 
+    struct TmdbMetaBackend;
+
+    impl Backend for TmdbMetaBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
+
+        fn catalog_page(
+            &self,
+            _key: &str,
+            _skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
+            Ok(Vec::new())
+        }
+
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+
+        fn meta(&self, type_: &str, id: &str) -> Option<Meta> {
+            (type_ == "movie" && id == "tmdb:603").then(|| Meta {
+                id: id.into(),
+                type_: type_.into(),
+                name: "The Matrix".into(),
+                poster: Some("https://image.tmdb.org/t/p/w300/matrix.jpg".into()),
+                ..Default::default()
+            })
+        }
+
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
     #[test]
     fn tmdb_cast_and_trailer_shapes_use_plex_fields() {
         let cast = TmdbCast {
@@ -402,6 +453,88 @@ mod tmdb_metadata_tests {
         );
         assert_eq!(preview.release_info.as_deref(), Some("2021-12-15"));
     }
+
+    #[test]
+    fn tmdb_related_rating_key_resolves_to_full_metadata() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        let movie = plx_stremio::addons_tmdb::TmdbMovie {
+            id: 603,
+            title: "The Matrix".into(),
+            poster_path: Some("/matrix.jpg".into()),
+            ..Default::default()
+        };
+        let related = shim.tmdb_recommendation_row(&movie);
+        let rating_key = related["ratingKey"].as_str().unwrap();
+        assert!(rating_key.parse::<i64>().is_ok());
+        assert_eq!(related["key"], format!("/library/metadata/{rating_key}"));
+
+        let response = shim.handle(&Request {
+            method: "GET".into(),
+            path: related["key"].as_str().unwrap().into(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        });
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(
+            body["MediaContainer"]["Metadata"][0]["ratingKey"],
+            rating_key
+        );
+        assert_eq!(body["MediaContainer"]["Metadata"][0]["title"], "The Matrix");
+
+        let fallback = shim.tmdb_recommendation_row(&plx_stremio::addons_tmdb::TmdbMovie {
+            id: 999,
+            title: "Fallback Movie".into(),
+            ..Default::default()
+        });
+        assert!(fallback["ratingKey"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .is_ok());
+        assert_eq!(fallback["ratingKey"], "9500999");
+
+        let details = TmdbMovieDetails {
+            movie: TmdbMovie {
+                id: 999,
+                title: "Fallback Movie".into(),
+                overview: Some("TMDB summary".into()),
+                backdrop_path: Some("/backdrop.jpg".into()),
+                release_date: Some("2020-06-15".into()),
+                runtime: Some(123),
+                genres: vec![plx_stremio::addons_tmdb::TmdbGenre {
+                    id: 18,
+                    name: "Drama".into(),
+                }],
+                ..Default::default()
+            },
+            credits: plx_stremio::addons_tmdb::TmdbCredits {
+                cast: vec![TmdbCast {
+                    name: "Actor Name".into(),
+                    character: "Character Name".into(),
+                    profile_path: Some("/actor.jpg".into()),
+                }],
+            },
+            ..Default::default()
+        };
+        let row = shim.tmdb_details_row(&details, 9_500_999);
+        assert_eq!(row["ratingKey"], "9500999");
+        assert_eq!(row["Role"][0]["tag"], "Actor Name");
+        assert_eq!(row["Role"][0]["role"], "Character Name");
+        assert_eq!(row["Genre"][0]["tag"], "Drama");
+        assert_eq!(row["art"], "https://image.tmdb.org/t/p/w300/backdrop.jpg");
+        assert_eq!(row["duration"], 7_380_000);
+        assert_eq!(row["summary"], "TMDB summary");
+        assert_eq!(row["year"], 2020);
+        assert_eq!(row["originallyAvailableAt"], "2020-06-15");
+    }
+
+    #[test]
+    fn synthetic_related_rating_keys_decode_to_tmdb_ids() {
+        assert_eq!(synthetic_tmdb_id(9_500_603), Some(603));
+        assert_eq!(synthetic_tmdb_id(9_499_999), None);
+    }
 }
 
 /// `.../library/metadata/123` or `123` → 123.
@@ -425,6 +558,7 @@ impl Shim {
             streams: Mutex::new(HashMap::new()),
             sub_urls: Mutex::new(HashMap::new()),
             poster_fallbacks: Mutex::new(HashMap::new()),
+            tmdb_fallbacks: Mutex::new(HashMap::new()),
             next_sub: AtomicI64::new(900_000_000),
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
             probes: crate::shim_probe::ProbeCache::default(),
@@ -954,13 +1088,14 @@ impl Shim {
                 "size": 0, "Metadata": []
             })
         };
-        let Some(Ident::Title { id, .. }) = self
-            .keys
-            .ident(rk)
-            .filter(|i| matches!(i, Ident::Title { type_, .. } if type_ == "movie"))
-        else {
+        if synthetic_tmdb_id(rk).is_none()
+            && !matches!(
+                self.keys.ident(rk),
+                Some(Ident::Title { type_, .. }) if type_ == "movie"
+            )
+        {
             return Response::json(&container(json!({"Hub": [empty_hub()]})));
-        };
+        }
         let Some(client) = TmdbClient::from_env() else {
             return Response::json_status(
                 503,
@@ -969,10 +1104,7 @@ impl Shim {
                 })),
             );
         };
-        let imdb_id = self
-            .meta("movie", &id)
-            .and_then(|meta| meta.imdb_id.clone());
-        let tmdb_id = match resolve_tmdb_movie_id(&client, &id, imdb_id.as_deref()) {
+        let tmdb_id = match self.related_tmdb_id(rk, &client) {
             Ok(Some(id)) => id,
             Ok(None) => {
                 return Response::json(&container(json!({"Hub": [empty_hub()]})));
@@ -1001,7 +1133,9 @@ impl Shim {
             .recommendations
             .results
             .iter()
-            .filter(|movie| movie.id > 0)
+            .filter(|movie| {
+                movie.id > 0 && movie.id <= i64::MAX as u64 - TMDB_FALLBACK_KEY_BASE as u64
+            })
             .take(10)
             .map(|movie| self.tmdb_recommendation_row(movie))
             .collect();
@@ -1012,14 +1146,49 @@ impl Shim {
         Response::json(&container(json!({"Hub": [hub]})))
     }
 
+    fn related_tmdb_id(
+        &self,
+        rk: i64,
+        client: &TmdbClient,
+    ) -> plx_stremio::model::Result<Option<u64>> {
+        if let Some(tmdb_id) = synthetic_tmdb_id(rk) {
+            return Ok(Some(tmdb_id));
+        }
+        let Some(Ident::Title { id, .. }) = self
+            .keys
+            .ident(rk)
+            .filter(|ident| matches!(ident, Ident::Title { type_, .. } if type_ == "movie"))
+        else {
+            return Ok(None);
+        };
+        let imdb_id = self
+            .meta("movie", &id)
+            .and_then(|meta| meta.imdb_id.clone());
+        resolve_tmdb_movie_id(client, &id, imdb_id.as_deref())
+    }
+
     fn tmdb_recommendation_row(&self, movie: &TmdbMovie) -> Value {
-        let id = format!("tmdb:{}", movie.id);
+        let stremio_id = format!("tmdb:{}", movie.id);
+        if let Some(meta) = self.meta("movie", &stremio_id) {
+            let preview = preview_from_meta(&meta, &stremio_id);
+            return self.preview_row(&preview);
+        }
+
+        let fallback_key = TMDB_FALLBACK_KEY_BASE + movie.id as i64;
+        self.tmdb_fallbacks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(fallback_key, movie.clone());
+        self.tmdb_fallback_row(movie, fallback_key)
+    }
+
+    fn tmdb_fallback_row(&self, movie: &TmdbMovie, fallback_key: i64) -> Value {
         let poster = movie.poster_path.as_deref().and_then(|path| {
             path.starts_with('/')
                 .then(|| format!("https://image.tmdb.org/t/p/w300{path}"))
         });
         let preview = MetaPreview {
-            id,
+            id: format!("tmdb:{}", movie.id),
             type_: "movie".into(),
             name: movie.title.clone(),
             poster: poster.clone(),
@@ -1032,8 +1201,67 @@ impl Shim {
             ..MetaPreview::default()
         };
         let mut row = self.preview_row(&preview);
+        row["ratingKey"] = json!(fallback_key.to_string());
+        row["key"] = json!(format!("/library/metadata/{fallback_key}"));
         if let Some(poster) = poster {
             row["thumb"] = json!(poster);
+        }
+        row
+    }
+
+    fn tmdb_fallback_movie(&self, rk: i64) -> Option<TmdbMovie> {
+        self.tmdb_fallbacks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&rk)
+            .cloned()
+    }
+
+    fn tmdb_details_row(&self, details: &TmdbMovieDetails, rk: i64) -> Value {
+        let movie = &details.movie;
+        let image_url = |path: Option<&str>| {
+            path.filter(|path| path.starts_with('/'))
+                .map(|path| format!("https://image.tmdb.org/t/p/w300{path}"))
+        };
+        let preview = MetaPreview {
+            id: format!("tmdb:{}", movie.id),
+            type_: "movie".into(),
+            name: movie.title.clone(),
+            poster: image_url(movie.poster_path.as_deref()),
+            background: image_url(movie.backdrop_path.as_deref()),
+            description: movie.overview.clone(),
+            release_info: movie.release_date.clone(),
+            genres: details
+                .movie
+                .genres
+                .iter()
+                .map(|genre| genre.name.clone())
+                .collect(),
+            ..MetaPreview::default()
+        };
+        let mut row = self.preview_row(&preview);
+        row["ratingKey"] = json!(rk.to_string());
+        row["key"] = json!(format!("/library/metadata/{rk}"));
+        row["Role"] = Value::Array(
+            details
+                .credits
+                .cast
+                .iter()
+                .filter_map(tmdb_role)
+                .take(10)
+                .collect(),
+        );
+        row["Genre"] = tags(&preview.genres, false);
+        row["duration"] = json!(movie
+            .runtime
+            .filter(|minutes| *minutes > 0)
+            .map(|minutes| i64::from(minutes) * 60_000)
+            .unwrap_or(DEFAULT_MOVIE_MS));
+        if let Some(date) = date_of(movie.release_date.as_deref()) {
+            row["originallyAvailableAt"] = json!(date);
+        }
+        if let Some(backdrop) = preview.background {
+            row["art"] = json!(backdrop);
         }
         row
     }
@@ -1182,8 +1410,22 @@ impl Shim {
         rk: i64,
         probe_index: Option<usize>,
     ) -> Option<(Value, Option<Result<crate::shim_probe::ProbeInfo, String>>)> {
-        let ident = self.keys.ident(rk)?;
-        let mut row = self.row(rk)?;
+        let ident = self.keys.ident(rk);
+        let fallback = if ident.is_none() {
+            self.tmdb_fallback_movie(rk)
+        } else {
+            None
+        };
+        let ident = ident.or_else(|| {
+            fallback.as_ref().map(|movie| Ident::Title {
+                type_: "movie".into(),
+                id: format!("tmdb:{}", movie.id),
+            })
+        })?;
+        let mut row = match fallback {
+            Some(movie) => self.tmdb_fallback_row(&movie, rk),
+            None => self.row(rk)?,
+        };
         let mut verdict = None;
         if self.stream_target(&ident).is_some() {
             let dur = row["duration"].as_i64().unwrap_or(0);
@@ -1590,6 +1832,31 @@ impl Shim {
                 self.section(req, k.parse().unwrap_or(0), rest)
             }
             (_, ["library", "metadata", rk]) => {
+                if let Some(fallback_key) = rk.parse::<i64>().ok() {
+                    if fallback_key >= TMDB_FALLBACK_KEY_BASE {
+                        let tmdb_id = (fallback_key - TMDB_FALLBACK_KEY_BASE) as u64;
+                        let Some(client) = TmdbClient::from_env() else {
+                            return Response::json_status(
+                                503,
+                                &container(json!({
+                                    "Metadata": [], "error": "TMDB_API_KEY is not configured"
+                                })),
+                            );
+                        };
+                        return match client.movie_details(tmdb_id) {
+                            Ok(details) => Response::json(&container(json!({
+                                "Metadata": [self.tmdb_details_row(&details, fallback_key)]
+                            }))),
+                            Err(error) => Response::json_status(
+                                503,
+                                &container(json!({
+                                    "Metadata": [],
+                                    "error": format!("TMDB movie details lookup failed: {error}")
+                                })),
+                            ),
+                        };
+                    }
+                }
                 let mut rows: Vec<Value> = rk
                     .split(',')
                     .filter_map(|x| x.parse().ok())
