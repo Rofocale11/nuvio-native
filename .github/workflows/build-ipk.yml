@@ -76,6 +76,7 @@ jobs:
           NUVIO_SUPABASE_FALLBACK_URL: ${{ vars.NUVIO_SUPABASE_FALLBACK_URL }}
           DEVICE_LOGIN_WEB_BASE_URL: ${{ vars.DEVICE_LOGIN_WEB_BASE_URL }}
           TV_LOGIN_WEB_BASE_URL: ${{ vars.TV_LOGIN_WEB_BASE_URL }}
+          TMDB_API_KEY: ${{ vars.TMDB_API_KEY }}
 
       - name: Probe AVFrame layout
         if: always()

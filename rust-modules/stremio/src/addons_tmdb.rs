@@ -87,9 +87,11 @@ struct ExternalIdsResponse {
 }
 
 impl TmdbClient {
-    /// Uses the runtime `TMDB_API_KEY`; an unset or blank key disables TMDB lookups.
+    /// Uses the compiled-in or runtime `TMDB_API_KEY`; an unset or blank key disables TMDB lookups.
     pub fn from_env() -> Option<Self> {
-        let api_key = std::env::var("TMDB_API_KEY").ok()?;
+        let api_key = option_env!("TMDB_API_KEY")
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("TMDB_API_KEY").ok())?;
         let api_key = api_key.trim();
         (!api_key.is_empty()).then(|| Self {
             api_key: api_key.to_string(),
