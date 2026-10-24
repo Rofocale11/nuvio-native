@@ -281,16 +281,34 @@ fn youtube_id(value: &Value) -> Option<String> {
     .then(|| id.to_string())
 }
 
+fn trailer_metadata(rk: i64, youtube_id: &str, title: &str) -> Value {
+    let trailer_key = format!("/library/metadata/{rk}/trailer");
+    json!({
+        // The native client's MDE request uses ratingKey as the numeric
+        // /library/metadata/{ratingKey} path. "trailer" makes the shim's
+        // decision route reject the item before it ever requests the Part.
+        "ratingKey": rk.to_string(),
+        "key": trailer_key,
+        "type": "clip",
+        "subtype": "trailer",
+        "extraType": 1,
+        "title": title,
+        "thumb": format!("https://img.youtube.com/vi/{youtube_id}/hqdefault.jpg"),
+        "Media": [{
+            "container": "mp4",
+            "videoCodec": "h264",
+            "audioCodec": "aac",
+            "Part": [{
+                "key": trailer_key,
+                "container": "mp4"
+            }]
+        }]
+    })
+}
+
 fn trailer_extras(rk: i64, youtube_id: &str, title: &str) -> Value {
     json!({
-        "size": 1,
-        "Video": [{
-            "ratingKey": "trailer",
-            "key": format!("/library/metadata/{rk}/trailer"),
-            "type": "clip",
-            "title": title,
-            "thumb": format!("https://img.youtube.com/vi/{youtube_id}/hqdefault.jpg")
-        }]
+        "Metadata": [trailer_metadata(rk, youtube_id, title)]
     })
 }
 
@@ -346,18 +364,44 @@ mod tmdb_metadata_tests {
                 "thumb": "https://image.tmdb.org/t/p/w300/actor.jpg"
             })
         );
+        let extras = trailer_extras(42, "youtube123", "Official Trailer");
         assert_eq!(
-            trailer_extras(42, "youtube123", "Official Trailer"),
+            extras,
             json!({
-                "size": 1,
-                "Video": [{
-                    "ratingKey": "trailer",
+                "Metadata": [{
+                    "ratingKey": "42",
                     "key": "/library/metadata/42/trailer",
                     "type": "clip",
+                    "subtype": "trailer",
+                    "extraType": 1,
                     "title": "Official Trailer",
-                    "thumb": "https://img.youtube.com/vi/youtube123/hqdefault.jpg"
+                    "thumb": "https://img.youtube.com/vi/youtube123/hqdefault.jpg",
+                    "Media": [{
+                        "container": "mp4",
+                        "videoCodec": "h264",
+                        "audioCodec": "aac",
+                        "Part": [{
+                            "key": "/library/metadata/42/trailer",
+                            "container": "mp4"
+                        }]
+                    }]
                 }]
             })
+        );
+        let parsed: plx_plex::plex::ExtrasHub = serde_json::from_value(extras).unwrap();
+        let trailer = &parsed.metadata[0];
+        assert_eq!(trailer.kind, "clip");
+        assert_eq!(trailer.rating_key, "42");
+        assert_eq!(trailer.subtype, "trailer");
+        assert_eq!(trailer.extra_type, 1);
+        assert_eq!(
+            trailer.first_part().map(|part| part.key.as_str()),
+            Some("/library/metadata/42/trailer")
+        );
+        assert_eq!(
+            trailing_key(&format!("/library/metadata/{}", trailer.rating_key)),
+            Some(42),
+            "the MDE request must address a numeric rating key"
         );
     }
 
@@ -939,6 +983,18 @@ impl Shim {
         if let Some((youtube_id, title)) = trailer {
             row["Extras"] = trailer_extras(rk, &youtube_id, &title);
         }
+    }
+
+    fn extras(&self, rk: i64) -> Response {
+        let Some(mut row) = self.row(rk) else {
+            return Response::json(&container(json!({"Metadata": []})));
+        };
+        self.enrich_movie_row(rk, &mut row);
+        let metadata = row["Extras"]["Metadata"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        Response::json(&container(json!({"Metadata": metadata})))
     }
 
     fn related_hub(&self, rk: i64) -> Response {
@@ -1614,6 +1670,9 @@ impl Shim {
                     }
                 }
                 Response::json(&container(json!({"Metadata": rows})))
+            }
+            (_, ["library", "metadata", rk, "extras"]) => {
+                self.extras(rk.parse().unwrap_or(-1))
             }
             (_, ["library", "metadata", rk, "children"]) => Response::json(&container(
                 json!({"Metadata": self.children(rk.parse().unwrap_or(0))}),

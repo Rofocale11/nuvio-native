@@ -25,5 +25,8 @@ flate2 = "1"
 qrcodegen = "=1.8.0"
 png = "0.18"
 
+[dev-dependencies]
+plx_plex = { path = "../plex" }
+
 [lints]
 workspace = true

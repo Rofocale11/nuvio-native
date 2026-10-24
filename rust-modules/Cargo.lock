@@ -778,6 +778,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "plx_net",
+ "plx_plex",
  "plx_stremio",
  "png",
  "qrcodegen",
