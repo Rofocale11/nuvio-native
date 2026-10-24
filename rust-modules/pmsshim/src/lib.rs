@@ -9,8 +9,9 @@
 //! - a Stremio title, a season and an episode each get a stable numeric ratingKey ([`store::Keys`]);
 //! - a movie's or episode's `Media[]` is its playable streams, best first ([`media`]); a Part key
 //!   redirects to the stream's real URL;
-//! - movie detail rows can add TMDB cast, trailer and related-movie metadata when `TMDB_API_KEY`
-//!   is configured; the addon crate performs those requests through its existing HTTP client;
+//! - movie and show detail rows can add TMDB cast, trailer and related-title metadata when
+//!   `TMDB_API_KEY` is configured; the addon crate performs those requests through its existing
+//!   HTTP client;
 //! - the transcoder decision always answers direct play; watch state is kept locally.
 //!
 //! Side API for the front end's own Nuvio screens (not PMS): `/nuvio/streams?ratingKey=` lists

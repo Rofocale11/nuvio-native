@@ -1,4 +1,4 @@
-//! TMDB's movie metadata endpoints, using the Stremio crate's existing HTTP transport.
+//! TMDB's movie and TV metadata endpoints, using the Stremio crate's existing HTTP transport.
 
 use crate::addon_http;
 use crate::model::{Error, Result};
@@ -47,6 +47,19 @@ pub struct TmdbMovie {
     pub genres: Vec<TmdbGenre>,
 }
 
+/// A TV show, as TMDB spells it: `name`/`first_air_date` where a movie has `title`/`release_date`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbShow {
+    pub id: u64,
+    pub name: String,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+    pub first_air_date: Option<String>,
+    pub genres: Vec<TmdbGenre>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TmdbGenre {
@@ -86,6 +99,21 @@ pub struct TmdbMovieDetails {
     pub recommendations: TmdbRecommendations,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbShowRecommendations {
+    pub results: Vec<TmdbShow>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbShowDetails {
+    #[serde(flatten)]
+    pub show: TmdbShow,
+    pub credits: TmdbCredits,
+    pub recommendations: TmdbShowRecommendations,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct VideosResponse {
@@ -96,6 +124,7 @@ struct VideosResponse {
 #[serde(default)]
 struct FindResponse {
     movie_results: Vec<TmdbMovie>,
+    tv_results: Vec<TmdbShow>,
 }
 
 #[derive(Default, Deserialize)]
@@ -190,6 +219,37 @@ impl TmdbClient {
     pub fn movie_details(&self, movie_id: u64) -> Result<TmdbMovieDetails> {
         self.get(&format!(
             "/movie/{movie_id}?append_to_response=credits,recommendations"
+        ))
+    }
+
+    /// Resolves a Stremio series id (`tmdb:123`, `123`, or an IMDb `tt…` id) to TMDB's numeric id.
+    /// `/find` answers a show's IMDb id under `tv_results`, not `movie_results`.
+    pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
+        let id = crate::addons::content_level_id(id);
+        if !id.starts_with("tt") {
+            return self.movie_id(&id);
+        }
+        let path = format!(
+            "/find/{}?external_source=imdb_id&api_key={}",
+            addon_http::encode_component(&id),
+            addon_http::encode_component(&self.api_key)
+        );
+        let cache_path = format!("/find/{id}?external_source=imdb_id");
+        let body = cached_json(&self.cache, (self.api_key.clone(), cache_path), || {
+            addon_http::get_json(&format!("{API_BASE}{path}"), addon_http::ADDON)
+        })?;
+        let found: FindResponse =
+            serde_json::from_value(body).map_err(|error| Error::Parse(error.to_string()))?;
+        Ok(found
+            .tv_results
+            .first()
+            .map(|show| show.id)
+            .filter(|id| *id > 0))
+    }
+
+    pub fn tv_details(&self, tv_id: u64) -> Result<TmdbShowDetails> {
+        self.get(&format!(
+            "/tv/{tv_id}?append_to_response=credits,recommendations"
         ))
     }
 
@@ -289,9 +349,38 @@ mod tests {
             client.url("/movie/603?append_to_response=credits,recommendations"),
             "https://api.themoviedb.org/3/movie/603?append_to_response=credits,recommendations&api_key=key%20%2B"
         );
+        assert_eq!(
+            client.url("/tv/1396?append_to_response=credits,recommendations"),
+            "https://api.themoviedb.org/3/tv/1396?append_to_response=credits,recommendations&api_key=key%20%2B"
+        );
         assert_eq!(client.movie_id("tmdb:603:1:2").unwrap(), Some(603));
         assert_eq!(client.movie_id("603").unwrap(), Some(603));
         assert_eq!(client.movie_id("not-a-movie-id").unwrap(), None);
+    }
+
+    #[test]
+    fn decodes_tmdb_tv_endpoint_shapes() {
+        let details: TmdbShowDetails = serde_json::from_value(serde_json::json!({
+            "id": 1396,
+            "name": "Breaking Bad",
+            "overview": "Overview",
+            "poster_path": "/poster.jpg",
+            "first_air_date": "2008-01-20",
+            "genres": [{"id": 18, "name": "Drama"}],
+            "credits": {
+                "cast": [{"name": "Actor", "character": "Role", "profile_path": "/actor.jpg"}]
+            },
+            "recommendations": {
+                "results": [{"id": 60059, "name": "Better Call Saul", "poster_path": "/bcs.jpg"}]
+            }
+        }))
+        .unwrap();
+        assert_eq!(details.show.id, 1396);
+        assert_eq!(details.show.name, "Breaking Bad");
+        assert_eq!(details.show.first_air_date.as_deref(), Some("2008-01-20"));
+        assert_eq!(details.show.genres[0].name, "Drama");
+        assert_eq!(details.credits.cast[0].character, "Role");
+        assert_eq!(details.recommendations.results[0].name, "Better Call Saul");
     }
 
     #[test]
