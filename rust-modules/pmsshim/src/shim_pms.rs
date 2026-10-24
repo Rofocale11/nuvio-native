@@ -6,12 +6,13 @@ use crate::shim_core::{Config, MACHINE_ID};
 use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
+use innertube_rs::{FormatFilter, FormatType, Innertube, QualityPreference};
 use plx_stremio::addons_tmdb::{TmdbCast, TmdbClient, TmdbVideo};
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const META_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -22,6 +23,88 @@ const HUBS_BUDGET: Duration = Duration::from_secs(4);
 /// Catalog fetches in flight at once (the TV's network and CPU are shared with the UI).
 const CATALOG_PARALLEL: usize = 8;
 const STREAM_TTL: Duration = Duration::from_secs(30 * 60);
+/// Trailer rating keys occupy a separate range from the shim's persisted item keys.
+const TRAILER_RATING_KEY_BASE: i64 = 9_000_000;
+static TRAILER_URLS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn trailer_url_cache() -> &'static Mutex<HashMap<String, String>> {
+    TRAILER_URLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn trailer_url_expired_at(url: &str, now: u64) -> bool {
+    url.split_once('?')
+        .and_then(|(_, query)| {
+            query
+                .split('&')
+                .find_map(|part| part.strip_prefix("expire="))
+        })
+        .and_then(|expiry| expiry.parse::<u64>().ok())
+        .is_some_and(|expiry| expiry <= now)
+}
+
+fn cached_trailer_redirect(cache: &Mutex<HashMap<String, String>>, key: &str) -> Option<Response> {
+    let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+    let location = cache.get(key)?.clone();
+    if trailer_url_expired_at(&location, now_secs().max(0) as u64) {
+        cache.remove(key);
+        return None;
+    }
+    Some(Response::redirect(&location))
+}
+
+fn cache_trailer_url(cache: &Mutex<HashMap<String, String>>, key: String, url: String) {
+    let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+    let now = now_secs().max(0) as u64;
+    cache.retain(|_, cached_url| !trailer_url_expired_at(cached_url, now));
+    if cache.len() >= 512 {
+        cache.clear();
+    }
+    cache.insert(key, url);
+}
+
+fn youtube_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn youtube_client(runtime: &tokio::runtime::Runtime) -> Result<Arc<Innertube>, String> {
+    static CLIENT: OnceLock<Mutex<Option<Arc<Innertube>>>> = OnceLock::new();
+    let mut client = CLIENT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if client.is_none() {
+        let initialized = runtime
+            .block_on(Innertube::new())
+            .map_err(|error| error.to_string())?;
+        *client = Some(Arc::new(initialized));
+    }
+    client
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "YouTube client initialization returned no client".into())
+}
+
+fn resolve_youtube_mp4(youtube_id: &str) -> Result<String, String> {
+    let runtime = youtube_runtime()?;
+    let client = youtube_client(runtime)?;
+    let filter = FormatFilter {
+        format_type: FormatType::AudioVideo,
+        quality: QualityPreference::Highest,
+        container: Some("mp4".into()),
+    };
+    runtime
+        .block_on(client.get_stream_url(youtube_id, &filter))
+        .map_err(|error| error.to_string())
+}
 /// Rows a catalog listing reports beyond what it has fetched while the catalog is not exhausted,
 /// so a grid keeps asking for the next page.
 const MORE_HINT: i64 = 50;
@@ -257,6 +340,11 @@ fn youtube_id(value: &Value) -> Option<String> {
             .1
             .split(['?', '&', '/'])
             .next()?
+    } else if raw.contains("img.youtube.com/vi/") {
+        raw.split_once("img.youtube.com/vi/")?
+            .1
+            .split(['?', '&', '/'])
+            .next()?
     } else if raw.contains("youtube.com/watch?") {
         raw.split_once('?')?
             .1
@@ -281,14 +369,24 @@ fn youtube_id(value: &Value) -> Option<String> {
     .then(|| id.to_string())
 }
 
-fn trailer_metadata(rk: i64, youtube_id: &str, title: &str) -> Value {
-    let trailer_key = format!("/library/metadata/{rk}/trailer");
-    json!({
-        // The native client's MDE request uses ratingKey as the numeric
-        // /library/metadata/{ratingKey} path. "trailer" makes the shim's
-        // decision route reject the item before it ever requests the Part.
-        "ratingKey": rk.to_string(),
-        "key": trailer_key,
+fn trailer_rating_key(parent_rk: i64) -> Option<i64> {
+    (parent_rk > 0)
+        .then(|| TRAILER_RATING_KEY_BASE.checked_add(parent_rk))
+        .flatten()
+}
+
+fn trailer_parent_key(trailer_rk: i64) -> Option<i64> {
+    (trailer_rk > TRAILER_RATING_KEY_BASE)
+        .then(|| trailer_rk.checked_sub(TRAILER_RATING_KEY_BASE))
+        .flatten()
+}
+
+fn trailer_metadata(rk: i64, youtube_id: &str, title: &str) -> Option<Value> {
+    let trailer_rk = trailer_rating_key(rk)?;
+    let part_key = format!("/library/metadata/{rk}/trailer");
+    Some(json!({
+        "ratingKey": trailer_rk.to_string(),
+        "key": format!("/library/metadata/{trailer_rk}"),
         "type": "clip",
         "subtype": "trailer",
         "extraType": 1,
@@ -299,17 +397,17 @@ fn trailer_metadata(rk: i64, youtube_id: &str, title: &str) -> Value {
             "videoCodec": "h264",
             "audioCodec": "aac",
             "Part": [{
-                "key": trailer_key,
+                "key": part_key,
                 "container": "mp4"
             }]
         }]
-    })
+    }))
 }
 
-fn trailer_extras(rk: i64, youtube_id: &str, title: &str) -> Value {
-    json!({
-        "Metadata": [trailer_metadata(rk, youtube_id, title)]
-    })
+fn trailer_extras(rk: i64, youtube_id: &str, title: &str) -> Option<Value> {
+    Some(json!({
+        "Metadata": [trailer_metadata(rk, youtube_id, title)?]
+    }))
 }
 
 fn preview_from_meta(meta: &Meta, id: &str) -> MetaPreview {
@@ -364,13 +462,13 @@ mod tmdb_metadata_tests {
                 "thumb": "https://image.tmdb.org/t/p/w300/actor.jpg"
             })
         );
-        let extras = trailer_extras(42, "youtube123", "Official Trailer");
+        let extras = trailer_extras(42, "youtube123", "Official Trailer").unwrap();
         assert_eq!(
             extras,
             json!({
                 "Metadata": [{
-                    "ratingKey": "42",
-                    "key": "/library/metadata/42/trailer",
+                    "ratingKey": "9000042",
+                    "key": "/library/metadata/9000042",
                     "type": "clip",
                     "subtype": "trailer",
                     "extraType": 1,
@@ -391,7 +489,7 @@ mod tmdb_metadata_tests {
         let parsed: plx_plex::plex::ExtrasHub = serde_json::from_value(extras).unwrap();
         let trailer = &parsed.metadata[0];
         assert_eq!(trailer.kind, "clip");
-        assert_eq!(trailer.rating_key, "42");
+        assert_eq!(trailer.rating_key, "9000042");
         assert_eq!(trailer.subtype, "trailer");
         assert_eq!(trailer.extra_type, 1);
         assert_eq!(
@@ -400,9 +498,16 @@ mod tmdb_metadata_tests {
         );
         assert_eq!(
             trailing_key(&format!("/library/metadata/{}", trailer.rating_key)),
-            Some(42),
+            Some(9_000_042),
             "the MDE request must address a numeric rating key"
         );
+        assert_eq!(trailer_parent_key(9_000_042), Some(42));
+        assert_eq!(
+            trailer_rating_key(10_003),
+            Some(9_010_003),
+            "the trailer key is 9,000,000 plus the full parent key"
+        );
+        assert_eq!(trailer_rating_key(i64::MAX), None);
     }
 
     #[test]
@@ -417,6 +522,13 @@ mod tmdb_metadata_tests {
         );
         assert_eq!(
             youtube_id(&json!("https://www.youtube.com/watch?v=youtube123&t=3")).as_deref(),
+            Some("youtube123")
+        );
+        assert_eq!(
+            youtube_id(&json!(
+                "https://img.youtube.com/vi/youtube123/hqdefault.jpg"
+            ))
+            .as_deref(),
             Some("youtube123")
         );
         assert_eq!(youtube_id(&json!("not a youtube id")), None);
@@ -913,7 +1025,9 @@ impl Shim {
                 .chain(&meta.trailers)
                 .find_map(youtube_id)
             {
-                row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
+                if let Some(extras) = trailer_extras(rk, &youtube_id, "Official Trailer") {
+                    row["Extras"] = extras;
+                }
             }
             return;
         };
@@ -931,7 +1045,9 @@ impl Shim {
                 .chain(&meta.trailers)
                 .find_map(youtube_id)
             {
-                row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
+                if let Some(extras) = trailer_extras(rk, &youtube_id, "Official Trailer") {
+                    row["Extras"] = extras;
+                }
             }
             return;
         };
@@ -981,8 +1097,65 @@ impl Shim {
                 .map(|id| (id, "Official Trailer".into()))
         });
         if let Some((youtube_id, title)) = trailer {
-            row["Extras"] = trailer_extras(rk, &youtube_id, &title);
+            if let Some(extras) = trailer_extras(rk, &youtube_id, &title) {
+                row["Extras"] = extras;
+            }
         }
+    }
+
+    /// Resolve the synthetic trailer rating key back to its movie's Plex-shaped extra row.
+    fn trailer_row(&self, trailer_rk: i64) -> Option<Value> {
+        let parent_rk = trailer_parent_key(trailer_rk)?;
+        if !matches!(
+            self.keys.ident(parent_rk),
+            Some(Ident::Title { type_, .. }) if type_ == "movie"
+        ) {
+            return None;
+        }
+        let mut parent = self.row(parent_rk)?;
+        self.enrich_movie_row(parent_rk, &mut parent);
+        let rating_key = trailer_rk.to_string();
+        parent["Extras"]["Metadata"]
+            .as_array()?
+            .iter()
+            .find(|row| row["ratingKey"].as_str() == Some(rating_key.as_str()))
+            .cloned()
+    }
+
+    fn trailer_part(&self, parent_rk: i64) -> Response {
+        let cache_key = parent_rk.to_string();
+        if let Some(response) = cached_trailer_redirect(trailer_url_cache(), &cache_key) {
+            return response;
+        }
+        let Some(trailer_rk) = trailer_rating_key(parent_rk) else {
+            return Response::not_found();
+        };
+        let Some(row) = self.trailer_row(trailer_rk) else {
+            return Response::not_found();
+        };
+        let Some(youtube_id) = row
+            .get("thumb")
+            .and_then(Value::as_str)
+            .and_then(|thumb| youtube_id(&Value::String(thumb.to_string())))
+        else {
+            return Response::bytes(
+                502,
+                "text/plain",
+                b"Trailer metadata did not include a YouTube ID".to_vec(),
+            );
+        };
+        let url = match resolve_youtube_mp4(&youtube_id) {
+            Ok(url) => url,
+            Err(error) => {
+                eprintln!("pmsshim: YouTube trailer stream resolution failed: {error}");
+                return Response::json_status(
+                    502,
+                    &json!({"error": format!("Unable to resolve trailer stream: {error}")}),
+                );
+            }
+        };
+        cache_trailer_url(trailer_url_cache(), cache_key, url.clone());
+        Response::redirect(&url)
     }
 
     fn extras(&self, rk: i64) -> Response {
@@ -1348,6 +1521,20 @@ impl Shim {
                 "transcodeDecisionCode": 4005, "transcodeDecisionText": why, "mdeDecisionCode": 2000, "Metadata": []}),
             ))
         };
+        if let Some(mut row) = self.trailer_row(rk) {
+            if index != 0 {
+                return refuse("This trailer stream is no longer available.".into());
+            }
+            if let Some(part) = row["Media"][0]["Part"][0].as_object_mut() {
+                part.insert("decision".into(), json!("directplay"));
+            }
+            return Response::json(&container(json!({
+                "generalDecisionCode": 1000,
+                "generalDecisionText": "Direct play OK",
+                "mdeDecisionCode": 1000,
+                "Metadata": [row]
+            })));
+        }
         let Some((mut row, verdict)) = self.item_probed(rk, Some(index)) else {
             return refuse("This title is no longer available from your addons.".into());
         };
@@ -1656,7 +1843,7 @@ impl Shim {
                 let mut rows: Vec<Value> = rk
                     .split(',')
                     .filter_map(|x| x.parse().ok())
-                    .filter_map(|k| self.item(k))
+                    .filter_map(|k| self.trailer_row(k).or_else(|| self.item(k)))
                     .collect();
                 if rows.is_empty() {
                     return Response::json_status(404, &container(json!({"Metadata": []})));
@@ -1671,8 +1858,9 @@ impl Shim {
                 }
                 Response::json(&container(json!({"Metadata": rows})))
             }
-            (_, ["library", "metadata", rk, "extras"]) => {
-                self.extras(rk.parse().unwrap_or(-1))
+            (_, ["library", "metadata", rk, "extras"]) => self.extras(rk.parse().unwrap_or(-1)),
+            (_, ["library", "metadata", rk, "trailer"]) => {
+                self.trailer_part(rk.parse().unwrap_or(-1))
             }
             (_, ["library", "metadata", rk, "children"]) => Response::json(&container(
                 json!({"Metadata": self.children(rk.parse().unwrap_or(0))}),
@@ -2029,7 +2217,10 @@ impl Shim {
             .unwrap_or(-1);
         // The play is about to start: wait for the streams and probe the lead, so the queue's row
         // carries the real fields rather than the detail page's early guesses.
-        let Some((first, _)) = self.item_probed(rk, Some(0)) else {
+        let first = self
+            .trailer_row(rk)
+            .or_else(|| self.item_probed(rk, Some(0)).map(|(row, _)| row));
+        let Some(first) = first else {
             return Response::json(&container(json!({"Metadata": [], "playQueueID": 1})));
         };
         let mut rows = vec![first];
@@ -2250,6 +2441,81 @@ fn _assert_send_sync() {
 #[cfg(test)]
 mod playback_regressions {
     use super::*;
+
+    #[test]
+    fn trailer_rating_key_resolves_metadata_and_mde_without_aliasing_the_movie() {
+        let shim = Arc::new(Shim::new(
+            Arc::new(crate::shim_fake::FakeBackend),
+            Config::default(),
+        ));
+        let parent_rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tmdb:not-an-id".into(),
+        });
+        shim.metas.lock().unwrap().insert(
+            ("movie".into(), "tmdb:not-an-id".into()),
+            (
+                Instant::now(),
+                Arc::new(Meta {
+                    id: "tmdb:not-an-id".into(),
+                    type_: "movie".into(),
+                    name: "Trailer fixture".into(),
+                    trailer_streams: vec![json!({"youtubeId": "youtube123"})],
+                    ..Default::default()
+                }),
+            ),
+        );
+        let trailer_rk = trailer_rating_key(parent_rk).unwrap();
+
+        let metadata = shim.handle(&Request {
+            method: "GET".into(),
+            path: format!("/library/metadata/{trailer_rk}"),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        });
+        let metadata: Value = serde_json::from_slice(&metadata.body).unwrap();
+        let trailer = &metadata["MediaContainer"]["Metadata"][0];
+        assert_eq!(trailer["ratingKey"], trailer_rk.to_string());
+        assert_eq!(trailer["title"], "Official Trailer");
+        assert_eq!(
+            trailer["Media"][0]["Part"][0]["key"],
+            format!("/library/metadata/{parent_rk}/trailer")
+        );
+
+        let decision = shim.handle(&Request {
+            method: "GET".into(),
+            path: "/video/:/transcode/universal/decision".into(),
+            query: HashMap::from([("path".into(), format!("/library/metadata/{trailer_rk}"))]),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        });
+        let decision: Value = serde_json::from_slice(&decision.body).unwrap();
+        assert_eq!(decision["MediaContainer"]["generalDecisionCode"], 1000);
+        let decided = &decision["MediaContainer"]["Metadata"][0];
+        assert_eq!(decided["ratingKey"], trailer_rk.to_string());
+        assert_eq!(decided["Media"][0]["Part"][0]["decision"], "directplay");
+
+        let cache_key = parent_rk.to_string();
+        let stream_url = "https://video.example/trailer.mp4?expire=4102444800";
+        trailer_url_cache()
+            .lock()
+            .unwrap()
+            .insert(cache_key.clone(), stream_url.into());
+        let part = shim.handle(&Request {
+            method: "GET".into(),
+            path: format!("/library/metadata/{parent_rk}/trailer"),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        });
+        assert_eq!(part.status, 302);
+        assert_eq!(
+            part.headers,
+            [("Location".into(), stream_url.into())]
+        );
+        trailer_url_cache().lock().unwrap().remove(&cache_key);
+    }
 
     #[test]
     fn an_inflight_stream_list_cannot_direct_play_a_placeholder() {

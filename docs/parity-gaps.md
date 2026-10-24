@@ -979,8 +979,9 @@ player, transport and tracks auditors, and is counted once in the themes above.
   the same direct-play-only path and writes no watch state. `continuous` is omitted so EOS
   cannot Up-Next into a sibling extra. `metadata::current()` stays the parent.
   The extras shelf is `screens/detail/extras.rs`. `Detail.extras` holds every row;
-  `Detail::trailer()` is the picker winner. Item menu Play Trailer is still cache-only from the
-  loaded parent.
+  `Detail::trailer()` is the picker winner. Item menu Play Trailer selects its trailer from the
+  loaded parent; on the first Part request the shim resolves the YouTube ID to an MP4 URL and
+  caches the expiring URL for later redirects.
 
 - **The in-player action set is scattered across three controls with no single "More" list, and no Settings entry** — `minor` / `medium`
   The official player's More menu is one list: Subtitle Track, Audio Track, Settings, Go to Show, Watch Together, Shuffle Season, Delete. Ours splits the two track pickers onto right-edge discs and buries Go to Show inside the Info card's button column; there is no consolidated list, and no Settings row at all (no playback-quality, subtitle-appearance, or player-preferences screen exists anywhere in the app).

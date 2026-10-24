@@ -17,6 +17,8 @@ path = "src/bin/serve.rs"
 [dependencies]
 plx_net = { path = "../net" }
 plx_stremio = { path = "../stremio" }
+innertube-rs = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 # gunzip of addon subtitle downloads (already in the tree through `image`'s png decoder).
