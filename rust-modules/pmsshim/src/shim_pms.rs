@@ -60,6 +60,22 @@ fn translate_to_stremio_id(rk: i64) -> Option<String> {
         .map(|tmdb_id| format!("tmdb:{tmdb_id}"))
 }
 
+/// The addon identity of a synthetic related key, or `None` for a real one. This is the fallback
+/// for every route that needs an `Ident`: a synthetic key is never written to `keys.tsv`, so
+/// `Keys::ident` cannot resolve it.
+fn synthetic_ident(rk: i64) -> Option<Ident> {
+    let id = translate_to_stremio_id(rk)?;
+    let type_ = if synthetic_show_tmdb_id(rk).is_some() {
+        "series"
+    } else {
+        "movie"
+    };
+    Some(Ident::Title {
+        type_: type_.into(),
+        id,
+    })
+}
+
 struct CatalogCache {
     at: Instant,
     rows: Vec<MetaPreview>,
@@ -713,6 +729,10 @@ mod tmdb_metadata_tests {
             body: Vec::new(),
         });
         assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        // A movie has no streams from this backend, but the list is finished: the picker must stop
+        // asking rather than poll to its retry limit.
+        assert_eq!(body["complete"], true);
         assert_eq!(
             backend.streams.lock().unwrap().as_slice(),
             [("movie".to_string(), "tmdb:603".to_string())]
@@ -727,6 +747,26 @@ mod tmdb_metadata_tests {
             backend.subtitles.lock().unwrap().as_slice(),
             [("movie".to_string(), "tmdb:603".to_string())]
         );
+    }
+
+    #[test]
+    fn a_related_show_answers_complete_without_waiting_for_a_stream() {
+        let backend = Arc::new(RecordingBackend::default());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let response = shim.handle(&Request {
+            method: "GET".into(),
+            path: "/nuvio/streams".into(),
+            query: HashMap::from([("ratingKey".into(), "2000001396".into())]),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        });
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        // A series has no stream id until an episode is chosen: the answer is an empty FINISHED
+        // list, not `complete: false` forever (which made the Source Picker spin).
+        assert_eq!(body["complete"], true);
+        assert_eq!(body["streams"], json!([]));
+        assert!(backend.streams.lock().unwrap().is_empty());
     }
 }
 
@@ -914,7 +954,7 @@ impl Shim {
         let (type_, id) = self.stream_target(ident)?;
         // A synthetic related key exists only as `tmdb:<id>` to addons: streams and subtitles are
         // asked for that, never for the shim's own number.
-        let id = translate_to_stremio_id(rk).unwrap_or(id);
+        let translated_id = translate_to_stremio_id(rk).unwrap_or(id);
         let mut g = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = g.get(&rk) {
             if s.started.elapsed() < STREAM_TTL {
@@ -931,13 +971,15 @@ impl Shim {
         });
         g.insert(rk, slot.clone());
         drop(g);
+        // Logged once per fetch (not per poll of a live slot), just before the addons are asked.
+        eprintln!("Fetching streams for translated ID: {:?}", translated_id);
         let (backend, s2, deadline) =
             (self.backend.clone(), slot.clone(), self.cfg.stream_deadline);
         let subs_backend = self.backend.clone();
-        let (st, sid) = (type_.clone(), id.clone());
+        let (st, sid) = (type_.clone(), translated_id.clone());
         // Subtitles ride beside the streams, never in front of them.
         let slot_subs = slot.clone();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("pmsshim-streams".into())
             .spawn(move || {
                 let mut on_batch = |b: &[Stream]| {
@@ -946,7 +988,7 @@ impl Shim {
                     st.streams.extend(b.iter().take(room).cloned());
                     s2.cv.notify_all();
                 };
-                let all = backend.streams(&type_, &id, deadline, &mut on_batch);
+                let all = backend.streams(&type_, &translated_id, deadline, &mut on_batch);
                 let mut st = s2.state.lock().unwrap_or_else(|e| e.into_inner());
                 // A backend that only returns at the end (no batches) still lands here.
                 if st.streams.is_empty() && !all.is_empty() {
@@ -955,7 +997,14 @@ impl Shim {
                 st.done = true;
                 s2.cv.notify_all();
             })
-            .ok()?;
+            .is_ok();
+        // A slot whose thread never started must still report `done`, or the Source Picker polls
+        // to its retry limit and shows "loading" forever.
+        if !started {
+            let mut st = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.done = true;
+            slot.cv.notify_all();
+        }
         let _ = std::thread::Builder::new()
             .name("pmsshim-subs".into())
             .spawn(move || {
@@ -1464,6 +1513,19 @@ impl Shim {
             .cloned()
     }
 
+    /// The row of a synthetic related key that the in-memory fallback map no longer holds (a
+    /// restart, or a key reached from Continue Watching). One cached TMDB request, as the route
+    /// itself makes; `None` when TMDB is unconfigured or the title is gone.
+    fn tmdb_synthetic_row(&self, rk: i64) -> Option<Value> {
+        let client = TmdbClient::from_env()?;
+        if let Some(tmdb_id) = synthetic_show_tmdb_id(rk) {
+            let details = client.tv_details(tmdb_id).ok()?;
+            return Some(self.tmdb_show_details_row(&details, rk));
+        }
+        let details = client.movie_details(synthetic_tmdb_id(rk)?).ok()?;
+        Some(self.tmdb_details_row(&details, rk))
+    }
+
     fn tmdb_show_recommendation_row(&self, show: &TmdbShow) -> Value {
         let stremio_id = format!("tmdb:{}", show.id);
         if let Some(meta) = self.meta("series", &stremio_id) {
@@ -1720,15 +1782,22 @@ impl Shim {
         } else {
             None
         };
-        let ident = ident.or_else(|| {
-            fallback.as_ref().map(|movie| Ident::Title {
-                type_: "movie".into(),
-                id: format!("tmdb:{}", movie.id),
+        let ident = ident
+            .or_else(|| {
+                fallback.as_ref().map(|movie| Ident::Title {
+                    type_: "movie".into(),
+                    id: format!("tmdb:{}", movie.id),
+                })
             })
-        })?;
+            // The fallback map is in-memory only: after a restart a synthetic key still has to
+            // resolve, or a title the user can see refuses to play.
+            .or_else(|| synthetic_ident(rk))?;
         let mut row = match fallback {
             Some(movie) => self.tmdb_fallback_row(&movie, rk),
-            None => self.row(rk)?,
+            None => match self.row(rk) {
+                Some(row) => row,
+                None => self.tmdb_synthetic_row(rk)?,
+            },
         };
         let mut verdict = None;
         if self.stream_target(&ident).is_some() {
@@ -2379,26 +2448,14 @@ impl Shim {
                     .unwrap_or(-1);
                 // A synthetic related key has no ident of its own: addons know the title as
                 // `tmdb:<id>`, which is also the id the subtitles are asked for.
-                let ident = self.keys.ident(rk).or_else(|| {
-                    translate_to_stremio_id(rk).map(|id| Ident::Title {
-                        type_: if synthetic_show_tmdb_id(rk).is_some() {
-                            "series".into()
-                        } else {
-                            "movie".into()
-                        },
-                        id,
-                    })
-                });
-                let Some(ident) = ident else {
+                let Some(ident) = self.keys.ident(rk).or_else(|| synthetic_ident(rk)) else {
                     return Response::not_found();
                 };
-                let (ranked, _, _) = self.ranked(rk, &ident, None, DETAIL_WAIT);
-                let done = self
-                    .streams
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&rk)
-                    .is_some_and(|s| s.state.lock().map(|g| g.done).unwrap_or(true));
+                // `done` from `ranked` is authoritative: it is true when there is nothing to ask an
+                // addon for (a related show has no episode yet, or no slot could be started). The
+                // slot map cannot answer that — an absent slot must NOT read as "still loading",
+                // or the picker polls to its retry limit and never shows a result.
+                let (ranked, _, done) = self.ranked(rk, &ident, None, DETAIL_WAIT);
                 Response::json(&json!({"ratingKey": rk, "complete": done,
                     "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>()}))
             }

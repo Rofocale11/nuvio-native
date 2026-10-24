@@ -85,6 +85,7 @@ fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
 *   `unwrap_or(id)` leaves real catalog items untouched — their `Ident` id is already the Stremio id.
 *   Because `slot()` is the single entry point for both threads, a new addon-facing call must go through it (or translate explicitly) or it will leak synthetic keys.
 *   `/nuvio/streams` additionally accepts a synthetic key that has **no** `Ident` (synthetic keys are never written to `keys.tsv`), synthesising `Title { type_: "movie" | "series", id: "tmdb:<id>" }` so the Source Picker works on a related title.
+*   `complete` comes from `ranked()`, never from the slot map. An absent slot means *nothing to ask for* (a related show has no episode yet), so it must answer `complete: true` with an empty list — reporting `false` makes the picker re-poll 60× and show "loading" forever.
 
 ## 4. TMDB Enrichment (Movies & TV Shows)
 The app is enriched with TMDB data: cast on detail rows, and a "More Like This" hub of recommendations.
