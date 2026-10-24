@@ -971,8 +971,6 @@ impl Shim {
         });
         g.insert(rk, slot.clone());
         drop(g);
-        // Logged once per fetch (not per poll of a live slot), just before the addons are asked.
-        eprintln!("Fetching streams for translated ID: {:?}", translated_id);
         let (backend, s2, deadline) =
             (self.backend.clone(), slot.clone(), self.cfg.stream_deadline);
         let subs_backend = self.backend.clone();
@@ -1259,10 +1257,7 @@ impl Shim {
             resolve_tmdb_movie_id(&client, &id, meta.imdb_id.as_deref())
         } {
             Ok(id) => id,
-            Err(error) => {
-                eprintln!("pmsshim: TMDB metadata ID lookup failed: {error}");
-                None
-            }
+            Err(_) => None,
         };
         let Some(tmdb_id) = tmdb_id else {
             if let Some(youtube_id) = meta_trailer() {
@@ -1275,7 +1270,7 @@ impl Shim {
             // A show's trailers come from Cinemeta; TMDB only supplies the cast here.
             match client.tv_details(tmdb_id) {
                 Ok(details) => set_roles(row, &details.credits.cast),
-                Err(error) => eprintln!("pmsshim: TMDB TV details lookup failed: {error}"),
+                Err(_) => {}
             }
             if let Some(youtube_id) = meta_trailer() {
                 row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
@@ -1291,8 +1286,7 @@ impl Shim {
 
         match details {
             Ok(Ok(details)) => set_roles(row, &details.credits.cast),
-            Ok(Err(error)) => eprintln!("pmsshim: TMDB movie details lookup failed: {error}"),
-            Err(_) => eprintln!("pmsshim: TMDB movie details lookup thread panicked"),
+            Ok(Err(_)) | Err(_) => {}
         }
 
         let trailer = match videos {
@@ -1306,14 +1300,7 @@ impl Shim {
                     (youtube_id, title.to_string())
                 })
             }),
-            Ok(Err(error)) => {
-                eprintln!("pmsshim: TMDB videos lookup failed: {error}");
-                None
-            }
-            Err(_) => {
-                eprintln!("pmsshim: TMDB videos lookup thread panicked");
-                None
-            }
+            Ok(Err(_)) | Err(_) => None,
         }
         .or_else(|| {
             meta.trailer_streams
@@ -2025,10 +2012,14 @@ impl Shim {
     }
 
     fn saved_item(&self, req: &Request) -> Response {
-        let Some(Ident::Title { type_, id }) = req
+        let Some(rk) = req
             .q("ratingKey")
             .and_then(|v| v.parse().ok())
-            .and_then(|rk| self.keys.ident(rk))
+        else {
+            return Response::json_status(400, &json!({"error":"invalid title"}));
+        };
+        let Some(Ident::Title { type_, id }) =
+            self.keys.ident(rk).or_else(|| synthetic_ident(rk))
         else {
             return Response::json_status(400, &json!({"error":"invalid title"}));
         };
@@ -2042,13 +2033,69 @@ impl Shim {
                     Some("0") => false,
                     _ => return Err(plx_stremio::model::Error::Status(400)),
                 };
-                let meta = self
-                    .meta(&type_, &id)
-                    .ok_or(plx_stremio::model::Error::Status(404))?;
+                let (saved_type, saved_id) = translate_to_stremio_id(rk)
+                    .map(|id| {
+                        (
+                            if synthetic_show_tmdb_id(rk).is_some() {
+                                "series"
+                            } else {
+                                "movie"
+                            }
+                            .to_owned(),
+                            id,
+                        )
+                    })
+                    .unwrap_or_else(|| (type_.clone(), id.clone()));
+                let meta = if let Some(meta) = self.meta(&saved_type, &saved_id) {
+                    meta
+                } else {
+                    let client = TmdbClient::from_env()
+                        .ok_or(plx_stremio::model::Error::Status(404))?;
+                    let (name, poster_path, description, release_info) =
+                        if saved_type == "series" {
+                            let tmdb_id = synthetic_show_tmdb_id(rk)
+                                .ok_or(plx_stremio::model::Error::Status(404))?;
+                            let details = client.tv_details(tmdb_id)?;
+                            (
+                                details.show.name,
+                                details.show.poster_path,
+                                details.show.overview,
+                                details.show.first_air_date,
+                            )
+                        } else {
+                            let tmdb_id = synthetic_tmdb_id(rk)
+                                .ok_or(plx_stremio::model::Error::Status(404))?;
+                            let details = client.movie_details(tmdb_id)?;
+                            (
+                                details.movie.title,
+                                details.movie.poster_path,
+                                details.movie.overview,
+                                details.movie.release_date,
+                            )
+                        };
+                    Arc::new(Meta {
+                        id: saved_id.clone(),
+                        type_: saved_type.clone(),
+                        name,
+                        poster: tmdb_image(poster_path.as_deref()),
+                        description,
+                        release_info: year_of(release_info.as_deref())
+                            .map(|year| year.to_string()),
+                        ..Meta::default()
+                    })
+                };
+                eprintln!("saving My List item: type={} id={}", meta.type_, meta.id);
                 self.account.set_saved(&meta, saved)?;
             }
             let items = self.account.saved_library(req.method != "POST")?;
-            Ok(items.iter().any(|p| p.type_ == type_ && p.id == id))
+            let translated_id = translate_to_stremio_id(rk);
+            Ok(items.iter().any(|item| {
+                item.type_ == type_
+                    && (item.id == id
+                        || translated_id
+                            .as_ref()
+                            .is_some_and(|translated| item.id == *translated))
+            }))
         })();
         match result {
             Ok(saved) => Response::json(&json!({"signedIn":true,"saved":saved})),
