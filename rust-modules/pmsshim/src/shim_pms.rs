@@ -36,10 +36,10 @@ const DEFAULT_EPISODE_MS: i64 = 45 * 60_000;
 const DEFAULT_MOVIE_MS: i64 = 110 * 60_000;
 const SECTION_MOVIES: i64 = 1;
 const SECTION_SHOWS: i64 = 2;
-const TMDB_FALLBACK_KEY_BASE: i64 = 9_500_000;
+const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
 /// Synthetic keys for TMDB recommendations that no addon carries; above the movie base so the two
-/// decoders cannot alias.
-const TMDB_SHOW_KEY_BASE: i64 = 9_600_000;
+/// decoders cannot alias. A billion apart because TMDB movie ids already pass 100,000.
+const TMDB_SHOW_KEY_BASE: i64 = 2_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
 fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
@@ -544,7 +544,7 @@ mod tmdb_metadata_tests {
             .unwrap()
             .parse::<i64>()
             .is_ok());
-        assert_eq!(fallback["ratingKey"], "9500999");
+        assert_eq!(fallback["ratingKey"], "1000000999");
 
         let details = TmdbMovieDetails {
             movie: TmdbMovie {
@@ -569,8 +569,8 @@ mod tmdb_metadata_tests {
             },
             ..Default::default()
         };
-        let row = shim.tmdb_details_row(&details, 9_500_999);
-        assert_eq!(row["ratingKey"], "9500999");
+        let row = shim.tmdb_details_row(&details, 1_000_000_999);
+        assert_eq!(row["ratingKey"], "1000000999");
         assert_eq!(row["Role"][0]["tag"], "Actor Name");
         assert_eq!(row["Role"][0]["role"], "Character Name");
         assert_eq!(row["Genre"][0]["tag"], "Drama");
@@ -583,21 +583,24 @@ mod tmdb_metadata_tests {
 
     #[test]
     fn synthetic_related_rating_keys_decode_to_tmdb_ids() {
-        assert_eq!(synthetic_tmdb_id(9_500_603), Some(603));
-        assert_eq!(synthetic_tmdb_id(9_499_999), None);
+        assert_eq!(synthetic_tmdb_id(1_000_000_603), Some(603));
+        assert_eq!(synthetic_tmdb_id(999_999_999), None);
         // A show key must never decode as a movie id, or the two bases collide.
-        assert_eq!(synthetic_tmdb_id(9_600_603), None);
-        assert_eq!(synthetic_show_tmdb_id(9_600_603), Some(603));
-        assert_eq!(synthetic_show_tmdb_id(9_599_999), None);
+        assert_eq!(synthetic_tmdb_id(2_000_000_603), None);
+        assert_eq!(synthetic_show_tmdb_id(2_000_000_603), Some(603));
+        assert_eq!(synthetic_show_tmdb_id(1_999_999_999), None);
         assert_eq!(
-            translate_to_stremio_id(9_500_603).as_deref(),
+            translate_to_stremio_id(1_000_000_603).as_deref(),
             Some("tmdb:603")
         );
         assert_eq!(
-            translate_to_stremio_id(9_600_603).as_deref(),
+            translate_to_stremio_id(2_000_000_603).as_deref(),
             Some("tmdb:603")
         );
         assert_eq!(translate_to_stremio_id(12_345), None);
+        // A six-figure TMDB movie id stays inside the movie range (it used to cross the show base).
+        assert_eq!(synthetic_tmdb_id(1_000_141_052), Some(141_052));
+        assert_eq!(synthetic_show_tmdb_id(1_000_141_052), None);
     }
 
     #[test]
@@ -611,7 +614,7 @@ mod tmdb_metadata_tests {
             ..Default::default()
         };
         let fallback = shim.tmdb_show_recommendation_row(&show);
-        assert_eq!(fallback["ratingKey"], "9601396");
+        assert_eq!(fallback["ratingKey"], "2000001396");
         assert_eq!(fallback["type"], "show");
         assert_eq!(fallback["title"], "Breaking Bad");
         assert_eq!(fallback["year"], 2008);
@@ -639,9 +642,9 @@ mod tmdb_metadata_tests {
             },
             ..Default::default()
         };
-        let row = shim.tmdb_show_details_row(&details, 9_601_396);
-        assert_eq!(row["ratingKey"], "9601396");
-        assert_eq!(row["key"], "/library/metadata/9601396");
+        let row = shim.tmdb_show_details_row(&details, 2_000_001_396);
+        assert_eq!(row["ratingKey"], "2000001396");
+        assert_eq!(row["key"], "/library/metadata/2000001396");
         assert_eq!(row["type"], "show");
         assert_eq!(row["Role"][0]["tag"], "Actor Name");
         assert_eq!(row["Role"][0]["role"], "Character Name");
@@ -705,7 +708,7 @@ mod tmdb_metadata_tests {
         let response = shim.handle(&Request {
             method: "GET".into(),
             path: "/nuvio/streams".into(),
-            query: HashMap::from([("ratingKey".into(), "9500603".into())]),
+            query: HashMap::from([("ratingKey".into(), "1000000603".into())]),
             headers: HashMap::new(),
             body: Vec::new(),
         });

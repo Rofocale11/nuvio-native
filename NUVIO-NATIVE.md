@@ -28,12 +28,14 @@ The shim is the only place that knows both vocabularies, so it hands the UI a **
 ### 3.2 The synthetic bases (CRITICAL — do not change or overlap)
 | Kind | Formula | Example | Range |
 | --- | --- | --- | --- |
-| Related **Movies** | `9_500_000 + TMDB_ID` | `9_500_603` (The Matrix) | `9_500_000 .. 9_600_000` |
-| Related **TV Shows** | `9_600_000 + TMDB_ID` | `9_601_396` (Breaking Bad) | `9_600_000 ..` |
+| Related **Movies** | `1_000_000_000 + TMDB_ID` | `1_000_000_603` (The Matrix) | `1_000_000_000 .. 2_000_000_000` |
+| Related **TV Shows** | `2_000_000_000 + TMDB_ID` | `2_000_001_396` (Breaking Bad) | `2_000_000_000 ..` |
+
+The bases are a billion apart on purpose: TMDB movie ids already pass 100,000, so a narrower gap lets a real movie key (`9_641_052` = movie `141_052` on the old bases) cross into the show range and load the wrong title.
 
 ```rust
-const TMDB_FALLBACK_KEY_BASE: i64 = 9_500_000;
-const TMDB_SHOW_KEY_BASE: i64 = 9_600_000;
+const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
+const TMDB_SHOW_KEY_BASE: i64 = 2_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
 fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
@@ -48,9 +50,9 @@ fn synthetic_show_tmdb_id(rk: i64) -> Option<u64> {
 }
 ```
 
-*   The movie decoder is **bounded above** by the show base. Without that bound `9_600_603` would decode as movie `100_603` and the two kinds would alias.
+*   The movie decoder is **bounded above** by the show base. Without that bound `2_000_000_603` would decode as movie `1_000_000_603` and the two kinds would alias.
 *   The show base is above every real key (`10_000 + N`) and above the movie range, so the three spaces cannot collide.
-*   **Check the show base first.** A key `>= 9_600_000` is always a show; a key in the movie range is always a movie.
+*   **Check the show base first.** A key `>= 2_000_000_000` is always a show; a key in the movie range is always a movie.
 
 Both synthetic kinds are handled on the way back in by `/library/metadata/{rk}`: parse the key, decode it with the matching helper, fetch TMDB, and return the enriched Plex row (`tmdb_details_row` for movies, `tmdb_show_details_row` for shows). `/library/metadata/{rk}/related` recognises the synthetic ranges too, so a TMDB-only related title can drill down forever.
 
@@ -66,7 +68,7 @@ fn translate_to_stremio_id(rk: i64) -> Option<String> {
 }
 ```
 
-**Streams and subtitles MUST both be translated.** They are the two requests that leave the shim for an addon, and an untranslated `9_500_603` reaches Torrentio (and every subtitle addon) as an unknown id — an empty Source Picker and no subtitles.
+**Streams and subtitles MUST both be translated.** They are the two requests that leave the shim for an addon, and an untranslated `1_000_000_603` reaches Torrentio (and every subtitle addon) as an unknown id — an empty Source Picker and no subtitles.
 
 Rather than patch each caller, the translation lives in `Shim::slot()`, the one function that starts **both** fetches:
 
