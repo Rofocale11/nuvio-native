@@ -261,6 +261,14 @@ impl TmdbClient {
             .filter(|id| id.starts_with("tt")))
     }
 
+    pub fn tv_external_ids(&self, tv_id: u64) -> Result<Option<String>> {
+        let response: ExternalIdsResponse = self.get(&format!("/tv/{tv_id}/external_ids"))?;
+        Ok(response
+            .imdb_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| id.starts_with("tt")))
+    }
+
     pub fn videos(&self, movie_id: u64) -> Result<Vec<TmdbVideo>> {
         let response: VideosResponse = self.get(&format!("/movie/{movie_id}/videos"))?;
         Ok(response.results)

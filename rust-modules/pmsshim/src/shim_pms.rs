@@ -2453,9 +2453,10 @@ impl Shim {
                 };
                 // `done` from `ranked` is authoritative: it is true when there is nothing to ask an
                 // addon for (a related show has no episode yet, or no slot could be started). The
-                // slot map cannot answer that — an absent slot must NOT read as "still loading",
-                // or the picker polls to its retry limit and never shows a result.
-                let (ranked, _, done) = self.ranked(rk, &ident, None, DETAIL_WAIT);
+                // slot map cannot answer that — an absent slot must NOT read as "still loading".
+                // The picker polls this route while addon workers report batches. Never wait here:
+                // return the streams cached so far and let the next poll observe later addons.
+                let (ranked, _, done) = self.ranked(rk, &ident, None, Duration::ZERO);
                 Response::json(&json!({"ratingKey": rk, "complete": done,
                     "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>()}))
             }
@@ -2546,6 +2547,22 @@ impl Shim {
     }
 
     fn children(&self, rk: i64) -> Vec<Value> {
+        if rk >= TMDB_SHOW_KEY_BASE {
+            let tmdb_id = (rk - TMDB_SHOW_KEY_BASE) as u64;
+            let client = TmdbClient::from_env();
+            let mut meta = client
+                .as_ref()
+                .and_then(|client| client.tv_external_ids(tmdb_id).ok().flatten())
+                .and_then(|imdb_id| self.meta("series", &imdb_id));
+            if meta.is_none() {
+                meta = self.meta("series", &format!("tmdb:{tmdb_id}"));
+            }
+            let Some(m) = meta else { return Vec::new() };
+            return seasons_of(&m)
+                .into_iter()
+                .map(|n| self.season_row(rk, &m, n))
+                .collect();
+        }
         match self.keys.ident(rk) {
             Some(Ident::Title { type_, id }) if is_series(&type_) => {
                 let Some(m) = self.meta(&type_, &id) else {
@@ -2571,6 +2588,22 @@ impl Shim {
     }
 
     fn leaves(&self, rk: i64) -> Vec<Value> {
+        if rk >= TMDB_SHOW_KEY_BASE {
+            let tmdb_id = (rk - TMDB_SHOW_KEY_BASE) as u64;
+            let client = TmdbClient::from_env();
+            let mut meta = client
+                .as_ref()
+                .and_then(|client| client.tv_external_ids(tmdb_id).ok().flatten())
+                .and_then(|imdb_id| self.meta("series", &imdb_id));
+            if meta.is_none() {
+                meta = self.meta("series", &format!("tmdb:{tmdb_id}"));
+            }
+            let Some(m) = meta else { return Vec::new() };
+            return episodes_of(&m)
+                .into_iter()
+                .map(|(s, e, v)| self.episode_row(rk, &m, s, e, v))
+                .collect();
+        }
         match self.keys.ident(rk) {
             Some(Ident::Title { type_, id }) if is_series(&type_) => {
                 let Some(m) = self.meta(&type_, &id) else {
