@@ -253,12 +253,16 @@ impl TmdbClient {
         ))
     }
 
-    pub fn external_ids(&self, movie_id: u64) -> Result<Option<String>> {
+    pub fn movie_external_ids(&self, movie_id: u64) -> Result<Option<String>> {
         let response: ExternalIdsResponse = self.get(&format!("/movie/{movie_id}/external_ids"))?;
         Ok(response
             .imdb_id
             .map(|id| id.trim().to_string())
             .filter(|id| id.starts_with("tt")))
+    }
+
+    pub fn external_ids(&self, movie_id: u64) -> Result<Option<String>> {
+        self.movie_external_ids(movie_id)
     }
 
     pub fn tv_external_ids(&self, tv_id: u64) -> Result<Option<String>> {

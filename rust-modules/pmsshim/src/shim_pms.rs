@@ -1876,7 +1876,20 @@ impl Shim {
     }
 
     fn decision(&self, req: &Request) -> Response {
-        let rk = req.q("path").and_then(trailing_key).unwrap_or(-1);
+        let path_key = req.q("path").and_then(trailing_key);
+        let rk = path_key.unwrap_or(-1);
+        let rk = if rk < 0 {
+            req.q("path")
+                .and_then(|path| path.trim_end_matches('/').rsplit('/').next())
+                .and_then(|id| id.strip_prefix("tmdb:"))
+                .and_then(|id| id.parse::<u64>().ok())
+                .and_then(|tmdb_id| {
+                    self.account.saved_library(false).ok()?.into_iter()
+                        .find(|item| item.id == format!("tmdb:{tmdb_id}"))
+                        .map(|item| if is_series(&item.type_) { TMDB_SHOW_KEY_BASE } else { TMDB_FALLBACK_KEY_BASE } + tmdb_id as i64)
+                })
+                .unwrap_or(-1)
+        } else { rk };
         let index: usize = req
             .q("mediaIndex")
             .and_then(|v| v.parse().ok())
@@ -2046,14 +2059,31 @@ impl Shim {
                         )
                     })
                     .unwrap_or_else(|| (type_.clone(), id.clone()));
-                let meta = if let Some(meta) = self.meta(&saved_type, &saved_id) {
+                let client = TmdbClient::from_env();
+                let tmdb_id = if saved_type == "series" {
+                    synthetic_show_tmdb_id(rk)
+                } else {
+                    synthetic_tmdb_id(rk)
+                };
+                let imdb_id = tmdb_id.and_then(|tmdb_id| {
+                    client.as_ref().and_then(|client| {
+                        if saved_type == "series" {
+                            client.tv_external_ids(tmdb_id).ok().flatten()
+                        } else {
+                            client.movie_external_ids(tmdb_id).ok().flatten()
+                        }
+                    })
+                });
+                let save_id = imdb_id.as_deref().unwrap_or(&saved_id);
+                let meta = if let Some(meta) = self.meta(&saved_type, save_id) {
                     meta
                 } else {
-                    let client = TmdbClient::from_env()
-                        .ok_or(plx_stremio::model::Error::Status(404))?;
                     let (name, poster_path, description, release_info) =
                         if saved_type == "series" {
                             let tmdb_id = synthetic_show_tmdb_id(rk)
+                                .ok_or(plx_stremio::model::Error::Status(404))?;
+                            let client = client
+                                .as_ref()
                                 .ok_or(plx_stremio::model::Error::Status(404))?;
                             let details = client.tv_details(tmdb_id)?;
                             (
@@ -2065,6 +2095,9 @@ impl Shim {
                         } else {
                             let tmdb_id = synthetic_tmdb_id(rk)
                                 .ok_or(plx_stremio::model::Error::Status(404))?;
+                            let client = client
+                                .as_ref()
+                                .ok_or(plx_stremio::model::Error::Status(404))?;
                             let details = client.movie_details(tmdb_id)?;
                             (
                                 details.movie.title,
@@ -2074,7 +2107,7 @@ impl Shim {
                             )
                         };
                     Arc::new(Meta {
-                        id: saved_id.clone(),
+                        id: save_id.to_owned(),
                         type_: saved_type.clone(),
                         name,
                         poster: tmdb_image(poster_path.as_deref()),
@@ -2089,12 +2122,22 @@ impl Shim {
             }
             let items = self.account.saved_library(req.method != "POST")?;
             let translated_id = translate_to_stremio_id(rk);
+            let imdb_id = if let Some(tmdb_id) = synthetic_show_tmdb_id(rk) {
+                TmdbClient::from_env()
+                    .and_then(|client| client.tv_external_ids(tmdb_id).ok().flatten())
+            } else if let Some(tmdb_id) = synthetic_tmdb_id(rk) {
+                TmdbClient::from_env()
+                    .and_then(|client| client.movie_external_ids(tmdb_id).ok().flatten())
+            } else {
+                None
+            };
             Ok(items.iter().any(|item| {
                 item.type_ == type_
                     && (item.id == id
                         || translated_id
                             .as_ref()
-                            .is_some_and(|translated| item.id == *translated))
+                            .is_some_and(|translated| item.id == *translated)
+                        || imdb_id.as_ref().is_some_and(|imdb| item.id == *imdb))
             }))
         })();
         match result {
@@ -2235,6 +2278,13 @@ impl Shim {
     fn route(self: &Arc<Self>, req: &Request) -> Response {
         let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
         let p = req.path.as_str();
+        let tmdb_rating_key = |raw: &str| {
+            let tmdb_id = raw.strip_prefix("tmdb:")?.parse::<u64>().ok()?;
+            let saved_id = format!("tmdb:{tmdb_id}");
+            let type_ = self.account.saved_library(false).ok()?.into_iter()
+                .find(|item| item.id == saved_id)?.type_;
+            Some((if is_series(&type_) { TMDB_SHOW_KEY_BASE } else { TMDB_FALLBACK_KEY_BASE } + tmdb_id as i64))
+        };
         match (req.method.as_str(), segs.as_slice()) {
             (_, []) | (_, ["identity"]) => Response::json(&container(json!({
                 "machineIdentifier": MACHINE_ID, "friendlyName": "Nuvio", "version": "1.41.0.0000-nuvio",
@@ -2252,6 +2302,11 @@ impl Shim {
                 self.section(req, k.parse().unwrap_or(0), rest)
             }
             (_, ["library", "metadata", rk]) => {
+                if let Some(key) = tmdb_rating_key(rk) {
+                    if let Some(row) = self.item(key) {
+                        return Response::json(&container(json!({"Metadata": [row]})));
+                    }
+                }
                 if let Ok(key) = rk.parse::<i64>() {
                     if let Some(tmdb_id) = synthetic_show_tmdb_id(key) {
                         let Some(client) = TmdbClient::from_env() else {
@@ -2316,14 +2371,16 @@ impl Shim {
                 }
                 Response::json(&container(json!({"Metadata": rows})))
             }
-            (_, ["library", "metadata", rk, "children"]) => Response::json(&container(
-                json!({"Metadata": self.children(rk.parse().unwrap_or(0))}),
-            )),
+            (_, ["library", "metadata", rk, "children"]) => {
+                let key = rk.parse().ok().or_else(|| tmdb_rating_key(rk)).unwrap_or(0);
+                Response::json(&container(json!({"Metadata": self.children(key)})))
+            }
             (_, ["library", "metadata", rk, "allLeaves"]) => Response::json(&container(
                 json!({"Metadata": self.leaves(rk.parse().unwrap_or(0))}),
             )),
             (_, ["library", "metadata", rk, "related"]) => {
-                self.related_hub(rk.parse().unwrap_or(-1))
+                let key = rk.parse().ok().or_else(|| tmdb_rating_key(rk)).unwrap_or(-1);
+                self.related_hub(key)
             }
             (_, ["library", "metadata", _, ..]) => ok_empty(),
             ("PUT", ["library", "parts", ..]) => ok_empty(),
