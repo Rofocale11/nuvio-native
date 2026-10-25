@@ -12,6 +12,10 @@ on:
     # for `release.yml`'s `line` input, so it gets the same push gate `main` does — otherwise the
     # first time a hotfix's changes are compiled in a clean checkout is the release run itself.
     branches: [main, 'release/*']
+    branches-ignore:
+      - 'nuvio-native'
+      - 'feature/*'
+      - 'dev'
     # This gate is host checks (lint + unit suite) and an ARM cross-build — expensive (#261 spent
     # ~20 runner-minutes on a README-only PR, #513 the same on issue templates and docs), and
     # neither stage reads prose, images or repository metadata. The policy: start from `'**'`,
