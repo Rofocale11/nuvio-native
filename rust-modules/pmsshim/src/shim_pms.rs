@@ -60,6 +60,13 @@ fn translate_to_stremio_id(rk: i64) -> Option<String> {
         .map(|tmdb_id| format!("tmdb:{tmdb_id}"))
 }
 
+fn resolve_imdb_id(rk: i64, client: &TmdbClient) -> Option<String> {
+    if let Some(tmdb_id) = synthetic_show_tmdb_id(rk) {
+        return client.tv_external_ids(tmdb_id).ok().flatten();
+    }
+    synthetic_tmdb_id(rk).and_then(|tmdb_id| client.movie_external_ids(tmdb_id).ok().flatten())
+}
+
 /// The addon identity of a synthetic related key, or `None` for a real one. This is the fallback
 /// for every route that needs an `Ident`: a synthetic key is never written to `keys.tsv`, so
 /// `Keys::ident` cannot resolve it.
@@ -952,9 +959,11 @@ impl Shim {
 
     fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
         let (type_, id) = self.stream_target(ident)?;
-        // A synthetic related key exists only as `tmdb:<id>` to addons: streams and subtitles are
-        // asked for that, never for the shim's own number.
-        let translated_id = translate_to_stremio_id(rk).unwrap_or(id);
+        let translated_id = if translate_to_stremio_id(rk).is_some() {
+            TmdbClient::from_env().and_then(|client| resolve_imdb_id(rk, &client))?
+        } else {
+            id
+        };
         let mut g = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = g.get(&rk) {
             if s.started.elapsed() < STREAM_TTL {
@@ -2801,7 +2810,17 @@ impl Shim {
             return Response::not_found();
         }
         let (rk, idx) = (pid / PART_STRIDE, (pid % PART_STRIDE) as usize);
-        let Some(ident) = self.keys.ident(rk) else {
+        let Some(ident) = self.keys.ident(rk).or_else(|| {
+            let client = TmdbClient::from_env()?;
+            resolve_imdb_id(rk, &client).map(|id| Ident::Title {
+                type_: if synthetic_show_tmdb_id(rk).is_some() {
+                    "series".into()
+                } else {
+                    "movie".into()
+                },
+                id,
+            })
+        }) else {
             return Response::not_found();
         };
         // Make sure the slot exists (a resume after a restart lands here first) and has waited.
