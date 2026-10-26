@@ -1267,12 +1267,21 @@ impl Shim {
 
     /// The ranked playable streams of an item (waiting per the deadline/grace rules) and the
     /// subtitles known so far. Each entry carries its arrival index.
+    ///
+    /// **`chosen` ends the wait once a stream has been picked.** `/nuvio/select` records the
+    /// viewer's file, and from that moment no addon still answering can change which one plays —
+    /// so the resolve that follows a pick must not sit out the grace window (nor, for a picked
+    /// stream the local playable test does not recognise, the whole deadline) waiting for a list
+    /// it will not use. That wait is what made a pick made during progressive loading look like it
+    /// had to wait for every addon to finish. The DETAIL page's own fetch passes `false`: its list
+    /// keeps filling, and the picker polls it until the addons are done.
     fn ranked(
         &self,
         rk: i64,
         ident: &Ident,
         runtime_secs: Option<u32>,
         max_wait: Duration,
+        chosen: bool,
     ) -> (Vec<(usize, Classified)>, Vec<SubRef>, bool) {
         let Some(slot) = self.slot(rk, ident) else {
             return (Vec::new(), Vec::new(), true);
@@ -1287,6 +1296,9 @@ impl Shim {
         let mut first_playable: Option<Instant> = None;
         loop {
             if st.done {
+                break;
+            }
+            if chosen && st.selected.is_some_and(|i| i < st.streams.len()) {
                 break;
             }
             let elapsed = slot.started.elapsed();
@@ -2254,7 +2266,7 @@ impl Shim {
                 DETAIL_WAIT
             };
             let (ranked, subs, done) =
-                self.ranked(rk, &ident, u32::try_from(dur / 1000).ok(), wait);
+                self.ranked(rk, &ident, u32::try_from(dur / 1000).ok(), wait, probe_index.is_some());
             let mut media = Vec::with_capacity(ranked.len().max(1));
             // Pre-probe the leading stream once the list is complete, off this request: the play that
             // usually follows a detail page then finds real fields (and a warmed source) waiting.
@@ -3063,7 +3075,7 @@ impl Shim {
                 // slot map cannot answer that — an absent slot must NOT read as "still loading".
                 // The picker polls this route while addon workers report batches. Never wait here:
                 // return the streams cached so far and let the next poll observe later addons.
-                let (ranked, _, done) = self.ranked(rk, &ident, None, Duration::ZERO);
+                let (ranked, _, done) = self.ranked(rk, &ident, None, Duration::ZERO, false);
                 Response::json(&json!({"ratingKey": rk, "complete": done,
                     "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>()}))
             }
@@ -3341,7 +3353,9 @@ impl Shim {
             return Response::not_found();
         };
         // Make sure the slot exists (a resume after a restart lands here first) and has waited.
-        let (ranked, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline);
+        // A pick already made ends that wait: the player is opening THAT file, and no addon still
+        // answering can change it.
+        let (ranked, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline, true);
         let stream = if idx == BEST_PART {
             ranked.first().map(|(_, c)| c.stream.clone())
         } else {

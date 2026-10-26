@@ -410,7 +410,13 @@ pub struct AltSourcesScreen {
     stream_choices: Vec<plx_plex::plex::nuvio::StreamChoice>,
     stream_mailbox: std::sync::Arc<std::sync::Mutex<Option<StreamReply>>>,
     stream_mode: bool,
+    /// A list read is in flight — what the "Finding streams…" caption reads while there is
+    /// nothing to draw yet. Deliberately NOT a pick guard: addons keep answering while the viewer
+    /// reads, and a pick must never wait for the last one (that is `stream_selecting`).
     stream_pending: bool,
+    /// A `/nuvio/select` is in flight — the one press that must not be repeated. A latch between
+    /// the press and its reply, not logical state (like `root_return`), so it is not hashed.
+    stream_selecting: bool,
     stream_error: bool,
     stream_attempts: u32,
     /// **Which page of the Streams picker is showing**: `None` is the addon list, `Some(first
@@ -440,6 +446,7 @@ impl AltSourcesScreen {
             stream_mailbox: Default::default(),
             stream_mode,
             stream_pending: false,
+            stream_selecting: false,
             stream_error: false,
             stream_attempts: 0,
             stream_page: None,
@@ -636,14 +643,17 @@ impl AltSourcesScreen {
                 }
                 return;
             }
-            if self.stream_pending || !self.stream_choices.iter().any(|s| s.index == elem as usize) { return; }
-            self.stream_pending = true;
+            // **Only a pick already committing refuses a second one.** Addons still answering are
+            // no reason to wait: the chosen index is already in the shim's slot, which commits it
+            // and resolves the play from THAT file, so the rest of the list is irrelevant.
+            if self.stream_selecting || !self.stream_choices.iter().any(|s| s.index == elem as usize) { return; }
+            self.stream_selecting = true;
             let (sid, rk, mailbox) = (self.arg.sid, self.arg.rk.clone(), self.stream_mailbox.clone());
             if plx_base::task::spawn("nuvio-stream-select", move || {
                 let ok = plx_plex::plex::client_for(sid).is_some_and(|c| c.nuvio_select(&rk, elem as usize));
                 *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamReply::Selected(ok));
                 plx_machine::idle::invalidate();
-            }).is_none() { self.stream_pending = false; self.stream_error = true; }
+            }).is_none() { self.stream_selecting = false; self.stream_error = true; }
             return;
         }
         let action = match self.form.index_of_key(RowKey(elem)).and_then(|i| self.form.activate(i)) {
@@ -699,11 +709,13 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                             self.rebuild(Sel::Keep, H::metadata(cx));
                         }
                         StreamReply::Selected(true) => {
+                            self.stream_selecting = false;
                             self.dismiss(fx);
                             fx.push(Fx::Deliver(MachineId::Instance(self.arg.host),
                                 Delivery::Screen(ScreenEvent::App(AppMsg::NuvioStreamSelected))));
                         }
                         StreamReply::Selected(false) => {
+                            self.stream_selecting = false;
                             self.stream_error = true;
                             self.rebuild(Sel::Keep, H::metadata(cx));
                         }

@@ -1033,6 +1033,31 @@ mod focus_and_hit {
         )));
     }
 
+    /// **A pick is taken while addons are still answering.** The list keeps being polled until
+    /// every addon has reported, and that poll must not be what a press waits on: the viewer found
+    /// their source and pressed it, and the shim commits THAT stream — the rest of the list cannot
+    /// change which file plays.
+    #[test]
+    fn a_pick_is_taken_while_the_stream_list_is_still_loading() {
+        let _serial = plx_base::testlock::serial();
+        let mut p = picker(Some(5));
+        // a list read is in flight, and more addons will still report
+        p.stream_pending = true;
+        let entry = p.entry;
+        let cx = fixture_cx(Some(FocusKey { entry, elem: 5 }));
+        let mut buf = Vec::new();
+        let mut present = plx_machine::present::Present::default();
+        let mut fx = plx_machine::machine::Effects::new(&mut buf, plx_machine::machine::MachineId::Input, &mut present);
+        assert_eq!(Machine::step(&mut p, &ScreenEvent::Activate(5), &cx, &mut fx), Handled::Yes);
+        assert!(p.stream_selecting, "the press must be accepted, not queued behind the poll");
+        assert!(
+            !buf.iter().any(|s| matches!(&s.fx,
+                plx_machine::machine::Fx::Deliver(.., plx_machine::machine::Delivery::Screen(
+                    ScreenEvent::App(AppMsg::NuvioStreamSelected))))),
+            "the play waits for the shim's commit, not for the addons"
+        );
+    }
+
     #[test]
     fn back_dismisses_the_panel() {
         let (mut p, ..) = two_row_panel();

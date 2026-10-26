@@ -43,6 +43,14 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   and refuses media that cannot direct play; the native route uses its probed fields.
   The Streams overlay uses `/nuvio/streams` and `/nuvio/select`, retaining the shim's
   ranked index instead of confusing it with the selected-first Media list.
+- **A press opens the picker; a pick IS the play.** The Detail page's **Streams** pill, an
+  episode's still (for THAT episode), the Home hero's **Play** (for the billboard's film) and a
+  movie page's pill all raise the same `ContentPanel::AltSources` panel, and the commit starts the
+  thing the panel was about — `AppMsg::NuvioStreamSelected` is what a successful `/nuvio/select`
+  delivers back to the page that opened it. On an ordinary Plex server the picker is not offered,
+  so those presses play or navigate as before. A pick is taken while addons are still answering,
+  and it ends the shim's own wait: `Shim::ranked`'s `chosen` argument stops the grace/deadline wait
+  once a stream is recorded, so the `/decision` and `Part` that follow a pick answer at once.
 - Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
   loaded/saved through the authenticated storage helper. Stable/debug/nightly own
   separate records. The helper verifies readback before import files are removed.

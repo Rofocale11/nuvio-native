@@ -35,8 +35,9 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   "Finding streams…" placeholder). Part URLs redirect (or proxy, when headers are needed) to the
   stream's real URL. The decision endpoint waits for discovery/probing and refuses media that
   cannot direct play; the native route uses its probed fields.
-- **Both stream pickers are two-level menus, not flat lists** — the player's `…` popover and the
-  Detail page's **Streams** pill behave identically:
+- **The stream pickers are two-level menus, not flat lists** — the player's `…` popover, the
+  Detail page's **Streams** pill and the Home hero's Play all open the same panel and behave
+  identically:
   1. **the addons that answered for the item**, in ranked order (the addon holding the best stream
      leads), each stating how many streams it offered;
   2. **one addon's streams**, best first, headed by that addon's name — the page's rows omit the
@@ -48,6 +49,28 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   also carries the stream's technical facts). `route::AVAILABLE_STREAMS` is written only through
   `route::set_available_streams`, so a revision stamp tells the player panel's per-tick poll that
   nothing moved.
+- **A press opens the picker; a pick IS the play.** Every surface that used to start a file
+  directly raises this panel first, and the commit starts the thing the panel was about:
+  * **Detail page**: the hero's **Streams** pill lists the page's own item; an **episode's still**
+    opens the same panel for THAT episode (`ContentPanel::AltSources { item }` names the subject,
+    so the show page's own item is overridden) and the pick starts the episode;
+  * **Home**: the hero's **Play** raises it for the billboard's film (`item` names it, since Home
+    has no page item of its own; the panel opens centred, `item_menu::fallback_anchor`). A show or
+    season hero still plays its on-deck episode — it has no stream list of its own;
+  * **a movie page's pill** plays the movie on the pick, exactly as its Play button does. The pick
+    used to only re-read the item, which left the film sitting on its page with the new stream
+    selected and nothing playing.
+
+  A picker on any other source (an ordinary Plex server) is not offered at all: it has no stream
+  list, so those presses play or navigate exactly as before.
+- **A pick never waits for the addons to finish.** The panel polls `/nuvio/streams` until every
+  addon has reported (`complete`), and the press is taken the whole time — `stream_selecting` is
+  the only latch (one commit at a time), never the in-flight list read. On the shim's side a pick
+  also ends the wait: `Shim::ranked`'s `chosen` argument stops the grace/deadline wait as soon as
+  `/nuvio/select` has recorded a stream, so the `/decision` and the `Part` that follow a pick
+  answer immediately instead of sitting out `stream_grace` — or, for a picked entry the local
+  playable test does not recognise, the whole 60 s deadline. The Detail page's own fetch and
+  `/nuvio/streams` pass `chosen: false`: their list keeps filling progressively.
 - **The player's Source page carries no quality ladder.** Under the shim a playback's quality is a
   property of the STREAM picked — the shim resolves a concrete file and the route plays it — so a
   list of bitrate ceilings beside the stream list would be a second answer to the same question.
@@ -57,7 +80,9 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   quality RUNG, not which file plays.
 - The stream pick itself is `/nuvio/select?index=` on the shim's own ranked index, then a fresh
   resolve of the same item; the Media list a `/decision` returns is selected-first and must not be
-  confused with it.
+  confused with it. `AppMsg::NuvioStreamSelected` is what a successful commit delivers back to the
+  page that opened the panel — the panel names no item, so Detail remembers which episode (or,
+  for the movie pill, none) its picker was about, and Home remembers which hero item.
 - Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
   loaded/saved through the authenticated storage helper. Stable/debug/nightly own
   separate records. The helper verifies readback before import files are removed.
@@ -202,6 +227,7 @@ fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
 *   Because `slot()` is the single entry point for both threads, a new addon-facing call must go through it (or translate explicitly) or it will leak synthetic keys.
 *   `/nuvio/streams` additionally accepts a synthetic key that has **no** `Ident` (synthetic keys are never written to `keys.tsv`), synthesising `Title { type_: "movie" | "series", id: "tmdb:<id>" }` so the Source Picker works on a related title.
 *   `complete` comes from `ranked()`, never from the slot map. An absent slot means *nothing to ask for* (a related show has no episode yet), so it must answer `complete: true` with an empty list — reporting `false` makes the picker re-poll 60× and show "loading" forever.
+*   `ranked()` takes a `chosen` flag, `true` on the two routes a PICK leads to (`/nuvio/select`'s own resolve: the `/decision` and the `Part` it opens) and `false` on the detail page's fetch and `/nuvio/streams`. With it set, the wait for more addons ends the moment a stream is recorded — the chosen file cannot be superseded, so those requests must not sit out `stream_grace` (2.5 s after the first playable stream) or, for a picked entry the local playable test does not recognise, the full `stream_deadline`. That wait was why a pick made during progressive loading appeared to wait for every addon to finish.
 
 ## 4. TMDB Enrichment (Movies & TV Shows)
 The app is enriched with TMDB data: cast on detail rows, a "More Like This" hub of recommendations,
