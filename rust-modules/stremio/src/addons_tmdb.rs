@@ -37,6 +37,15 @@ pub struct TmdbCast {
     pub profile_path: Option<String>,
 }
 
+/// A movie's franchise, as `/movie/{id}` names it: the id to ask `/collection/{id}` with, and the
+/// name the shelf is headed by until that answer arrives.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbCollectionRef {
+    pub id: u64,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TmdbMovie {
@@ -48,6 +57,20 @@ pub struct TmdbMovie {
     pub release_date: Option<String>,
     pub runtime: Option<u32>,
     pub genres: Vec<TmdbGenre>,
+    /// `None` for a standalone film — the franchise shelf has nothing to list.
+    pub belongs_to_collection: Option<TmdbCollectionRef>,
+}
+
+/// `/collection/{id}` — a franchise's name and every film in it, in TMDB's release order.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbCollection {
+    pub id: u64,
+    pub name: String,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+    pub parts: Vec<TmdbMovie>,
 }
 
 /// A TV show, as TMDB spells it: `name`/`first_air_date` where a movie has `title`/`release_date`.
@@ -288,6 +311,11 @@ impl TmdbClient {
         ))
     }
 
+    /// `/collection/{id}` — the franchise a movie's `belongs_to_collection` names.
+    pub fn collection_details(&self, collection_id: u64) -> Result<TmdbCollection> {
+        self.get(&format!("/collection/{collection_id}"))
+    }
+
     /// Resolves a Stremio series id (`tmdb:123`, `123`, or an IMDb `tt…` id) to TMDB's numeric id.
     /// `/find` answers a show's IMDb id under `tv_results`, not `movie_results`.
     pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
@@ -431,9 +459,50 @@ mod tests {
             client.url("/tv/1396?append_to_response=credits,recommendations"),
             "https://api.themoviedb.org/3/tv/1396?append_to_response=credits,recommendations&api_key=key%20%2B"
         );
+        assert_eq!(
+            client.url("/collection/234"),
+            "https://api.themoviedb.org/3/collection/234?api_key=key%20%2B"
+        );
         assert_eq!(client.movie_id("tmdb:603:1:2").unwrap(), Some(603));
         assert_eq!(client.movie_id("603").unwrap(), Some(603));
         assert_eq!(client.movie_id("not-a-movie-id").unwrap(), None);
+    }
+
+    #[test]
+    fn decodes_a_movies_collection_and_its_franchise() {
+        let details: TmdbMovieDetails = serde_json::from_value(serde_json::json!({
+            "id": 155,
+            "title": "The Dark Knight",
+            "belongs_to_collection": {"id": 234, "name": "The Dark Knight Collection"},
+            "credits": {"cast": []},
+            "recommendations": {"results": []}
+        }))
+        .unwrap();
+        let reference = details.movie.belongs_to_collection.expect("a franchise ref");
+        assert_eq!((reference.id, reference.name.as_str()), (234, "The Dark Knight Collection"));
+
+        // A standalone film says nothing, which is `None` and not a franchise with no id.
+        let standalone: TmdbMovieDetails = serde_json::from_value(serde_json::json!({
+            "id": 603, "title": "The Matrix", "credits": {"cast": []},
+            "recommendations": {"results": []}
+        }))
+        .unwrap();
+        assert!(standalone.movie.belongs_to_collection.is_none());
+
+        let collection: TmdbCollection = serde_json::from_value(serde_json::json!({
+            "id": 234,
+            "name": "The Dark Knight Collection",
+            "overview": "A franchise.",
+            "parts": [
+                {"id": 272, "title": "Batman Begins", "poster_path": "/begins.jpg"},
+                {"id": 155, "title": "The Dark Knight", "release_date": "2008-07-16"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(collection.id, 234);
+        assert_eq!(collection.overview.as_deref(), Some("A franchise."));
+        assert_eq!(collection.parts[0].title, "Batman Begins");
+        assert_eq!(collection.parts[1].release_date.as_deref(), Some("2008-07-16"));
     }
 
     #[test]

@@ -7,8 +7,8 @@ use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
 use plx_stremio::addons_tmdb::{
-    TmdbCast, TmdbClient, TmdbCredit, TmdbMovie, TmdbMovieDetails, TmdbShow, TmdbShowDetails,
-    TmdbVideo,
+    TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbMovie, TmdbMovieDetails, TmdbShow,
+    TmdbShowDetails, TmdbVideo,
 };
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
@@ -38,12 +38,15 @@ const DEFAULT_MOVIE_MS: i64 = 110 * 60_000;
 const SECTION_MOVIES: i64 = 1;
 const SECTION_SHOWS: i64 = 2;
 const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
-/// Synthetic keys for TMDB recommendations that no addon carries; above the movie base so the two
-/// decoders cannot alias. A billion apart because TMDB movie ids already pass 100,000.
+/// Above the movie base so the two decoders cannot alias, a billion apart because TMDB movie ids
+/// already pass 100,000.
 const TMDB_SHOW_KEY_BASE: i64 = 2_000_000_000;
 /// A Cast & Crew headshot's synthetic `personId` — TMDB's person id, encoded, above both title
 /// bases so a person key never opens a title.
 const TMDB_PERSON_KEY_BASE: i64 = 3_000_000_000;
+/// A TMDB collection's ratingKey — the franchise page a member film's collection heading opens.
+/// Above the person base, so no title or person key can land on one.
+const TMDB_COLLECTION_KEY_BASE: i64 = 4_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
 fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
@@ -60,9 +63,17 @@ fn synthetic_show_tmdb_id(rk: i64) -> Option<u64> {
         .then_some((rk - TMDB_SHOW_KEY_BASE) as u64)
 }
 
-/// A synthetic Cast & Crew person key's TMDB person id.
+/// A synthetic Cast & Crew person key's TMDB person id, bounded above by the collection base so a
+/// collection page is never mistaken for a person.
 fn synthetic_person_id(rk: i64) -> Option<u64> {
-    (rk >= TMDB_PERSON_KEY_BASE).then_some((rk - TMDB_PERSON_KEY_BASE) as u64)
+    (TMDB_PERSON_KEY_BASE..TMDB_COLLECTION_KEY_BASE)
+        .contains(&rk)
+        .then_some((rk - TMDB_PERSON_KEY_BASE) as u64)
+}
+
+/// A synthetic collection ratingKey's TMDB collection id.
+fn synthetic_collection_id(rk: i64) -> Option<u64> {
+    (rk >= TMDB_COLLECTION_KEY_BASE).then_some((rk - TMDB_COLLECTION_KEY_BASE) as u64)
 }
 
 /// The Stremio id addons know a synthetic related ratingKey by (`tmdb:603`), if it is synthetic.
@@ -130,6 +141,11 @@ pub struct Shim {
     sub_urls: Mutex<HashMap<i64, String>>,
     poster_fallbacks: Mutex<HashMap<String, String>>,
     tmdb_fallbacks: Mutex<HashMap<i64, TmdbMovie>>,
+    /// The TMDB franchises a detail page has shown a collection shelf for, by TMDB collection id.
+    /// The shelf's linked heading opens a collection PAGE, whose three routes (section listing,
+    /// header, children) all read from here — TMDB is the only source, and a page the user just
+    /// saw must not answer "unavailable" because nothing was kept.
+    collections: Mutex<HashMap<u64, TmdbCollection>>,
     /// The rows of the last filmography served. A person page follows its
     /// `/library/people/{id}/media` answer with ONE batched `/library/metadata/{csv}` for the
     /// character captions; without this every key in it would cost a TMDB lookup (and a stream
@@ -670,6 +686,96 @@ mod tmdb_metadata_tests {
         assert_eq!(synthetic_show_tmdb_id(3_000_000_638), None);
         assert_eq!(synthetic_tmdb_id(3_000_000_638), None);
         assert_eq!(translate_to_stremio_id(3_000_000_638), None);
+        // A collection key is above the person base, and decodes as neither.
+        assert_eq!(synthetic_collection_id(4_000_000_234), Some(234));
+        assert_eq!(synthetic_person_id(4_000_000_234), None);
+        assert_eq!(synthetic_collection_id(3_000_000_638), None);
+    }
+
+    /// A member film's franchise shelf: headed by the franchise's name, carrying the OTHER films as
+    /// ordinary recommendation keys (so they open and play), and naming the collection by `tagId`
+    /// in the shape the app splits a collection shelf out of `/related` by.
+    #[test]
+    fn a_member_film_gets_a_collection_hub_of_the_other_films() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        let parts = plx_stremio::addons_tmdb::TmdbCollection {
+            id: 234,
+            name: "The Dark Knight Collection".into(),
+            overview: Some("A franchise.".into()),
+            parts: vec![
+                TmdbMovie { id: 155, title: "The Dark Knight".into(), ..Default::default() },
+                TmdbMovie { id: 272, title: "Batman Begins".into(), ..Default::default() },
+                TmdbMovie { id: 49026, title: "The Dark Knight Rises".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let hub = shim
+            .collection_hub_json(&parts, 272, "Named by the member row")
+            .expect("a franchise with other films gets a shelf");
+        assert_eq!(hub["title"], "The Dark Knight Collection");
+        assert_eq!(hub["hubIdentifier"], "collection.related.1.1");
+        assert_eq!(hub["key"], "/library/sections/1/all?type=1&tagId=234");
+        assert_eq!(hub["totalSize"], 3);
+        let rows = hub["Metadata"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "the page's own film is not in its own shelf");
+        assert_eq!(rows[0]["title"], "The Dark Knight");
+        assert_eq!(rows[1]["title"], "The Dark Knight Rises");
+        for row in rows {
+            let rk: i64 = row["ratingKey"].as_str().unwrap().parse().unwrap();
+            assert_eq!(row["key"], format!("/library/metadata/{rk}"));
+            // A playable key: the movie's TMDB id behind the synthetic base.
+            assert!(synthetic_tmdb_id(rk).is_some());
+        }
+
+        // A film that is the franchise's only member has no shelf: one poster is not a shelf.
+        let alone = plx_stremio::addons_tmdb::TmdbCollection {
+            parts: vec![TmdbMovie { id: 272, title: "Batman Begins".into(), ..Default::default() }],
+            ..parts.clone()
+        };
+        assert!(shim.collection_hub_json(&alone, 272, "Solo").is_none());
+    }
+
+    /// The franchise's own page: the section listing resolves the member's `tagId`, the header
+    /// answers its synthetic key, and the children are its films.
+    #[test]
+    fn a_collection_page_resolves_from_the_section_listing_to_its_films() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        shim.remember_collection(&plx_stremio::addons_tmdb::TmdbCollection {
+            id: 234,
+            name: "The Dark Knight Collection".into(),
+            parts: vec![
+                TmdbMovie { id: 155, title: "The Dark Knight".into(), ..Default::default() },
+                TmdbMovie { id: 272, title: "Batman Begins".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        });
+        let get = |path: &str| {
+            let body: Value = serde_json::from_slice(
+                &shim
+                    .handle(&Request {
+                        method: "GET".into(),
+                        path: path.into(),
+                        query: HashMap::new(),
+                        headers: HashMap::new(),
+                        body: Vec::new(),
+                    })
+                    .body,
+            )
+            .unwrap();
+            body["MediaContainer"].clone()
+        };
+        let listing = get("/library/sections/1/collections");
+        assert_eq!(listing["Metadata"][0]["index"], 234);
+        assert_eq!(listing["Metadata"][0]["title"], "The Dark Knight Collection");
+
+        let header = get("/library/metadata/4000000234");
+        assert_eq!(header["Metadata"][0]["title"], "The Dark Knight Collection");
+        assert_eq!(header["Metadata"][0]["childCount"], 2);
+
+        let children = get("/library/collections/4000000234/children");
+        assert_eq!(children["totalSize"], 2);
+        assert_eq!(children["Metadata"][0]["title"], "The Dark Knight");
+        assert_eq!(children["Metadata"][1]["title"], "Batman Begins");
     }
 
     /// A headshot's filmography: the kind is read per ROW (`combined_credits` merges both), the
@@ -909,6 +1015,7 @@ impl Shim {
             sub_urls: Mutex::new(HashMap::new()),
             poster_fallbacks: Mutex::new(HashMap::new()),
             tmdb_fallbacks: Mutex::new(HashMap::new()),
+            collections: Mutex::new(HashMap::new()),
             credit_rows: Mutex::new(Vec::new()),
             next_sub: AtomicI64::new(900_000_000),
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
@@ -1480,7 +1587,7 @@ impl Shim {
                 );
             }
         };
-        let rows: Vec<Value> = if series {
+        let (rows, collection_hub): (Vec<Value>, Option<Value>) = if series {
             let details = match client.tv_details(tmdb_id) {
                 Ok(details) => details,
                 Err(error) => {
@@ -1492,7 +1599,7 @@ impl Shim {
                     );
                 }
             };
-            details
+            let rows = details
                 .recommendations
                 .results
                 .iter()
@@ -1501,7 +1608,8 @@ impl Shim {
                 })
                 .take(10)
                 .map(|show| self.tmdb_show_recommendation_row(show))
-                .collect()
+                .collect();
+            (rows, None)
         } else {
             let details = match client.movie_details(tmdb_id) {
                 Ok(details) => details,
@@ -1514,7 +1622,7 @@ impl Shim {
                     );
                 }
             };
-            details
+            let rows = details
                 .recommendations
                 .results
                 .iter()
@@ -1523,9 +1631,143 @@ impl Shim {
                 })
                 .take(10)
                 .map(|movie| self.tmdb_recommendation_row(movie))
-                .collect()
+                .collect();
+            let hub = self.collection_hub(&details, &client);
+            (rows, hub)
         };
-        Response::json(&container(json!({"Hub": [related_hub_json(kind, rows)]})))
+        let mut hubs = vec![related_hub_json(kind, rows)];
+        hubs.extend(collection_hub);
+        Response::json(&container(json!({"Hub": hubs})))
+    }
+
+    /// A member film's franchise, in the shape PMS uses for the same shelf: a
+    /// `collection.related.*` hub, so the Detail page draws it as the collection shelf under the
+    /// collection's own name rather than folding the films into Related. The rows are the OTHER
+    /// films — this page's own title is the page — built by the same row builder as a
+    /// recommendation, so each one is a clickable, playable key.
+    ///
+    /// The hub's `key` names the collection by `tagId` (its TMDB id), which is the identity the
+    /// app's collection store resolves; the franchise itself is kept in [`Shim::collections`] so
+    /// the heading's page (`/library/sections/{s}/collections` → header → children) answers
+    /// without a second TMDB round trip.
+    fn collection_hub(&self, details: &TmdbMovieDetails, client: &TmdbClient) -> Option<Value> {
+        let collection = details
+            .movie
+            .belongs_to_collection
+            .as_ref()
+            .filter(|collection| collection.id > 0)?;
+        let parts = client.collection_details(collection.id).ok()?;
+        let hub = self.collection_hub_json(&parts, details.movie.id, &collection.name)?;
+        self.remember_collection(&parts);
+        Some(hub)
+    }
+
+    /// The shelf itself, from the franchise TMDB returned: **PURE**, so the two things that can be
+    /// wrong here are host-testable — the page's own film is left out, and the heading is the
+    /// franchise's name rather than the one the member row named it by.
+    fn collection_hub_json(
+        &self,
+        parts: &TmdbCollection,
+        own_id: u64,
+        fallback_title: &str,
+    ) -> Option<Value> {
+        let rows: Vec<Value> = parts
+            .parts
+            .iter()
+            .filter(|movie| {
+                movie.id > 0
+                    && movie.id != own_id
+                    && movie.id <= i64::MAX as u64 - TMDB_FALLBACK_KEY_BASE as u64
+            })
+            .map(|movie| self.tmdb_recommendation_row(movie))
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let title = if parts.name.trim().is_empty() {
+            fallback_title
+        } else {
+            parts.name.as_str()
+        };
+        Some(json!({
+            "title": title, "type": "movie",
+            "hubIdentifier": format!("collection.related.{SECTION_MOVIES}.1"),
+            "key": format!("/library/sections/{SECTION_MOVIES}/all?type=1&tagId={}", parts.id),
+            "size": rows.len(), "totalSize": parts.parts.len(), "more": false,
+            "Metadata": rows,
+        }))
+    }
+
+    /// Keep a franchise the shim has served, so its own page answers without another TMDB read.
+    /// Bounded like every other in-memory cache here; an evicted franchise is simply fetched again.
+    fn remember_collection(&self, collection: &TmdbCollection) {
+        let mut map = self
+            .collections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if map.len() >= 256 {
+            map.clear();
+        }
+        map.insert(collection.id, collection.clone());
+    }
+
+    /// A franchise by TMDB id: the one a detail page just showed, else one cached TMDB request.
+    fn tmdb_collection(&self, id: u64) -> Option<TmdbCollection> {
+        if let Some(collection) = self
+            .collections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&id)
+        {
+            return Some(collection.clone());
+        }
+        let collection = TmdbClient::from_env()?.collection_details(id).ok()?;
+        self.remember_collection(&collection);
+        Some(collection)
+    }
+
+    /// A franchise as a PMS collection row — the header the collection page draws, and the row a
+    /// member's `tagId` resolves against in the section's collection listing (`index`).
+    fn collection_row(&self, collection: &TmdbCollection) -> Value {
+        let rk = TMDB_COLLECTION_KEY_BASE + collection.id as i64;
+        let poster = tmdb_image(collection.poster_path.as_deref())
+            .or_else(|| {
+                collection
+                    .parts
+                    .iter()
+                    .find_map(|part| tmdb_image(part.poster_path.as_deref()))
+            })
+            .unwrap_or_default();
+        json!({
+            "ratingKey": rk.to_string(), "key": format!("/library/collections/{rk}/children"),
+            "guid": format!("nuvio://collection/{}", collection.id),
+            "type": "collection", "title": collection.name, "titleSort": collection.name,
+            "index": collection.id,
+            "librarySectionID": SECTION_MOVIES, "librarySectionTitle": "Movies",
+            "librarySectionKey": format!("/library/sections/{SECTION_MOVIES}"),
+            "summary": collection.overview.clone().unwrap_or_default(),
+            "thumb": poster, "childCount": collection.parts.len(),
+            // TMDB lists a franchise in release order, which is PMS's own default here.
+            "collectionSort": 0, "addedAt": 0, "updatedAt": 0,
+        })
+    }
+
+    /// A franchise's films as collection children, in TMDB's release order and paged like any
+    /// other collection listing.
+    fn collection_children(&self, collection: &TmdbCollection, start: usize, size: usize) -> Value {
+        let rows: Vec<Value> = collection
+            .parts
+            .iter()
+            .filter(|movie| {
+                movie.id > 0 && movie.id <= i64::MAX as u64 - TMDB_FALLBACK_KEY_BASE as u64
+            })
+            .skip(start)
+            .take(size)
+            .map(|movie| self.tmdb_recommendation_row(movie))
+            .collect();
+        let mut out = container(json!({"Metadata": rows}));
+        out["MediaContainer"]["totalSize"] = json!(collection.parts.len());
+        out
     }
 
     fn related_tmdb_id(
@@ -2494,6 +2736,19 @@ impl Shim {
                     }
                 }
                 if let Ok(key) = rk.parse::<i64>() {
+                    if let Some(collection_id) = synthetic_collection_id(key) {
+                        let Some(collection) = self.tmdb_collection(collection_id) else {
+                            return Response::json_status(
+                                503,
+                                &container(json!({
+                                    "Metadata": [], "error": "This collection is not available."
+                                })),
+                            );
+                        };
+                        return Response::json(&container(json!({
+                            "Metadata": [self.collection_row(&collection)]
+                        })));
+                    }
                     if let Some(tmdb_id) = synthetic_show_tmdb_id(key) {
                         let Some(client) = TmdbClient::from_env() else {
                             return Response::json_status(
@@ -2589,6 +2844,21 @@ impl Shim {
                     })
                     .unwrap_or_default();
                 Response::json(&container(json!({"Metadata": rows})))
+            }
+            (_, ["library", "collections", rk, "children"]) => {
+                let collection = rk
+                    .parse()
+                    .ok()
+                    .and_then(synthetic_collection_id)
+                    .and_then(|id| self.tmdb_collection(id));
+                let Some(collection) = collection else {
+                    return Response::json_status(
+                        404,
+                        &container(json!({"Metadata": [], "error": "This collection is not available."})),
+                    );
+                };
+                let (start, size) = page_params(req);
+                Response::json(&self.collection_children(&collection, start, size.unwrap_or(60)))
             }
             (_, ["library", "collections", ..]) | (_, ["library", "people", ..]) => {
                 Response::json(&container(json!({"Metadata": []})))
@@ -2845,8 +3115,33 @@ impl Shim {
                     .collect();
                 Response::json(&container(json!({"Directory": dirs})))
             }
-            ["firstCharacter"] | ["collections"] => {
+            ["firstCharacter"] => {
                 Response::json(&container(json!({"Directory": [], "Metadata": []})))
+            }
+            // The section's collection listing: what a member's `collection.related` hub (a TMDB
+            // franchise shelf) resolves its `tagId` against. Only the franchises this shim has
+            // served are known — there is no library scan to list from — which always includes the
+            // one whose heading was just pressed, since its shelf came from this same process.
+            // Ordered by id so a page's `start` means the same rows twice.
+            ["collections"] => {
+                let (start, size) = page_params(req);
+                let mut known: Vec<TmdbCollection> = self
+                    .collections
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .values()
+                    .cloned()
+                    .collect();
+                known.sort_by_key(|collection| collection.id);
+                let rows: Vec<Value> = known
+                    .iter()
+                    .skip(start)
+                    .take(size.unwrap_or(60))
+                    .map(|collection| self.collection_row(collection))
+                    .collect();
+                let mut out = container(json!({"Metadata": rows}));
+                out["MediaContainer"]["totalSize"] = json!(known.len());
+                Response::json(&out)
             }
             _ => Response::json(&container(json!({"Directory": []}))),
         }

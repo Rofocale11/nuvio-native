@@ -97,14 +97,15 @@ The two halves of the app disagree about what an ID is:
 The shim is the only place that knows both vocabularies, so it hands the UI a **numeric** key and remembers — or decodes — the **string** identity behind it. Two mechanisms do that:
 
 *   **The key table (`shim_store::Keys`)** — append-only `keys.tsv`. Line *N* is ratingKey `10_000 + N`, and the line records the real `Ident` (`Title { type_, id }`, `Season`, `Episode`). This is what real catalog items use, and it survives restarts so Continue Watching and cached images keep resolving.
-*   **Synthetic keys** — for TMDB recommendations that no addon carries there is no `Ident` to store, so the TMDB id is encoded arithmetically and decoded on the way back in.
+*   **Synthetic keys** — for TMDB recommendations and franchises that no addon carries there is no `Ident` to store, so the TMDB id is encoded arithmetically and decoded on the way back in.
 
 ### 3.2 The synthetic bases (CRITICAL — do not change or overlap)
 | Kind | Formula | Example | Range |
 | --- | --- | --- | --- |
 | Related **Movies** | `1_000_000_000 + TMDB_ID` | `1_000_000_603` (The Matrix) | `1_000_000_000 .. 2_000_000_000` |
 | Related **TV Shows** | `2_000_000_000 + TMDB_ID` | `2_000_001_396` (Breaking Bad) | `2_000_000_000 .. 3_000_000_000` |
-| **People** (Cast & Crew) | `3_000_000_000 + TMDB_PERSON_ID` | `3_000_000_638` (Keanu Reeves) | `3_000_000_000 ..` |
+| **People** (Cast & Crew) | `3_000_000_000 + TMDB_PERSON_ID` | `3_000_000_638` (Keanu Reeves) | `3_000_000_000 .. 4_000_000_000` |
+| **Collections** (franchises) | `4_000_000_000 + TMDB_COLLECTION_ID` | `4_000_000_234` (The Dark Knight Collection) | `4_000_000_000 ..` |
 
 The bases are a billion apart on purpose: TMDB movie ids already pass 100,000, so a narrower gap lets a real movie key (`9_641_052` = movie `141_052` on the old bases) cross into the show range and load the wrong title.
 
@@ -112,6 +113,7 @@ The bases are a billion apart on purpose: TMDB movie ids already pass 100,000, s
 const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
 const TMDB_SHOW_KEY_BASE: i64 = 2_000_000_000;
 const TMDB_PERSON_KEY_BASE: i64 = 3_000_000_000;
+const TMDB_COLLECTION_KEY_BASE: i64 = 4_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
 fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
@@ -129,16 +131,24 @@ fn synthetic_show_tmdb_id(rk: i64) -> Option<u64> {
 
 /// A Cast & Crew headshot's synthetic `personId` → TMDB's person id.
 fn synthetic_person_id(rk: i64) -> Option<u64> {
-    (rk >= TMDB_PERSON_KEY_BASE).then_some((rk - TMDB_PERSON_KEY_BASE) as u64)
+    (TMDB_PERSON_KEY_BASE..TMDB_COLLECTION_KEY_BASE) // bounded: a collection is not a person
+        .contains(&rk)
+        .then_some((rk - TMDB_PERSON_KEY_BASE) as u64)
+}
+
+/// A synthetic collection ratingKey's TMDB collection id.
+fn synthetic_collection_id(rk: i64) -> Option<u64> {
+    (rk >= TMDB_COLLECTION_KEY_BASE).then_some((rk - TMDB_COLLECTION_KEY_BASE) as u64)
 }
 ```
 
 *   Each decoder is **bounded above** by the next base. Without that, `3_000_000_638` would also decode as the show a billion ids below it, and a headshot would open the wrong title.
-*   The bases are above every real key (`10_000 + N`), so the four spaces cannot collide.
-*   **Check the bases highest-first.** A key `>= 3_000_000_000` is always a person, `>= 2_000_000_000` a show, and a key in the movie range is always a movie.
+*   The bases are above every real key (`10_000 + N`), so the five spaces cannot collide.
+*   **Check the bases highest-first.** A key `>= 4_000_000_000` is always a collection, `>= 3_000_000_000` a person, `>= 2_000_000_000` a show, and a key in the movie range is always a movie.
 *   A person key is a **`personId`, not a `ratingKey`** — it travels in `Role[].id` on a cast row, which is what the app's cast shelf reads to open `/library/people/{id}/media` (see §4.5).
+*   A collection key is a **`ratingKey`** for a franchise row — it is never sent to an addon (nothing plays a collection), and it exists so the shelf's linked heading can open the collection page (§4.6).
 
-Both synthetic kinds are handled on the way back in by `/library/metadata/{rk}`: parse the key, decode it with the matching helper, fetch TMDB, and return the enriched Plex row (`tmdb_details_row` for movies, `tmdb_show_details_row` for shows). `/library/metadata/{rk}/related` recognises the synthetic ranges too, so a TMDB-only related title can drill down forever.
+Every synthetic kind is handled on the way back in by `/library/metadata/{rk}`: parse the key, decode it with the matching helper, fetch TMDB, and return the enriched Plex row (`tmdb_details_row` for movies, `tmdb_show_details_row` for shows, `collection_row` for a franchise). `/library/metadata/{rk}/related` recognises the synthetic title ranges too, so a TMDB-only related title can drill down forever, and a film in a franchise carries its collection shelf there (§4.6).
 
 ### 3.3 Global ID translation (MUST be applied)
 Addons never see a synthetic number. Every addon-facing request translates the key first:
@@ -172,7 +182,8 @@ fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
 *   `complete` comes from `ranked()`, never from the slot map. An absent slot means *nothing to ask for* (a related show has no episode yet), so it must answer `complete: true` with an empty list — reporting `false` makes the picker re-poll 60× and show "loading" forever.
 
 ## 4. TMDB Enrichment (Movies & TV Shows)
-The app is enriched with TMDB data: cast on detail rows, and a "More Like This" hub of recommendations.
+The app is enriched with TMDB data: cast on detail rows, a "More Like This" hub of recommendations,
+and — for a film in a franchise — a collection shelf of the other films in it (§4.6).
 
 ### 4.1 One request per title
 *   **Performance:** both kinds use a **single HTTP request** with `append_to_response=credits,recommendations`, so cast and related titles arrive together. Do not add separate `/credits` or `/recommendations` calls.
@@ -187,7 +198,11 @@ pub fn tv_details(&self, tv_id: u64) -> Result<TmdbShowDetails> {
 }
 ```
 
-*   The only other request is a movie's `/movie/{id}/videos`, spawned in parallel with the details call (trailer thumbnail). TV shows take their trailer from Cinemeta, so `tv_details` is genuinely one request.
+*   The only other requests are a movie's `/movie/{id}/videos` (trailer thumbnail) and, for a film
+    in a franchise, `/collection/{id}` (§4.6). The first is spawned in parallel with the details
+    call; the second is the only one that adds latency to a detail page, and only for a film that
+    has a franchise at all. TV shows take their trailer from Cinemeta, so `tv_details` is genuinely
+    one request.
 *   Responses are cached for 15 minutes by the shared `TmdbClient` cache, keyed by API key + path.
 
 ### 4.2 TMDB ID resolution: `movie_results` vs `tv_results`
@@ -214,6 +229,7 @@ pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
 *   **TV Shows:** TMDB spells these `name` / `first_air_date`, and there is no runtime — rows use `DEFAULT_EPISODE_MS`. `TmdbShow` / `TmdbShowDetails` exist precisely because the field names differ.
 *   **Related Movies:** `recommendations.results` → the Plex `Hub` array, `type`/`hubIdentifier` `movie`.
 *   **Related TV Shows:** the same hub shape with `type`/`hubIdentifier` `show`.
+*   **Franchises:** `belongs_to_collection` + `/collection/{id}` → a SECOND `Hub` in the same answer, `collection.related.{section}.{n}` (§4.6).
 *   A recommendation is rendered from the addon's own metadata when available (`meta("movie", "tmdb:<id>")` / `meta("series", "tmdb:<id>")`) and otherwise from TMDB, with a synthetic ratingKey (§3.2).
 *   **API Key:** The `TMDB_API_KEY` is injected at compile time via GitHub Secrets (`option_env!("TMDB_API_KEY")`), with a runtime `std::env` fallback. An unset or blank key disables every TMDB lookup (the hub answers 503 and rows keep their Cinemeta metadata). Local testing requires exporting the env var.
 
@@ -250,6 +266,48 @@ fetch.
     base, which would address person `0`.
 *   **A failed or unconfigured lookup is an empty container**, matching the other TMDB routes: the
     page then draws its header (from the `Role[]` entry) with no shelves, not an error screen.
+
+### 4.6 Movie Collections (franchises)
+A film that belongs to a franchise gets a collection shelf on its Detail page, headed by the
+franchise's name and listing the OTHER films in it.
+
+```rust
+/// `/movie/{id}` names the franchise; `/collection/{id}` lists it.
+pub struct TmdbCollectionRef { pub id: u64, pub name: String }      // belongs_to_collection
+pub struct TmdbCollection {
+    pub id: u64, pub name: String, pub overview: Option<String>,
+    pub poster_path: Option<String>, pub backdrop_path: Option<String>,
+    pub parts: Vec<TmdbMovie>,
+}
+```
+
+*   **The source is `TmdbMovie::belongs_to_collection`** (`None` for a standalone film), and the
+    shelf's films are `TmdbClient::collection_details(id)` → `GET /collection/{id}`. One extra
+    request per franchise film's detail page, through the same 15-minute cache.
+*   **It is a `collection.related.{section}.{n}` hub**, not a second recommendation hub. That is the
+    identifier the app's `/related` reader splits a member's collection shelf out of
+    (`plx_data::metadata::collection_shelf`), and it is what makes the shelf draw above Related
+    under its own linked heading instead of folding the films into "More Like This". The answer is
+    `"Hub": [<More Like This>, <franchise>]`, and the shim adds no third hub.
+*   **The rows are ordinary recommendation rows** (`tmdb_recommendation_row`), so each film is a
+    clickable, playable key. The page's own film is left out — it IS the page — and a franchise
+    whose only member is the film on screen gets no shelf at all.
+*   **The heading opens the collection page.** The hub's `key` names the collection by `tagId`
+    (its TMDB id), which is the identity the app's collection store resolves, and the shelf's films
+    are kept in `Shim::collections` so the page answers from what the detail page already fetched.
+    The three routes that page needs:
+    *   `/library/sections/{s}/collections` — the `tagId` resolution, as a collection row whose
+        `index` is the TMDB collection id.
+    *   `/library/metadata/{collection_rk}` — the header (`collection_row`), by the synthetic key
+        `4_000_000_000 + TMDB_COLLECTION_ID` (§3.2).
+    *   `/library/collections/{rk}/children` — the films, in TMDB's release order, paged like any
+        other collection listing.
+*   **The shim has no library scan**, so the section listing carries only franchises it has served
+    (bounded at 256, cleared whole when full), ordered by id so a page's `start` means the same rows
+    twice. It always includes the one whose heading was pressed, since that shelf came from this
+    same process — but a franchise never shown is not listed, and `/library/collections/{rk}/children`
+    for an unknown key answers 404 rather than inventing one.
+*   **TV shows have no collection shelf.** TMDB's `belongs_to_collection` is a movie field.
 
 ## 5. Build & Release Pipeline
 *   **Local Simulator:** `make -j10 sim-linux` (Requires the Linux `libav*` host libraries to be built and placed in `pkg/`).
