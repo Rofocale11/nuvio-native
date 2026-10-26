@@ -30,12 +30,34 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
 - Catalogs → PMS library sections and Home hubs. Metas → movie/show/season/episode items.
   Search → `/hubs/search`. Streams → the item's `Media[]` list (one Media per stream, with
-  resolution/codec/HDR/size/bitrate from `plx_stremio::classify`), so PlxNative's existing
-  version/source picker is the stream picker. Part URLs redirect (or proxy, when headers are
-  needed) to the stream's real URL. The decision endpoint waits for discovery/probing
-  and refuses media that cannot direct play; the native route uses its probed fields.
-  The Streams overlay uses `/nuvio/streams` and `/nuvio/select`, retaining the shim's
-  ranked index instead of confusing it with the selected-first Media list.
+  resolution/codec/HDR/size/bitrate from `plx_stremio::classify`). Each Media also carries
+  `addon_name`, the `Addon::label()` of the addon that returned it (empty only on the
+  "Finding streams…" placeholder). Part URLs redirect (or proxy, when headers are needed) to the
+  stream's real URL. The decision endpoint waits for discovery/probing and refuses media that
+  cannot direct play; the native route uses its probed fields.
+- **Both stream pickers are two-level menus, not flat lists** — the player's `…` popover and the
+  Detail page's **Streams** pill behave identically:
+  1. **the addons that answered for the item**, in ranked order (the addon holding the best stream
+     leads), each stating how many streams it offered;
+  2. **one addon's streams**, best first, headed by that addon's name — the page's rows omit the
+     addon from their fact line, because the band already says it.
+  Picking a stream commits it; BACK walks one level at a time before the panel closes. The addon
+  label is the shim's own `addon_name` (the `Media[]` field), which `/nuvio/streams` returns as
+  `addon`. Grouping rules: `plx_appkit::source_list::addon_groups` (the route's ranked
+  `(index, label, addon_name)` list) and `addon_pages` (the panel's own `StreamChoice[]`, which
+  also carries the stream's technical facts). `route::AVAILABLE_STREAMS` is written only through
+  `route::set_available_streams`, so a revision stamp tells the player panel's per-tick poll that
+  nothing moved.
+- **The player's Source page carries no quality ladder.** Under the shim a playback's quality is a
+  property of the STREAM picked — the shim resolves a concrete file and the route plays it — so a
+  list of bitrate ceilings beside the stream list would be a second answer to the same question.
+  The ladder exists only in Settings > Playback, where it is a policy for ordinary Plex servers.
+  (It was drawn in the player popover until 2026-10-26.) The failure read-out's `Change Source`
+  button opens this picker and is offered under Force Direct Play too: Force overrides every
+  quality RUNG, not which file plays.
+- The stream pick itself is `/nuvio/select?index=` on the shim's own ranked index, then a fresh
+  resolve of the same item; the Media list a `/decision` returns is selected-first and must not be
+  confused with it.
 - Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
   loaded/saved through the authenticated storage helper. Stable/debug/nightly own
   separate records. The helper verifies readback before import files are removed.

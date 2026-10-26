@@ -45,6 +45,22 @@
 //! [`AppMsg::AltSourceOpen`] to the Detail instance named by its argument and the PAGE performs the
 //! navigation, which is `LibraryMenu`'s shape and keeps one owner of "what a press means here".
 //!
+//! # The same panel, two vocabularies
+//!
+//! On a Nuvio (shim) item this pill is the **Streams** picker instead — `browse.detail.also_available`
+//! reads "Streams" — and it lists the addon streams the shim found for the item rather than Plex
+//! copies. It is a **two-level sub-menu**, the same shape the player's `…` Source page has:
+//!
+//! 1. the ADDONS that answered for this item (grouped by `addon_name`, ranked order), each stating
+//!    how many streams it offered — `plx_appkit::source_list::addon_pages`;
+//! 2. one addon's streams, best first, headed by that addon's name; picking one asks the shim to
+//!    select it (`/nuvio/select`) and the Detail page starts the playback.
+//!
+//! That split is the whole point: an addon can answer with a hundred streams, and a flat list makes
+//! the viewer read all of them to find the source they trust. Which page is showing is
+//! `stream_page`, NAMED by its addon's lead ranked index so a re-rank cannot point it at another
+//! source; BACK walks one level at a time before the panel closes.
+//!
 //! This paragraph said "watch state does not travel between servers" flat, and half of that stopped
 //! being true when [`plx_data::viewstate`] began fanning a Mark as Watched out over every source
 //! holding the guid. The two halves are not the same claim and the split is the whole point: the
@@ -81,7 +97,6 @@
 //! beneath it, which is a smaller surprise than the cursor jumping mid-interaction.
 
 use std::borrow::Cow;
-use std::convert::Infallible;
 
 use plx_data::metadata::AltCopy;
 use plx_plex::plex::ServerId;
@@ -105,7 +120,7 @@ use plx_ui::{theme, Rect};
 /// selected ROW is in it deliberately: this panel's UP/DOWN changes nothing else in the app, so
 /// without it a replay grades the panel opening and closing and nothing between.
 pub const SHAPE: [&str; 2] = [
-    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4]},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion,streams:{mode:bool,pending:bool,error:bool,attempts:u32,rows:[{index:u32,label:str,detail:str}]}",
+    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4]},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion,streams:{mode:bool,pending:bool,error:bool,attempts:u32,page:opt<u32>,root:opt<str>,rows:[{index:u32,label:str,detail:str}]}}",
     TableView::MOTION_SHAPE,
 ];
 
@@ -306,6 +321,12 @@ pub enum Action {
     None,
     /// Open `rk` on server `sid` — that copy's own page. Never a swap of the copy in place.
     Open { sid: ServerId, rk: String },
+    /// **The Streams picker's first level**: drill into one addon's streams, by its position in
+    /// [`plx_appkit::source_list::addon_pages`]. The panel replaces its own rows and stays up —
+    /// nothing is reported to the Detail page, because no choice has been made yet.
+    Addon(usize),
+    /// **The Streams picker's second level**: select this stream (the shim's ranked index).
+    Stream(usize),
 }
 
 /// What one row's OK means, decided once when the row is declared, so the "the row you are on is
@@ -323,6 +344,10 @@ pub fn action_for(row: &AltRow, here_sid: ServerId, here_rk: &str) -> Action {
 /// A row's identity: the copy it names (server + ratingKey) and, for a producer that listed the
 /// same copy twice, which occurrence — a duplicate is a second row, never a second identity
 /// collision. Selection across a rebuild follows this, not a position.
+///
+/// **The Streams picker's rows use the same type**, with `sid` naming nothing and `rk` carrying a
+/// marker instead: the addon a row drills into (`page`) or the stream a page row commits (`act`).
+/// One identity type serves both lists because one form does — see [`AltPage`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct AltId {
     sid: ServerId,
@@ -337,13 +362,25 @@ impl AltId {
         let nth = rows[..pos].iter().filter(|o| o.sid == r.sid && o.rk == r.rk).count();
         AltId { sid: r.sid, rk: r.rk.clone(), nth }
     }
+
+    /// The Streams picker's SOURCE-page identity: the addon at `group`, whose name keys it (the
+    /// list is rebuilt from live data, so a position alone could name a different addon).
+    fn addon(group: usize, name: &str) -> Self {
+        AltId { sid: ServerId::default(), rk: format!("addon|{group}|{name}"), nth: 0 }
+    }
+
+    /// The Streams picker's ADDON-page identity: the stream at `index` — the shim's own ranked
+    /// index, which is what `/nuvio/select` takes.
+    fn stream(index: usize) -> Self {
+        AltId { sid: ServerId::default(), rk: format!("stream|{index}"), nth: 0 }
+    }
 }
 
 /// The panel's one section, declared from the resolved rows alone (pure, so the text-fit suite
 /// drives it): every row carries its own destination ([`action_for`]). The dynamic rows' focus key
 /// is their position in the list (docs/settings-form.md, "Dynamic rows"): the list is one
 /// unheaded section whose length and order the store decides.
-pub fn form_for(rows: &[AltRow], here_sid: ServerId, here_rk: &str) -> Form<AltId, Action, Infallible> {
+pub fn form_for(rows: &[AltRow], here_sid: ServerId, here_rk: &str) -> Form<AltId, Action, Action> {
     let mut sec = FormSection::new("");
     for (pos, r) in rows.iter().enumerate() {
         let id = AltId::of(rows, pos);
@@ -369,13 +406,21 @@ pub struct AltSourcesScreen {
     /// The rows the `TableView` and `dests` were built from — the rebuild stamp (module doc).
     rows: Vec<AltRow>,
     /// The table and what each row does, replaced together ([`form_for`]).
-    pub form: FormTable<AltId, Action, Infallible>,
+    pub form: FormTable<AltId, Action, Action>,
     stream_choices: Vec<plx_plex::plex::nuvio::StreamChoice>,
     stream_mailbox: std::sync::Arc<std::sync::Mutex<Option<StreamReply>>>,
     stream_mode: bool,
     stream_pending: bool,
     stream_error: bool,
     stream_attempts: u32,
+    /// **Which page of the Streams picker is showing**: `None` is the addon list, `Some(first
+    /// ranked index)` is that addon's page. The first ranked index is what identifies the addon
+    /// across a rebuild — the list is ranked fresh each poll, so a position could name another
+    /// source, while the stream that led the group cannot (the group would be empty otherwise).
+    stream_page: Option<usize>,
+    /// What the addon list looked like when the page was pushed — the opener focused and the
+    /// scroll it was left at — reinstated by a pop ([`FormTable::restore`]).
+    root_return: Option<(AltId, f32)>,
 }
 
 enum StreamReply {
@@ -397,6 +442,8 @@ impl AltSourcesScreen {
             stream_pending: false,
             stream_error: false,
             stream_attempts: 0,
+            stream_page: None,
+            root_return: None,
         };
         if screen.stream_mode { screen.request_streams(); }
         screen.rebuild(Sel::OnTheCopyYouAreOn, meta);
@@ -417,20 +464,83 @@ impl AltSourcesScreen {
         if job.is_none() { self.stream_pending = false; self.stream_error = true; }
     }
 
-    fn stream_form(&self) -> Form<AltId, Action, Infallible> {
+    /// **The Streams picker, as the page that is showing**: the addons that answered for the item
+    /// on the first level, one of them's streams on the second. Pure over the panel's own list, so
+    /// both pages are host-testable without a route.
+    ///
+    /// **A row's focus key is its identity**, not its position (unlike the Also-available list,
+    /// whose rows the store orders): the stream list is polled and re-ranked while the panel is
+    /// open, so a position-keyed row would slide onto its neighbour under the cursor.
+    fn stream_form(&self) -> Form<AltId, Action, Action> {
         // placeholder-exempt: this declares rows; draw() counts the visible waiting caption.
-        let mut section = FormSection::new("");
-        for choice in &self.stream_choices {
-            let rk = choice.index.to_string();
-            section = section.item_keyed(AltId { sid: self.arg.sid, rk: rk.clone(), nth: 0 },
-                RowKey(choice.index as u32), RowKind::Choice,
-                Action::Open { sid: self.arg.sid, rk }, plx_appkit::source_list::stream_row(choice));
+        let pages = plx_appkit::source_list::addon_pages(&self.stream_choices);
+        if let Some(page) = self.stream_page {
+            if let Some(group) = pages.iter().find(|g| g.lead == page) {
+                let sec = group.rows.iter().fold(FormSection::new(""), |sec, pos| {
+                    let choice = &self.stream_choices[*pos];
+                    let id = AltId::stream(choice.index);
+                    let act = Action::Stream(choice.index);
+                    // the page's band already names the addon, so the row does not repeat it
+                    sec.item_keyed(id, RowKey(choice.index as u32), RowKind::Choice, act,
+                        plx_appkit::source_list::stream_row_with(choice, false))
+                });
+                return Form::new().section(sec);
+            }
         }
+        let mut section = pages.iter().enumerate().fold(FormSection::new(""), |sec, (group, g)| {
+            let id = AltId::addon(group, &g.name);
+            // the trailing count is app-owned arithmetic; the name is the addon's own
+            let row = Row::new(g.name.clone()).server_label().value(g.rows.len().to_string());
+            sec.item_keyed(id, RowKey(group as u32), RowKind::Nav(Action::Addon(group)),
+                Action::Addon(group), row)
+        });
         if self.stream_choices.is_empty() || self.stream_error {
             section = section.note(if self.stream_error { plx_platform::i18n::msg::browse_streams_failed() }
                 else if self.stream_pending { plx_platform::i18n::msg::browse_streams_loading() } else { plx_platform::i18n::msg::browse_streams_empty() });
         }
         Form::new().section(section)
+    }
+
+    /// The title band's text: the addon whose page is showing, else none (the first level is the
+    /// panel's own list, which the Detail page's chip has already named).
+    fn stream_title(&self) -> Option<String> {
+        let page = self.stream_page?;
+        plx_appkit::source_list::addon_pages(&self.stream_choices)
+            .into_iter()
+            .find(|g| g.lead == page)
+            .map(|g| g.name)
+    }
+
+    /// **Drill into an addon, or come back up one page.** The panel keeps its own stack because a
+    /// pick on the lower level is not a choice the Detail page has to act on — it is a request the
+    /// shim performs — so there is nothing for the container to route.
+    fn push_stream_page(&mut self, group: usize) {
+        let Some(g) = plx_appkit::source_list::addon_pages(&self.stream_choices).into_iter().nth(group)
+        else {
+            return;
+        };
+        // what the list looked like, so a pop brings it back exactly as it was left
+        if let Some(opener) = self.form.selected_id().cloned() {
+            self.root_return = Some((opener, self.form.table.scroll_pos()));
+        }
+        // the page is NAMED by its addon's first RANKED index (see `stream_page`), not by the
+        // position in the group list
+        self.stream_page = Some(g.lead);
+        // nothing on the new page is "current": it opens on its own first row
+        self.form.open(self.stream_form(), None);
+        self.form.table.set_title(self.stream_title());
+    }
+
+    /// Pop the addon page: the first level comes back exactly as it was left. `false` at the first
+    /// level (nothing to pop — the caller dismisses the panel).
+    fn pop_stream_page(&mut self) -> bool {
+        if self.stream_page.take().is_none() {
+            return false;
+        }
+        let (opener, scroll) = self.root_return.take().unzip();
+        self.form.restore(self.stream_form(), opener.as_ref(), scroll.unwrap_or(0.0));
+        self.form.table.set_title(None);
+        true
     }
 
     /// The rows the store would produce right now, marked against **the server the open PAGE
@@ -480,6 +590,16 @@ impl AltSourcesScreen {
                 self.form.set(form, here.as_ref());
             }
         }
+        // A rebuild can be the stream list arriving, re-ranking, or emptying under an open addon
+        // page: the band names the page as it is NOW, and one the change emptied goes back up.
+        if self.stream_mode {
+            let pages = plx_appkit::source_list::addon_pages(&self.stream_choices);
+            if self.stream_page.is_some_and(|p| !pages.iter().any(|g| g.lead == p)) {
+                self.stream_page = None;
+                self.form.set(self.stream_form(), None);
+            }
+            self.form.table.set_title(self.stream_title());
+        }
     }
 
     pub fn frame(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
@@ -491,6 +611,12 @@ impl AltSourcesScreen {
         fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
     }
 
+    /// The panel's own content moved (a page push or pop): nothing in the app changed, so this is
+    /// an INPUT-provenance invalidation — the same one a `FocusMoved` raises — never a landing.
+    fn moved<H: AppLike>(&self, fx: &mut Effects<'_, H>) {
+        fx.invalidate(plx_machine::present::Provenance::Input);
+    }
+
     /// Commit row `elem` and close. The row you are ALREADY on reports nothing — there is nowhere
     /// to navigate to, and the tick has already answered the question the press was asking.
     ///
@@ -500,6 +626,16 @@ impl AltSourcesScreen {
     /// `AccountMenuScreen::activate` draws.
     fn commit<H: AppLike>(&mut self, elem: u32, fx: &mut Effects<'_, H>) {
         if self.stream_mode {
+            // an ADDON row drills in; only a stream row selects and closes
+            if self.stream_page.is_none() {
+                if let Some(plx_ui::form::Activation::Push(Action::Addon(group))) =
+                    self.form.index_of_key(RowKey(elem)).and_then(|i| self.form.activate(i))
+                {
+                    self.push_stream_page(group);
+                    self.moved(fx);
+                }
+                return;
+            }
             if self.stream_pending || !self.stream_choices.iter().any(|s| s.index == elem as usize) { return; }
             self.stream_pending = true;
             let (sid, rk, mailbox) = (self.arg.sid, self.arg.rk.clone(), self.stream_mailbox.clone());
@@ -552,10 +688,10 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                             self.stream_error = list.is_none();
                             if let Some(list) = list {
                                 // FORK (RichiL10): Cache the streams immediately when loaded
-                                let saved: Vec<(usize, String)> = list.streams.iter()
-                                    .map(|s| (s.index, s.label.clone()))
+                                let saved: Vec<(usize, String, String)> = list.streams.iter()
+                                    .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default()))
                                     .collect();
-                                *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
+                                plx_media::route::set_available_streams(saved);
 
                                 self.stream_choices = list.streams;
                                 if !list.complete && self.stream_attempts < 60 { self.request_streams(); }
@@ -620,7 +756,12 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                     edge: Edge::Down,
                     ..
                 } => {
-                    self.dismiss(fx);
+                    // the Streams picker walks back one level before it closes
+                    if self.stream_mode && self.pop_stream_page() {
+                        self.moved(fx);
+                    } else {
+                        self.dismiss(fx);
+                    }
                     Handled::Yes
                 }
                 _ => Handled::No,
@@ -714,6 +855,11 @@ impl LogicalState for AltSourcesScreen {
         c.u32(self.form.table.sel as u32);
         self.form.table.write_motion(c);
         c.bool(self.stream_mode).bool(self.stream_pending).bool(self.stream_error).u32(self.stream_attempts);
+        // the Streams picker's page: `Some(first ranked index of the group)` names it across a
+        // re-rank; the SHAPE below says so in words
+        c.option(self.stream_page.as_ref(), |c, p| {
+            c.u32(*p as u32);
+        });
         c.seq(self.stream_choices.len());
         for choice in &self.stream_choices {
             let row = plx_appkit::source_list::stream_row(choice);

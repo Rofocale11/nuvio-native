@@ -17,52 +17,50 @@
 //! people who would report the bug, and the alternative to THAT is a fourth disc for a control most
 //! users touch once. Overflow is what a `…` means.
 //!
-//! # A root with a Quality row, a Quality page, and the two row idioms they are drawn in
+//! # A root with a Source row, and one page per addon under it
 //!
-//! **Quality leads.** It is the primary playback control this popover exists to reach — a rung
-//! picked here re-routes the picture that is on screen right now (see below). On the ROOT it is one
-//! headerless drill-in row ([`MoreRow::OpenQuality`]) whose value is the current rung's label;
-//! RIGHT or OK pushes the **Quality page** (a title band, then the rungs). **Options** trails it on
-//! the root: the diagnostics switch is an overflow affordance, something a viewer reaches for once,
-//! to photograph a bug, not a control anyone returns to.
+//! **Source leads.** On the ROOT it is one headerless drill-in row ([`MoreRow::OpenSource`]) whose
+//! value is the item's playable-stream count; RIGHT or OK pushes the **Source page**. **Options**
+//! trails it on the root: the diagnostics switch is an overflow affordance, something a viewer
+//! reaches for once, to photograph a bug, not a control anyone returns to.
 //!
-//! **Quality** (the page) is the [`plx_media::route::Quality`] ladder — Original, fixed rungs, and Auto once its
-//! playback readiness gate opens — and its rows carry
-//! [`Row::checked`]'s LEADING checkmark, which means "the active one of several". That is the same
-//! design-system rule from the other side: **a mark says where you are and a word says what is set,
-//! and no row says both**, which is why a rung's rate rides inside its own label rather than in a
-//! trailing value beside the mark. (The Options row drew as a PAIR OF MARKS for one day, a ring
-//! ticked when on; those assets were deleted the same evening — see [`plx_ui::icons`].)
+//! **The Source page is one row per addon that answered for the item** ([`MoreRow::OpenAddon`]),
+//! each stating how many streams it offered, and each opening its OWN page ([`MorePage::Addon`]) of
+//! just that addon's streams. That is the sub-menu: a viewer who trusts one source picks it once
+//! instead of walking a flat list of a hundred and fifty rows.
+//!
+//! The addon named on a row is the shim's own `addon_name` (the `Media[]` field), carried through
+//! the ranked list the route publishes — see `crate::source_list::addon_groups`, which is where the
+//! grouping rule lives. Groups appear in RANKED order (the addon holding the best stream leads),
+//! and the streams inside a page stay in ranked order too.
+//!
+//! **There is no playback-quality ladder here.** Under the Stremio shim the quality of a playback is
+//! a property of the STREAM picked — the shim resolves a concrete file and the route plays it — so
+//! a list of bitrate ceilings beside the stream list would be a second, contradictory answer to the
+//! same question. The ladder lives only in Settings > Playback, where it is a policy for ordinary
+//! Plex servers. (It was drawn on this page until 2026-10-26, above the addon rows.)
 //!
 //! **Options** holds switches. Its row carries [`Row::toggle`], so it states itself as the WORD
 //! `On`/`Off` at the row's trailing edge. It is a STATE, not a destination: a chevron would promise
 //! a page behind the row and there is none.
 //!
-//! `docs/parity-gaps.md`'s standing decision is that this app has **no full-screen menu sheets** —
-//! the reference clients put playback quality in one and we do not. Quality drills in INSIDE the
-//! popover instead, on the same [`plx_ui::page_stack::PageStack`] the Subtitles tab of
-//! [`crate::track_menu`] uses: BACK, LEFT and a click on the title band mean "up one page", and
-//! only BACK on the root dismisses. Six rungs fit; when they stop fitting, the [`TableView`]
-//! scrolls, which is what it is for.
+//! `docs/parity-gaps.md`'s standing decision is that this app has **no full-screen menu sheets**.
+//! The streams drill in INSIDE the popover instead, on the same [`plx_ui::page_stack::PageStack`]
+//! the Subtitles tab of [`crate::track_menu`] uses: BACK, LEFT and a click on the title band mean
+//! "up one page" (an addon page goes back to the Source page, the Source page to the root), and
+//! only BACK on the root dismisses. When a page stops fitting, the [`TableView`] scrolls, which is
+//! what it is for.
 //!
-//! A rung closes the menu on commit (opening the page does not), so the read-out is never what confirms the press: the
-//! overlay appearing behind the dismissed panel — or, for a rung, the next play routing differently
-//! — is.
+//! A stream closes the menu on commit (opening a page does not), so the read-out is never what
+//! confirms the press: the overlay appearing behind the dismissed panel — and, once the new source
+//! opens, a different picture — is.
 //!
-//! # What a picked rung does, and what it deliberately does not
+//! # What a picked STREAM does
 //!
-//! It is a ROUTING policy, not a number handed to the transcoder: over-ceiling content loses direct
-//! play *and* the container remux, which is the only way a cap can bind at all. Original preserves
-//! the source unchanged. Auto is exposed only through `route::auto_quality_ready()`, the named
-//! fail-closed gate owned by the integrated HLS prime/swap path. The whole argument is
-//! [`plx_media::route::Quality`]'s doc.
-//!
-//! It binds every future play, **and it re-decides the one on screen** — because this menu is the
-//! ladder's only entry point, so a rung that waited for the next play would be a control that
-//! visibly does nothing everywhere it can be reached. `route::set_quality` re-asks the routing
-//! question with the new rung and reloads only when the answer changed; picking a HIGHER rung than
-//! the picture already satisfies does nothing at all. That is a user-initiated switch and not an
-//! adaptive one — nothing measures a link or moves a rung on its own.
+//! It is not a routing policy at all: the shim owns the item's stream list, so the pick is
+//! `/nuvio/select?index=` (through `route::set_stream_index`) followed by a fresh resolve of the
+//! same item — `app::playback::apply_more_action` performs both. The index is the shim's own ranked
+//! index, which is why the pages carry `Action::SetStream(index)` and not a URL.
 #![allow(non_upper_case_globals)]
 use plx_ui::frame::Budget;
 use plx_ui::geom::IndexElem;
@@ -83,8 +81,6 @@ pub enum Action {
     None,
     /// flip `crate::app::diagnostics`'s overlay on/off
     ToggleStats,
-    /// select a rung of the playback-quality ladder ([`plx_media::route::set_quality`])
-    SetQuality(plx_media::route::Quality),
     /// select a specific Addon stream by index
     SetStream(usize), // <--- Just the index, no String!
     /// **Lab builds only** — snapshot and upload the diagnostic ring (`crate::lab`). Here as well
@@ -95,43 +91,57 @@ pub enum Action {
 
 /// **A drill-in page of the More menu** — the form's `Dest`. The root is the empty page stack, not
 /// a value of this type (`docs/player-submenus.md`).
+///
+/// The Source page is TWO levels, the way a viewer thinks about a stream: first the addons that
+/// answered, then the streams one of them returned. The second level is addressed by the addon's
+/// POSITION in the list the page beneath was built from — the names themselves are user and addon
+/// data, and a page stack that carried one would have to be re-keyed every time the list moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MorePage {
-    /// The playback-quality ladder: one checked-rung row per rung ([`MoreRow::Act`] of a
-    /// [`Action::SetQuality`]).
-    Quality,
+    /// The addons that answered, each a drill-in ([`MoreRow::OpenAddon`]).
+    Source,
+    /// One addon's streams, best first ([`MoreRow::Act`] of a [`Action::SetStream`]).
+    Addon(usize),
 }
 
 impl MorePage {
-    /// The title band's text.
-    fn title(self) -> String {
+    /// The title band's text; an addon page is titled by the addon itself.
+    fn title(self, streams: &[(usize, String, String)]) -> String {
         match self {
-            Self::Quality => plx_platform::i18n::msg::widgets_menu_quality().to_string(),
+            Self::Source => plx_platform::i18n::msg::widgets_menu_source().to_string(),
+            Self::Addon(i) => match crate::source_list::addon_groups(streams).get(i) {
+                Some((name, _)) if !name.is_empty() => name.clone(),
+                Some(_) => crate::source_list::untagged_source().to_string(),
+                None => String::new(),
+            },
         }
     }
 
     /// A stable small number for the replay canon. Never reordered: recordings hash it.
     fn code(self) -> u32 {
         match self {
-            Self::Quality => 1,
+            Self::Source => 1,
+            Self::Addon(i) => 2 + i as u32,
         }
     }
 }
 
-/// A row's identity on either page: the Quality drill-in on the root, or a row that commits an
-/// [`Action`] (a rung on the Quality page, an Options switch on the root).
+/// A row's identity on either page: the Source drill-in on the root, an addon on the Source page,
+/// or a row that commits an [`Action`] (a stream on an addon page, an Options switch on the root).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoreRow {
-    /// The root's Quality row ([`MorePage::Quality`]): reads out the current rung.
-    OpenQuality,
+    /// The root's Source row ([`MorePage::Source`]): reads out the stream count.
+    OpenSource,
+    /// A drill-in to one addon's streams, by its position in [`stream_groups`].
+    OpenAddon(usize),
     Act(Action),
 }
 
 /// What OK on the highlighted row did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoreOk {
-    /// Perform this action; the container dismisses the panel (a rung pick and the Options rows
-    /// close it, exactly as before the Quality page existed).
+    /// Perform this action; the container dismisses the panel (a stream pick and the Options rows
+    /// close it).
     Action(Action),
     /// A Nav row opened a page: the panel stays, with its rows replaced.
     Navigated,
@@ -149,18 +159,15 @@ type MoreTable = FormTable<MoreRow, Action, MorePage>;
 
 pub struct MoreMenuState {
     /// The rows AND the action each one commits, declared together ([`root_form`],
-    /// [`quality_form`]) — the row SET varies (the Quality ladder is built from
-    /// `route::available_quality_ladder`, and Force Direct Play drops it), so a row is found by its
-    /// identity ([`MoreRow`]'s [`FormId`] key), never by a position. One table serves the page that
-    /// is showing. The table is main-thread-only, like every other panel's.
+    /// [`source_form`]) — the row SET varies (the streams arrive asynchronously, so the addon
+    /// list grows), so a row is found by its identity ([`MoreRow`]'s [`FormId`] key), never by a
+    /// position. One table serves the page that is showing. The table is main-thread-only, like
+    /// every other panel's.
     form: MoreTable,
     /// The row set the form was last built from (what [`rows_for`] answered), so a live change to
-    /// it — Auto's readiness gate opening, Force Direct Play flipping — is noticed and the panel
-    /// rebuilt and RESIZED ([`Self::refresh`]) rather than left showing a ladder that has moved.
+    /// it is noticed and the panel rebuilt and RESIZED ([`Self::refresh`]) rather than left
+    /// showing a list that has moved.
     rows: Vec<Action>,
-    pub forced: bool,
-    /// The rung the root's Quality row reads out and the Quality page checks, as of the last build.
-    current: plx_media::route::Quality,
     /// The pages pushed above the root, outermost first (empty = the root): each remembers the row
     /// that opened it and the scroll it was left at ([`page_stack`]).
     pages: PageStack<MorePage, MoreRow>,
@@ -168,27 +175,24 @@ pub struct MoreMenuState {
     /// menu uses: a row set that changes height animates the top edge, bottom and right stay on the
     /// anchor, and a push or pop slides the two pages.
     motion: PanelMotion,
-    pub last_stream_count: usize,
+    /// The ranked stream list the pages were last built from, `(index, label, addon)`. Held so a
+    /// pushed page is built from the SAME list its opener was, and so a live change to it can be
+    /// noticed ([`Self::refresh_to`]) — the global the route publishes is read once per rebuild.
+    streams: Vec<(usize, String, String)>,
+    /// The route's revision of that list as of the last rebuild, so the tick's poll is one atomic
+    /// load rather than a copy of every label on every frame.
+    stream_rev: u32,
 }
 
-/// The hand-assigned focus key of each row. `SetQuality` rungs are an exhaustive match, so a new
-/// rung cannot compile without claiming a key; none of these is a discriminant, a position or a
+/// The hand-assigned focus key of each row — none of these is a discriminant, a position or a
 /// hash, so reordering the menu moves no key.
 impl FormId for Action {
     fn key(&self) -> RowKey {
-        use plx_media::route::Quality;
         RowKey(match self {
             Action::None => 0,
             Action::ToggleStats => 1,
             Action::SendDiagnostics => 2,
-            Action::SetQuality(Quality::Auto) => 10,
-            Action::SetQuality(Quality::Original) => 11,
-            Action::SetQuality(Quality::P1080High) => 12,
-            Action::SetQuality(Quality::P1080) => 13,
-            Action::SetQuality(Quality::P720) => 14,
-            Action::SetQuality(Quality::P720Low) => 15,
-            Action::SetQuality(Quality::P480) => 16,
-            Action::SetStream(i) => 100 + *i as u32, 
+            Action::SetStream(i) => 100 + *i as u32,
         })
     }
 }
@@ -196,85 +200,111 @@ impl FormId for Action {
 impl FormId for MoreRow {
     fn key(&self) -> RowKey {
         match self {
-            // free in `Action`'s key space (0..=2 and 10..=16)
-            MoreRow::OpenQuality => RowKey(3),
+            // free in `Action`'s key space (0..=2)
+            MoreRow::OpenSource => RowKey(3),
+            // 0x1000 up: one band per addon, clear of every `SetStream` (100 + index). An addon
+            // page's rows are `Act` rows and never collide with a drill-in, so the only keys that
+            // must stay apart are these and the actions of the page BENEATH, which they do.
+            MoreRow::OpenAddon(i) => RowKey(0x1000 + *i as u32),
             MoreRow::Act(a) => a.key(),
         }
     }
 }
 
-/// Is the Quality row offered? Force Direct Play never offers one (no rung can change what plays),
-/// and an empty ladder has nothing to open onto — a row leading to an empty page would read as a
-/// menu that failed to load.
-fn quality_offered(rows: &[Action], forced: bool) -> bool {
-    !forced && rows.iter().any(|a| matches!(a, Action::SetQuality(_)))
+/// Is the Source row offered? An empty list has nothing to open onto — a row leading to an empty
+/// page would read as a menu that failed to load.
+fn source_offered(streams: &[(usize, String, String)]) -> bool {
+    !streams.is_empty()
 }
 
-/// The ROOT as a pure form: the Quality drill-in (headerless, like the Subtitles root's Style —
-/// it reads out the current rung as its value), then Options.
-fn root_form(
-    ps: &plx_media::route::PlaybackSession,
-    rows: &[Action],
-    forced: bool,
-    current: plx_media::route::Quality,
-) -> MoreForm {
+/// One addon's streams, as `(ranked index, label)` — what [`MorePage::Addon`]'s page lists.
+fn streams_of(streams: &[(usize, String, String)], indices: &[usize]) -> Vec<(usize, String)> {
+    indices
+        .iter()
+        .filter_map(|i| streams.iter().find(|(index, _, _)| index == i))
+        .map(|(index, label, _)| (*index, label.clone()))
+        .collect()
+}
+
+/// The ROOT as a pure form: the Source drill-in (headerless, like the Subtitles root's Style —
+/// it reads out how many streams there are), then Options.
+fn root_form(rows: &[Action], streams: &[(usize, String, String)]) -> MoreForm {
     let mut options = FormSection::new(plx_platform::i18n::msg::widgets_menu_options());
-    
-    // FORK: Filter out BOTH SetQuality and SetStream so they don't show in Options
-    for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetQuality(_)) && !matches!(a, Action::SetStream(_))) {
-        options = options.item(MoreRow::Act(a), RowKind::Button, a, row_for(ps, a));
+
+    // the streams are reached through the Source row, so they are not an option
+    for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetStream(_))) {
+        options = options.item(MoreRow::Act(a), RowKind::Button, a, row_for(a));
     }
-    
-    // FORK: Show the Source button if we have EITHER qualities OR streams
-    let has_sources = rows.iter().any(|a| matches!(a, Action::SetQuality(_) | Action::SetStream(_)));
-    let quality = FormSection::new("").item_if(
-        has_sources && !forced,
-        MoreRow::OpenQuality,
-        RowKind::Nav(MorePage::Quality),
+
+    let source = FormSection::new("").item_if(
+        source_offered(streams),
+        MoreRow::OpenSource,
+        RowKind::Nav(MorePage::Source),
         Action::None,
-        Row::new(plx_platform::i18n::msg::widgets_menu_quality()).value(current.label()),
+        Row::new(plx_platform::i18n::msg::widgets_menu_source()).value(streams.len().to_string()),
     );
-    Form::new().section(quality).section(options)
+    Form::new().section(source).section(options)
 }
 
-/// The Quality PAGE: one checked-rung row per rung of `rows`, the current one checked.
-fn quality_form(
-    ps: &plx_media::route::PlaybackSession,
-    rows: &[Action],
-    current: plx_media::route::Quality,
-) -> MoreForm {
-    let sec = rows.iter().copied().filter(|a| matches!(a, Action::SetQuality(_) | Action::SetStream(_))).fold(
-        FormSection::new(""),
-        |sec, a| {
-            sec.choice(MoreRow::Act(a), a, row_for(ps, a), |id| {
-                match id {
-                    // Check the current quality rung
-                    MoreRow::Act(Action::SetQuality(q)) => *q == current,
-                    // We don't track the current stream index perfectly in the UI yet, so no checkmark
-                    MoreRow::Act(Action::SetStream(_)) => false,
-                    _ => false,
-                }
-            })
-        },
-    );
+/// **The Source PAGE**: one drill-in row per addon that answered for the item, stating how many
+/// streams it offered. The second level is that addon's own page ([`addon_form`]).
+///
+/// Nothing about playback quality is drawn here: under the shim a stream IS a quality, so a rung
+/// list beside the stream list would be a second answer to the same question.
+fn source_form(streams: &[(usize, String, String)]) -> MoreForm {
+    let addons = crate::source_list::addon_groups(streams)
+        .into_iter()
+        .enumerate()
+        .fold(FormSection::new(""), |sec, (i, (name, indices))| {
+            let name = if name.is_empty() { crate::source_list::untagged_source().to_string() } else { name };
+            let row = Row::new(name).server_label().server_value().value(indices.len().to_string());
+            sec.item(MoreRow::OpenAddon(i), RowKind::Nav(MorePage::Addon(i)), Action::None, row)
+        });
+    let mut form = Form::new().section(addons);
+    if streams.is_empty() {
+        form = form.section(FormSection::new("").note(plx_platform::i18n::msg::browse_streams_loading()));
+    }
+    form
+}
+
+/// One addon's page: its streams, best first. Nothing is checked — the shim's selected index is
+/// not read back here — and every row commits its own [`Action::SetStream`].
+fn addon_form(group: usize, streams: &[(usize, String, String)]) -> MoreForm {
+    let indices = crate::source_list::addon_groups(streams)
+        .get(group)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let sec = streams_of(streams, &indices)
+        .into_iter()
+        .fold(FormSection::new(""), |sec, (index, label)| {
+            let a = Action::SetStream(index);
+            sec.item(MoreRow::Act(a), RowKind::Choice, a, Row::new(label).server_label())
+        });
     Form::new().section(sec)
 }
 
 impl MoreMenuState {
-    fn open_focused(ps: &plx_media::route::PlaybackSession, quality: Option<plx_media::route::Quality>) -> Self {
-        let forced = plx_media::route::forced_direct_play(ps);
-        let rows = rows_for(forced);
-        let current = plx_media::route::quality();
+    /// `on_open`: open straight on the Source page (the failure read-out's OK), no slide.
+    fn open_focused(on_open: bool) -> Self {
+        let rows = rows_for();
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true; // a short action list — BODY labels, like the profile menu
         form.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
-        form.set_or_open(root_form(ps, &rows, forced, current), None);
-        let mut st = MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new(), last_stream_count: 0 };
-        // A quality entry (the failure screen's OK) opens straight on the Quality page with the
-        // active rung focused, no slide: the viewer is fixing a bad decision, not browsing. Under
-        // Force Direct Play there is no ladder, so it is the ordinary root.
-        if quality.is_some() && quality_offered(&st.rows, st.forced) {
-            st.push(ps, MorePage::Quality);
+        let streams = plx_media::route::available_streams();
+        form.set_or_open(root_form(&rows, &streams), None);
+        let mut st = MoreMenuState {
+            form,
+            rows,
+            pages: PageStack::new(),
+            motion: PanelMotion::new(),
+            streams,
+            stream_rev: plx_media::route::streams_rev(),
+        };
+        // An on_open entry (the failure screen's OK) opens straight on the Source page, no slide:
+        // the viewer is fixing a bad decision, not browsing. Nothing is focused in particular —
+        // there is no current rung to land on, and the first addon is the sensible start.
+        if on_open && source_offered(&st.streams) {
+            st.push(MorePage::Source);
             st.motion.cancel_slide();
         }
         st
@@ -293,53 +323,56 @@ impl MoreMenuState {
     }
 
     /// The form of a pushed page, from the panel's own read-outs.
-    fn page_form(&self, ps: &plx_media::route::PlaybackSession, page: MorePage) -> MoreForm {
+    fn page_form(&self, page: MorePage) -> MoreForm {
         match page {
-            MorePage::Quality => quality_form(ps, &self.rows, self.current),
+            MorePage::Source => source_form(&self.streams),
+            MorePage::Addon(i) => addon_form(i, &self.streams),
         }
     }
 
-    /// The explicit initial focus of a pushed page: the Quality page opens on its checked rung
-    /// (else the first row, [`FormTable::open`]'s fallback).
-    fn page_initial(&self, page: MorePage) -> Option<MoreRow> {
-        match page {
-            MorePage::Quality => Some(MoreRow::Act(Action::SetQuality(self.current))),
-        }
+    /// The explicit initial focus of a pushed page: none for either — the root's opener is restored
+    /// by a pop and a fresh push starts on the page's opening row.
+    fn page_initial(&self, _page: MorePage) -> Option<MoreRow> {
+        None
     }
 
     /// Open `page` above the current one: remember the opener and its scroll, install the page's
     /// rows (the pill snaps, the scroll returns to the top, focus lands on [`Self::page_initial`])
     /// and its title band, and start the slide.
-    fn push(&mut self, ps: &plx_media::route::PlaybackSession, page: MorePage) {
+    fn push(&mut self, page: MorePage) {
         let Some(return_id) = self.form.selected_id().copied() else { return };
         self.pages.push(page, return_id, self.form.table.scroll_pos());
         let leaving = page_stack::leave_page(&mut self.form);
-        let form = self.page_form(ps, page);
+        let form = self.page_form(page);
         self.form.open(form, self.page_initial(page).as_ref());
         // after the sections: the band moves every row, so the pill is re-jumped onto the focused one
-        self.form.table.set_title(Some(page.title()));
+        self.form.table.set_title(Some(page.title(&self.streams)));
         self.motion.begin_slide(leaving, 1.0);
     }
 
-    /// Pop the top page: the root comes back exactly as it was left — the opener focused by id, the
-    /// scroll reinstated ([`FormTable::restore`]). `false` at the root (nothing popped).
-    pub fn pop(&mut self, ps: &plx_media::route::PlaybackSession) -> bool {
+    /// Pop the top page: the page beneath comes back exactly as it was left — the opener focused by
+    /// id, the scroll reinstated ([`FormTable::restore`]). `false` at the root (nothing popped).
+    pub fn pop(&mut self) -> bool {
         let Some(saved) = self.pages.pop() else { return false };
         let leaving = page_stack::leave_page(&mut self.form);
         self.motion.begin_slide(leaving, -1.0);
-        let form = root_form(ps, &self.rows, self.forced, self.current);
+        // the page BENEATH the one that just left: the root, or the Source page an addon came from
+        let (form, title) = match self.pages.top() {
+            Some(page) => (self.page_form(page), Some(page.title(&self.streams))),
+            None => (root_form(&self.rows, &self.streams), None),
+        };
         self.form.restore(form, Some(&saved.return_id), saved.scroll);
-        self.form.table.set_title(None);
+        self.form.table.set_title(title);
         true
     }
 
     /// **RIGHT**: on a Nav row it enters — the same as OK; anywhere else nothing happens (this
     /// popover has no tabs to switch).
-    pub fn on_right(&mut self, ps: &plx_media::route::PlaybackSession) {
+    pub fn on_right(&mut self) {
         let sel = self.form.table.sel.max(0) as usize;
         if matches!(self.form.binding_at(sel).map(|b| &b.kind), Some(RowKind::Nav(_))) {
             if let Some(Activation::Push(dest)) = self.form.activate(sel) {
-                self.push(ps, dest);
+                self.push(dest);
             }
         }
     }
@@ -356,69 +389,81 @@ impl MoreMenuState {
         self.pages.len()
     }
 
-    /// **Follow a live change of the row set or the current rung**: rebuild the page that is
-    /// showing when [`rows_for`], Force Direct Play or the current rung no longer answer what it
-    /// was built from. On the root the form is rebuilt keeping the focused row by identity; on the
-    /// Quality page it is refreshed IN PLACE (focus kept by id, the checked rung following the
-    /// pick), and the page pops to the root when Quality stops being offered. The panel's height
-    /// follows, and the card animates to it ([`Self::update`]). Returns whether it rebuilt.
-    pub fn refresh(&mut self, ps: &plx_media::route::PlaybackSession) -> bool {
-        let forced = plx_media::route::forced_direct_play(ps);
-        self.refresh_to(ps, forced, rows_for(forced), plx_media::route::quality())
+    /// **Follow a live change**: rebuild the page that is showing when the ranked stream list no
+    /// longer answers what it was built from — which is what makes the Source pages fill in as the
+    /// addons reply. On the root the form is rebuilt keeping the focused row by identity; on a
+    /// pushed page it is refreshed IN PLACE (focus kept by id), and a page the change emptied pops
+    /// back one level instead of leaving the viewer on a blank sheet. The panel's height follows,
+    /// and the card animates to it ([`Self::update`]). Returns whether it rebuilt.
+    pub fn refresh(&mut self) -> bool {
+        let rev = plx_media::route::streams_rev();
+        // `rows_for` is a function of the stream list and nothing else, so when the list has not
+        // moved there is nothing the page could draw differently — which is what keeps the tick's
+        // poll down to one atomic load, instead of copying every stream label each frame.
+        if rev == self.stream_rev {
+            return false;
+        }
+        self.stream_rev = rev;
+        let streams = plx_media::route::available_streams();
+        self.refresh_to(rows_for(), streams)
     }
 
     /// [`Self::refresh`] against explicit answers (what a test or a probe supplies in place of the
     /// live route).
-    fn refresh_to(
-        &mut self,
-        ps: &plx_media::route::PlaybackSession,
-        forced: bool,
-        rows: Vec<Action>,
-        current: plx_media::route::Quality,
-    ) -> bool {
-        if forced == self.forced && rows == self.rows && current == self.current {
+    fn refresh_to(&mut self, rows: Vec<Action>, streams: Vec<(usize, String, String)>) -> bool {
+        if rows == self.rows && streams == self.streams {
             return false;
         }
         self.rows = rows;
-        self.forced = forced;
-        self.current = current;
+        self.streams = streams;
+        let addons = crate::source_list::addon_groups(&self.streams);
         if let Some(first) = self.pages.first().copied() {
-            if quality_offered(&self.rows, self.forced) {
-                let page = self.pages.top().unwrap_or(MorePage::Quality);
-                let fallback = self.page_initial(page);
-                let form = self.page_form(ps, page);
-                self.form.refresh_with(form, None, fallback.as_ref());
+            // An addon page is addressed by the addon's POSITION in the list the Source page was
+            // built from. A re-rank that drops that addon leaves nothing to show and the position
+            // naming somebody else, so the page goes back one level instead of quietly listing a
+            // different source under the same title.
+            if matches!(self.pages.top(), Some(MorePage::Addon(i)) if i >= addons.len()) {
+                let saved = self.pages.pop();
+                let form = self.page_form(MorePage::Source);
+                self.form.restore(form, saved.as_ref().map(|s| &s.return_id), saved.map_or(0.0, |s| s.scroll));
+                self.form.table.set_title(Some(MorePage::Source.title(&self.streams)));
+                self.motion.cancel_slide();
+                return true;
+            }
+            if source_offered(&self.streams) {
+                let page = self.pages.top().unwrap_or(MorePage::Source);
+                let form = self.page_form(page);
+                self.form.refresh_with(form, None, None);
+                // the addon list may have re-ordered: the band names the page as it is NOW
+                self.form.table.set_title(Some(page.title(&self.streams)));
             } else {
-                // the ladder is gone under the viewer: back to the root, restoring the opener and
-                // scroll the stack saved at its first push
+                // nothing left to pick from: back to the root, restoring the opener and scroll the
+                // stack saved at its first push
                 self.pages.clear();
-                let form = root_form(ps, &self.rows, self.forced, self.current);
+                let form = root_form(&self.rows, &self.streams);
                 self.form.restore(form, Some(&first.return_id), first.scroll);
                 self.form.table.set_title(None);
                 self.motion.cancel_slide();
             }
         } else {
             let keep = self.form.selected_id().copied();
-            self.form.set_or_open(root_form(ps, &self.rows, self.forced, self.current), keep.as_ref());
+            self.form.set_or_open(root_form(&self.rows, &self.streams), keep.as_ref());
         }
         true
     }
 
-    pub fn new(ps: &plx_media::route::PlaybackSession) -> Self {
-        Self::open_focused(ps, None)
+    pub fn new() -> Self {
+        Self::open_focused(false)
     }
 
-    /// The existing overflow menu, opened on the Quality page with the ACTIVE rung focused.
+    /// The same menu, opened ON the Source page.
     ///
-    /// The terminal playback screen has no transport discs, so OK must enter the ladder on the rung
-    /// that is actually playing — a viewer arriving here is fixing a bad decision, not browsing the
-    /// list. It is still the SAME menu, form and action map as the ordinary `…` menu; only the page
-    /// it opens on differs (BACK pops to the root, as from any pushed page).
-    ///
-    /// Under Force Direct Play the menu has no Quality section (see [`rows_for`]), and this is the
-    /// same menu as [`Self::new`]; `screens::player::overlay` does not route here then.
-    pub fn new_quality(ps: &plx_media::route::PlaybackSession) -> Self {
-        Self::open_focused(ps, Some(plx_media::route::quality()))
+    /// The terminal playback screen has no transport discs, so OK must reach the stream list
+    /// directly — a viewer arriving here is fixing a bad decision, not browsing the list. It is
+    /// still the SAME menu, form and action map as the ordinary `…` menu; only the page it opens
+    /// on differs (BACK pops to the root, as from any pushed page).
+    pub fn new_source() -> Self {
+        Self::open_focused(true)
     }
 
     /// Every row's focus key, in drawn order (for a test that walks the rows).
@@ -450,11 +495,11 @@ impl MoreMenuState {
 
     /// OK on the highlighted row: an action to perform (the container dismisses the panel
     /// afterward), or a Nav row that opened its page.
-    pub fn on_ok(&mut self, ps: &plx_media::route::PlaybackSession) -> MoreOk {
+    pub fn on_ok(&mut self) -> MoreOk {
         match self.form.selected_id().and_then(|id| self.form.index_of(id)).and_then(|i| self.form.activate(i)) {
             Some(Activation::Action(act)) => MoreOk::Action(act),
             Some(Activation::Push(page)) => {
-                self.push(ps, page);
+                self.push(page);
                 MoreOk::Navigated
             }
             None => MoreOk::Action(Action::None),
@@ -511,8 +556,8 @@ impl MoreMenuState {
         self.motion.warm_open(&self.form.table, || self.panel_rect(measure), measure);
     }
 
-    pub fn update(&mut self, dt: f32, measure: &dyn plx_machine::machine::Measure, ps: &plx_media::route::PlaybackSession) {
-        self.refresh(ps);
+    pub fn update(&mut self, dt: f32, measure: &dyn plx_machine::machine::Measure) {
+        self.refresh();
         // `update` subtracts its own top/bottom padding now — pass the panel's raw height.
         let natural = self.panel_rect(measure);
         self.form.table.update(dt, natural.h);
@@ -624,28 +669,22 @@ where
 ///
 /// **The order here is the whole contract**, because [`TableView`]'s `sel` is a single flat index
 /// over every row of every section: this list must be built in exactly the order
-/// [`MoreMenuState::open_focused`] pushes rows, or a press commits its neighbour. A separator would
-/// be a row here too — there is none, and the debug assert in [`MoreMenuState::open_focused`] is
-/// what would catch one being added on one side only.
+/// [`MoreMenuState::open_focused`] pushes rows, or a press commits its neighbour.
 ///
-/// **`forced` (Force Direct Play) drops the Quality section entirely.** Every rung is a request for
-/// the server to convert, and Force forbids conversion, so under it no rung can change what plays:
-/// a row that cannot change the outcome is not offered (the same rule as the failure read-out's
-/// `player::failure_actions`). Pure over the flag so both shapes are testable without a session.
-fn rows_for(_forced: bool) -> Vec<Action> {
+/// The streams lead — they are what this popover is for — and everything else is an Option. An
+/// empty list adds nothing: the Source page says it is still looking (`browse_streams_loading`),
+/// and the root then has no Source row at all rather than a row onto an empty page.
+fn rows_for() -> Vec<Action> {
     let mut v: Vec<Action> = Vec::new();
-    
-    let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
-    
-    if !streams.is_empty() {
-        for (index, _) in streams.iter() {
-            v.push(Action::SetStream(*index));
-        }
-    } else {
-        // FORK (RichiL10): Add a fake action to show a loading state
-        v.push(Action::SetStream(9999)); 
+
+    for (index, _, _) in plx_media::route::AVAILABLE_STREAMS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+    {
+        v.push(Action::SetStream(*index));
     }
-    
+
     v.push(Action::ToggleStats);
     if plx_platform::labcfg::menu_row_enabled() {
         v.push(Action::SendDiagnostics);
@@ -656,18 +695,12 @@ fn rows_for(_forced: bool) -> Vec<Action> {
 fn label(a: Action) -> std::borrow::Cow<'static, str> {
     match a {
         Action::ToggleStats => plx_platform::i18n::msg::widgets_menu_stats().into(),
-        Action::SetQuality(q) => q.label().into(),
         Action::SetStream(index) => {
-            // FORK (RichiL10): Show "Finding sources..." if we are waiting for the background fetch
-            if index == 9999 {
-                return "Finding sources...".into();
-            }
-            
             let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
             streams.iter()
-                .find(|(i, _)| *i == index)
-                .map(|(_, label)| label.clone())
-                .unwrap_or_else(|| format!("Stream #{}", index))
+                .find(|(i, _, _)| *i == index)
+                .map(|(_, label, _)| label.clone())
+                .unwrap_or_else(|| format!("Stream #{index}"))
                 .into()
         }
         Action::SendDiagnostics => plx_platform::i18n::msg::widgets_menu_diagnostics().into(),
@@ -693,59 +726,22 @@ fn stats_on() -> bool {
 }
 
 /// Whether the SWITCH a row names is currently on. It reaches the row as [`Row::toggle`] and so
-/// draws as the WORD `On`/`Off` at the trailing edge — never as a picker's leading checkmark, which
-/// means "the active one of several" and is what the Quality rung rows use instead. Two idioms, one
-/// rule: a mark says where you are and a word says what is set, and no row says both. (Named
-/// `checked` until 2026-08-21, from the row builder it does not call — a name that read as a
-/// promise of the leading mark an Options row deliberately does not draw.)
+/// draws as the WORD `On`/`Off` at the trailing edge. (Named `checked` until 2026-08-21, from the
+/// row builder it does not call — a name that read as a promise of the leading mark an Options row
+/// deliberately does not draw.)
 fn is_on(a: Action) -> bool {
     match a {
         Action::ToggleStats => stats_on(),
-        // a rung is not a switch — see `row_for`, which gives it the leading mark instead
-        Action::SetQuality(_) | Action::SendDiagnostics | Action::None | Action::SetStream(_) => false,
-    }
-}
-
-/// **"Original" is a claim about the SOURCE, and for some sources it is false.**
-///
-/// Every other rung names a bound the viewer can reason about — "1080p · 20 Mbps". This one names a
-/// provenance, and when the television cannot decode the source video at all (MPEG-2, and AV1 / VP9
-/// on a set whose codec table lists no such decoder — `route::source_decodable`) the server must
-/// re-encode the pixels whatever is picked. The row
-/// still does something: it is the only rung that sends no bitrate or resolution cap. But it cannot
-/// deliver the original, and until this it said so nowhere, while the DETAIL page for the same item
-/// already said "Converts on server" from the same predicate.
-///
-/// **The same words as the detail page, deliberately.** One vocabulary for one fact; a second
-/// phrasing here would read as a second fact.
-///
-/// **A sub-line rather than a trailing value**, because `Row`'s rule is that a leading mark and a
-/// trailing word may not both appear and every rung row carries the picker's mark. And no `dim`:
-/// dimming is the ink of "unavailable", the row is fully selectable and still useful, and this is
-/// the one rung that can ask for more than 1080p — an annotation that reads as "do not pick this"
-/// would steer people off the only >1080p ask the app has.
-/// **Pure, and it takes the fact rather than reading it.** The predicate lives on the session and
-/// the row is drawn from it (`row_for`); passing it in is what lets the copy be tested without a
-/// resolved playback, and what keeps this function a statement about the LADDER rather than about
-/// global state.
-fn quality_detail(q: plx_media::route::Quality, source_decodable: bool) -> &'static str {
-    if q == plx_media::route::Quality::Original && !source_decodable {
-        plx_ui::fmt::converts_on_server()
-    } else {
-        ""
+        Action::SendDiagnostics | Action::None | Action::SetStream(_) => false,
     }
 }
 
 /// One row, drawn in the idiom its ACTION calls for. Free-standing (rather than inline in the form
-/// builders) so the two idioms are decided in one place: a switch gets the trailing word, a picker
-/// rung gets the leading mark ([`FormSection::choice`] derives it from the current rung), and nothing gets
-/// both.
-fn row_for(ps: &plx_media::route::PlaybackSession, a: Action) -> Row {
+/// builders) so the idioms are decided in one place: a switch gets the trailing word, a stream is a
+/// plain choice row.
+fn row_for(a: Action) -> Row {
     match a {
-        Action::SetQuality(q) => Row::new(label(a)).detail(quality_detail(q, plx_media::route::source_decodable(ps))),
-        // FORK (RichiL10): Streams are standard choices, not toggle switches. 
-        // We just render the label and let `.choice()` handle the selection mark.
-        Action::SetStream(_) => Row::new(label(a)), 
+        Action::SetStream(_) => Row::new(label(a)),
         _ => Row::new(label(a)).toggle(is_on(a)),
     }
 }
@@ -768,72 +764,51 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
 mod tests {
     use super::*;
 
-    /// **The Original row says so when it cannot be Original.**
-    ///
-    /// For a source this television cannot decode — MPEG-2, and AV1 / VP9 on a set whose codec table
-    /// lists no such decoder — the server must re-encode
-    /// the pixels whatever rung is picked, so the word "Original" is a promise the pipeline cannot
-    /// keep. The DETAIL page for the same item already said "Converts on server" from the same
-    /// predicate; the quality picker, which is where a viewer goes to do something about it, said
-    /// nothing at all.
-    ///
-    /// Differential: unmodified code draws no sub-line on any quality row, in any state.
-    ///
-    /// The negative half is the important one. A fixed rung ALSO converts, and Auto on such an
-    /// item runs an encoded ladder too — but neither of them is named after the source, so neither
-    /// is making the claim this line corrects. Annotating them would turn one honest correction
-    /// into four lines of noise.
-    #[test]
-    fn only_the_original_row_says_the_source_cannot_be_preserved() {
-        use plx_media::route::Quality;
-        assert_eq!(
-            quality_detail(Quality::Original, false),
-            "Converts on server"
-        );
-        assert_eq!(
-            quality_detail(Quality::Original, true),
-            "",
-            "a source the panel decodes needs no correction — Original means Original",
-        );
-        for q in plx_media::route::QUALITY_LADDER {
-            if q == Quality::Original {
-                continue;
-            }
-            assert_eq!(
-                quality_detail(q, false),
-                "",
-                "{q:?} is not named after the source, so it makes no claim to correct",
-            );
+    type Streams = Vec<(usize, String, String)>;
+
+    /// A ranked stream list with two addons answering for one item: Torrentio twice (the best
+    /// stream and a third), Sootio once. The order is ranked, so this is also the order the pages
+    /// must show.
+    fn two_addons() -> Streams {
+        vec![
+            (3, "4k DV".to_string(), "Torrentio".to_string()),
+            (5, "1080p".to_string(), "Sootio".to_string()),
+            (7, "720p".to_string(), "Torrentio".to_string()),
+        ]
+    }
+
+    /// The menu built over an explicit row list and stream list — no process-global state, so
+    /// these tests do not need a serial lock or a route.
+    fn state(rows: Vec<Action>, streams: &[(usize, String, String)]) -> MoreMenuState {
+        let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
+        form.table.compact = true;
+        form.set_or_open(root_form(&rows, streams), None);
+        MoreMenuState {
+            form,
+            rows,
+            pages: PageStack::new(),
+            motion: PanelMotion::new(),
+            streams: streams.to_vec(),
+            stream_rev: 0,
         }
     }
 
-    /// The copy is the DETAIL page's, verbatim. One vocabulary for one fact: a second phrasing
-    /// would read as a second fact, and the two surfaces answer from the same predicate.
-    #[test]
-    fn the_conversion_notice_is_the_words_the_detail_page_already_uses() {
-        assert_eq!(
-            quality_detail(plx_media::route::Quality::Original, false),
-            plx_ui::fmt::converts_on_server(),
-        );
+    /// The root over `two_addons`.
+    fn menu() -> MoreMenuState {
+        state(rows_for(), &two_addons())
     }
 
-    #[test]
-    fn every_row_has_a_label() {
-        for a in rows_for(false) {
-            assert!(!label(a).is_empty(), "{a:?} would draw a blank row");
-        }
-        // The full persisted ladder must keep finished UI copy even if the readiness gate is
-        // deliberately closed again for a future protocol regression.
-        for q in plx_media::route::QUALITY_LADDER {
-            assert!(
-                !label(Action::SetQuality(q)).is_empty(),
-                "{q:?} would draw a blank row when enabled"
-            );
-        }
+    /// [`menu`] with the Source page pushed and its slide skipped.
+    fn source_page() -> MoreMenuState {
+        let mut st = menu();
+        st.focus_key(MoreRow::OpenSource.key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+        st
     }
 
-    /// The actions of the rows showing, in table order, read back off a built menu by identity (the
-    /// root's Quality drill-in commits nothing and is not one).
+    /// The actions of the rows showing, in table order, read back by identity (a drill-in row
+    /// commits nothing and is not one).
     fn order(st: &MoreMenuState) -> Vec<Action> {
         (0..st.form.table.n_rows() as usize)
             .filter_map(|i| match st.form.id_at(i) {
@@ -843,188 +818,197 @@ mod tests {
             .collect()
     }
 
-    /// A menu ROOT built from the row list, without a `PlaybackSession` beyond the default one.
-    fn menu(forced: bool, current: plx_media::route::Quality) -> MoreMenuState {
-        let ps = plx_media::route::PlaybackSession::default();
-        let rows = rows_for(forced);
-        let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
-        form.table.compact = true;
-        form.set_or_open(root_form(&ps, &rows, forced, current), None);
-        MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new() }
+    /// Every row identity showing, in table order.
+    fn ids(st: &MoreMenuState) -> Vec<MoreRow> {
+        (0..st.form.table.n_rows() as usize)
+            .filter_map(|i| st.form.id_at(i).copied())
+            .collect()
     }
 
-    /// The same menu with the Quality page pushed (and its slide skipped).
-    fn quality_page(current: plx_media::route::Quality) -> MoreMenuState {
-        let ps = plx_media::route::PlaybackSession::default();
-        let mut st = menu(false, current);
-        st.focus_key(MoreRow::OpenQuality.key().0);
-        assert_eq!(st.on_ok(&ps), MoreOk::Navigated);
-        st.motion.cancel_slide();
-        st
-    }
-
-    /// The text a row reads out as its value (a Nav row's current setting).
+    /// The text a row reads out at its trailing edge (a Nav row's current value).
     fn value_of(st: &mut MoreMenuState, id: MoreRow) -> Option<String> {
         let i = st.form.index_of(&id)?;
         st.form.table.row_mut(i as i32).and_then(|r| r.value.clone())
     }
 
-    /// Is the row `id` drawn with the picker's leading check?
-    fn checked(st: &mut MoreMenuState, id: MoreRow) -> bool {
-        let i = st.form.index_of(&id).expect("a row");
-        st.form.table.row_mut(i as i32).is_some_and(|r| r.checked)
+    #[test]
+    fn every_row_has_a_label() {
+        for a in rows_for() {
+            assert!(!label(a).is_empty(), "{a:?} would draw a blank row");
+        }
     }
 
-    use plx_media::route::Quality;
+    /// **There is no playback-quality ladder in this popover.** Under the shim a stream IS a
+    /// quality, so a rung list would be a second answer to the same question; the rung variant
+    /// does not exist, and the only rows are the streams themselves and the Options switches.
+    #[test]
+    fn the_menu_offers_no_quality_rung() {
+        let rows = rows_for();
+        let st = menu();
+        assert_eq!(
+            order(&st),
+            rows,
+            "the root's Actions are exactly `rows_for`, and the variant that named a rung is gone"
+        );
+        // the ladder is still a real setting, reached from Settings > Playback
+        assert!(!plx_media::route::QUALITY_LADDER.is_empty());
+    }
 
-    /// Pressing each row commits ITS action, addressed by identity — never by a position: an
-    /// Options row on the root and a rung on the Quality page.
+    /// **The root leads with the Source drill-in and holds no streams of its own** — the whole
+    /// point of the sub-menu. Its value is how many streams are on offer.
+    #[test]
+    fn the_root_leads_with_the_source_row_and_holds_no_streams() {
+        let mut st = menu();
+        let shown = ids(&st);
+        assert_eq!(shown[0], MoreRow::OpenSource, "Source leads");
+        assert!(
+            !shown.iter().any(|i| matches!(i, MoreRow::Act(Action::SetStream(_)))),
+            "a stream is reached through its addon, never listed on the root: {shown:?}"
+        );
+        assert!(shown.contains(&MoreRow::Act(Action::ToggleStats)));
+        assert_eq!(
+            value_of(&mut st, MoreRow::OpenSource),
+            Some("3".into()),
+            "the row reads out the stream count"
+        );
+        assert_eq!(
+            st.form.table.title(),
+            None,
+            "the root carries no title band"
+        );
+    }
+
+    /// **The Source page is one row per addon, in ranked order**, with the addon's own stream
+    /// count as its value — and each of those opens a page of that addon's streams alone.
+    #[test]
+    fn the_source_page_lists_one_row_per_addon_and_each_page_its_own_streams() {
+        let streams = two_addons();
+        assert_eq!(
+            crate::source_list::addon_groups(&streams),
+            vec![
+                ("Torrentio".to_string(), vec![3, 7]),
+                ("Sootio".to_string(), vec![5]),
+            ]
+        );
+
+        let mut st = source_page();
+        assert_eq!(st.page(), Some(MorePage::Source));
+        assert_eq!(
+            ids(&st),
+            vec![MoreRow::OpenAddon(0), MoreRow::OpenAddon(1)],
+            "one drill-in per addon, nothing else"
+        );
+        assert_eq!(
+            st.form.table.title(),
+            Some(plx_platform::i18n::msg::widgets_menu_source()),
+            "the band names the page"
+        );
+        assert_eq!(value_of(&mut st, MoreRow::OpenAddon(0)), Some("2".into()));
+        assert_eq!(value_of(&mut st, MoreRow::OpenAddon(1)), Some("1".into()));
+
+        // into the second addon: its page holds ITS streams and nothing else
+        st.focus_key(MoreRow::OpenAddon(1).key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+        assert_eq!(st.page(), Some(MorePage::Addon(1)));
+        assert_eq!(st.form.table.title(), Some("Sootio"), "the band names the addon");
+        assert_eq!(
+            order(&st),
+            vec![Action::SetStream(5)],
+            "only Sootio's stream, and it commits its own ranked index"
+        );
+        assert_eq!(st.on_ok(), MoreOk::Action(Action::SetStream(5)));
+    }
+
+    /// An empty list draws no Source row at all — a row onto an empty page would read as a menu
+    /// that failed to load — and the Source page says it is still looking.
+    #[test]
+    fn nothing_to_pick_draws_no_source_row_and_the_page_says_so() {
+        let st = state(rows_for(), &[]);
+        assert!(
+            st.form.index_of(&MoreRow::OpenSource).is_none(),
+            "no streams, no page to open"
+        );
+        let page = source_form(&[]);
+        assert!(
+            page.slots().iter().all(Option::is_none),
+            "the waiting caption is an inert note, never a focusable row"
+        );
+
+        // the background fetch lands under the open root: the row appears
+        let mut st = st;
+        assert!(st.refresh_to(rows_for(), two_addons()));
+        assert!(st.form.index_of(&MoreRow::OpenSource).is_some());
+    }
+
+    /// **BACK walks one page at a time** — an addon page to the Source page, the Source page to
+    /// the root — restoring the opener and the band at each step. At the root it does nothing.
+    #[test]
+    fn back_walks_one_page_at_a_time_from_an_addon() {
+        let mut st = source_page();
+        st.focus_key(MoreRow::OpenAddon(1).key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+        assert_eq!(st.page(), Some(MorePage::Addon(1)));
+        assert_eq!(st.on_ok(), MoreOk::Action(Action::SetStream(5)));
+
+        assert!(st.pop());
+        assert_eq!(st.page(), Some(MorePage::Source));
+        assert_eq!(
+            st.form.table.title(),
+            Some(plx_platform::i18n::msg::widgets_menu_source())
+        );
+        assert_eq!(
+            st.form.selected_id(),
+            Some(&MoreRow::OpenAddon(1)),
+            "the opener comes back focused"
+        );
+        assert!(st.pop());
+        assert_eq!(st.page(), None);
+        assert_eq!(st.form.table.title(), None);
+        assert_eq!(st.form.selected_id(), Some(&MoreRow::OpenSource));
+        assert!(!st.pop(), "the root has nothing to pop");
+    }
+
+    /// RIGHT enters a Nav row and does nothing anywhere else (this popover has no tabs).
+    #[test]
+    fn right_enters_a_nav_row_and_nothing_else() {
+        let mut st = menu();
+        st.focus_key(Action::ToggleStats.key().0);
+        st.on_right();
+        assert_eq!(st.page(), None, "RIGHT on an Options row stays put");
+        st.focus_key(MoreRow::OpenSource.key().0);
+        st.on_right();
+        assert_eq!(st.page(), Some(MorePage::Source), "RIGHT on the Source row enters it");
+    }
+
+    /// Pressing each row commits ITS action, addressed by identity — never by a position.
     #[test]
     fn a_focused_row_commits_its_own_action() {
-        let ps = plx_media::route::PlaybackSession::default();
-        let mut st = menu(false, Quality::P1080);
-        for a in rows_for(false).into_iter().filter(|a| !matches!(a, Action::SetQuality(_))) {
+        let rows = rows_for();
+        let mut st = state(rows.clone(), &two_addons());
+        for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetStream(_))) {
             st.focus_key(a.key().0);
-            assert_eq!(st.on_ok(&ps), MoreOk::Action(a));
+            assert_eq!(st.on_ok(), MoreOk::Action(a));
         }
-        let mut st = quality_page(Quality::P1080);
-        for a in rows_for(false).into_iter().filter(|a| matches!(a, Action::SetQuality(_))) {
+        let mut st = source_page();
+        st.focus_key(MoreRow::OpenAddon(0).key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+        for a in [Action::SetStream(3), Action::SetStream(7)] {
             st.focus_key(a.key().0);
-            // exactly the action the flat ladder reported: `app::playback::apply_more_action` is
-            // the one place a `SetQuality` is performed (`route::set_quality`)
-            assert_eq!(st.on_ok(&ps), MoreOk::Action(a), "{a:?}");
+            // `app::playback::apply_more_action` is the one place a `SetStream` is performed
+            assert_eq!(st.on_ok(), MoreOk::Action(a), "{a:?}");
         }
     }
 
-    /// **The root is the Quality drill-in then Options; the rungs live on the page.** The root no
-    /// longer lists a rung, the page lists the ladder in order and nothing else.
-    #[test]
-    fn the_root_leads_with_the_quality_row_and_the_page_holds_the_ladder() {
-        let st = menu(false, Quality::Original);
-        let ids: Vec<Option<MoreRow>> =
-            (0..st.form.table.n_rows() as usize).map(|i| st.form.id_at(i).copied()).collect();
-        assert_eq!(ids[0], Some(MoreRow::OpenQuality), "Quality leads");
-        assert!(ids.contains(&Some(MoreRow::Act(Action::ToggleStats))));
-        assert!(
-            !ids.iter().any(|i| matches!(i, Some(MoreRow::Act(Action::SetQuality(_))))),
-            "no rung on the root: {ids:?}"
-        );
-        let ladder: Vec<Action> =
-            plx_media::route::available_quality_ladder().iter().map(|q| Action::SetQuality(*q)).collect();
-        assert_eq!(order(&quality_page(Quality::Original)), ladder);
-    }
-
-    /// **The root's Quality row reads out the CURRENT rung** — "Auto", "Original", "1080p · 8 Mbps"
-    /// — as its value, and the page checks that rung and no other.
-    #[test]
-    fn the_quality_row_reads_the_current_rung_and_the_page_checks_it() {
-        for q in plx_media::route::QUALITY_LADDER {
-            let mut st = menu(false, q);
-            assert_eq!(value_of(&mut st, MoreRow::OpenQuality), Some(q.label()), "{q:?}");
-            assert!(
-                !checked(&mut st, MoreRow::OpenQuality),
-                "a drill-in row carries no check — a mark says where you are, a word says what is set"
-            );
-            let mut st = quality_page(q);
-            for rung in plx_media::route::QUALITY_LADDER {
-                let id = MoreRow::Act(Action::SetQuality(rung));
-                if st.form.index_of(&id).is_some() {
-                    assert_eq!(checked(&mut st, id), rung == q, "{rung:?} while {q:?} is current");
-                }
-            }
-        }
-    }
-
-    /// **Push focuses the checked rung; pop restores focus on the Quality row** (by identity), the
-    /// title band comes and goes with the page, and BACK at the root pops nothing.
-    #[test]
-    fn push_lands_on_the_checked_rung_and_pop_restores_the_quality_row() {
-        let ps = plx_media::route::PlaybackSession::default();
-        for q in plx_media::route::available_quality_ladder() {
-            let mut st = menu(false, *q);
-            assert!(!st.pop(&ps), "the root has nothing to pop");
-            st.focus_key(MoreRow::OpenQuality.key().0);
-            assert_eq!(st.on_ok(&ps), MoreOk::Navigated);
-            assert_eq!(st.page(), Some(MorePage::Quality));
-            assert_eq!(st.form.selected_id(), Some(&MoreRow::Act(Action::SetQuality(*q))), "initial focus = the checked rung");
-            assert_eq!(st.form.table.title(), Some("Quality"));
-            assert!(st.transitioning(), "a push slides");
-            assert!(st.pop(&ps));
-            assert_eq!(st.page(), None);
-            assert_eq!(st.form.selected_id(), Some(&MoreRow::OpenQuality), "pop restores focus on the Quality row");
-            assert_eq!(st.form.table.title(), None);
-        }
-    }
-
-    /// RIGHT on the Quality row enters it, on an Options row does nothing; the page's own RIGHT
-    /// does nothing either (there is no deeper page and no tab to switch to).
-    #[test]
-    fn right_enters_the_quality_row_and_nothing_else() {
-        let ps = plx_media::route::PlaybackSession::default();
-        let mut st = menu(false, Quality::P720);
-        st.focus_key(Action::ToggleStats.key().0);
-        st.on_right(&ps);
-        assert_eq!(st.page(), None, "RIGHT on an Options row stays put");
-        st.focus_key(MoreRow::OpenQuality.key().0);
-        st.on_right(&ps);
-        assert_eq!(st.page(), Some(MorePage::Quality));
-        st.on_right(&ps);
-        assert_eq!(st.page(), Some(MorePage::Quality), "RIGHT on a rung does nothing");
-    }
-
-    /// **`warm_open` queues the OPENING page's strings with no `update`, once** — the root for the
-    /// ordinary entry, the Quality page for a quality entry.
-    #[test]
-    fn warm_open_queues_the_opening_page_once_without_an_update() {
-        use plx_ui::fixture::FixtureMeasure as M;
-        let _serial = plx_base::testlock::serial();
-        let ps = plx_media::route::PlaybackSession::default();
-        for st in [MoreMenuState::new(&ps), MoreMenuState::new_quality(&ps)] {
-            plx_gfx::text::reset_prewarm_for_test();
-            st.warm_open(&M);
-            assert!(plx_gfx::text::prewarm_pending(), "warm_open queued the opening page");
-            plx_gfx::text::clear_prewarm();
-            st.warm_open(&M);
-            assert!(!plx_gfx::text::prewarm_pending(), "an unchanged layout was walked again");
-        }
-    }
-
-    /// The failure screen's entry opens ON the Quality page, the active rung focused, no slide; a
-    /// Force Direct Play entry (no ladder) and the ordinary entry open the root.
-    #[test]
-    fn the_quality_entry_opens_on_the_page_and_the_ordinary_entry_on_the_root() {
-        let _serial = plx_base::testlock::serial();
-        let ps = plx_media::route::PlaybackSession::default();
-        let st = MoreMenuState::new(&ps);
-        assert_eq!(st.page(), None);
-        let st = MoreMenuState::new_quality(&ps);
-        assert_eq!(st.page(), Some(MorePage::Quality));
-        assert!(!st.transitioning(), "the entry is not a slide");
-        assert_eq!(st.form.table.title(), Some("Quality"));
-        let active = MoreRow::Act(Action::SetQuality(plx_media::route::quality()));
-        if st.form.index_of(&active).is_some() {
-            assert_eq!(st.form.selected_id(), Some(&active), "the active rung is focused");
-        }
-    }
-
-    /// Reordering the rows moves no key: every row keeps the key (and so the action) it had, and
-    /// the press still commits the row's own action.
+    /// Reordering the rows moves no key: every row keeps the key (and so the action) it had.
     #[test]
     fn a_reordered_menu_resolves_every_key_to_the_same_action() {
-        let ps = plx_media::route::PlaybackSession::default();
-        let mut rows = rows_for(false);
+        let mut rows = rows_for();
         rows.reverse();
-        let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
-        form.set(quality_form(&ps, &rows, Quality::Auto), None);
-        let st = MoreMenuState {
-            form,
-            rows: rows.clone(),
-            forced: false,
-            current: Quality::Auto,
-            pages: PageStack::new(),
-            motion: PanelMotion::new(),
-        };
-        for a in rows_for(false).into_iter().filter(|a| matches!(a, Action::SetQuality(_))) {
+        let st = state(rows.clone(), &two_addons());
+        for a in rows {
             let i = st.form.index_of_key(a.key()).expect("every row keeps its key");
             assert_eq!(st.form.id_at(i), Some(&MoreRow::Act(a)));
             match st.form.activate(i) {
@@ -1034,119 +1018,28 @@ mod tests {
         }
     }
 
-    /// **Quality must stay entirely ahead of Options in the row list** ([`rows_for`]): the root
-    /// builds the Quality drill-in before the Options section, and the list is what both forms are
-    /// built from, so a rung added on the wrong side of the split would reach the Options section.
-    #[test]
-    fn every_quality_rung_sits_ahead_of_the_stats_toggle() {
-        let rows = rows_for(false);
-        let stats_i = rows
-            .iter()
-            .position(|a| *a == Action::ToggleStats)
-            .expect("the toggle is always in the menu");
-        for (i, a) in rows.iter().enumerate() {
-            if matches!(a, Action::SetQuality(_)) {
-                assert!(
-                    i < stats_i,
-                    "{a:?} at row {i} must come before Stats for nerds at row {stats_i}"
-                );
-            }
-        }
-    }
-
-    /// **Force Direct Play leaves no Quality row and no page**: no rung can change what plays under
-    /// it, so none is offered and a quality entry lands on the first Options row.
-    #[test]
-    fn forced_direct_play_offers_no_quality_row_and_lands_on_the_first_option() {
-        let ps = plx_media::route::PlaybackSession::default();
-        let forced = rows_for(true);
-        assert!(
-            !forced.iter().any(|a| matches!(a, Action::SetQuality(_))),
-            "forced direct play must not offer a quality rung: {forced:?}"
-        );
-        assert_eq!(forced.first(), Some(&Action::ToggleStats));
-        assert!(!quality_offered(&forced, true));
-        assert!(!quality_offered(&[Action::ToggleStats], false), "an empty ladder offers no page to open");
-        assert!(quality_offered(&rows_for(false), false));
-        for q in plx_media::route::QUALITY_LADDER {
-            let mut st = menu(true, q);
-            assert!(st.form.index_of(&MoreRow::OpenQuality).is_none());
-            assert_eq!(st.on_ok(&ps), MoreOk::Action(Action::ToggleStats), "a vanished rung opens on the first option");
-            assert_eq!(st.sel(), 0);
-        }
-        // not forced: the ladder is unchanged, in order, ahead of Options
-        let open = rows_for(false);
-        let ladder: Vec<Action> = open
-            .iter()
-            .copied()
-            .filter(|a| matches!(a, Action::SetQuality(_)))
-            .collect();
-        let expected: Vec<Action> = plx_media::route::available_quality_ladder()
-            .iter()
-            .map(|q| Action::SetQuality(*q))
-            .collect();
-        assert_eq!(ladder, expected);
-        assert_eq!(&open[ladder.len()..], &forced[..]);
-    }
-
-    /// **A live change refreshes the open Quality page IN PLACE**: a rung leaving (Auto's gate
-    /// closing) or the current rung moving rebuilds the page, keeps the page open, the title band
-    /// and the focused row by id (the checked rung when the focused one left).
-    #[test]
-    fn a_live_rung_change_refreshes_the_open_page_in_place() {
-        let ps = plx_media::route::PlaybackSession::default();
-        let mut st = quality_page(Quality::P1080);
-        st.focus_key(Action::SetQuality(Quality::P720).key().0);
-        let before = st.form.table.sel;
-        // the current rung moves: the check follows, focus stays on the row the viewer was on
-        let rows = st.rows.clone();
-        assert!(st.refresh_to(&ps, false, rows.clone(), Quality::P480));
-        assert!(!st.refresh_to(&ps, false, rows.clone(), Quality::P480), "and only once");
-        assert_eq!(st.page(), Some(MorePage::Quality), "still on the page");
-        assert_eq!(st.form.table.title(), Some("Quality"), "the title band stays");
-        assert_eq!(st.form.selected_id(), Some(&MoreRow::Act(Action::SetQuality(Quality::P720))));
-        assert_eq!(st.form.table.sel, before);
-        assert!(checked(&mut st, MoreRow::Act(Action::SetQuality(Quality::P480))));
-        assert!(!checked(&mut st, MoreRow::Act(Action::SetQuality(Quality::P1080))));
-        // the focused rung leaves the ladder: focus falls back to the checked rung, page stays
-        let without: Vec<Action> = rows.iter().copied().filter(|a| *a != Action::SetQuality(Quality::P720)).collect();
-        assert!(st.refresh_to(&ps, false, without, Quality::P480));
-        assert!(st.form.index_of(&MoreRow::Act(Action::SetQuality(Quality::P720))).is_none());
-        assert_eq!(st.page(), Some(MorePage::Quality));
-        assert_eq!(st.form.selected_id(), Some(&MoreRow::Act(Action::SetQuality(Quality::P480))));
-    }
-
-    /// **Quality becoming unavailable pops to the root**: Force Direct Play arriving under the open
-    /// page drops the ladder, so the page goes, the band goes, the slide is cancelled and the root
-    /// comes back without the Quality row.
-    #[test]
-    fn quality_becoming_unavailable_pops_the_page_to_the_root() {
-        let ps = plx_media::route::PlaybackSession::default();
-        let mut st = quality_page(Quality::P1080);
-        assert!(st.refresh_to(&ps, true, rows_for(true), Quality::P1080));
-        assert_eq!(st.page(), None);
-        assert_eq!(st.form.table.title(), None);
-        assert!(!st.transitioning(), "a page that vanished does not slide away");
-        assert!(st.form.index_of(&MoreRow::OpenQuality).is_none());
-        assert_eq!(st.form.selected_id(), Some(&MoreRow::Act(Action::ToggleStats)));
-    }
-
     /// A key that names no row commits nothing, never a neighbour's action.
     #[test]
     fn an_unknown_key_is_none_not_a_neighbour() {
-        let mut st = menu(false, Quality::Auto);
+        let mut st = menu();
         let before = st.sel();
         assert!(!st.focus_key(0xdead), "an unknown key reports it seated nothing");
         assert_eq!(st.sel(), before, "an unknown key moves nothing");
-        assert!(st.focus_key(MoreRow::OpenQuality.key().0), "the Quality row is seatable on the root");
+        assert!(st.focus_key(MoreRow::OpenSource.key().0), "the Source row is seatable");
     }
 
-    /// Every row's key is distinct and below the band, and the title band's pointer key is none of
-    /// them.
+    /// Every row's key is distinct and below the band, and the title band's pointer key is none
+    /// of them.
     #[test]
     fn every_key_is_distinct_and_below_the_band() {
-        let mut all: Vec<MoreRow> = plx_media::route::QUALITY_LADDER.iter().map(|q| MoreRow::Act(Action::SetQuality(*q))).collect();
-        all.extend([MoreRow::OpenQuality, MoreRow::Act(Action::ToggleStats), MoreRow::Act(Action::SendDiagnostics)]);
+        let mut all: Vec<MoreRow> = (0..4).map(MoreRow::OpenAddon).collect();
+        all.extend([
+            MoreRow::OpenSource,
+            MoreRow::Act(Action::ToggleStats),
+            MoreRow::Act(Action::SendDiagnostics),
+            MoreRow::Act(Action::SetStream(3)),
+            MoreRow::Act(Action::SetStream(7)),
+        ]);
         let mut keys: Vec<u32> = all.iter().map(|a| a.key().0).collect();
         keys.sort_unstable();
         keys.dedup();
@@ -1156,94 +1049,111 @@ mod tests {
         assert!(keys.iter().all(|k| !page_stack::is_title_key(*k)));
     }
 
-    /// **The replay canon tells the root from the Quality page**, and one selected row from
-    /// another: the same index on the two pages must not hash alike.
+    /// **The replay canon tells the root, the Source page and an addon page apart**, and one
+    /// selected row from another: the same index on two pages must not hash alike.
     #[test]
-    fn the_canon_tells_the_root_and_the_page_apart() {
+    fn the_canon_tells_the_root_and_the_pages_apart() {
         use plx_machine::machine::Canon;
         let fp = |st: &MoreMenuState| {
             let mut c = Canon::new();
             st.canon(&mut c);
             c.finish()
         };
-        let root = menu(false, Quality::P1080);
-        let page = quality_page(Quality::P1080);
-        assert_ne!(fp(&root), fp(&page), "depth and opener are in the canon");
-        assert_eq!(fp(&page), fp(&quality_page(Quality::P1080)), "the same state hashes the same");
-        let mut moved = quality_page(Quality::P1080);
-        moved.focus_key(Action::SetQuality(Quality::P480).key().0);
-        assert_ne!(fp(&page), fp(&moved), "the selected KEY is in the canon");
+        let root = menu();
+        let source = source_page();
+        assert_ne!(fp(&root), fp(&source), "depth and opener are in the canon");
+        assert_eq!(fp(&source), fp(&source_page()), "the same state hashes the same");
+        let mut moved = source_page();
+        moved.focus_key(MoreRow::OpenAddon(1).key().0);
+        assert_ne!(fp(&source), fp(&moved), "the selected KEY is in the canon");
+
+        let mut addon = source_page();
+        addon.focus_key(MoreRow::OpenAddon(1).key().0);
+        assert_eq!(addon.on_ok(), MoreOk::Navigated);
+        assert_ne!(fp(&addon), fp(&moved), "the second level is its own page");
     }
 
-    /// **A push slides the page and a pop slides it back; both rest.** The panel reports motion each
-    /// frame it animates and asks for none once settled — the same bar as the track menu.
+    /// **A live change to the stream list refreshes the open page in place**: focus stays on the
+    /// row the viewer was on, and the band follows a re-ordered addon list.
     #[test]
-    fn a_push_and_a_pop_slide_and_then_rest() {
-        let _serial = plx_base::testlock::serial();
-        const DT: f32 = 1.0 / 60.0;
-        let ps = plx_media::route::PlaybackSession::default();
-        let m = plx_base::fontcov::advances::ShippedMeasure;
-        let step = |st: &mut MoreMenuState| {
-            plx_machine::idle::frame_begin(DT);
-            st.update(DT, &m, &ps);
-            plx_machine::idle::present_moving()
-        };
-        let mut st = menu(false, plx_media::route::quality());
-        st.motion.step(DT, st.panel_rect(&m));
-        assert!(!step(&mut st), "an opened menu is at rest");
-        st.focus_key(MoreRow::OpenQuality.key().0);
-        assert_eq!(st.on_ok(&ps), MoreOk::Navigated);
-        assert!(st.motion.sliding());
-        assert!(step(&mut st), "the slide is motion");
-        assert!(st.motion.live_dx() > 0.0, "the arriving page comes in from the right");
-        let mut n = 0;
-        while step(&mut st) {
-            n += 1;
-            assert!(n < 240, "the push never settles");
-        }
-        assert!(!st.motion.sliding() && !st.transitioning());
-        assert_eq!(st.motion.live_dx(), 0.0);
-        assert!(!step(&mut st), "at rest: no frames requested");
-        assert!(st.pop(&ps));
-        assert!(st.motion.sliding());
-        assert!(step(&mut st), "the pop is motion too");
-        n = 0;
-        while step(&mut st) {
-            n += 1;
-            assert!(n < 240, "the pop never settles");
-        }
-        assert!(!st.motion.sliding() && !st.transitioning());
-        assert!(!step(&mut st));
+    fn a_live_stream_change_refreshes_the_open_page_in_place() {
+        let mut st = source_page();
+        st.focus_key(MoreRow::OpenAddon(1).key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+        assert_eq!(st.page(), Some(MorePage::Addon(1)));
+        // Sootio answers once more: the list this page was built from has changed under it
+        let mut longer = two_addons();
+        longer.push((9, "720p".to_string(), "Sootio".to_string()));
+        assert!(st.refresh_to(rows_for(), longer.clone()), "a longer list is a change");
+        assert!(!st.refresh_to(rows_for(), longer.clone()), "and only once");
+        assert_eq!(st.page(), Some(MorePage::Addon(1)), "still on the page");
+        assert_eq!(st.form.table.title(), Some("Sootio"), "the band stays");
+        assert_eq!(
+            order(&st),
+            vec![Action::SetStream(5), Action::SetStream(9)],
+            "the new stream joined the page it belongs to, in ranked order"
+        );
+        assert_eq!(
+            st.form.selected_id(),
+            Some(&MoreRow::Act(Action::SetStream(5))),
+            "focus keeps the stream it was on"
+        );
     }
 
-    /// **A row set that changes height animates the card** (`ui::panel_motion`): the panel opens
-    /// at rest, a live change to the set (Force Direct Play dropping the Quality row, Auto's
-    /// gate opening) rebuilds it and the top edge springs to the new layout while the bottom and
-    /// right stay anchored, then it asks for no more frames.
+    /// **A page that the change emptied pops back one level** instead of leaving the viewer on a
+    /// blank sheet — and the root loses its Source row when nothing is left to pick.
+    #[test]
+    fn a_vanished_addon_pops_and_an_empty_list_drops_the_source_row() {
+        let mut st = source_page();
+        st.focus_key(MoreRow::OpenAddon(1).key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+
+        // the second addon answers no more: the page's position now names nobody
+        let narrower = vec![(3, "4k DV".to_string(), "Torrentio".to_string())];
+        assert!(st.refresh_to(rows_for(), narrower.clone()));
+        assert_eq!(st.page(), Some(MorePage::Source), "back to the addon list");
+        assert!(!st.transitioning(), "a page that vanished does not slide away");
+        assert_eq!(ids(&st), vec![MoreRow::OpenAddon(0)]);
+
+        // everything goes away: back to the root, without a Source row
+        assert!(st.refresh_to(rows_for(), Vec::new()));
+        assert_eq!(st.page(), None);
+        assert_eq!(st.form.table.title(), None);
+        assert!(st.form.index_of(&MoreRow::OpenSource).is_none());
+        assert_eq!(st.form.selected_id(), Some(&MoreRow::Act(Action::ToggleStats)));
+    }
+
+    /// **A row set that changes height animates the card** (`ui::panel_motion`): the panel opens at
+    /// rest, the Source row arriving under it rebuilds and grows it, the top edge springs to the
+    /// new layout while the bottom and right stay anchored, then it asks for no more frames.
     #[test]
     fn a_changed_row_set_resizes_the_card_with_a_spring_and_then_rests() {
         let _serial = plx_base::testlock::serial();
         const DT: f32 = 1.0 / 60.0;
-        let ps = plx_media::route::PlaybackSession::default();
         let m = plx_base::fontcov::advances::ShippedMeasure;
         let step = |st: &mut MoreMenuState| {
             plx_machine::idle::frame_begin(DT);
-            st.update(DT, &m, &ps);
+            st.update(DT, &m);
             plx_machine::idle::present_moving()
         };
-        // opened under Force Direct Play: no Quality row, a short panel
-        let mut st = menu(true, plx_media::route::quality());
+        // opened with nothing to pick: Options only, a short panel
+        let mut st = state(rows_for(), &[]);
         let short = st.panel_rect(&m);
         st.motion.step(DT, short); // the open: the first step places the card AT its layout
         assert!(!st.transitioning(), "a freshly opened panel is at rest");
         assert_eq!(st.shown_rect(&m), short);
 
-        // Force Direct Play is switched off under the open panel: the Quality row appears, the panel grows
-        assert!(st.refresh(&ps), "the row set moved");
-        assert!(!st.refresh(&ps), "and only once");
+        // the streams land: the Source row appears and the panel grows
+        assert!(st.refresh_to(rows_for(), two_addons()), "the row set moved");
         let tall = st.panel_rect(&m);
-        assert!(tall.h > short.h, "the Quality row makes the panel taller: {} > {}", tall.h, short.h);
-        assert_eq!((tall.x + tall.w, tall.y + tall.h), (short.x + short.w, short.y + short.h), "bottom and right are the anchor");
+        assert!(tall.h > short.h, "the Source row makes the panel taller: {} > {}", tall.h, short.h);
+        assert_eq!(
+            (tall.x + tall.w, tall.y + tall.h),
+            (short.x + short.w, short.y + short.h),
+            "bottom and right are the anchor"
+        );
         assert!(st.transitioning());
         assert!(step(&mut st), "the resize is motion");
         let mid = st.shown_rect(&m);
@@ -1256,6 +1166,46 @@ mod tests {
         assert_eq!(st.shown_rect(&m), tall, "lands exactly on the new layout");
         assert!(!st.transitioning());
         assert!(!step(&mut st), "at rest: no frames requested");
+    }
+
+    /// **A push slides the page and a pop slides it back; both rest.** The panel reports motion
+    /// each frame it animates and asks for none once settled — the same bar as the track menu.
+    #[test]
+    fn a_push_and_a_pop_slide_and_then_rest() {
+        let _serial = plx_base::testlock::serial();
+        const DT: f32 = 1.0 / 60.0;
+        let m = plx_base::fontcov::advances::ShippedMeasure;
+        let step = |st: &mut MoreMenuState| {
+            plx_machine::idle::frame_begin(DT);
+            st.update(DT, &m);
+            plx_machine::idle::present_moving()
+        };
+        let mut st = menu();
+        st.motion.step(DT, st.panel_rect(&m));
+        assert!(!step(&mut st), "an opened menu is at rest");
+        st.focus_key(MoreRow::OpenSource.key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        assert!(st.motion.sliding());
+        assert!(step(&mut st), "the slide is motion");
+        assert!(st.motion.live_dx() > 0.0, "the arriving page comes in from the right");
+        let mut n = 0;
+        while step(&mut st) {
+            n += 1;
+            assert!(n < 240, "the push never settles");
+        }
+        assert!(!st.motion.sliding() && !st.transitioning());
+        assert_eq!(st.motion.live_dx(), 0.0);
+        assert!(!step(&mut st), "at rest: no frames requested");
+        assert!(st.pop());
+        assert!(st.motion.sliding());
+        assert!(step(&mut st), "the pop is motion too");
+        n = 0;
+        while step(&mut st) {
+            n += 1;
+            assert!(n < 240, "the pop never settles");
+        }
+        assert!(!st.motion.sliding() && !st.transitioning());
+        assert!(!step(&mut st));
     }
 }
 
@@ -1287,29 +1237,29 @@ mod focus_tests {
         })
     }
 
-    /// A three-row menu (two synthetic quality rungs, then `Stats for nerds`) — mirrors the real
-    /// menu's order (Quality leads, Options trails; this module's doc) rather than contradicting
-    /// it, built the same way [`MoreMenuState::open_focused`] does but without a `PlaybackSession`
-    /// — no row here reads one.
+    /// A three-row menu mirroring a real addon page's shape — three streams, in ranked order —
+    /// built without a route: no row here reads one.
     fn three_row_menu() -> MoreMenuState {
-        let mut sec = FormSection::new("Quality");
+        let mut sec = FormSection::new("");
+        let mut rows = Vec::new();
         for (a, label) in [
-            (Action::SetQuality(plx_media::route::Quality::Original), "Rung A"),
-            (Action::SetQuality(plx_media::route::Quality::Auto), "Rung B"),
+            (Action::SetStream(3), "4k DV"),
+            (Action::SetStream(5), "1080p"),
             (Action::ToggleStats, "Stats for nerds"),
         ] {
             sec = sec.item(MoreRow::Act(a), RowKind::Button, a, Row::new(label));
+            rows.push(a);
         }
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true;
         form.set(Form::new().section(sec), None);
         MoreMenuState {
             form,
-            rows: Vec::new(),
-            forced: false,
-            current: plx_media::route::Quality::Auto,
+            rows,
             pages: PageStack::new(),
             motion: PanelMotion::new(),
+            streams: Vec::new(),
+            stream_rev: 0,
         }
     }
 
@@ -1343,14 +1293,12 @@ mod focus_tests {
             assert_eq!(step(r2, Dir::Down), None, "the last row does not wrap");
             assert_eq!(step(r0, Dir::Up), None, "the first row does not wrap");
             assert_eq!(step(r1, Dir::Up), Some(r0));
-            // LEFT/RIGHT are swallowed — this popover is ONE column, matching the old ladder's
-            // `Key::Up | Key::Down => …` arm with no Left/Right case at all.
+            // LEFT/RIGHT are swallowed — this popover is ONE column.
             assert!(matches!(step(elem(&st, 1), Dir::Left), None));
         });
     }
 
-    /// `place` reports exactly the row rect `TableView::row_frame` (and so the old `draw`) would
-    /// paint at.
+    /// `place` reports exactly the row rect `TableView::row_frame` would paint at.
     #[test]
     fn place_matches_the_tables_own_row_frame() {
         let e = EntryId(4);
@@ -1374,7 +1322,7 @@ mod focus_tests {
         with_cx(e, |cx| {
             let got = <MoreMenuPart as Focusable<HostFixture>>::reconcile(
                 &part,
-                FocusKey { entry: e, elem: 99 },
+                FocusKey { entry: e, elem: 0xdead },
                 cx,
             );
             assert_eq!(got.elem, elem(&st, 0));
@@ -1387,19 +1335,21 @@ mod focus_tests {
         });
     }
 
-    /// **Every row fits the panel, in every shipped language** — the root with each possible
-    /// current rung read out beside its Quality row, and the Quality page (title band included).
-    /// The panel hugs its widest row up to [`MENU_MAX_W`](plx_ui::table::MENU_MAX_W), and a row
-    /// elides its label to what the value beside it leaves — Spanish *Estadísticas avanzadas* and
-    /// Belarusian *Падрабязная статыстыка* both ended in `…` beside their *Off*, and a rung's value
-    /// ("1080p · 20 Mbps", "Original", "Автаматычна") shares its row with the label *Quality*.
+    /// **Every row fits the panel, in every shipped language** — the root (with each possible
+    /// stream count read out beside its Source row), the Source page, and an addon page with the
+    /// title band. The panel hugs its widest row up to [`MENU_MAX_W`](plx_ui::table::MENU_MAX_W),
+    /// and a row elides its label to what the value beside it leaves — Spanish *Estadísticas
+    /// avanzadas* and Belarusian *Падрабязная статыстыка* both ended in `…` beside their *Off*.
     /// Measured with the device's whole-pixel advances.
     #[test]
     fn every_row_fits_the_panel_in_every_language() {
         use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
-        let ps = plx_media::route::PlaybackSession::default();
+        let streams: Vec<(usize, String, String)> = vec![
+            (3, "4k DV".to_string(), "Torrentio".to_string()),
+            (5, "1080p".to_string(), "Sootio".to_string()),
+        ];
         let mut out = Vec::new();
-        let rows = rows_for(false);
+        let rows = rows_for();
         let mut check = |tag: &str, form: &MoreTable| {
             out.extend(form.table.menu_cap_failure(&plx_base::fontcov::advances::ShippedMeasure, tag));
             out.extend(form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, tag));
@@ -1407,20 +1357,22 @@ mod focus_tests {
         };
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
-            for q in plx_media::route::QUALITY_LADDER {
-                let mut root = MoreMenuState::new(&ps);
-                root.form.set(root_form(&ps, &rows, false, q), None);
-                check(language.tag(), &root.form);
-                let mut page = MoreMenuState::new(&ps);
-                page.current = q;
-                page.rows = rows.clone();
-                page.focus_key(MoreRow::OpenQuality.key().0);
-                page.push(&ps, MorePage::Quality);
-                check(language.tag(), &page.form);
-            }
-            // the forced root (Options only)
-            let forced = MoreMenuState::new(&ps);
-            check(language.tag(), &forced.form);
+            let mut root = MoreMenuState::new();
+            root.form.set(root_form(&rows, &streams), None);
+            check(language.tag(), &root.form);
+            let mut page = MoreMenuState::new();
+            page.rows = rows.clone();
+            page.streams = streams.clone();
+            page.push(MorePage::Source);
+            check(language.tag(), &page.form);
+            let mut addon = MoreMenuState::new();
+            addon.rows = rows.clone();
+            addon.streams = streams.clone();
+            addon.push(MorePage::Addon(0));
+            check(language.tag(), &addon.form);
+            // the root with nothing to pick (Options only)
+            let empty = MoreMenuState::new();
+            check(language.tag(), &empty.form);
         }
         plx_ui::table::assert_no_fit_failures(&out);
     }

@@ -418,10 +418,11 @@ When playback cannot start, the app does not fail silently and does not show a s
 draws a full-screen read-out: a warning mark, a headline, **the reason in plain language**, the
 server's own verdict beneath it where there is one, a row of the actions that can actually change
 the outcome, and a dim diagnostics footer. The row always ends in **Back**. For an ordinary failure
-it offers **Change quality**, which opens the same quality ladder the `…` menu does on the rung
-this playback is already using, preceded by **Try again** when the failure may be transient. With
-Force Direct Play enabled no rung can help, so the row offers **Switch to Auto and play** instead:
-OK turns Force off and retries in place, with no trip to Settings. A file with no video track gets
+it offers **Change Source**, which opens the same stream picker the `…` menu does (the addons that
+answered for this item, then their streams), preceded by **Try again** when the failure may be
+transient. With Force Direct Play enabled no quality RUNG can help, so the row leads with **Switch
+to Auto and play** — OK turns Force off and retries in place, with no trip to Settings — and still
+keeps **Change Source**, because Force has no opinion about which FILE plays. A file with no video track gets
 Back alone, because nothing the viewer picks puts a picture in it. A failure is therefore terminal
 for the pipeline, not a trap for the viewer.
 
@@ -561,8 +562,9 @@ generic show root. The final position is reported to the server on the way out, 
 where it was left, on this client or any other, and Continue Watching is refreshed shortly after.
 
 While a playback **failure** owns the frame (§5.10), exactly three keys act and everything else
-is swallowed, because nothing else on that frame is drawn: **OK** opens the shared quality ladder on
-its current rung (picking that rung is a plain retry), **BACK** and **Stop** leave the playback, and
+is swallowed, because nothing else on that frame is drawn: **OK** opens the shared stream picker —
+the addons that answered for this item, then their streams (picking one retries on it) — **BACK**
+and **Stop** leave the playback, and
 **EXIT** ends the app as it does everywhere. Both of the first two are printed on the read-out
 itself. This line said "BACK is the only key that acts" and was true only by accident: the arm that
 implemented the OK escape carried a guard it could never satisfy, so OK fell through to the ordinary

@@ -492,6 +492,7 @@
   "browse.streams.loading": "Пошук плыняў…",
   "browse.streams.empty": "Няма даступных плыняў.",
   "browse.streams.failed": "Не ўдалося загрузіць плыні. Закрыйце і паспрабуйце зноў.",
+  "browse.streams.other": "Іншыя крыніцы",
   "browse.list.add": "У мой спіс",
   "browse.list.remove": "Выдаліць",
   "browse.list.saving": "Чакаем…",

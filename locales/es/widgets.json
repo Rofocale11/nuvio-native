@@ -4,6 +4,7 @@
   "widgets.diagnostics.failed": "Error al enviar los diagnósticos",
   "widgets.menu.options": "Opciones",
   "widgets.menu.quality": "Calidad",
+  "widgets.menu.source": "Fuentes",
   "widgets.menu.stats": "Estadísticas",
   "widgets.menu.diagnostics": "Enviar diagnósticos",
   "widgets.badge.forced": "FORZADOS",
@@ -260,5 +261,5 @@
   "widgets.region.nl": "Países Bajos",
   "widgets.region.latin_america": "Latinoamérica",
   "widgets.failure.play_auto": "Cambiar a Automático y reproducir",
-  "widgets.failure.change_quality": "Cambiar calidad"
+  "widgets.failure.change_source": "Cambiar fuente"
 }

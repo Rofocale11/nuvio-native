@@ -79,7 +79,7 @@ fn panel(host_sid: ServerId, rk: &str) -> AltSourcesScreen {
 
 /// The one section the screen draws for `list`, built through the same [`form_for`].
 fn section_for(list: &[AltRow]) -> plx_ui::table::Section {
-    let mut t = FormTable::<AltId, Action, std::convert::Infallible>::new(plx_ui::table_screen::BAND_BASE);
+    let mut t = FormTable::<AltId, Action, Action>::new(plx_ui::table_screen::BAND_BASE);
     t.set(form_for(list, sid(0), "0"), None);
     t.table.sections.remove(0)
 }
@@ -1085,6 +1085,184 @@ fn every_app_owned_run_fits_the_panel_in_every_language() {
         out.extend(capped.menu_cap_failure(&plx_base::fontcov::advances::ShippedMeasure, language.tag()));
         out.extend(table.app_fit_failures(MENU_MAX_W, language.tag()));
         out.extend(table.app_fit_failures_hugged(language.tag()));
+    }
+    plx_ui::table::assert_no_fit_failures(&out);
+}
+
+// ---- the Streams picker's two levels ---------------------------------------------------------
+
+/// A ranked stream list with two addons answering for one item: Torrentio twice (the best stream
+/// and a third), Sootio once. Ranked order, so this is also the page order.
+fn two_addons() -> Vec<plx_plex::plex::nuvio::StreamChoice> {
+    let choice = |index: usize, label: &str, addon: &str| plx_plex::plex::nuvio::StreamChoice {
+        index,
+        label: label.into(),
+        addon: Some(addon.into()),
+        ..Default::default()
+    };
+    vec![
+        choice(3, "4k DV", "Torrentio"),
+        choice(5, "1080p", "Sootio"),
+        choice(7, "720p", "Torrentio"),
+    ]
+}
+
+/// The panel with that list already landed, on the addon page (`Some`) or the addon list
+/// (`None`) — no route, no dispatcher: the picker is pure over its own list.
+fn picker(page: Option<usize>) -> AltSourcesScreen {
+    let mut p = panel(sid(0), "0");
+    // a Nuvio item is what puts the panel in stream mode; the harness has no client, so the
+    // flag is set here rather than inferred. Everything below is the real code path from there.
+    p.stream_mode = true;
+    p.stream_choices = two_addons();
+    p.stream_page = page;
+    p.form.table.compact = false;
+    p.form.set(p.stream_form(), None);
+    p.form.table.set_title(p.stream_title());
+    p
+}
+
+/// Every row identity on the page showing, in table order.
+fn ids(p: &AltSourcesScreen) -> Vec<AltId> {
+    (0..p.form.table.n_rows() as usize)
+        .filter_map(|i| p.form.id_at(i).cloned())
+        .collect()
+}
+
+/// **The Streams dropdown is a sub-menu, exactly like the player's Source page**: the first level
+/// lists the ADDONS that answered for the item (with how many streams each offered), and only the
+/// second level lists streams — that addon's, and nothing else.
+#[test]
+fn the_streams_picker_lists_addons_first_and_then_one_addons_streams() {
+    let _serial = plx_base::testlock::serial();
+    let p = picker(None);
+    let pages = plx_appkit::source_list::addon_pages(&p.stream_choices);
+    let shape: Vec<(&str, usize, Vec<usize>)> =
+        pages.iter().map(|g| (g.name.as_str(), g.lead, g.rows.clone())).collect();
+    assert_eq!(
+        shape,
+        vec![("Torrentio", 3, vec![0, 2]), ("Sootio", 5, vec![1])],
+        "groups in ranked order, each named by its lead stream's ranked index"
+    );
+    let rows = &p.form.table.sections[0].rows;
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["Torrentio", "Sootio"], "the addon names, and nothing else");
+    let counts: Vec<Option<String>> = rows.iter().map(|r| r.value.clone()).collect();
+    assert_eq!(counts, [Some("2".into()), Some("1".into())], "each states its stream count");
+    assert_eq!(p.form.table.title(), None, "the first level carries no band");
+    assert_eq!(ids(&p).len(), 2, "one row per addon");
+
+    // the second level: Sootio's own page
+    let p = picker(Some(5));
+    assert_eq!(
+        p.form.table.title().as_deref(),
+        Some("Sootio"),
+        "the band names the addon"
+    );
+    let rows = &p.form.table.sections[0].rows;
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["1080p"], "only that addon's stream");
+    assert!(
+        !rows[0].detail.contains("Sootio"),
+        "the page already names the addon, so the row does not repeat it: {}",
+        rows[0].detail
+    );
+}
+
+/// **The pages push and pop on the panel's own stack**: drilling in replaces its rows (leaving the
+/// panel where it is — nothing is reported to the Detail page until a stream is picked), and BACK
+/// returns to the addon list with the opener focused.
+#[test]
+fn the_picker_drills_in_and_back_out_without_leaving_the_panel() {
+    let _serial = plx_base::testlock::serial();
+    let mut p = picker(None);
+    // the addon row is a Nav row, so a press pushes rather than commits
+    assert_eq!(
+        p.form.index_of_key(RowKey(1)).and_then(|i| p.form.activate(i)),
+        Some(plx_ui::form::Activation::Push(Action::Addon(1))),
+        "an addon row is a drill-in"
+    );
+    p.form.table.sel = 1;
+    p.push_stream_page(1);
+    assert_eq!(p.stream_page, Some(5), "named by that addon's first RANKED index");
+    assert_eq!(p.form.table.title().as_deref(), Some("Sootio"));
+    assert_eq!(
+        p.root_return.as_ref().map(|(id, _)| id.clone()),
+        Some(AltId::addon(1, "Sootio")),
+        "the opener is banked so a pop can seat it"
+    );
+    assert_eq!(
+        p.form.selected_id(),
+        Some(&AltId::stream(5)),
+        "the new page opens on its own first stream"
+    );
+
+    assert!(p.pop_stream_page(), "BACK pops the page");
+    assert_eq!(p.stream_page, None);
+    assert_eq!(p.form.table.title(), None, "the band goes with the page");
+    assert_eq!(
+        p.form.selected_id(),
+        Some(&AltId::addon(1, "Sootio")),
+        "the opener comes back focused"
+    );
+    assert!(!p.pop_stream_page(), "there is nothing to pop at the first level");
+}
+
+/// **A stream that no addon claimed stays reachable**, under the fallback heading: the shim tags
+/// every stream it serves, so a missing name means no source was reported, not that the stream is
+/// unplayable.
+#[test]
+fn an_untagged_stream_gets_the_fallback_heading() {
+    let untagged = vec![plx_plex::plex::nuvio::StreamChoice {
+        index: 9,
+        label: "720p".into(),
+        addon: None,
+        ..Default::default()
+    }];
+    let pages = plx_appkit::source_list::addon_pages(&untagged);
+    assert_eq!(
+        pages,
+        vec![plx_appkit::source_list::AddonPage {
+            name: plx_appkit::source_list::untagged_source().to_string(),
+            lead: 9,
+            rows: vec![0],
+        }]
+    );
+}
+
+/// **Both Streams-picker pages fit the panel in every shipped language.** None of their text is
+/// ours except the loading/failed/empty notes and the `Other sources` fallback heading — the addon
+/// names, stream labels and their technical facts are all server text — but the panel still has to
+/// hold them, and the fallback heading is product copy that has to survive translation beside a
+/// stream count.
+#[test]
+fn the_streams_picker_pages_fit_the_panel_in_every_language() {
+    use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+    let untagged = vec![plx_plex::plex::nuvio::StreamChoice {
+        index: 1,
+        label: "1080p".into(),
+        video_codec: Some("h264".into()),
+        audio_codec: Some("eac3".into()),
+        size_bytes: Some(15_000_000_000),
+        bitrate_kbps: Some(12_345),
+        ..Default::default()
+    }];
+    let mut out = Vec::new();
+    for language in SHIPPED {
+        let _guard = language_on_this_thread_for_test(language);
+        for page in [None, Some(5)] {
+            let p = picker(page);
+            out.extend(p.form.table.menu_cap_failure(&plx_base::fontcov::advances::ShippedMeasure, language.tag()));
+            out.extend(p.form.table.app_fit_failures(MENU_MAX_W, language.tag()));
+            out.extend(p.form.table.app_fit_failures_hugged(language.tag()));
+        }
+        // …and the fallback heading, which is the one product string on the first level
+        let mut p = picker(None);
+        p.stream_choices = untagged.clone();
+        p.form.set(p.stream_form(), None);
+        out.extend(p.form.table.menu_cap_failure(&plx_base::fontcov::advances::ShippedMeasure, language.tag()));
+        out.extend(p.form.table.app_fit_failures(MENU_MAX_W, language.tag()));
+        out.extend(p.form.table.app_fit_failures_hugged(language.tag()));
     }
     plx_ui::table::assert_no_fit_failures(&out);
 }

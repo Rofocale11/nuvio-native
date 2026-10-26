@@ -1115,7 +1115,7 @@ pub fn failure_action_label(a: plx_media::player::FailureAction) -> &'static std
     match a {
         A::PlayAutomatically => msg::widgets_failure_play_auto_c(),
         A::TryAgain => msg::browse_action_retry_c(),
-        A::ChangeQuality => msg::widgets_failure_change_quality_c(),
+        A::ChangeSource => msg::widgets_failure_change_source_c(),
         A::Repair => msg::widgets_repair_action_c(),
         A::Back => msg::settings_back_c(),
     }
@@ -2600,8 +2600,10 @@ mod tests {
     }
 
     /// **Say it once.** Under Force the reason IS the route's verdict (what happened and why), no
-    /// note repeats it, the row is *Switch to Auto and play* · *Back* (no *Details*), and the
-    /// support facts are the dim footer — which the draw really paints, below the row.
+    /// note repeats it, the row is *Switch to Auto and play* · *Change Source* · *Back* (no
+    /// *Details*), and the support facts are the dim footer — which the draw really paints, below
+    /// the row. *Change Source* survives Force because it picks another FILE: Force overrides every
+    /// quality rung, not which stream plays.
     #[test]
     fn the_forced_readout_says_what_and_why_once_and_draws_the_diagnostics_as_the_footer() {
         use plx_media::player::FailureAction as A;
@@ -2610,7 +2612,7 @@ mod tests {
         let r = readout_of(&e);
         assert_eq!(r.reason(), verdict.as_str());
         assert_eq!(r.note(), None, "the verdict already names the cause");
-        assert_eq!(r.actions(), &[A::PlayAutomatically, A::Back]);
+        assert_eq!(r.actions(), &[A::PlayAutomatically, A::ChangeSource, A::Back]);
         assert_eq!(r.footer(), "0.7.0 · webOS 4.5 · code");
         let log = plx_ui::draw_census::capture(|| {
             r.draw(plx_ui::Painter::recording(), 0, &plx_ui::fixture::FixtureMeasure);
@@ -2647,8 +2649,8 @@ mod tests {
         use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
         use plx_media::player::FailureAction as A;
         let rows: [&[A]; 3] = [
-            &[A::PlayAutomatically, A::TryAgain, A::Back],
-            &[A::TryAgain, A::ChangeQuality, A::Back],
+            &[A::PlayAutomatically, A::TryAgain, A::ChangeSource, A::Back],
+            &[A::TryAgain, A::ChangeSource, A::Back],
             &[A::Repair, A::Back],
         ];
         let mut out = Vec::new();

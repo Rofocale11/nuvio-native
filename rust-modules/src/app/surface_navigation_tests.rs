@@ -371,7 +371,7 @@ fn player_diagnostics_hide_behind_any_open_player_overlay() {
         OverlayKind::Tracks { tab: 0 },
         OverlayKind::Info,
         OverlayKind::Chapters,
-        OverlayKind::More { quality: false },
+        OverlayKind::More { source: false },
     ] {
         open_player_overlay(
             plx_media::route::idle_session_for_test(),

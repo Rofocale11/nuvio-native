@@ -19,6 +19,10 @@
     "value": "Source",
     "description": "Option or section label in the player overflow menu."
   },
+  "widgets.menu.source": {
+    "value": "Streams",
+    "description": "Row in the player overflow menu that opens the picker listing the addons that answered for the item, then their streams."
+  },
   "widgets.menu.stats": {
     "value": "Stats for nerds",
     "description": "Option or section label in the player overflow menu."
@@ -1068,8 +1072,8 @@
     "value": "Switch to Auto and play",
     "description": "Failed-playback button: sets Direct Play back to Auto (the Settings value, saved) and plays the item again."
   },
-  "widgets.failure.change_quality": {
+  "widgets.failure.change_source": {
     "value": "Change Source",
-    "description": "Failed-playback button: opens the quality ladder; picking a rung retries at it."
+    "description": "Failed-playback button: opens the picker listing the addons that answered for the item; picking another stream retries on it."
   }
 }

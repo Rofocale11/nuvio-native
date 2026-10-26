@@ -188,7 +188,7 @@ pub enum PlayerReq {
     CommitTrack(plx_appkit::track_menu::TrackCommit),
     /// **Present one of the player's overlays directly** (restructure phase 12) — the tabs row's OK
     /// (`OverlayKind::Info`/`::Chapters`, the old `key_ok`'s `focus == 2` arm) and the failure
-    /// read-out's own recovery escape (`OverlayKind::More { quality: true }`, the old
+    /// read-out's own recovery escape (`OverlayKind::More { source: true }`, the old
     /// `key_player_failed`'s `ChooseQuality` arm). Both used to reach
     /// `super::bridge::open_player_overlay` straight from the loop's key ladder; `PlayerScreen`
     /// may not name that function itself (§2.2), so it asks instead.
@@ -2092,7 +2092,10 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Nuvio rating source adds a Playback field and picker option vocabulary.
 // Real simulator recordings are required; previous pin: 0xf541c16b15ec999f.
 // My List adds the detail page's asynchronous account-library state. Real recordings replace the old shape.
-const SCREEN_SHAPES_PIN: u64 = 0xb9582887de5b0626;
+// The Streams picker became a two-level menu (addon pages over `/nuvio/select`) and the player's
+// Source page lost its quality ladder — so both screens' state changed. Previous pin:
+// 0xb9582887de5b0626.
+const SCREEN_SHAPES_PIN: u64 = 0xb3ba4cb5fc1287f2;
 
 #[cfg(test)]
 mod arg_tests {

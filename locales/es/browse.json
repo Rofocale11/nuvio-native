@@ -478,6 +478,7 @@
   "browse.streams.loading": "Buscando fuentes…",
   "browse.streams.empty": "No se encontraron fuentes reproducibles.",
   "browse.streams.failed": "No se pudieron cargar las fuentes. Cierra e inténtalo de nuevo.",
+  "browse.streams.other": "Otras fuentes",
   "browse.list.add": "Añadir a Mi lista",
   "browse.list.remove": "Quitar de Mi lista",
   "browse.list.saving": "Sincronizando Mi lista…",

@@ -782,9 +782,9 @@ pub enum FailureAction {
     /// Resolve the same item again, unchanged — worth offering only where the failure can be
     /// transient (the stream stopped, the pipeline never answered, no cause was reported).
     TryAgain,
-    /// The `…` popover opened on the quality ladder — a different rung is a different route, and
-    /// picking one retries at it.
-    ChangeQuality,
+    /// The `…` popover opened on its Source page — another addon, or another stream from the same
+    /// one, is a different file, and picking it retries on it.
+    ChangeSource,
     /// Review the sandbox repair (the confirmation `Player.repair` guards).
     Repair,
     /// Leave the player.
@@ -795,8 +795,9 @@ pub enum FailureAction {
 /// whether an action could CHANGE the outcome.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FailureContext {
-    /// Force Direct Play was in effect for the failed attempt. It overrides every quality rung
-    /// (Force always requests the original), so no rung can change the outcome.
+    /// Force Direct Play was in effect for the failed attempt. It overrides every playback-quality
+    /// rung (Force always requests the original) — but it says nothing about which STREAM plays,
+    /// so [`ChangeSource`](FailureAction::ChangeSource) can still change the outcome.
     pub forced: bool,
     /// The failed attempt has a Plex request that can be resolved again. A URL/dev-trigger
     /// playback has none, so nothing that retries can do anything.
@@ -812,14 +813,14 @@ pub struct FailureContext {
 /// **The rule: offer an action only if it can change the outcome under the current settings.**
 /// `Back` is always last, because leaving always does something. In particular:
 ///
-/// * Under Force Direct Play NO quality rung can help — Force requests the original whatever rung
-///   is picked — so [`ChangeQuality`](FailureAction::ChangeQuality) is never offered there, and
-///   [`PlayAutomatically`](FailureAction::PlayAutomatically) is, because it is the one change that
-///   re-enables the fallback.
+/// * Under Force Direct Play no quality rung can help — Force requests the original whatever rung
+///   is picked — so [`PlayAutomatically`](FailureAction::PlayAutomatically) is offered, because it
+///   is the one change that re-enables the fallback. [`ChangeSource`](FailureAction::ChangeSource)
+///   stays: it picks a different FILE, which Force says nothing about, and another stream may need
+///   no conversion at all.
 /// * A deterministic refusal (the server's `/decision`, the TV refusing the Load declaration) gets
 ///   no [`TryAgain`](FailureAction::TryAgain): the same request gets the same answer. A different
-///   rung is a different request, so the ladder stays where a transcode or a direct play could
-///   succeed instead.
+///   stream is a different request, so the source list stays where a direct play could succeed.
 /// * A file with no video track and an unrepairable sandbox get nothing but *Back*.
 pub fn failure_actions(kind: FailureKind, cx: FailureContext) -> Vec<FailureAction> {
     use FailureAction as A;
@@ -842,6 +843,7 @@ pub fn failure_actions(kind: FailureKind, cx: FailureContext) -> Vec<FailureActi
                 if transient {
                     v.push(A::TryAgain);
                 }
+                v.push(A::ChangeSource);
             }
         }
         // Only reachable under Force (`with_forced_playback_context`); without it there is no
@@ -852,7 +854,7 @@ pub fn failure_actions(kind: FailureKind, cx: FailureContext) -> Vec<FailureActi
                 if transient {
                     v.push(A::TryAgain);
                 }
-                v.push(A::ChangeQuality);
+                v.push(A::ChangeSource);
             }
         }
     }
@@ -2520,18 +2522,21 @@ mod tests {
         assert_eq!(classes.len(), table.len(), "two causes share one wire class");
     }
 
-    /// **The owner's bug**: under Force Direct Play the read-out offered the Quality ladder, whose
-    /// every rung Force overrides. The fix is the one change that re-enables the fallback.
+    /// **The owner's bug**: under Force Direct Play the read-out offered the playback-quality
+    /// ladder, whose every rung Force overrides. The fix is the one change that re-enables the
+    /// fallback — plus, now that the `…` popover opens a list of STREAMS rather than rungs, the
+    /// choice Force says nothing about: another file may need no conversion at all.
     #[test]
-    fn forced_direct_play_offers_the_fix_and_never_the_quality_ladder() {
+    fn forced_direct_play_offers_the_fix_and_the_other_stream() {
         let cx = FailureContext { forced: true, can_retry: true, repair_idle: true };
         let row = failure_actions(FailureKind::PlaybackPolicy, cx);
         assert_eq!(row.first(), Some(&FailureAction::PlayAutomatically));
-        assert!(!row.contains(&FailureAction::ChangeQuality), "{row:?}");
+        assert!(row.contains(&FailureAction::ChangeSource), "{row:?}");
         assert!(!row.contains(&FailureAction::TryAgain), "the same request gets the same refusal: {row:?}");
-        // the owner's chosen read-out: the fix and Back — the support facts are the footer, never
-        // a control of their own
-        assert_eq!(row, [FailureAction::PlayAutomatically, FailureAction::Back]);
+        assert_eq!(
+            row,
+            [FailureAction::PlayAutomatically, FailureAction::ChangeSource, FailureAction::Back]
+        );
     }
 
     /// **Offer an action only if it can change the outcome**, over the whole table: no quality
@@ -2547,13 +2552,11 @@ mod tests {
             let at = format!("{kind:?} {cx:?}: {row:?}");
             assert_eq!(row.last(), Some(&A::Back), "{at}");
             assert_eq!(row.iter().filter(|a| **a == A::Back).count(), 1, "{at}");
-            if cx.forced {
-                assert!(!row.contains(&A::ChangeQuality), "Force overrides every rung — {at}");
-            } else {
+            if !cx.forced {
                 assert!(!row.contains(&A::PlayAutomatically), "nothing to switch off — {at}");
             }
             if !cx.can_retry {
-                for a in [A::TryAgain, A::ChangeQuality, A::PlayAutomatically] {
+                for a in [A::TryAgain, A::ChangeSource, A::PlayAutomatically] {
                     assert!(!row.contains(&a), "no request to resolve again — {at}");
                 }
             }
@@ -2568,7 +2571,7 @@ mod tests {
         // and a transient failure without Force keeps both of its recoveries
         let cx = FailureContext { forced: false, can_retry: true, repair_idle: true };
         let row = failure_actions(K::PlaybackInterrupted, cx);
-        assert_eq!(&row[..2], &[A::TryAgain, A::ChangeQuality]);
+        assert_eq!(&row[..2], &[A::TryAgain, A::ChangeSource]);
     }
 
     #[test]

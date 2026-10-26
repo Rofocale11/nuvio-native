@@ -20,8 +20,32 @@ use std::sync::Mutex;
 use super::flight::*;
 use super::plan::*;
 
-/// Global storage for the last fetched Nuvio streams so the in-player menu can read them.
-pub static AVAILABLE_STREAMS: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
+/// Global storage for the last fetched Nuvio streams so the in-player menu can read them:
+/// `(ranked index, label, addon name)`. The addon is the shim's `addon_name` — the same value the
+/// item's `Media[]` carries — because the menu groups its Source page by it. Write it ONLY through
+/// [`set_available_streams`], which bumps [`streams_rev`].
+pub static AVAILABLE_STREAMS: Mutex<Vec<(usize, String, String)>> = Mutex::new(Vec::new());
+
+/// Bumped on every [`set_available_streams`]: the menu polls the list each tick, and a stamp lets
+/// it tell "unchanged" from "arrived" without copying the labels (three Strings per stream) once
+/// per frame.
+static STREAMS_REV: AtomicU32 = AtomicU32::new(0);
+
+/// Publish the ranked stream list (the shim's `/nuvio/streams` answer) for the player menu.
+pub fn set_available_streams(list: Vec<(usize, String, String)>) {
+    *AVAILABLE_STREAMS.lock().unwrap_or_else(|e| e.into_inner()) = list;
+    STREAMS_REV.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The revision of the published list — see [`STREAMS_REV`].
+pub fn streams_rev() -> u32 {
+    STREAMS_REV.load(Ordering::Relaxed)
+}
+
+/// A copy of the published list (only on a revision change — see [`streams_rev`]).
+pub fn available_streams() -> Vec<(usize, String, String)> {
+    AVAILABLE_STREAMS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// Tell the Nuvio Shim to switch to a specific stream index, and restart playback.
 pub fn set_stream_index(ps: &mut PlaybackSession, index: usize) -> bool {

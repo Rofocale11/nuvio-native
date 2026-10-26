@@ -109,23 +109,7 @@ pub(crate) fn is_started() -> bool {
 pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: &mut plx_media::player::adapter::PlayerAdapter, bridge: &mut super::bridge::Bridge, a: plx_appkit::more_menu::Action) {
     match a {
         plx_appkit::more_menu::Action::ToggleStats => crate::app::diagnostics::toggle(),
-        // A rung of the playback-quality ladder — a routing POLICY, not a number handed to a
-        // running stream. Not deferred either: `route::set_quality` re-asks the routing question
-        // for the playback on screen and reloads only when the answer changed.
-        plx_appkit::more_menu::Action::SetQuality(q) => {
-            // A terminal Engine never reaches pump's pending-retranscode arm, and a `/decision`
-            // refusal has no Engine at all.  Persist the pick first, then make a fresh playback
-            // request at the same user-visible position.  Selecting the already-active rung is
-            // therefore the promised plain Retry.
-            let failed = matches!(plx_media::player::state(ps), plx_media::player::PlaybackState::Error);
-            if failed {
-                plx_media::route::set_quality_for_retry(q);
-                retry_failed_playback(ps, pa, bridge.metadata_mut(), None);
-            } else {
-                plx_media::route::set_quality(ps, q);
-            }
-        }
-        
+
         // FORK (RichiL10): User picked a specific Addon stream from the menu
         plx_appkit::more_menu::Action::SetStream(index) => {
             // 1. Tell the Nuvio Shim to update the mediaIndex
@@ -404,7 +388,7 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     resources: &mut R,
 ) -> bool {
     // FORK (RichiL10): Fetch streams in the background (does not block video start)
-    *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = Vec::new();
+    plx_media::route::set_available_streams(Vec::new());
     if let Some(req) = &ps.request {
         let fetch_sid = req.sid;
         let fetch_rk = req.rk.clone();
@@ -414,10 +398,10 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
                     for _attempt in 1..=10 {
                         if let Some(list) = client.nuvio_streams(&fetch_rk) {
                             if !list.streams.is_empty() {
-                                let saved: Vec<(usize, String)> = list.streams.iter()
-                                    .map(|s| (s.index, s.label.clone()))
+                                let saved: Vec<(usize, String, String)> = list.streams.iter()
+                                    .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default()))
                                     .collect();
-                                *plx_media::route::AVAILABLE_STREAMS.lock().unwrap() = saved;
+                                plx_media::route::set_available_streams(saved);
                                 plx_machine::idle::invalidate(); // <--- THIS TRIGGERS THE LIVE UPDATE!
                                 break;
                             }
@@ -1080,7 +1064,7 @@ pub(crate) unsafe fn activate_player_row(
     } else if btn == plx_appkit::player_hud::BTN_MORE {
         // …so the discs are what row 1 holds — the complement of the arm above, and the row's only
         // other occupant. OK on a control disc PRESENTS its panel on this page's own stack.
-        super::bridge::open_player_overlay(ps, bridge.metadata_view(), pages, plx_screens::player::overlay::OverlayKind::More { quality: false });
+        super::bridge::open_player_overlay(ps, bridge.metadata_view(), pages, plx_screens::player::overlay::OverlayKind::More { source: false });
     } else {
         super::bridge::open_player_overlay(
             ps,

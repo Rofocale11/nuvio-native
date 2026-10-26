@@ -9,7 +9,8 @@ model reviewer over several rounds; this file keeps the decisions and their reas
 the Size / Position / Color pickers, nav keys, persistence, locks, the rebuild signature and replay
 state) and PR 3 (Other languages, the language pages, the image-subtitle badge) and PR 4 (the animated
 panel resize and page slide for Tracks and More, `ui::panel_motion`, plus the device frame-time
-scene) and PR 5 (More -> Quality on the shared `ui::page_stack::PageStack`, the `more-quality-osc`
+scene) and PR 5 (the More popover's drill-in pages on the shared `ui::page_stack::PageStack`, the
+`more-quality-osc`
 scene) are what this repository has. The replay anchors were re-recorded for PR 2 and again for PR 5
 because the overlay's state shape changed on purpose.
 
@@ -141,8 +142,8 @@ re-recorded.
   an opposite-direction key (push then pop) revives the page that was arriving from its own alpha,
   and a push during a push turns the arriving page into a leaving one from where it is, so no key
   steps the picture. Audio <-> Subtitles resizes the
-  card only; More resizes when its row set changes and also slides between its root and the
-  Quality page. Only the live page registers focus stops, at
+  card only; More resizes when its row set changes and also slides between its root, its Source
+  page and an addon page. Only the live page registers focus stops, at
   the animated position (`place` agrees with `Part::draw`), and `Screen::pointer_held` makes the
   dispatcher record but never resolve pointer input for the slide plus the rect lag. A settled
   panel reports no motion to `ui::idle` and asks for no frames.
@@ -162,11 +163,14 @@ On the root the change refreshes in place. On a sub-page the page is refreshed i
    state, pointer and BACK behaviour.
 3. Other languages, language pages, the badge change, the invalidation fingerprint.
 4. Resize/slide animation for all table popovers (Tracks, More); the `track-menu-submenu-osc` scene.
-5. More -> Quality: the root's headerless Quality row (value = the current rung) pushes a Quality page
-   on `ui::page_stack::PageStack` (extracted from the track menu); live refresh keeps focus by id and
-   pops to the root when Quality becomes unavailable; the failure screen's quality entry opens on the
-   page, and BACK pops to the root before it dismisses; the `more-quality-osc` scene
+5. More -> Source: the root's headerless Source row (value = the item's stream count) pushes a Source
+   page on `ui::page_stack::PageStack` (extracted from the track menu), which lists the ADDONS that
+   answered for the item; picking one pushes its own page of streams. Live refresh keeps focus by id
+   and pops a page the change emptied; the failure screen's entry opens on the Source page, and BACK
+   pops one level at a time before it dismisses; the `more-quality-osc` scene
    (`plxnative-more=1`, `plxnative-moreosc=<period_ms>`, `dev::scenarios::moreosc_arm`).
+   **The playback-quality ladder is no longer here** (2026-10-26): a stream is a quality under the
+   Stremio shim, so the rungs live only in Settings > Playback.
 
 ## Decisions
 
@@ -326,11 +330,11 @@ Fixed on the way here:
   one frame).
 
 `more-quality-osc` (trigger `plxnative-more=1` to open More, `plxnative-moreosc=<period_ms>`,
-`dev::scenarios::moreosc_arm`) is the same check for More: RIGHT on the Quality row pushes the rung
-page and LEFT pops it, every 900 ms. Same sequence with `--arm more=1 --arm moreosc=900`, reading
-`route=player overlay=more`; `moreosc:` lines log each key. The Quality row is absent only under
-Force Direct Play, so that setting must be off; the oscillator then logs `moreosc: no Quality row`
-and pushes nothing, and the scene's `require_log` (`moreosc: depth=1`) fails the run rather than
+`dev::scenarios::moreosc_arm`) is the same check for More: RIGHT on the Source row pushes the addon
+list and LEFT pops it, every 900 ms. Same sequence with `--arm more=1 --arm moreosc=900`, reading
+`route=player overlay=more`; `moreosc:` lines log each key. The Source row exists only once the
+shim has answered with at least one stream; the oscillator then logs `moreosc: no Source row` and
+pushes nothing, and the scene's `require_log` (`moreosc: depth=1`) fails the run rather than
 grading a screen that never moved. Same 25 ms budget, same
 "not yet measured on the TV".
 

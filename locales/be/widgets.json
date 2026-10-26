@@ -4,6 +4,7 @@
   "widgets.diagnostics.failed": "Не ўдалося даслаць дыягностыку",
   "widgets.menu.options": "Параметры",
   "widgets.menu.quality": "Якасць",
+  "widgets.menu.source": "Плыні",
   "widgets.menu.stats": "Статыстыка",
   "widgets.menu.diagnostics": "Даслаць дыягностыку",
   "widgets.badge.forced": "ПРЫМУСОВЫЯ",
@@ -264,5 +265,5 @@
   "widgets.region.nl": "Нідэрланды",
   "widgets.region.latin_america": "Лацінская Амерыка",
   "widgets.failure.play_auto": "Уключыць «Аўтаматычна» і прайграць",
-  "widgets.failure.change_quality": "Змяніць якасць"
+  "widgets.failure.change_source": "Змяніць крыніцу"
 }

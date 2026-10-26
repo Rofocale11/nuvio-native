@@ -2075,6 +2075,10 @@
     "value": "Couldn’t load streams. Close and try again.",
     "description": "Addon stream picker status"
   },
+  "browse.streams.other": {
+    "value": "Other sources",
+    "description": "Heading of the stream picker's group for streams whose addon did not name itself. Short: it shares a row with a stream count."
+  },
   "browse.list.add": {
     "value": "Add to My List",
     "description": "Nuvio account My List action/status."

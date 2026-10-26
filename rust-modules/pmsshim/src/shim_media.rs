@@ -179,6 +179,9 @@ pub fn media_json(rk: i64, idx: usize, c: &Classified, duration_ms: i64, subs: &
         "audioChannels": if c.info.atmos { 8 } else { 6 },
         "videoProfile": if ten_bit && vcodec == "hevc" { "main 10" } else { "" },
         "title": c.info.label,
+        // The addon that returned this stream, so the picker can group its list by source. Empty
+        // only on the placeholder Media that stands in while the addons are still answering.
+        "addon_name": c.stream.addon_name,
         "Part": [{
             "id": part_id, "key": format!("/library/parts/{part_id}/0/file.{ext}"),
             "duration": duration_ms, "file": c.info.filename.clone().unwrap_or_default(),
@@ -236,10 +239,13 @@ mod tests {
 
     #[test]
     fn media_shape() {
-        let c = Classified { stream: s("x", Some("https://h/f.mkv?t=1"), None), info: StreamInfo { height: Some(2160), hdr: Hdr::DolbyVision { with_hdr10_fallback: true }, size_bytes: Some(60_000_000_000), ..Default::default() }, url: "https://h/f.mkv?t=1".into() };
+        let mut stream = s("x", Some("https://h/f.mkv?t=1"), None);
+        stream.addon_name = "Torrentio".into();
+        let c = Classified { stream, info: StreamInfo { height: Some(2160), hdr: Hdr::DolbyVision { with_hdr10_fallback: true }, size_bytes: Some(60_000_000_000), ..Default::default() }, url: "https://h/f.mkv?t=1".into() };
         let m = media_json(10_001, 3, &c, 7_200_000, &[SubRef { id: 9, lang: "eng".into() }]);
         assert_eq!(m["videoResolution"], "4k");
         assert_eq!(m["container"], "mkv");
+        assert_eq!(m["addon_name"], "Torrentio", "the picker groups by addon");
         assert_eq!(m["videoCodec"], "hevc");
         assert_eq!(m["Part"][0]["id"], 10_001_003);
         assert_eq!(m["Part"][0]["key"], "/library/parts/10001003/0/file.mkv");

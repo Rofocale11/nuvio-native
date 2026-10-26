@@ -623,7 +623,7 @@ impl PlayerScreen {
         match action {
             A::PlayAutomatically => Self::ask(fx, PlayerReq::PlayAutomatically),
             A::TryAgain => Self::ask(fx, PlayerReq::RetryPlayback),
-            A::ChangeQuality => Self::ask(fx, PlayerReq::OpenOverlay(overlay::OverlayKind::More { quality: true })),
+            A::ChangeSource => Self::ask(fx, PlayerReq::OpenOverlay(overlay::OverlayKind::More { source: true })),
             A::Repair => {
                 if ps.repair_status == plx_platform::tv::sandbox::State::Idle && !self.repair_alert.visible() {
                     self.repair_scroll = 0;

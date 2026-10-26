@@ -1329,12 +1329,15 @@ impl Shim {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         for c in shim_media::rank(&indexed, runtime_secs, ts, &audio) {
-            // `rank` clones; recover the arrival index by identity of the URL + name.
+            // `rank` clones; recover the arrival index by identity of the URL + name, which the
+            // addon tag completes — two addons can offer the same file under the same label, and
+            // the index is what `/nuvio/select` and the picker's `addon_name` group address.
             let i = indexed
                 .iter()
                 .position(|s| {
                     shim_media::playable_url(s, ts).as_deref() == Some(c.url.as_str())
                         && s.name == c.stream.name
+                        && s.addon_name == c.stream.addon_name
                 })
                 .unwrap_or(0);
             out.push((i, c));

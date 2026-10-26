@@ -85,10 +85,10 @@ pub enum OverlayKind {
     Info,
     /// The chapter strip (`appkit/chapters_panel.rs`).
     Chapters,
-    /// The `…` overflow popover (`appkit/more_menu.rs`). `quality` opens it focused on the active
-    /// quality rung — the failure read-out's recovery path, which is also why this is the one
-    /// overlay whose style `survives_failure`.
-    More { quality: bool },
+    /// The `…` overflow popover (`appkit/more_menu.rs`). `source` opens it straight on the
+    /// Source page (the addons that answered for the item) — the failure read-out's recovery
+    /// path, which is also why this is the one overlay whose style `survives_failure`.
+    More { source: bool },
     /// The on-video Subtitle Timing capsule (`appkit/timing_capsule.rs`, plan `subtitle-menu-capsule`
     /// §4) — the Subtitles panel's Timing row hands off here
     /// (`appkit::track_menu::TrackOk::OpenTiming`) rather than stepping the offset itself. The only
@@ -107,7 +107,7 @@ impl OverlayKind {
         OverlayKind::Tracks { tab: 0 },
         OverlayKind::Info,
         OverlayKind::Chapters,
-        OverlayKind::More { quality: false },
+        OverlayKind::More { source: false },
         OverlayKind::Timing,
     ];
 
@@ -121,7 +121,7 @@ impl OverlayKind {
     /// `ScreenArg::same_instance` compares, and the reason it is not the whole `OverlayKind`.
     ///
     /// The two on-screen discs open the SAME track menu on their own tab, and the failure
-    /// read-out opens the SAME `…` popover focused on the quality rung. So `tab` and `quality` are
+    /// read-out opens the SAME `…` popover on its Source page. So `tab` and `source` are
     /// a boot ADDRESS, not an identity — exactly as `AppArg::Settings`'s root page is — and a
     /// container that compared them would stack a second track menu on top of the first when the
     /// viewer moved from Subtitles to Audio.
@@ -171,10 +171,10 @@ impl OverlayKind {
     /// **Does this panel stay up over the terminal failure read-out?**
     ///
     /// Only the `…` popover, and the reason is the read-out's own escape: OK on a failed playback
-    /// opens the shared quality ladder, so that panel must remain visible and drivable over the
-    /// black failure ground. The other three are stale content about a stream that is not playing
-    /// and are gone with the transport — the same rule `app/run.rs`'s `panels` guard applied when
-    /// they were routes.
+    /// opens the list of sources for the same item, so that panel must remain visible and drivable
+    /// over the black failure ground. The other three are stale content about a stream that is not
+    /// playing and are gone with the transport — the same rule `app/run.rs`'s `panels` guard
+    /// applied when they were routes.
     pub fn survives_failure(self) -> bool {
         matches!(self, OverlayKind::More { .. })
     }
@@ -205,8 +205,8 @@ impl LogicalState for PlayerOverlayArg {
             OverlayKind::Tracks { tab } => {
                 c.u32(tab as u32);
             }
-            OverlayKind::More { quality } => {
-                c.bool(quality);
+            OverlayKind::More { source } => {
+                c.bool(source);
             }
             OverlayKind::Info | OverlayKind::Chapters | OverlayKind::Timing => {}
         }
@@ -304,16 +304,11 @@ impl PlayerOverlayScreen {
             OverlayKind::Chapters => {
                 Panel::Chapters(plx_appkit::chapters_panel::ChaptersState::new(meta))
             }
-            OverlayKind::More { quality: false } => {
-                Panel::More(plx_appkit::more_menu::MoreMenuState::new(ps))
+            OverlayKind::More { source: false } => {
+                Panel::More(plx_appkit::more_menu::MoreMenuState::new())
             }
-            // Force Direct Play offers no Quality section, so there is no rung to land on: a
-            // quality entry is the ordinary menu then (`more_menu::rows_for`).
-            OverlayKind::More { quality: true } if plx_media::route::forced_direct_play(ps) => {
-                Panel::More(plx_appkit::more_menu::MoreMenuState::new(ps))
-            }
-            OverlayKind::More { quality: true } => {
-                Panel::More(plx_appkit::more_menu::MoreMenuState::new_quality(ps))
+            OverlayKind::More { source: true } => {
+                Panel::More(plx_appkit::more_menu::MoreMenuState::new_source())
             }
             OverlayKind::Timing => {
                 let (lo, hi) = plx_media::player::subtitle_offset_range_ms();
@@ -412,12 +407,12 @@ impl PlayerOverlayScreen {
         }
     }
 
-    /// `moreosc`'s cursor seat: put the More cursor on the Quality row so the next real RIGHT key
+    /// `moreosc`'s cursor seat: put the More cursor on the Source row so the next real RIGHT key
     /// enters it.
-    /// `false` when the panel is not More or its root offers no Quality row (Force Direct Play).
-    pub fn seat_more_quality(&mut self) -> bool {
+    /// `false` when the panel is not More or there is no Source row to seat it on (nothing to pick).
+    pub fn seat_more_source(&mut self) -> bool {
         match &mut self.panel {
-            Panel::More(p) => p.focus_key(plx_ui::form::FormId::key(&plx_appkit::more_menu::MoreRow::OpenQuality).0),
+            Panel::More(p) => p.focus_key(plx_ui::form::FormId::key(&plx_appkit::more_menu::MoreRow::OpenSource).0),
             _ => false,
         }
     }
@@ -518,7 +513,6 @@ impl PlayerOverlayScreen {
     /// old ladder's `Key::Ok` arms did.
     fn activate<H: AppLike + crate::registry::MetadataLike>(
         &mut self,
-        ps: &plx_media::route::PlaybackSession,
         cx: &Cx<'_, H>,
         fx: &mut Effects<'_, H>,
     ) {
@@ -565,7 +559,7 @@ impl PlayerOverlayScreen {
                     }
                 }
             },
-            Panel::More(p) => match p.on_ok(ps) {
+            Panel::More(p) => match p.on_ok() {
                 MoreOk::Action(action) => {
                     self.dismiss(fx);
                     Self::ask(fx, PlayerReq::More(action));
@@ -624,11 +618,11 @@ impl PlayerOverlayScreen {
             }
             // More's one drill-in page: LEFT pops it (nothing at the root), RIGHT enters a Nav row
             (Panel::More(p), Key::Left { .. }) => {
-                p.pop(ps);
+                p.pop();
                 self.moved(fx);
             }
             (Panel::More(p), Key::Right { .. }) => {
-                p.on_right(ps);
+                p.on_right();
                 self.moved(fx);
             }
             (Panel::Chapters(_), Key::Down) | (Panel::Info(_), Key::Down) => {
@@ -739,7 +733,7 @@ impl PlayerOverlayScreen {
                     }
                 }
                 if let Panel::More(p) = &mut self.panel {
-                    if p.pop(ps) {
+                    if p.pop() {
                         self.moved(fx);
                         return Handled::Yes;
                     }
@@ -837,31 +831,28 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                 if let Panel::More(p) = &mut self.panel {
                     if plx_ui::page_stack::is_title_key(*elem) {
                         // the "< QUALITY" band: a click goes back one page, and acts on no row
-                        p.pop(ps);
+                        p.pop();
                         self.moved(fx);
                         return Handled::No;
                     }
                     p.focus_key(*elem);
                 }
-                self.activate(ps, cx, fx);
+                self.activate(cx, fx);
                 Handled::No
             }
             ScreenEvent::PressCommit(_) => {
                 if let Panel::Info(_) = &self.panel {
                     Self::ask(fx, PlayerReq::ArmInfoPress);
                 } else {
-                    self.activate(ps, cx, fx);
+                    self.activate(cx, fx);
                 }
                 Handled::No
             }
                 ScreenEvent::Tick(tick) => {
-                // FORK (RichiL10): Live-update the Source Picker when background fetch finishes
+                // The Source pages fill in as the addons reply: `refresh` owns noticing that the
+                // ranked stream list moved, so this only reports it as a landing.
                 if let Panel::More(ref mut p) = self.panel {
-                    let current_count = plx_media::route::AVAILABLE_STREAMS.lock().unwrap().len();
-                    if current_count != p.last_stream_count {
-                        p.last_stream_count = current_count;
-                        // Rebuild the menu rows now that we have new data
-                        p.refresh(ps);  
+                    if p.refresh() {
                         fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
                     }
                 }
@@ -906,7 +897,7 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                     }
                     Panel::Info(p) => p.update(dt),
                     Panel::Chapters(p) => p.update(dt, H::metadata(cx)),
-                    Panel::More(p) => p.update(dt, cx.measure, ps),
+                    Panel::More(p) => p.update(dt, cx.measure),
                     Panel::Timing(p) => p.update(dt),
                 }
                 // The transport must not auto-hide out from under a panel a viewer is reading —

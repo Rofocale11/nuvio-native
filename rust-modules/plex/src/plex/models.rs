@@ -491,6 +491,13 @@ pub struct Media {
     /// reads it, and the profile that matters to the decoder rides the Load payload's own fields.
     #[serde(rename = "videoProfile", default)]
     pub video_profile: String,
+    /// **The Nuvio shim's addon tag**, absent from every real PMS answer: the `Addon::label()` of
+    /// the addon that returned this version (`pmsshim`'s `media_json`). One Media per stream is
+    /// what makes a version picker a STREAM picker, and this is what groups that list by source.
+    /// Empty on a server that does not send it, and on the shim's own "Finding streams…"
+    /// placeholder.
+    #[serde(rename = "addon_name", default)]
+    pub addon_name: String,
     #[serde(rename = "Part", default)]
     pub part: Vec<MediaPart>,
 }
