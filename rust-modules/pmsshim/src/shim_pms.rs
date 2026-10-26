@@ -7,7 +7,8 @@ use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
 use plx_stremio::addons_tmdb::{
-    TmdbCast, TmdbClient, TmdbMovie, TmdbMovieDetails, TmdbShow, TmdbShowDetails, TmdbVideo,
+    TmdbCast, TmdbClient, TmdbCredit, TmdbMovie, TmdbMovieDetails, TmdbShow, TmdbShowDetails,
+    TmdbVideo,
 };
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
@@ -40,6 +41,9 @@ const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
 /// Synthetic keys for TMDB recommendations that no addon carries; above the movie base so the two
 /// decoders cannot alias. A billion apart because TMDB movie ids already pass 100,000.
 const TMDB_SHOW_KEY_BASE: i64 = 2_000_000_000;
+/// A Cast & Crew headshot's synthetic `personId` — TMDB's person id, encoded, above both title
+/// bases so a person key never opens a title.
+const TMDB_PERSON_KEY_BASE: i64 = 3_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
 fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
@@ -48,9 +52,17 @@ fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
         .then_some((rk - TMDB_FALLBACK_KEY_BASE) as u64)
 }
 
-/// A synthetic related-show ratingKey's TMDB id.
+/// A synthetic related-show ratingKey's TMDB id. Bounded above by the person base, or a person key
+/// would decode as the show a billion ids below it.
 fn synthetic_show_tmdb_id(rk: i64) -> Option<u64> {
-    (rk >= TMDB_SHOW_KEY_BASE).then_some((rk - TMDB_SHOW_KEY_BASE) as u64)
+    (TMDB_SHOW_KEY_BASE..TMDB_PERSON_KEY_BASE)
+        .contains(&rk)
+        .then_some((rk - TMDB_SHOW_KEY_BASE) as u64)
+}
+
+/// A synthetic Cast & Crew person key's TMDB person id.
+fn synthetic_person_id(rk: i64) -> Option<u64> {
+    (rk >= TMDB_PERSON_KEY_BASE).then_some((rk - TMDB_PERSON_KEY_BASE) as u64)
 }
 
 /// The Stremio id addons know a synthetic related ratingKey by (`tmdb:603`), if it is synthetic.
@@ -118,6 +130,12 @@ pub struct Shim {
     sub_urls: Mutex<HashMap<i64, String>>,
     poster_fallbacks: Mutex<HashMap<String, String>>,
     tmdb_fallbacks: Mutex<HashMap<i64, TmdbMovie>>,
+    /// The rows of the last filmography served. A person page follows its
+    /// `/library/people/{id}/media` answer with ONE batched `/library/metadata/{csv}` for the
+    /// character captions; without this every key in it would cost a TMDB lookup (and a stream
+    /// slot) — 48 of each for a prolific actor. One list because one person page is open at a
+    /// time, which also keeps the caption right: the same film has a different part per person.
+    credit_rows: Mutex<Vec<Value>>,
     next_sub: AtomicI64,
     permits: (Mutex<usize>, Condvar),
     /// Real stream metadata from the app's FFmpeg (installed at boot; absent on the host bin).
@@ -285,6 +303,12 @@ fn tmdb_role(cast: &TmdbCast) -> Option<Value> {
     let mut role = json!({"tag": cast.name, "role": cast.character});
     if let Some(thumb) = tmdb_image(cast.profile_path.as_deref()) {
         role["thumb"] = json!(thumb);
+    }
+    // `Role[].id` is the `personId` a headshot opens (`/library/people/{id}/media`), so a TMDB
+    // person gets a synthetic one and the app's cast row follows it with no TMDB knowledge at all.
+    // `tagKey` stays empty on purpose: that is plex.tv's global person guid, and TMDB has none.
+    if cast.id > 0 && cast.id < (i64::MAX - TMDB_PERSON_KEY_BASE) as u64 {
+        role["id"] = json!(TMDB_PERSON_KEY_BASE + cast.id as i64);
     }
     Some(role)
 }
@@ -459,6 +483,7 @@ mod tmdb_metadata_tests {
     #[test]
     fn tmdb_cast_and_trailer_shapes_use_plex_fields() {
         let cast = TmdbCast {
+            id: 638,
             name: "Actor Name".into(),
             character: "Character Name".into(),
             profile_path: Some("/actor.jpg".into()),
@@ -466,11 +491,19 @@ mod tmdb_metadata_tests {
         assert_eq!(
             tmdb_role(&cast).unwrap(),
             json!({
+                // the synthetic `personId` a headshot opens — `/library/people/3000000638/media`
+                "id": 3_000_000_638i64,
                 "tag": "Actor Name",
                 "role": "Character Name",
                 "thumb": "https://image.tmdb.org/t/p/w300/actor.jpg"
             })
         );
+        // A cast row TMDB sent no person id for opens nothing, rather than the bare base key.
+        let anonymous = TmdbCast {
+            name: "Nobody".into(),
+            ..Default::default()
+        };
+        assert!(tmdb_role(&anonymous).unwrap().get("id").is_none());
         assert_eq!(
             trailer_extras(42, "youtube123", "Official Trailer"),
             json!({
@@ -585,6 +618,7 @@ mod tmdb_metadata_tests {
             },
             credits: plx_stremio::addons_tmdb::TmdbCredits {
                 cast: vec![TmdbCast {
+                    id: 638,
                     name: "Actor Name".into(),
                     character: "Character Name".into(),
                     profile_path: Some("/actor.jpg".into()),
@@ -596,6 +630,7 @@ mod tmdb_metadata_tests {
         assert_eq!(row["ratingKey"], "1000000999");
         assert_eq!(row["Role"][0]["tag"], "Actor Name");
         assert_eq!(row["Role"][0]["role"], "Character Name");
+        assert_eq!(row["Role"][0]["id"], 3_000_000_638i64);
         assert_eq!(row["Genre"][0]["tag"], "Drama");
         assert_eq!(row["art"], "https://image.tmdb.org/t/p/w300/backdrop.jpg");
         assert_eq!(row["duration"], 7_380_000);
@@ -624,6 +659,80 @@ mod tmdb_metadata_tests {
         // A six-figure TMDB movie id stays inside the movie range (it used to cross the show base).
         assert_eq!(synthetic_tmdb_id(1_000_141_052), Some(141_052));
         assert_eq!(synthetic_show_tmdb_id(1_000_141_052), None);
+    }
+
+    /// The three synthetic ranges are disjoint, and a person key decodes as NOTHING but a person —
+    /// otherwise a headshot would open a title a billion ids away.
+    #[test]
+    fn synthetic_person_keys_decode_only_as_people() {
+        assert_eq!(synthetic_person_id(3_000_000_638), Some(638));
+        assert_eq!(synthetic_person_id(2_999_999_999), None);
+        assert_eq!(synthetic_show_tmdb_id(3_000_000_638), None);
+        assert_eq!(synthetic_tmdb_id(3_000_000_638), None);
+        assert_eq!(translate_to_stremio_id(3_000_000_638), None);
+    }
+
+    /// A headshot's filmography: the kind is read per ROW (`combined_credits` merges both), the
+    /// person key is stamped onto each so the page can caption the tile, and it is newest first.
+    #[test]
+    fn person_credits_split_by_each_rows_own_kind() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        let credits = vec![
+            TmdbCredit {
+                id: 603,
+                media_type: "movie".into(),
+                title: "The Matrix".into(),
+                release_date: Some("1999-03-31".into()),
+                character: "Neo".into(),
+                poster_path: Some("/matrix.jpg".into()),
+                ..Default::default()
+            },
+            TmdbCredit {
+                id: 1396,
+                media_type: "tv".into(),
+                name: "Breaking Bad".into(),
+                first_air_date: Some("2008-01-20".into()),
+                character: "Walter White".into(),
+                ..Default::default()
+            },
+            // Neither a film nor a show: no shelf would draw it, so it is dropped.
+            TmdbCredit {
+                id: 5,
+                media_type: "person".into(),
+                ..Default::default()
+            },
+        ];
+        let rows = shim.person_credit_rows(638, &credits);
+        assert_eq!(rows.len(), 2);
+        // Newest first, so the 2008 show leads the 1999 film.
+        assert_eq!(rows[0]["ratingKey"], "2000001396");
+        assert_eq!(rows[0]["type"], "show");
+        assert_eq!(rows[0]["title"], "Breaking Bad");
+        assert_eq!(rows[1]["ratingKey"], "1000000603");
+        assert_eq!(rows[1]["type"], "movie");
+        // The character rides on the CREDIT, keyed by the person the headshot opened.
+        assert_eq!(rows[0]["Role"][0]["id"], 3_000_000_638i64);
+        assert_eq!(rows[0]["Role"][0]["role"], "Walter White");
+        assert_eq!(rows[1]["Role"][0]["role"], "Neo");
+    }
+
+    /// A person id the shim does not know is an EMPTY container, not an error: the person page must
+    /// settle on "nothing here" rather than retry a fetch that can never succeed.
+    #[test]
+    fn an_unknown_person_id_answers_an_empty_container() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        for id in ["123", "2999999999", "not-a-number"] {
+            let response = shim.handle(&Request {
+                method: "GET".into(),
+                path: format!("/library/people/{id}/media"),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: Vec::new(),
+            });
+            assert_eq!(response.status, 200, "id {id}");
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["MediaContainer"]["Metadata"], json!([]), "id {id}");
+        }
     }
 
     #[test]
@@ -658,6 +767,7 @@ mod tmdb_metadata_tests {
             },
             credits: plx_stremio::addons_tmdb::TmdbCredits {
                 cast: vec![TmdbCast {
+                    id: 638,
                     name: "Actor Name".into(),
                     character: "Character Name".into(),
                     profile_path: Some("/actor.jpg".into()),
@@ -799,6 +909,7 @@ impl Shim {
             sub_urls: Mutex::new(HashMap::new()),
             poster_fallbacks: Mutex::new(HashMap::new()),
             tmdb_fallbacks: Mutex::new(HashMap::new()),
+            credit_rows: Mutex::new(Vec::new()),
             next_sub: AtomicI64::new(900_000_000),
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
             probes: crate::shim_probe::ProbeCache::default(),
@@ -1635,6 +1746,72 @@ impl Shim {
         })
     }
 
+    /// The filmography of a Cast & Crew headshot, as the rows `/library/people/{person key}/media`
+    /// answers with — the route the app's person page reads its two shelves from.
+    ///
+    /// `combined_credits` merges films and shows into ONE array and states the kind per row
+    /// (`media_type`), so each row is built by the builder for its own kind — the same rule
+    /// `split_by_type` applies to a real server's listing. Pure, so the mapping, the person key and
+    /// the order are host-testable without TMDB (the route does the request).
+    ///
+    /// Both builders render from TMDB alone, deliberately: the credits are already in hand, where
+    /// `tmdb_recommendation_row`'s addon `meta()` would cost one HTTP request per credit (a
+    /// prolific actor has 60).
+    fn person_credit_rows(&self, person_id: u64, credits: &[TmdbCredit]) -> Vec<Value> {
+        let key = TMDB_PERSON_KEY_BASE + person_id as i64;
+        let mut rows: Vec<(i64, Value)> = credits
+            .iter()
+            .filter(|credit| credit.id > 0 && credit.id < (i64::MAX - TMDB_PERSON_KEY_BASE) as u64)
+            .filter_map(|credit| {
+                let (year, mut row) = match credit.media_type.as_str() {
+                    "movie" => (
+                        year_of(credit.release_date.as_deref()).unwrap_or(0),
+                        self.tmdb_fallback_row(&credit.movie(), TMDB_FALLBACK_KEY_BASE + credit.id as i64),
+                    ),
+                    "tv" => (
+                        year_of(credit.first_air_date.as_deref()).unwrap_or(0),
+                        self.tmdb_show_fallback_row(&credit.show(), TMDB_SHOW_KEY_BASE + credit.id as i64),
+                    ),
+                    // Neither a film nor a show. The page has exactly two shelves, and filing an
+                    // unknown kind under either would be a guess.
+                    _ => return None,
+                };
+                // What they played IN THIS CREDIT — a fact about the credit, not about the title.
+                // The person page captions each tile from `Role[]` (`person::roles_from`, which
+                // joins on this same key), and a credit with no character just leaves it blank.
+                if !credit.character.trim().is_empty() {
+                    row["Role"] = json!([{"id": key, "tag": "", "role": credit.character}]);
+                }
+                Some((year, row))
+            })
+            .collect();
+        // Newest first, undated last — `person::filmography` orders its own list the same way.
+        rows.sort_by_key(|(year, _)| -year);
+        let rows: Vec<Value> = rows.into_iter().map(|(_, row)| row).collect();
+        // The page's next request is a batched `/library/metadata/{csv}` for the captions, whose
+        // keys are exactly these rows'. Holding them keeps that request free — the whole list is
+        // replaced rather than merged, because the same film has a different part per person.
+        *self.credit_rows.lock().unwrap_or_else(|e| e.into_inner()) = rows.clone();
+        rows
+    }
+
+    /// A filmography row the person page already has, so its batched caption read costs nothing.
+    ///
+    /// The fallback is [`Shim::tmdb_synthetic_row`] rather than a miss: a credit key IS a title key
+    /// (the movie or show base plus its TMDB id), and that row's own `Role[]` carries this person's
+    /// character under the same synthetic id — so the caption is still right, at one cached request.
+    /// Answering nothing would leave the batch 404ing and the store retrying it forever.
+    fn person_row(&self, rk: i64) -> Option<Value> {
+        let cached = self
+            .credit_rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|row| row["ratingKey"].as_str().and_then(|v| v.parse::<i64>().ok()) == Some(rk))
+            .cloned();
+        cached.or_else(|| self.tmdb_synthetic_row(rk))
+    }
+
     /// The URL to open for a ranked stream: itself, or — for a torrent marker — what the streaming
     /// server answers `/create` with (season/episode let it pick the file in a season pack).
     fn open_url(&self, rk: i64, stream: &Stream, url: &str) -> Option<String> {
@@ -2365,7 +2542,7 @@ impl Shim {
                 let mut rows: Vec<Value> = rk
                     .split(',')
                     .filter_map(|x| x.parse().ok())
-                    .filter_map(|k| self.item(k))
+                    .filter_map(|k| self.person_row(k).or_else(|| self.item(k)))
                     .collect();
                 if rows.is_empty() {
                     return Response::json_status(404, &container(json!({"Metadata": []})));
@@ -2396,6 +2573,22 @@ impl Shim {
             (_, ["library", "parts", pid, ..]) => self.part(pid.parse().unwrap_or(-1)),
             (_, ["library", "streams", sid]) => {
                 self.subtitle(sid.split('.').next().unwrap_or("").parse().unwrap_or(-1))
+            }
+            // A Cast & Crew headshot's person page reads its two shelves from
+            // `/library/people/{personId}/media`. A TMDB person is addressed by a synthetic key and
+            // the filmography is the answer; any other id is a library person this shim has never
+            // had, which is an empty container — an answer, not an error.
+            (_, ["library", "people", id, "media"]) => {
+                let rows = id
+                    .parse()
+                    .ok()
+                    .and_then(synthetic_person_id)
+                    .and_then(|person_id| {
+                        let credits = TmdbClient::from_env()?.person_credits(person_id).ok()?;
+                        Some(self.person_credit_rows(person_id, &credits))
+                    })
+                    .unwrap_or_default();
+                Response::json(&container(json!({"Metadata": rows})))
             }
             (_, ["library", "collections", ..]) | (_, ["library", "people", ..]) => {
                 Response::json(&container(json!({"Metadata": []})))
@@ -2660,8 +2853,7 @@ impl Shim {
     }
 
     fn children(&self, rk: i64) -> Vec<Value> {
-        if rk >= TMDB_SHOW_KEY_BASE {
-            let tmdb_id = (rk - TMDB_SHOW_KEY_BASE) as u64;
+        if let Some(tmdb_id) = synthetic_show_tmdb_id(rk) {
             let client = TmdbClient::from_env();
             let mut meta = client
                 .as_ref()
@@ -2701,8 +2893,7 @@ impl Shim {
     }
 
     fn leaves(&self, rk: i64) -> Vec<Value> {
-        if rk >= TMDB_SHOW_KEY_BASE {
-            let tmdb_id = (rk - TMDB_SHOW_KEY_BASE) as u64;
+        if let Some(tmdb_id) = synthetic_show_tmdb_id(rk) {
             let client = TmdbClient::from_env();
             let mut meta = client
                 .as_ref()

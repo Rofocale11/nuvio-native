@@ -103,13 +103,15 @@ The shim is the only place that knows both vocabularies, so it hands the UI a **
 | Kind | Formula | Example | Range |
 | --- | --- | --- | --- |
 | Related **Movies** | `1_000_000_000 + TMDB_ID` | `1_000_000_603` (The Matrix) | `1_000_000_000 .. 2_000_000_000` |
-| Related **TV Shows** | `2_000_000_000 + TMDB_ID` | `2_000_001_396` (Breaking Bad) | `2_000_000_000 ..` |
+| Related **TV Shows** | `2_000_000_000 + TMDB_ID` | `2_000_001_396` (Breaking Bad) | `2_000_000_000 .. 3_000_000_000` |
+| **People** (Cast & Crew) | `3_000_000_000 + TMDB_PERSON_ID` | `3_000_000_638` (Keanu Reeves) | `3_000_000_000 ..` |
 
 The bases are a billion apart on purpose: TMDB movie ids already pass 100,000, so a narrower gap lets a real movie key (`9_641_052` = movie `141_052` on the old bases) cross into the show range and load the wrong title.
 
 ```rust
 const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
 const TMDB_SHOW_KEY_BASE: i64 = 2_000_000_000;
+const TMDB_PERSON_KEY_BASE: i64 = 3_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
 fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
@@ -120,13 +122,21 @@ fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
 
 /// A synthetic related-show ratingKey's TMDB id.
 fn synthetic_show_tmdb_id(rk: i64) -> Option<u64> {
-    (rk >= TMDB_SHOW_KEY_BASE).then_some((rk - TMDB_SHOW_KEY_BASE) as u64)
+    (TMDB_SHOW_KEY_BASE..TMDB_PERSON_KEY_BASE)     // bounded: a person key is not a show
+        .contains(&rk)
+        .then_some((rk - TMDB_SHOW_KEY_BASE) as u64)
+}
+
+/// A Cast & Crew headshot's synthetic `personId` → TMDB's person id.
+fn synthetic_person_id(rk: i64) -> Option<u64> {
+    (rk >= TMDB_PERSON_KEY_BASE).then_some((rk - TMDB_PERSON_KEY_BASE) as u64)
 }
 ```
 
-*   The movie decoder is **bounded above** by the show base. Without that bound `2_000_000_603` would decode as movie `1_000_000_603` and the two kinds would alias.
-*   The show base is above every real key (`10_000 + N`) and above the movie range, so the three spaces cannot collide.
-*   **Check the show base first.** A key `>= 2_000_000_000` is always a show; a key in the movie range is always a movie.
+*   Each decoder is **bounded above** by the next base. Without that, `3_000_000_638` would also decode as the show a billion ids below it, and a headshot would open the wrong title.
+*   The bases are above every real key (`10_000 + N`), so the four spaces cannot collide.
+*   **Check the bases highest-first.** A key `>= 3_000_000_000` is always a person, `>= 2_000_000_000` a show, and a key in the movie range is always a movie.
+*   A person key is a **`personId`, not a `ratingKey`** — it travels in `Role[].id` on a cast row, which is what the app's cast shelf reads to open `/library/people/{id}/media` (see §4.5).
 
 Both synthetic kinds are handled on the way back in by `/library/metadata/{rk}`: parse the key, decode it with the matching helper, fetch TMDB, and return the enriched Plex row (`tmdb_details_row` for movies, `tmdb_show_details_row` for shows). `/library/metadata/{rk}/related` recognises the synthetic ranges too, so a TMDB-only related title can drill down forever.
 
@@ -199,7 +209,7 @@ pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
 *   `content_level_id()` strips episode suffixes first, so an episode id resolves to its series.
 
 ### 4.3 Field mapping
-*   **Cast:** `credits.cast` → the Plex `Role` array (`tag`, `role`, `thumb`), capped at 10 entries, for both `movie_details` and `tv_details`.
+*   **Cast:** `credits.cast` → the Plex `Role` array (`tag`, `role`, `thumb`, `id`), capped at 10 entries, for both `movie_details` and `tv_details`. `id` is the synthetic person key (§3.2) that makes the headshot clickable.
 *   **Movies:** `title` / `release_date` / `runtime` → `title` / `originallyAvailableAt` / `duration`.
 *   **TV Shows:** TMDB spells these `name` / `first_air_date`, and there is no runtime — rows use `DEFAULT_EPISODE_MS`. `TmdbShow` / `TmdbShowDetails` exist precisely because the field names differ.
 *   **Related Movies:** `recommendations.results` → the Plex `Hub` array, `type`/`hubIdentifier` `movie`.
@@ -212,6 +222,34 @@ pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
 *   **It becomes playable when an addon also has it.** `tmdb_show_recommendation_row` prefers `meta("series", "tmdb:<id>")`; when Cinemeta knows the show, the row is built from that `Meta` and the normal season/episode/stream path applies.
 *   Do not "fix" this by adding a `/tv/{id}/season/{n}` fetch to the hub: that is one extra request per recommendation and multiplies the hub's latency. Add it only for a show that must be playable rather than merely browsable.
 *   **A TMDB-only show is not in `keys.tsv`** — it is a pure arithmetic key, so anything that needs an `Ident` must special-case it the way `related_hub`, `/library/metadata/{rk}` and `slot()` do.
+
+### 4.5 Cast & Crew → the person page (filmography)
+A headshot on a detail page is clickable, and what it opens is the app's **person page** — the same
+screen a real Plex server's cast row opens, driven by the same `/library/people/{personId}/media`
+fetch.
+
+*   **The link is `Role[].id`.** `tmdb_role` sets it to `TMDB_PERSON_KEY_BASE + cast.id` (§3.2), so the
+    app's cast shelf (`screens::detail::cast`) needs no TMDB knowledge at all: `Cast::person_key`
+    returns that number and the Person store addresses `/library/people/{key}/media` with it.
+    `tagKey` stays empty — it is plex.tv's global person guid, and TMDB has none.
+*   **The route** answers `MediaContainer.Metadata[]` of ordinary movie/show rows. `PersonStore`
+    splits them into its Movies and Shows shelves **by each row's own `type`**, so a film must be
+    tagged `movie` and a show `show` — a mismatch lands on the wrong shelf.
+*   **One request.** `person_credits` is `GET /person/{id}/combined_credits`, which merges films and
+    shows into one array and states the kind per row in `media_type`. Do not add a `/person/{id}`
+    call for the name or portrait: the page's header is drawn from the `Role[]` entry that opened it.
+*   **The rows come from TMDB alone** (`tmdb_fallback_row` / `tmdb_show_fallback_row`), not from
+    `meta()`. A recommendation row prefers the addon's own metadata, but a filmography has dozens of
+    credits and one `meta()` per credit would be one HTTP request each.
+*   **The character name rides on the row's `Role[]`**, keyed by the person's synthetic id, because
+    `person::roles_from` joins on exactly that to caption each tile. It is a fact about the CREDIT,
+    so dropping it loses the only place "Neo" appears on that page.
+*   **Newest first, undated last** — the page sorts its own list the same way, so a stable server
+    order keeps the shelves from reshuffling between fetches.
+*   **A person with no TMDB id opens nothing.** `tmdb_role` omits `id` rather than emitting the bare
+    base, which would address person `0`.
+*   **A failed or unconfigured lookup is an empty container**, matching the other TMDB routes: the
+    page then draws its header (from the `Role[]` entry) with no shelves, not an error screen.
 
 ## 5. Build & Release Pipeline
 *   **Local Simulator:** `make -j10 sim-linux` (Requires the Linux `libav*` host libraries to be built and placed in `pkg/`).

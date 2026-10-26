@@ -29,6 +29,9 @@ pub struct TmdbClient {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TmdbCast {
+    /// TMDB's person id — the shim encodes it into a synthetic ratingKey so a headshot opens the
+    /// person's filmography.
+    pub id: u64,
     pub name: String,
     pub character: String,
     pub profile_path: Option<String>,
@@ -133,6 +136,60 @@ struct ExternalIdsResponse {
     imdb_id: Option<String>,
 }
 
+/// One row of `/person/{id}/combined_credits`, which merges films and shows into one array: the
+/// kind is per ROW (`media_type`), and the field names follow it (`title`/`release_date` for a
+/// film, `name`/`first_air_date` for a show) — the same split [`TmdbMovie`]/[`TmdbShow`] exist for.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbCredit {
+    pub id: u64,
+    /// `"movie"` or `"tv"`.
+    pub media_type: String,
+    pub title: String,
+    pub name: String,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+    pub release_date: Option<String>,
+    pub first_air_date: Option<String>,
+    /// The part they played, `""` where TMDB named none.
+    pub character: String,
+}
+
+impl TmdbCredit {
+    /// This credit as the film it is, for the row builders that already speak [`TmdbMovie`].
+    pub fn movie(&self) -> TmdbMovie {
+        TmdbMovie {
+            id: self.id,
+            title: self.title.clone(),
+            overview: self.overview.clone(),
+            poster_path: self.poster_path.clone(),
+            backdrop_path: self.backdrop_path.clone(),
+            release_date: self.release_date.clone(),
+            ..TmdbMovie::default()
+        }
+    }
+
+    /// This credit as the show it is; [`TmdbShow`] because TMDB spells a show's fields differently.
+    pub fn show(&self) -> TmdbShow {
+        TmdbShow {
+            id: self.id,
+            name: self.name.clone(),
+            overview: self.overview.clone(),
+            poster_path: self.poster_path.clone(),
+            backdrop_path: self.backdrop_path.clone(),
+            first_air_date: self.first_air_date.clone(),
+            ..TmdbShow::default()
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CombinedCredits {
+    cast: Vec<TmdbCredit>,
+}
+
 impl TmdbClient {
     /// Uses the compiled-in or runtime `TMDB_API_KEY`; an unset or blank key disables TMDB lookups.
     pub fn from_env() -> Option<Self> {
@@ -207,6 +264,15 @@ impl TmdbClient {
 
     pub fn credits(&self, movie_id: u64) -> Result<Vec<TmdbCast>> {
         let response: TmdbCredits = self.get(&format!("/movie/{movie_id}/credits"))?;
+        Ok(response.cast)
+    }
+
+    /// `/person/{id}/combined_credits` — every movie and show TMDB credits this person in, in one
+    /// request. `cast` only: the same endpoint's `crew` half is a different question (what they
+    /// worked ON) and nothing here draws it.
+    pub fn person_credits(&self, person_id: u64) -> Result<Vec<TmdbCredit>> {
+        let response: CombinedCredits =
+            self.get(&format!("/person/{person_id}/combined_credits"))?;
         Ok(response.cast)
     }
 
