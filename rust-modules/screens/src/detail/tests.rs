@@ -2296,6 +2296,28 @@ fn play_item(effects: &[plx_machine::machine::Stamped<TestHost>]) -> Option<(&Pl
 }
 
 #[test]
+fn a_movie_stream_pick_plays_the_movie() {
+    // The picker's own pill (no episode latch) is the MOVIE's picker: the shim has committed the
+    // stream and reordered `Media[0]`, so the pick must start the film, exactly as Play does —
+    // not just re-read the item and leave the viewer looking at the page.
+    let _guard = install(Detail {
+        sid: ServerId::UNSET, rk: "movie".into(), kind: "movie".into(),
+        title: "Movie".into(), part: "/library/parts/42/1/file.mkv".into(),
+        vcodec: "hevc".into(), acodec: "eac3".into(), ..Default::default()
+    });
+    let mut screen = bare(&_guard, ServerId::UNSET, "movie");
+    let (_, effects) = step(&mut screen, &ScreenEvent::App(AppMsg::NuvioStreamSelected), None);
+    match play_item(&effects).expect("a pick must play the movie") {
+        (PlayIntent::Item { rk, part, .. }, _) => {
+            assert_eq!(rk, "movie");
+            assert_eq!(part, "/library/parts/42/1/file.mkv");
+        }
+        _ => panic!("a movie page plays its own item"),
+    }
+    clear();
+}
+
+#[test]
 fn a_catalog_movie_without_a_part_plays_its_loaded_detail() {
     let _guard = install(Detail {
         sid: ServerId::UNSET, rk: "movie".into(), kind: "movie".into(),

@@ -2009,10 +2009,11 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
             }
             ScreenEvent::App(AppMsg::NuvioStreamSelected) => {
                 self.selected = None;
-                // **An episode's picker**: the shim has committed the stream and reordered the
-                // item's `Media[]`, so the episode the picker was opened for starts NOW (its
-                // resolve reads the picked stream as `Media[0]`). The movie page's own pill names
-                // no episode, so it only re-reads the item, exactly as it did before.
+                // **The shim has committed the stream and reordered the item's `Media[]`, so the
+                // thing that was picked starts NOW** — an episode's picker names its episode, and
+                // a movie page's own pill plays the movie, exactly as its Play button does. (The
+                // pick used to only re-read the item here, which left a movie sitting on its page
+                // with the new stream selected and nothing playing.)
                 let pending = self
                     .streams_episode
                     .take()
@@ -2024,7 +2025,9 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                     Some(i) => {
                         self.play_episode_at(i, false, fx, meta);
                     }
-                    None => self.start_reconciliation(fx, meta),
+                    None => {
+                        self.play_hero(false, fx, meta);
+                    }
                 }
                 fx.invalidate(Provenance::Landing(fx.from()));
                 Handled::Yes
