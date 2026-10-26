@@ -589,7 +589,21 @@ impl AltSourcesScreen {
             // leave the cursor where the user put it — on the same copy, found by identity
             Sel::Keep => {
                 let held = self.form.selected_id().cloned();
-                self.form.set(form, held.as_ref());
+                // Seed the first newly available selectable row so OK works immediately.
+                let first = if self.stream_mode && self.stream_page.is_none() {
+                    plx_appkit::source_list::addon_pages(&self.stream_choices)
+                        .first()
+                        .map(|g| AltId::addon(0, &g.name))
+                } else if self.stream_mode && self.stream_page.is_some() {
+                    plx_appkit::source_list::addon_pages(&self.stream_choices)
+                        .into_iter()
+                        .find(|g| Some(g.lead) == self.stream_page)
+                        .and_then(|g| g.rows.first().copied())
+                        .map(|pos| AltId::stream(self.stream_choices[pos].index))
+                } else {
+                    None
+                };
+                self.form.set(form, held.as_ref().or(first.as_ref()));
             }
             // on the copy you are on (the tick), else the first row
             Sel::OnTheCopyYouAreOn => {

@@ -433,7 +433,8 @@ impl MoreMenuState {
             if source_offered(&self.streams) {
                 let page = self.pages.top().unwrap_or(MorePage::Source);
                 let form = self.page_form(page);
-                self.form.refresh_with(form, None, None);
+                let selected = self.form.selected_id().copied();
+                self.form.refresh_with(form, selected.as_ref(), None);
                 // the addon list may have re-ordered: the band names the page as it is NOW
                 self.form.table.set_title(Some(page.title(&self.streams)));
             } else {

@@ -1537,7 +1537,7 @@ fn draw_kicker(p: Painter, kicker: Kicker) {
     p.text(
         text,
         SB_X,
-        SCR_H - 312.0,
+        SCR_H - 250.0,
         theme::size::CAPTION,
         ink,
         0,
@@ -1552,7 +1552,7 @@ pub fn draw_title(p: Painter, kicker: Kicker, title: *const std::os::raw::c_char
     p.text(
         title,
         SB_X,
-        SCR_H - 278.0,
+        SCR_H - 250.0,
         HUD_TITLE_SZ,
         theme::TEXT_PRIMARY,
         0,
@@ -1563,10 +1563,10 @@ pub fn draw_title(p: Painter, kicker: Kicker, title: *const std::os::raw::c_char
 /// The display title's clearLogo band: `LogoRung::Custom`'s floor and ceiling are the SAME height,
 /// so [`plx_ui::hero_logo::fit`] can only ever produce that height — a wider wordmark grows
 /// sideways, up to the band's own [`HUD_LOGO_MAX_W`] column.
-const HUD_LOGO_H: f32 = 40.0;
-const HUD_LOGO_MAX_W: f32 = 200.0;
+const HUD_LOGO_H: f32 = 160.0;
+const HUD_LOGO_MAX_W: f32 = 800.0;
 const HUD_LOGO_RUNG: plx_ui::hero_logo::LogoRung = plx_ui::hero_logo::LogoRung::Custom {
-    area: 8_000.0, // HUD_LOGO_MAX_W * HUD_LOGO_H
+    area: 128_000.0, // HUD_LOGO_MAX_W * HUD_LOGO_H
     h_min: HUD_LOGO_H,
     h_max: HUD_LOGO_H,
     fallback_sz: HUD_TITLE_SZ,
@@ -1598,7 +1598,7 @@ pub fn draw_title_logo(
     draw_kicker(p, kicker);
     let band = Rect::new(
         SB_X,
-        SCR_H - 278.0,
+        SCR_H - 420.0,
         HUD_LOGO_MAX_W,
         plx_ui::hero_logo::band_h(HUD_LOGO_RUNG),
     );
