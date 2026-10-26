@@ -4099,7 +4099,7 @@ impl DetailScreen {
             fx,
             ContentReq::Panel(ContentPanel::AltSources {
                 anchor: [anchor.x, anchor.y, anchor.w, anchor.h].map(f32::to_bits),
-                rk: episode,
+                item: episode.map(|rk| (self.sid, rk)),
             }),
         );
     }

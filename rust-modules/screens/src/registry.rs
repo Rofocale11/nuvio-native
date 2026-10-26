@@ -892,9 +892,10 @@ pub enum ContentReq {
 pub enum ContentPanel {
     /// *Also available* / *Streams* (`screens::alt_sources`), anchored to the drawn rect of the
     /// control that opened it — bit-preserving, so a canonical argument holds it without float
-    /// equality. `rk` overrides the page's own item: a show's episode still opens the picker for
-    /// THAT episode's streams, where the page's subject would be the show.
-    AltSources { anchor: [u32; 4], rk: Option<String> },
+    /// equality. `item` names the subject explicitly and overrides the host page's own: an
+    /// episode's still opens the picker for THAT episode, and Home's hero for the billboard's
+    /// film, where the page's subject is the show or nothing at all.
+    AltSources { anchor: [u32; 4], item: Option<(plx_plex::plex::ServerId, String)> },
     /// *Track information* (`screens::tracks_panel`), opened at 1-based `page`. Every interactive
     /// opening passes 1; `/tmp/plxnative-tracks=<n>` is the only caller that does not, and it is
     /// what makes a headless capture of page 2 possible at all.
@@ -934,14 +935,20 @@ impl ContentPanel {
     ) -> Option<(plx_ui::containers::modal::Style, AppArg)> {
         use plx_ui::containers::modal::Style;
         Some(match self {
-            Self::AltSources { anchor, rk } => {
-                let (sid, page_rk) = subject?;
+            Self::AltSources { anchor, item } => {
+                let (sid, rk) = match item {
+                    Some((sid, rk)) => (*sid, rk.clone()),
+                    None => {
+                        let (sid, rk) = subject?;
+                        (sid, rk.to_string())
+                    }
+                };
                 (
                     Style::Compact,
                     AppArg::AltSources(crate::alt_sources::AltSourcesArg {
                         host,
                         sid,
-                        rk: rk.clone().unwrap_or_else(|| page_rk.to_string()),
+                        rk,
                         anchor: *anchor,
                     }),
                 )
@@ -2193,22 +2200,36 @@ mod arg_tests {
     #[test]
     fn an_episodes_streams_panel_is_addressed_to_the_episode_not_the_show() {
         use crate::alt_sources::AltSourcesArg;
+        let show = plx_plex::plex::ServerId::UNSET;
         // A show's page subject is the SHOW; the argument the picker is mounted with is the
         // EPISODE, so its `/nuvio/streams` asks for that episode's streams.
-        let (_, arg) = ContentPanel::AltSources { anchor: [0; 4], rk: Some("1007".into()) }
-            .surface(plx_machine::machine::InstanceId(1), Some((plx_plex::plex::ServerId::UNSET, "show")))
+        let (_, arg) = ContentPanel::AltSources { anchor: [0; 4], item: Some((show, "1007".into())) }
+            .surface(plx_machine::machine::InstanceId(1), Some((show, "show")))
             .expect("an episode of a loaded show is presentable");
         match arg {
             AppArg::AltSources(AltSourcesArg { rk, .. }) => assert_eq!(rk, "1007"),
             _ => panic!("the Streams picker is the AltSources surface"),
         }
-        let (_, arg) = ContentPanel::AltSources { anchor: [0; 4], rk: None }
-            .surface(plx_machine::machine::InstanceId(1), Some((plx_plex::plex::ServerId::UNSET, "movie")))
-            .expect("the hero's own pill is presentable");
+        // …and a page with no item of its own (Home's hero) names one explicitly.
+        let (_, arg) = ContentPanel::AltSources { anchor: [0; 4], item: Some((show, "movie".into())) }
+            .surface(plx_machine::machine::InstanceId(1), None)
+            .expect("an explicit subject needs no page item");
         match arg {
             AppArg::AltSources(AltSourcesArg { rk, .. }) => assert_eq!(rk, "movie"),
             _ => panic!("the Streams picker is the AltSources surface"),
         }
+        // With no explicit item the host page's own subject stands, and a page without one is
+        // refused rather than presented against a neighbour's item.
+        let (_, arg) = ContentPanel::AltSources { anchor: [0; 4], item: None }
+            .surface(plx_machine::machine::InstanceId(1), Some((show, "page")))
+            .expect("the hero's own pill is presentable");
+        match arg {
+            AppArg::AltSources(AltSourcesArg { rk, .. }) => assert_eq!(rk, "page"),
+            _ => panic!("the Streams picker is the AltSources surface"),
+        }
+        assert!(ContentPanel::AltSources { anchor: [0; 4], item: None }
+            .surface(plx_machine::machine::InstanceId(1), None)
+            .is_none());
     }
 
     #[test]

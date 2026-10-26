@@ -1880,6 +1880,48 @@ fn continue_watching_commit_follows_the_setting_while_an_ordinary_shelf_opens_de
     assert!(has_home(&detail, |r| matches!(r, HomeReq::Detail { rk, .. } if rk == "1")));
 }
 
+#[test]
+fn only_a_nuvio_film_or_episode_hero_opens_the_streams_picker() {
+    // The hero's Play is a Play everywhere else: a show and a season have no stream list of their
+    // own (their Play starts the on-deck episode), and an ordinary Plex server has no picker at
+    // all.
+    assert!(hero_streams_first(0, true), "a film on the shim picks its stream first");
+    assert!(hero_streams_first(3, true), "an episode on the shim does too");
+    assert!(!hero_streams_first(1, true), "a show plays its on-deck episode");
+    assert!(!hero_streams_first(2, true), "so does a season");
+    for kind in [0, 1, 2, 3, 4] {
+        assert!(!hero_streams_first(kind, false), "a Plex source has no stream picker");
+    }
+}
+
+#[test]
+fn a_stream_picked_for_the_hero_starts_it_and_ignores_a_stale_latch() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 2, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    let hero = s.selected_hero(snapshot.view()).map(|h| h.item).unwrap();
+    s.streams_item = Some((hero.sid, hero.rk.clone()));
+    let (_, played, _) = step(&mut s, snapshot.view(), None, &ScreenEvent::App(AppMsg::NuvioStreamSelected));
+    assert!(played.iter().any(|stamped| matches!(&stamped.fx,
+        Fx::App(AppFx::Content(ContentReq::Play { play: PlayIntent::Item { rk, .. }, .. }))
+            if *rk == hero.rk)), "the picked stream starts the billboard's film");
+    assert!(played.iter().any(|stamped| matches!(&stamped.fx,
+        Fx::App(AppFx::Store(StoreId::Metadata, StoreCmd::Metadata(
+            plx_data::stores::metadata::MetadataCmd::RequestDetail { rk, .. }))) if *rk == hero.rk)),
+        "…and re-reads it, so the Info card names the film");
+    assert!(s.streams_item.is_none(), "the latch is spent");
+
+    // A pick arriving after the carousel moved on starts nothing: the item is no longer the one
+    // the viewer is looking at.
+    s.streams_item = Some((hero.sid, "not-the-billboard".into()));
+    let (_, stale, _) = step(&mut s, snapshot.view(), None, &ScreenEvent::App(AppMsg::NuvioStreamSelected));
+    assert!(!stale.iter().any(|stamped| matches!(&stamped.fx,
+        Fx::App(AppFx::Content(ContentReq::Play { .. })))), "a stale pick must not play");
+}
+
 /// The amber ▶ promises the press plays, so the deck's title line carries it in Play mode only.
 #[test]
 fn the_deck_title_carries_the_play_glyph_only_while_the_press_plays() {

@@ -63,8 +63,8 @@ fn hub_page_cmd(hub: &HubRef<'_>,
 }
 use super::plaintext_question::{self, AlertStep, Near, OfferWatch, PlaintextAlert};
 use super::registry::{
-    tile_facts, AppFx, AppMsg, ContentArg, ContentReq, HomeCmd, HomeGroupKey, HomeHubIdentity, HomeItemIdentity, HomeItemKey, HomeLike,
-    HomeMemory, HomeReq, HomeTab, LoopReq, PageMemory,
+    tile_facts, AppFx, AppMsg, ContentArg, ContentPanel, ContentReq, HomeCmd, HomeGroupKey, HomeHubIdentity, HomeItemIdentity, HomeItemKey, HomeLike,
+    HomeMemory, HomeReq, HomeTab, LoopReq, PageMemory, PlayIntent,
 };
 
 const HERO_GROUP: GroupId = GroupId(0);
@@ -165,6 +165,14 @@ fn heading_group(shelf: GroupId) -> GroupId {
 
 fn heading_elem(shelf: GroupId) -> u32 {
     HEADING_BASE | shelf.0
+}
+
+/// **Does the hero's Play open the *Streams* picker instead of starting a file?** Only on a Nuvio
+/// (shim) source, where the file is a property of the STREAM picked, and only for an item that has
+/// streams of its own to list: a show (kind 1) or a season (2) plays its on-deck episode, exactly
+/// as it did before the shim.
+fn hero_streams_first(kind: std::os::raw::c_int, nuvio: bool) -> bool {
+    nuvio && !matches!(kind, 1 | 2)
 }
 
 struct Grid {
@@ -437,6 +445,11 @@ pub struct HomeScreen {
 
     /// Selected hero ITEM identity. It is data, not focus.
     carousel: Option<(plx_plex::plex::ServerId, String)>,
+    /// The hero item whose *Streams* picker is open, by `(server, ratingKey)` — started when the
+    /// pick lands ([`AppMsg::NuvioStreamSelected`]). A latch between two events in one
+    /// interaction, like the Detail page's: a picker dismissed without a pick leaves it set and
+    /// harmless. Never hashed.
+    streams_item: Option<(plx_plex::plex::ServerId, String)>,
     outgoing: Option<(plx_plex::plex::ServerId, String)>,
     hero_flip_cd: f32,
     hero_slide: Spring,
@@ -497,6 +510,7 @@ impl HomeScreen {
             restored_scroll: Vec::new(),
             restore_reveal: false,
             carousel: None,
+            streams_item: None,
             outgoing: None,
             hero_flip_cd: 0.0,
             hero_slide: Spring::at(1.0),
@@ -1418,6 +1432,24 @@ impl HomeScreen {
                 let Some(item) = self.selected_hero(view).map(|h| h.item) else {
                     return;
                 };
+                // **A Nuvio (shim) source picks the FILE, not just the title.** Its hero Play
+                // opens the Detail page's own *Streams* picker for the billboard's item, exactly
+                // as an episode's still does there, and the pick starts it. A show or season has
+                // no stream of its own to list, so those still play their on-deck episode.
+                if hero_streams_first(item.kind,
+                    plx_plex::plex::client_for(item.sid).is_some_and(|c| c.is_nuvio()))
+                {
+                    self.streams_item = Some((item.sid, item.rk.clone()));
+                    // The hero is not a card with a drawn opener, so the panel opens centred.
+                    let anchor = crate::item_menu::fallback_anchor();
+                    fx.push(Fx::App(AppFx::Content(ContentReq::Panel(
+                        ContentPanel::AltSources {
+                            anchor: [anchor.x, anchor.y, anchor.w, anchor.h].map(f32::to_bits),
+                            item: Some((item.sid, item.rk.clone())),
+                        },
+                    ))));
+                    return;
+                }
                 let resume_ns = plx_data::metadata::resume_ns(item.resume_ms, item.dur_ns / 1_000_000);
                 (
                     item,
@@ -1894,6 +1926,9 @@ impl LogicalState for HomeScreen {
             // `elem_at` is derived from `rows`, which the census already covers via its elems.
             // `item_index` / `group_index` are caches of `items` / `groups`, which are covered.
             rows: _, elem_at: _, item_index: _, group_index: _, projected_generation: _, restored_scroll: _, restore_reveal: _, carousel: _,
+            // `streams_item` is the latch between the hero's Streams press and the pick that
+            // answers it — an event hand-off, like a shelf's `seen`/`left`, not motion or focus.
+            streams_item: _,
             outgoing: _, hero_flip_cd: _, hero_slide: _, hero_dir: _, hero_auto: _, hero_pinned: _, covered: _,
             snap_target: _,
             visible_activation: _, cta_available: _, strip_chosen: _, snap: _, status_ms: _,
@@ -2451,6 +2486,46 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
             ScreenEvent::App(AppMsg::Home(command)) => {
                 self.sync_catalog(cx);
                 self.command(*command, cx, fx)
+            }
+            // **A stream was picked in the hero's picker.** The shim has committed it and
+            // reorders the item's `Media[]`, so the billboard's film starts now. It starts as a
+            // `PlayIntent::Item` rather than a `HomeReq::Play`, because a hub row carries no
+            // `Part` at all — the part is the shim's to name, and `/decision` does, from the
+            // stream just picked. The pick names no item either, so the latch the press left
+            // says which one, and it must still be the billboard: a flip during the picker
+            // means this is no longer what the viewer is looking at.
+            ScreenEvent::App(AppMsg::NuvioStreamSelected) => {
+                let Some((sid, rk)) = self.streams_item.take() else { return Handled::No };
+                let view = H::hubs(cx);
+                let Some(item) = self
+                    .selected_hero(view)
+                    .map(|h| h.item)
+                    .filter(|item| item.sid == sid && item.rk == rk)
+                else {
+                    return Handled::Yes;
+                };
+                let resume_ns = plx_data::metadata::resume_ns(item.resume_ms, item.dur_ns / 1_000_000);
+                let play = PlayIntent::Item {
+                    sid,
+                    rk: rk.clone(),
+                    part: item.part.clone(),
+                    vcodec: item.vcodec.clone(),
+                    acodec: item.acodec.clone(),
+                    title: item.title.clone(),
+                    context: String::new(),
+                };
+                // The Info card's descriptor and "Go to Movie" come from the loaded leaf, which
+                // a catalog row is not: read it exactly as a card play does.
+                fx.push(Fx::App(AppFx::Store(
+                    StoreId::Metadata,
+                    StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::RequestDetail {
+                        sid,
+                        rk,
+                    }),
+                )));
+                fx.push(Fx::App(AppFx::Content(ContentReq::Play { play, resume_ns })));
+                fx.invalidate(Provenance::Input);
+                Handled::Yes
             }
             ScreenEvent::Input(InputEvent {
                 kind:
