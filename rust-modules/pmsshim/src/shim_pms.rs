@@ -7,8 +7,8 @@ use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
 use plx_stremio::addons_tmdb::{
-    TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbMovie, TmdbMovieDetails, TmdbShow,
-    TmdbShowDetails, TmdbVideo,
+    TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
+    TmdbShow, TmdbShowDetails, TmdbVideo,
 };
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
@@ -310,6 +310,23 @@ fn page_params(req: &Request) -> (usize, Option<usize>) {
 fn tmdb_image(path: Option<&str>) -> Option<String> {
     path.filter(|path| path.starts_with('/'))
         .map(|path| format!("https://image.tmdb.org/t/p/w300{path}"))
+}
+
+/// TMDB's `images.logos` as the row's `clearLogo`: the English logotype when TMDB has one, else
+/// the first logo it lists (a wordmark in another language still beats the text fallback).
+///
+/// `None` when the response carried no logo, and the row is then sent with no `clearLogo` at all —
+/// which is exactly what a real server sends for an item that has none, so the hero falls back to
+/// the text title through its ordinary absent-logo path rather than through a second rule here.
+fn tmdb_logo(images: Option<&TmdbImages>) -> Option<String> {
+    let logos = &images?.logos;
+    let pick = logos
+        .iter()
+        .find(|logo| logo.iso_639_1.as_deref() == Some("en") && logo.file_path.is_some())
+        .or_else(|| logos.iter().find(|logo| logo.file_path.is_some()))?;
+    pick.file_path
+        .as_deref()
+        .map(|path| format!("https://image.tmdb.org/t/p/w500{path}"))
 }
 
 fn tmdb_role(cast: &TmdbCast) -> Option<Value> {
@@ -1391,6 +1408,11 @@ impl Shim {
             "addedAt": 0, "updatedAt": 0,
             "Genre": tags(&p.genres, false),
         });
+        // The addon's title logo is PMS's `clearLogo`; `/photo/…?url=…/clearLogo` resolves it back
+        // out of this row, so the heroes get real title art instead of the text fallback.
+        if let Some(logo) = p.logo.as_deref().filter(|logo| !logo.is_empty()) {
+            row["clearLogo"] = json!(logo);
+        }
         if let Some(y) = year_of(p.release_info.as_deref()) {
             row["year"] = json!(y);
         }
@@ -1932,6 +1954,9 @@ impl Shim {
         if let Some(backdrop) = preview.background {
             row["art"] = json!(backdrop);
         }
+        if let Some(logo) = tmdb_logo(details.images.as_ref()) {
+            row["clearLogo"] = json!(logo);
+        }
         row
     }
 
@@ -1980,6 +2005,9 @@ impl Shim {
         }
         if let Some(backdrop) = preview.background {
             row["art"] = json!(backdrop);
+        }
+        if let Some(logo) = tmdb_logo(details.images.as_ref()) {
+            row["clearLogo"] = json!(logo);
         }
         row
     }
@@ -3380,12 +3408,21 @@ impl Shim {
         let pieces: Vec<_> = local.trim_matches('/').split('/').collect();
         let resolved = match pieces.as_slice() {
             ["library", "metadata", rk, kind @ ("thumb" | "art" | "clearLogo")] => {
-                rk.parse().ok().and_then(|rk| self.row(rk)).and_then(|row| {
-                    row[*kind]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                })
+                // A synthetic related key has no `Ident` in the key table, so `row` alone answers
+                // `None` — and its clearLogo is the one piece of art the app asks for BY PATH
+                // (`logo_key` in `app/adapters/poster.rs` always builds `/library/metadata/{rk}/
+                // clearLogo`), which is why a Related title drew text where a catalog one drew its
+                // logotype. The row is rebuilt from TMDB exactly as `/library/metadata/{rk}` does
+                // (one cached request), and its `clearLogo` URL then takes the proxy path below.
+                rk.parse()
+                    .ok()
+                    .and_then(|rk| self.row(rk).or_else(|| self.tmdb_synthetic_row(rk)))
+                    .and_then(|row| {
+                        row[*kind]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    })
             }
             _ => None,
         };

@@ -377,6 +377,10 @@ pub struct Metadata {
     pub view_count: i64, // present only once watched ≥1× (absent = unwatched)
     #[serde(default)]
     pub thumb: String,
+    /// The title-treatment image (`/library/metadata/{rk}/clearLogo/{ts}` on a real server), which
+    /// the heroes draw over `art`. Absent on most library items, and on every episode.
+    #[serde(rename = "clearLogo", default)]
+    pub clear_logo: Option<String>,
     #[serde(rename = "parentThumb", default)]
     pub parent_thumb: String,
     #[serde(default)]

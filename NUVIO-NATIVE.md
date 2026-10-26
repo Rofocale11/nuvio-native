@@ -170,7 +170,7 @@ fn synthetic_collection_id(rk: i64) -> Option<u64> {
 *   A person key is a **`personId`, not a `ratingKey`** — it travels in `Role[].id` on a cast row, which is what the app's cast shelf reads to open `/library/people/{id}/media` (see §4.5).
 *   A collection key is a **`ratingKey`** for a franchise row — it is never sent to an addon (nothing plays a collection), and it exists so the shelf's linked heading can open the collection page (§4.6).
 
-Every synthetic kind is handled on the way back in by `/library/metadata/{rk}`: parse the key, decode it with the matching helper, fetch TMDB, and return the enriched Plex row (`tmdb_details_row` for movies, `tmdb_show_details_row` for shows, `collection_row` for a franchise). `/library/metadata/{rk}/related` recognises the synthetic title ranges too, so a TMDB-only related title can drill down forever, and a film in a franchise carries its collection shelf there (§4.6).
+Every synthetic kind is handled on the way back in by `/library/metadata/{rk}`: parse the key, decode it with the matching helper, fetch TMDB, and return the enriched Plex row (`tmdb_details_row` for movies, `tmdb_show_details_row` for shows, `collection_row` for a franchise). `/library/metadata/{rk}/related` recognises the synthetic title ranges too, so a TMDB-only related title can drill down forever, and a film in a franchise carries its collection shelf there (§4.6). The `photo` route resolves the same keys, so a synthetic title's `clearLogo`/`thumb`/`art` are served even though the key table never heard of it (§4.3).
 
 ### 3.3 Global ID translation (MUST be applied)
 Addons never see a synthetic number. Every addon-facing request translates the key first:
@@ -205,18 +205,19 @@ fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
 
 ## 4. TMDB Enrichment (Movies & TV Shows)
 The app is enriched with TMDB data: cast on detail rows, a "More Like This" hub of recommendations,
-and — for a film in a franchise — a collection shelf of the other films in it (§4.6).
+the title logo (`clearLogo`) the heroes draw, and — for a film in a franchise — a collection shelf of
+the other films in it (§4.6).
 
 ### 4.1 One request per title
-*   **Performance:** both kinds use a **single HTTP request** with `append_to_response=credits,recommendations`, so cast and related titles arrive together. Do not add separate `/credits` or `/recommendations` calls.
+*   **Performance:** both kinds use a **single HTTP request** with `append_to_response=credits,recommendations,images`, so cast, related titles and the title logo arrive together. Do not add separate `/credits`, `/recommendations` or `/images` calls.
 
 ```rust
 pub fn movie_details(&self, movie_id: u64) -> Result<TmdbMovieDetails> {
-    self.get(&format!("/movie/{movie_id}?append_to_response=credits,recommendations"))
+    self.get(&format!("/movie/{movie_id}?append_to_response=credits,recommendations,images"))
 }
 
 pub fn tv_details(&self, tv_id: u64) -> Result<TmdbShowDetails> {
-    self.get(&format!("/tv/{tv_id}?append_to_response=credits,recommendations"))
+    self.get(&format!("/tv/{tv_id}?append_to_response=credits,recommendations,images"))
 }
 ```
 
@@ -252,14 +253,16 @@ pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
 *   **Related Movies:** `recommendations.results` → the Plex `Hub` array, `type`/`hubIdentifier` `movie`.
 *   **Related TV Shows:** the same hub shape with `type`/`hubIdentifier` `show`.
 *   **Franchises:** `belongs_to_collection` + `/collection/{id}` → a SECOND `Hub` in the same answer, `collection.related.{section}.{n}` (§4.6).
+*   **Logos:** `images.logos` → the row's Plex `clearLogo`, the title treatment both heroes draw. Prefer the logo whose `iso_639_1` is `"en"`, else the first one with a `file_path`; the URL is `https://image.tmdb.org/t/p/w500{file_path}` (`tmdb_logo`). A title with no logo sends **no** `clearLogo` field at all, exactly as a real server omits it, so the hero falls back to its text title through its ordinary absent-logo path — do not substitute the poster or the title string.
+*   **Artwork is fetched by PATH, not by URL.** The app never reads an image URL out of a row: it asks the server for `/library/metadata/{rk}/thumb|art|clearLogo` through `/photo/:/transcode` (`app/adapters/poster.rs`'s `logo_key` always builds that path). A synthetic related key has no `Ident`, so the `photo` route resolves it through `tmdb_synthetic_row` when `row` answers `None` — one cached TMDB request, then the resolved CDN URL is proxied byte-for-byte. Without that fallback a Related title's logo (and its poster and backdrop) 404s even though the row carries the URL.
 *   A recommendation is rendered from the addon's own metadata when available (`meta("movie", "tmdb:<id>")` / `meta("series", "tmdb:<id>")`) and otherwise from TMDB, with a synthetic ratingKey (§3.2).
 *   **API Key:** The `TMDB_API_KEY` is injected at compile time via GitHub Secrets (`option_env!("TMDB_API_KEY")`), with a runtime `std::env` fallback. An unset or blank key disables every TMDB lookup (the hub answers 503 and rows keep their Cinemeta metadata). Local testing requires exporting the env var.
 
 ### 4.4 TV Show limitations
-*   **A TMDB-only related show has no episodes.** TMDB recommendations carry no season/episode list, and the shim does not spend a second request fetching them. Such a show opens with full metadata (Cast, Summary, Genre, poster/backdrop, air date) and its own related hub, but has **nothing to play**.
+*   **A TMDB-only related show has no episodes.** TMDB recommendations carry no season/episode list, and the shim does not spend a second request fetching them. Such a show opens with full metadata (Cast, Summary, Genre, poster/backdrop/logo, air date) and its own related hub, but has **nothing to play**.
 *   **It becomes playable when an addon also has it.** `tmdb_show_recommendation_row` prefers `meta("series", "tmdb:<id>")`; when Cinemeta knows the show, the row is built from that `Meta` and the normal season/episode/stream path applies.
 *   Do not "fix" this by adding a `/tv/{id}/season/{n}` fetch to the hub: that is one extra request per recommendation and multiplies the hub's latency. Add it only for a show that must be playable rather than merely browsable.
-*   **A TMDB-only show is not in `keys.tsv`** — it is a pure arithmetic key, so anything that needs an `Ident` must special-case it the way `related_hub`, `/library/metadata/{rk}` and `slot()` do.
+*   **A TMDB-only show is not in `keys.tsv`** — it is a pure arithmetic key, so anything that needs an `Ident` must special-case it the way `related_hub`, `/library/metadata/{rk}`, the `photo` route and `slot()` do.
 
 ### 4.5 Cast & Crew → the person page (filmography)
 A headshot on a detail page is clickable, and what it opens is the app's **person page** — the same

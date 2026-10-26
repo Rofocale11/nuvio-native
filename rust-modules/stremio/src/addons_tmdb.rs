@@ -116,6 +116,24 @@ pub struct TmdbRecommendations {
     pub results: Vec<TmdbMovie>,
 }
 
+/// One title-treatment image from `append_to_response=images`. Only the logo is read: it is the
+/// one PMS field (`clearLogo`) that has no other TMDB source.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbLogo {
+    pub file_path: Option<String>,
+    /// `"en"`, `"de"`, `"xx"` for a wordmark with no words, or `null`.
+    pub iso_639_1: Option<String>,
+}
+
+/// The `images` half of a details response. TMDB returns `logos`, `posters` and `backdrops`;
+/// the last two are already `poster_path`/`backdrop_path` on the title itself.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbImages {
+    pub logos: Vec<TmdbLogo>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TmdbMovieDetails {
@@ -123,6 +141,7 @@ pub struct TmdbMovieDetails {
     pub movie: TmdbMovie,
     pub credits: TmdbCredits,
     pub recommendations: TmdbRecommendations,
+    pub images: Option<TmdbImages>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -138,6 +157,7 @@ pub struct TmdbShowDetails {
     pub show: TmdbShow,
     pub credits: TmdbCredits,
     pub recommendations: TmdbShowRecommendations,
+    pub images: Option<TmdbImages>,
 }
 
 #[derive(Default, Deserialize)]
@@ -307,7 +327,7 @@ impl TmdbClient {
 
     pub fn movie_details(&self, movie_id: u64) -> Result<TmdbMovieDetails> {
         self.get(&format!(
-            "/movie/{movie_id}?append_to_response=credits,recommendations"
+            "/movie/{movie_id}?append_to_response=credits,recommendations,images"
         ))
     }
 
@@ -343,7 +363,7 @@ impl TmdbClient {
 
     pub fn tv_details(&self, tv_id: u64) -> Result<TmdbShowDetails> {
         self.get(&format!(
-            "/tv/{tv_id}?append_to_response=credits,recommendations"
+            "/tv/{tv_id}?append_to_response=credits,recommendations,images"
         ))
     }
 
@@ -452,12 +472,12 @@ mod tests {
             "https://api.themoviedb.org/3/movie/603/credits?api_key=key%20%2B"
         );
         assert_eq!(
-            client.url("/movie/603?append_to_response=credits,recommendations"),
-            "https://api.themoviedb.org/3/movie/603?append_to_response=credits,recommendations&api_key=key%20%2B"
+            client.url("/movie/603?append_to_response=credits,recommendations,images"),
+            "https://api.themoviedb.org/3/movie/603?append_to_response=credits,recommendations,images&api_key=key%20%2B"
         );
         assert_eq!(
-            client.url("/tv/1396?append_to_response=credits,recommendations"),
-            "https://api.themoviedb.org/3/tv/1396?append_to_response=credits,recommendations&api_key=key%20%2B"
+            client.url("/tv/1396?append_to_response=credits,recommendations,images"),
+            "https://api.themoviedb.org/3/tv/1396?append_to_response=credits,recommendations,images&api_key=key%20%2B"
         );
         assert_eq!(
             client.url("/collection/234"),

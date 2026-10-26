@@ -1526,7 +1526,10 @@ pub enum Kicker {
 
 /// The title block above the playbar: the [`Kicker`] line over the [`HUD_TITLE_SZ`] display
 /// title. (Apple-TV layout.)
-pub fn draw_title(p: Painter, kicker: Kicker, title: *const std::os::raw::c_char) {
+///
+/// The kicker is drawn on its own because the display title under it has TWO sources: this
+/// text-only block, and [`draw_title_logo`]'s clearLogo. Both must keep the kicker identical.
+fn draw_kicker(p: Painter, kicker: Kicker) {
     let (text, ink, bold) = match kicker {
         Kicker::Episode(text) => (text, theme::TEXT_PRIMARY, 1),
         Kicker::Context(text) => (text, theme::TEXT_SECONDARY, 0),
@@ -1540,6 +1543,12 @@ pub fn draw_title(p: Painter, kicker: Kicker, title: *const std::os::raw::c_char
         0,
         bold,
     );
+}
+
+/// The title block as TEXT — for a caller with no item identity to resolve a logo on (the detail
+/// page's full-trailer transport). The player route draws [`draw_title_logo`].
+pub fn draw_title(p: Painter, kicker: Kicker, title: *const std::os::raw::c_char) {
+    draw_kicker(p, kicker);
     p.text(
         title,
         SB_X,
@@ -1549,6 +1558,57 @@ pub fn draw_title(p: Painter, kicker: Kicker, title: *const std::os::raw::c_char
         0,
         1,
     );
+}
+
+/// The display title's clearLogo band: `LogoRung::Custom`'s floor and ceiling are the SAME height,
+/// so [`plx_ui::hero_logo::fit`] can only ever produce that height — a wider wordmark grows
+/// sideways, up to the band's own [`HUD_LOGO_MAX_W`] column.
+const HUD_LOGO_H: f32 = 40.0;
+const HUD_LOGO_MAX_W: f32 = 200.0;
+const HUD_LOGO_RUNG: plx_ui::hero_logo::LogoRung = plx_ui::hero_logo::LogoRung::Custom {
+    area: 8_000.0, // HUD_LOGO_MAX_W * HUD_LOGO_H
+    h_min: HUD_LOGO_H,
+    h_max: HUD_LOGO_H,
+    fallback_sz: HUD_TITLE_SZ,
+};
+
+/// [`draw_title`] for an item the logo store can resolve: the item's clearLogo through
+/// [`plx_ui::hero_logo::HeroLogo`] — the app's ONE clearLogo path — in place of the display title,
+/// and [`draw_title`] itself while there is no logo to draw.
+///
+/// The gate is [`plx_ui::tex::logo_src`] and not `HeroLogo`'s own fallback, because that fallback
+/// CONTAINS the text to the logo's 200px band while the HUD's title has the whole playbar width.
+/// Gating on the resident pixels also means the empty `title` handed to the widget is unreachable.
+///
+/// `rk` is the ratingKey the logo is FETCHED by: for an episode that is its SHOW's (an episode has
+/// no clearLogo asset, so keying to it would only ever 404), which is exactly what
+/// `NowPlaying::detail_rk` carries. `sid` is the server that item came from.
+pub fn draw_title_logo(
+    p: Painter,
+    kicker: Kicker,
+    title: *const std::os::raw::c_char,
+    sid: u16,
+    rk: &str,
+    measure: &dyn plx_machine::machine::Measure,
+) {
+    if rk.is_empty() || plx_ui::tex::logo_src(sid, rk).is_none() {
+        draw_title(p, kicker, title);
+        return;
+    }
+    draw_kicker(p, kicker);
+    let band = Rect::new(
+        SB_X,
+        SCR_H - 278.0,
+        HUD_LOGO_MAX_W,
+        plx_ui::hero_logo::band_h(HUD_LOGO_RUNG),
+    );
+    plx_ui::hero_logo::HeroLogo::new(sid, rk, "", HUD_LOGO_RUNG).draw(p, band, measure);
+}
+
+/// The server the playing item's artwork belongs to — the resolution every other HUD panel already
+/// uses for its art (`chapters_panel`, `info_panel`, `up_next`): the item's own, else the surface's.
+fn hud_logo_sid(ps: &plx_media::route::PlaybackSession) -> u16 {
+    plx_media::route::item_sid(plx_media::route::cur_sid(ps)).raw()
 }
 
 /// How the playhead is drawn — see [`draw_playbar`].
@@ -1853,18 +1913,27 @@ pub fn draw_hud(
                 &n.ep_title,
             ))
             .unwrap_or_default();
-            // `if let Ok`, not `.unwrap_or_default()`: before this function was factored out, an
-            // interior-NUL title (the one CString::new can fail on) simply drew nothing — the
-            // refactor was supposed to be visual-no-op, and an `unwrap_or_default()` here draws an
-            // EMPTY title line instead of skipping it, which is a real (if rare) behavior change.
+            // The display title under the kicker is the SHOW's, and so is the clearLogo it may be
+            // replaced by: `detail_rk` is the show's ratingKey for an episode.
             if let Ok(title) = CString::new(n.title.clone()) {
-                draw_title(p, Kicker::Episode(kicker.as_ptr()), title.as_ptr());
+                draw_title_logo(
+                    p,
+                    Kicker::Episode(kicker.as_ptr()),
+                    title.as_ptr(),
+                    hud_logo_sid(ps),
+                    &n.detail_rk,
+                    measure,
+                );
             }
         } else {
-            draw_title(
+            let rk = meta.now_playing().map_or("", |n| n.detail_rk.as_str());
+            draw_title_logo(
                 p,
                 Kicker::Context(plx_media::route::ctxline_cptr(ps)),
                 plx_media::route::title_cptr(ps),
+                hud_logo_sid(ps),
+                rk,
+                measure,
             );
         }
 
