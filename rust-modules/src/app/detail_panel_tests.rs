@@ -67,7 +67,7 @@ fn a_detail_panel_parks_across_a_push_and_returns_with_the_same_instance() {
         &mut d,
         host,
         Some((here, "m1")),
-        plx_screens::registry::ContentPanel::AltSources { anchor: [300.0f32, 800.0, 300.0, 60.0].map(f32::to_bits) },
+        plx_screens::registry::ContentPanel::AltSources { anchor: [300.0f32, 800.0, 300.0, 60.0].map(f32::to_bits), rk: None },
     );
     run(&mut d, &mut rig, &mut t, detail_arg("m1"), 40);
     let panel = d.nav.modals.surfaces.first().expect("the picker is up").entry.id;

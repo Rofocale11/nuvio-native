@@ -888,11 +888,13 @@ pub enum ContentReq {
 /// overlays, which share a key ladder and a transport rule. These share nothing: two are read-only
 /// `Style::Alert` sheets (one with a page cursor, one with none), one is a `Style::Compact` menu
 /// anchored to a button whose OK navigates.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ContentPanel {
-    /// *Also available* (`screens::alt_sources`), anchored to the drawn rect of the pill that
-    /// opened it — bit-preserving, so a canonical argument holds it without float equality.
-    AltSources { anchor: [u32; 4] },
+    /// *Also available* / *Streams* (`screens::alt_sources`), anchored to the drawn rect of the
+    /// control that opened it — bit-preserving, so a canonical argument holds it without float
+    /// equality. `rk` overrides the page's own item: a show's episode still opens the picker for
+    /// THAT episode's streams, where the page's subject would be the show.
+    AltSources { anchor: [u32; 4], rk: Option<String> },
     /// *Track information* (`screens::tracks_panel`), opened at 1-based `page`. Every interactive
     /// opening passes 1; `/tmp/plxnative-tracks=<n>` is the only caller that does not, and it is
     /// what makes a headless capture of page 2 possible at all.
@@ -926,27 +928,27 @@ impl ContentPanel {
     /// and every panel that needs one is refused rather than presented against a neighbour's item.
     /// `None` back means "this page cannot offer that panel", which the caller drops.
     pub fn surface(
-        self,
+        &self,
         host: plx_machine::machine::InstanceId,
         subject: Option<(plx_plex::plex::ServerId, &str)>,
     ) -> Option<(plx_ui::containers::modal::Style, AppArg)> {
         use plx_ui::containers::modal::Style;
         Some(match self {
-            Self::AltSources { anchor } => {
-                let (sid, rk) = subject?;
+            Self::AltSources { anchor, rk } => {
+                let (sid, page_rk) = subject?;
                 (
                     Style::Compact,
                     AppArg::AltSources(crate::alt_sources::AltSourcesArg {
                         host,
                         sid,
-                        rk: rk.to_string(),
-                        anchor,
+                        rk: rk.clone().unwrap_or_else(|| page_rk.to_string()),
+                        anchor: *anchor,
                     }),
                 )
             }
             Self::Tracks { page } => (
                 Style::Alert,
-                AppArg::TracksPanel(crate::tracks_panel::TracksPanelArg { page }),
+                AppArg::TracksPanel(crate::tracks_panel::TracksPanelArg { page: *page }),
             ),
             Self::About => (Style::Alert, AppArg::AboutPanel),
             Self::Bio => (Style::Alert, AppArg::PersonBio),
@@ -2185,6 +2187,27 @@ mod arg_tests {
                 !(r.chrome() == Chrome::TabBar),
                 "only the bar-wearing screens carry the profile chip"
             );
+        }
+    }
+
+    #[test]
+    fn an_episodes_streams_panel_is_addressed_to_the_episode_not_the_show() {
+        use crate::alt_sources::AltSourcesArg;
+        // A show's page subject is the SHOW; the argument the picker is mounted with is the
+        // EPISODE, so its `/nuvio/streams` asks for that episode's streams.
+        let (_, arg) = ContentPanel::AltSources { anchor: [0; 4], rk: Some("1007".into()) }
+            .surface(plx_machine::machine::InstanceId(1), Some((plx_plex::plex::ServerId::UNSET, "show")))
+            .expect("an episode of a loaded show is presentable");
+        match arg {
+            AppArg::AltSources(AltSourcesArg { rk, .. }) => assert_eq!(rk, "1007"),
+            _ => panic!("the Streams picker is the AltSources surface"),
+        }
+        let (_, arg) = ContentPanel::AltSources { anchor: [0; 4], rk: None }
+            .surface(plx_machine::machine::InstanceId(1), Some((plx_plex::plex::ServerId::UNSET, "movie")))
+            .expect("the hero's own pill is presentable");
+        match arg {
+            AppArg::AltSources(AltSourcesArg { rk, .. }) => assert_eq!(rk, "movie"),
+            _ => panic!("the Streams picker is the AltSources surface"),
         }
     }
 

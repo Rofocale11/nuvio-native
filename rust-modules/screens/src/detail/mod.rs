@@ -244,6 +244,11 @@ pub struct DetailScreen {
     /// [`selected`](Self::selected)'s callers); it is never re-read from the catalog afterward, so
     /// a hub republish while this page is open does not change what it reports.
     selected: Option<plx_data::pms::PmsMovie>,
+    /// The EPISODE the Streams picker was opened for, by `ratingKey` — played when the pick lands
+    /// ([`AppMsg::NuvioStreamSelected`]). A picker dismissed without a pick leaves it set and
+    /// harmless: the next pick rewrites it, and only a pick consumes it. Unhashed: it is a latch
+    /// between two events in one interaction, like `preview_played_for`.
+    streams_episode: Option<String>,
     /// Skeleton spinner clock, in ms — cached each tick from [`spin_phase`](Self::spin_phase)'s
     /// `advance`. Render-only, never hashed.
     spin_ms: f32,
@@ -459,6 +464,7 @@ impl DetailScreen {
             about_rows: about::Rows::new(),
             ground,
             selected,
+            streams_episode: None,
             spin_ms: 0.0,
             spin_phase: plx_machine::motion::Phase::default(),
             layout: Cell::new(None),
@@ -2003,7 +2009,23 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
             }
             ScreenEvent::App(AppMsg::NuvioStreamSelected) => {
                 self.selected = None;
-                self.start_reconciliation(fx, meta);
+                // **An episode's picker**: the shim has committed the stream and reordered the
+                // item's `Media[]`, so the episode the picker was opened for starts NOW (its
+                // resolve reads the picked stream as `Media[0]`). The movie page's own pill names
+                // no episode, so it only re-reads the item, exactly as it did before.
+                let pending = self
+                    .streams_episode
+                    .take()
+                    .and_then(|rk| {
+                        self.detail(meta)
+                            .and_then(|d| d.episodes.iter().position(|ep| ep.rk == rk))
+                    });
+                match pending {
+                    Some(i) => {
+                        self.play_episode_at(i, false, fx, meta);
+                    }
+                    None => self.start_reconciliation(fx, meta),
+                }
                 fx.invalidate(Provenance::Landing(fx.from()));
                 Handled::Yes
             }
@@ -3801,9 +3823,12 @@ impl DetailScreen {
                     .map(|d| episodes::action(d, local, meta.season_loading()))
                     .unwrap_or(episodes::Action::None);
                 match action {
-                    episodes::Action::Play(i) => {
-                        self.play_episode_at(i, false, fx, meta);
-                    }
+                    // **A press on an episode's still opens the Streams picker — it does not
+                    // play.** On a Nuvio (shim) source the file that plays is a property of the
+                    // STREAM picked, so the picker (the same `ContentPanel::AltSources` the hero's
+                    // *Streams* pill opens) comes first, carrying THIS episode's ratingKey, and
+                    // the pick itself starts the episode. Anywhere else the strip plays directly.
+                    episodes::Action::Play(i) => self.press_episode(i, elem, cx, fx, meta),
                     episodes::Action::OpenDetail(sid, rk) => {
                         self.content(fx, ContentReq::Push(ContentArg::Detail { sid, rk }))
                     }
@@ -3927,12 +3952,7 @@ impl DetailScreen {
                     rect.y -= self.scroll.pos;
                     // The ANCHOR travels on the argument, bit for bit, so the surface places
                     // itself off the pill without the page or a static holding a `Rect` for it.
-                    self.content(
-                        fx,
-                        ContentReq::Panel(ContentPanel::AltSources {
-                            anchor: [rect.x, rect.y, rect.w, rect.h].map(f32::to_bits),
-                        }),
-                    );
+                    self.open_streams(rect, None, fx);
                 }
             }
             hero::HeroCtl::MarkWatched | hero::HeroCtl::MarkUnwatched => {
@@ -4066,6 +4086,51 @@ impl DetailScreen {
         };
         self.content(fx, ContentReq::Play { play, resume_ns });
         true
+    }
+
+    /// **Present the *Streams* picker** for `episode` — or for the page's own item when `None`,
+    /// which is the hero's pill. `anchor` is the drawn rect of the control that opened it, so the
+    /// pill and an episode still cannot place the same panel differently.
+    fn open_streams<H: ContentLike>(&mut self, anchor: Rect, episode: Option<String>, fx: &mut Effects<'_, H>) {
+        // The pick message names no item (the shim has already committed one), so the page remembers
+        // which episode its picker was about and starts it when the pick lands.
+        self.streams_episode = episode.clone();
+        self.content(
+            fx,
+            ContentReq::Panel(ContentPanel::AltSources {
+                anchor: [anchor.x, anchor.y, anchor.w, anchor.h].map(f32::to_bits),
+                rk: episode,
+            }),
+        );
+    }
+
+    /// **A press on an episode's still.** A Nuvio (shim) source picks the FILE, not just the
+    /// episode, so the press opens the Streams picker for THAT episode and the pick starts it
+    /// ([`AppMsg::NuvioStreamSelected`]). Any other source has no stream list to offer, so the
+    /// episode plays at once, exactly as it always did.
+    fn press_episode<H: ContentLike + crate::registry::MetadataLike>(
+        &mut self,
+        index: usize,
+        elem: u32,
+        cx: &Cx<'_, H>,
+        fx: &mut Effects<'_, H>,
+        meta: plx_data::metadata::MetadataView<'_>,
+    ) {
+        let nuvio = plx_plex::plex::client_for(self.sid).is_some_and(|c| c.is_nuvio());
+        let episode = self
+            .detail(meta)
+            .and_then(|d| d.episodes.get(index))
+            .map(|ep| ep.rk.clone())
+            .filter(|_| nuvio);
+        let Some(rk) = episode else {
+            self.play_episode_at(index, false, fx, meta);
+            return;
+        };
+        let anchor = self
+            .place(&elem, cx, At::Drawn)
+            .map(|p| p.rect)
+            .unwrap_or_else(crate::item_menu::fallback_anchor);
+        self.open_streams(anchor, Some(rk), fx);
     }
 
     fn content<H: ContentLike>(&self, fx: &mut Effects<'_, H>, req: ContentReq) {

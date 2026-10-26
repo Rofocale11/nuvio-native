@@ -135,6 +135,7 @@ fn bare(sid: ServerId, rk: &str) -> DetailScreen {
                 .filter(|_| plx_data::pms::index_of_rk(&pms_state, sid, rk) >= 0)
                 .cloned()
         },
+        streams_episode: None,
         spin_ms: 0.0,
         spin_phase: plx_machine::motion::Phase::default(),
         layout: std::cell::Cell::new(None),
