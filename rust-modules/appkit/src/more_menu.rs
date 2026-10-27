@@ -361,7 +361,15 @@ impl MoreMenuState {
             Some(page) => (self.page_form(page), Some(page.title(&self.streams))),
             None => (root_form(&self.rows, &self.streams), None),
         };
-        self.form.restore(form, Some(&saved.return_id), saved.scroll);
+        // Land on a row we can NAME: the opener when it is still on offer (a re-rank can drop it),
+        // else the page's first focusable row — never the table's own opening slot, which may be
+        // an inert note, and never whatever the engine happens to still hold.
+        let landing = if form.contains(&saved.return_id) {
+            Some(saved.return_id)
+        } else {
+            form.slots().into_iter().flatten().next().map(|b| b.id)
+        };
+        self.form.restore(form, landing.as_ref(), saved.scroll);
         self.form.table.set_title(title);
         true
     }
@@ -559,11 +567,35 @@ impl MoreMenuState {
 
     pub fn update(&mut self, dt: f32, measure: &dyn plx_machine::machine::Measure) {
         self.refresh();
+        // A page can be installed before its rows exist (and the engine's key can name none of
+        // them): the cursor must not be left on nothing while there is a row to focus.
+        self.seat_valid_focus();
         // `update` subtracts its own top/bottom padding now — pass the panel's raw height.
         let natural = self.panel_rect(measure);
         self.form.table.update(dt, natural.h);
         self.motion.step(dt, natural);
         self.motion.prewarm_text(natural, &self.form.table, measure);
+    }
+
+    /// The index of the first focusable row on the page showing; `None` when the page has
+    /// nothing to focus (an empty Source page's waiting note is inert).
+    fn first_focusable(&self) -> Option<usize> {
+        (0..self.form.table.n_rows() as usize).find(|&i| self.form.key_at(i).is_some())
+    }
+
+    /// **Keep the cursor on a row, every frame.** The form is installed (a page push, a live
+    /// rebuild, a restore) before the rows it will show have all arrived, and an installed cursor
+    /// can sit on an inert slot or past the end: nothing is highlighted, OK commits nothing
+    /// (`on_ok` reads the selected id) and the reader has to nudge a direction to make the menu
+    /// answer. Re-seat on the first focusable row until the cursor is valid; a valid cursor is
+    /// left exactly where it is, so this never fights a move the engine made.
+    fn seat_valid_focus(&mut self) {
+        if self.form.selected_id().is_some() {
+            return;
+        }
+        if let Some(i) = self.first_focusable() {
+            self.form.table.sel = i as i32;
+        }
     }
 
     pub fn draw(&mut self, appear: f32, measure: &dyn plx_machine::machine::Measure) {
@@ -969,6 +1001,51 @@ mod tests {
         assert_eq!(st.form.table.title(), None);
         assert_eq!(st.form.selected_id(), Some(&MoreRow::OpenSource));
         assert!(!st.pop(), "the root has nothing to pop");
+    }
+
+    /// **A cursor that names no row does not survive a frame.** The engine can leave a key behind
+    /// the page now showing, and a page can be installed before its rows land; either way the
+    /// cursor sits on nothing — no pill, and OK reads no id, so the menu looks dead until a
+    /// direction nudges it. The tick re-seats it on the first focusable row.
+    #[test]
+    fn an_invalid_cursor_is_reseated_on_a_row_by_the_tick() {
+        let _serial = plx_base::testlock::serial();
+        const DT: f32 = 1.0 / 60.0;
+        let m = plx_base::fontcov::advances::ShippedMeasure;
+        let mut st = menu();
+        st.stream_rev = plx_media::route::streams_rev(); // the tick's poll is not under test
+        st.form.table.sel = st.form.table.n_rows(); // one past the last row
+        assert_eq!(st.form.selected_id(), None, "the cursor names no row");
+        assert_eq!(st.on_ok(), MoreOk::Action(Action::None), "so OK commits nothing");
+        st.update(DT, &m);
+        assert_eq!(
+            st.form.selected_id(),
+            Some(&MoreRow::OpenSource),
+            "the tick puts the cursor back on the first row"
+        );
+        assert_eq!(st.on_ok(), MoreOk::Navigated, "and OK answers again");
+    }
+
+    /// **A pop lands on a row the returned page still has.** A re-rank can drop the addon that
+    /// opened the page, so the opener is looked up on the page being returned to; when it is
+    /// gone the cursor takes that page's first focusable row, never the old page's position.
+    #[test]
+    fn a_pop_lands_on_a_row_of_the_page_it_returns_to() {
+        let mut st = source_page();
+        st.focus_key(MoreRow::OpenAddon(1).key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+        // by BACK, the second addon has answered no more: its row, the opener, is gone
+        st.streams = vec![(3, "4k DV".to_string(), "Torrentio".to_string())];
+
+        assert!(st.pop());
+        assert_eq!(st.page(), Some(MorePage::Source));
+        assert_eq!(
+            st.form.selected_id(),
+            Some(&MoreRow::OpenAddon(0)),
+            "the returned page's first row, not the vanished opener"
+        );
+        assert_eq!(st.on_ok(), MoreOk::Navigated, "and it commits on OK");
     }
 
     /// RIGHT enters a Nav row and does nothing anywhere else (this popover has no tabs).
