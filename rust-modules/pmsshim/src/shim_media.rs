@@ -109,6 +109,44 @@ fn container_of(c: &Classified) -> String {
 pub struct SubRef {
     pub id: i64,
     pub lang: String,
+    /// Plex's `default`/`selected` for this track: the one the viewer's account language asks for
+    /// (see [`mark_preferred_subtitle`]). A sidecar carries no container ordinal, so this pair is
+    /// the ONLY way the app can start with it on — `metadata::server_selected_sidecar` reads it.
+    pub selected: bool,
+}
+
+/// Marks which of `subs` the viewer's account language picks, if any. `pref` is the account's
+/// `defaultSubtitleLanguage` (the 2-letter picker code); with none set the app's long-standing
+/// fallback is English. Addons label a track `en`, `eng`, `en-US` or `English`, so the comparison
+/// is on the language's OWN code, with the ISO-639-2/B spellings that do not begin with it folded
+/// to their 639-1 form (`ger`→`de`, `fre`→`fr`, …). Every other track is cleared, so a preference
+/// changed between plays cannot leave two selected.
+pub fn mark_preferred_subtitle(subs: &mut [SubRef], pref: Option<&str>) {
+    let want = lang_key(pref.unwrap_or("en"));
+    let hit = subs
+        .iter()
+        .position(|s| !want.is_empty() && lang_key(&s.lang) == want);
+    for (i, s) in subs.iter_mut().enumerate() {
+        s.selected = hit == Some(i);
+    }
+}
+
+/// Mirrors `plx_data::metadata::lang_key`'s folding of the one language a tag names (the shim does
+/// not depend on the data crate). Only the primary subtag counts.
+fn lang_key(lang: &str) -> String {
+    // The 639-2/B (library) codes whose first two letters are not the 639-1 code.
+    const ALIAS: [(&str, &str); 20] = [
+        ("alb", "sq"), ("arm", "hy"), ("baq", "eu"), ("bur", "my"), ("chi", "zh"),
+        ("cze", "cs"), ("dut", "nl"), ("fre", "fr"), ("geo", "ka"), ("ger", "de"),
+        ("gre", "el"), ("ice", "is"), ("mac", "mk"), ("mao", "mi"), ("may", "ms"),
+        ("per", "fa"), ("rum", "ro"), ("slo", "sk"), ("tib", "bo"), ("wel", "cy"),
+    ];
+    let s = lang.trim().to_ascii_lowercase();
+    let code = s.split(['-', '_', ' ']).next().unwrap_or("");
+    match ALIAS.iter().find(|(from, _)| *from == code) {
+        Some((_, to)) => (*to).to_string(),
+        None => code.chars().take(2).collect(),
+    }
 }
 
 /// The Media block for stream `idx` of item `rk`.
@@ -168,7 +206,7 @@ pub fn media_json(rk: i64, idx: usize, c: &Classified, duration_ms: i64, subs: &
         streams.push(json!({
             "id": s.id, "streamType": 3, "codec": "srt", "index": 2 + n, "external": true,
             "key": format!("/library/streams/{}.srt", s.id), "language": s.lang, "languageCode": s.lang,
-            "displayTitle": format!("{} (SRT)", s.lang), "selected": false, "default": false,
+            "displayTitle": format!("{} (SRT)", s.lang), "selected": s.selected, "default": s.selected,
         }));
     }
     let ext = if container == "hls" { "m3u8".to_string() } else { container.clone() };
@@ -242,7 +280,7 @@ mod tests {
         let mut stream = s("x", Some("https://h/f.mkv?t=1"), None);
         stream.addon_name = "Torrentio".into();
         let c = Classified { stream, info: StreamInfo { height: Some(2160), hdr: Hdr::DolbyVision { with_hdr10_fallback: true }, size_bytes: Some(60_000_000_000), ..Default::default() }, url: "https://h/f.mkv?t=1".into() };
-        let m = media_json(10_001, 3, &c, 7_200_000, &[SubRef { id: 9, lang: "eng".into() }]);
+        let m = media_json(10_001, 3, &c, 7_200_000, &[SubRef { id: 9, lang: "eng".into(), selected: false }]);
         assert_eq!(m["videoResolution"], "4k");
         assert_eq!(m["container"], "mkv");
         assert_eq!(m["addon_name"], "Torrentio", "the picker groups by addon");
@@ -251,6 +289,38 @@ mod tests {
         assert_eq!(m["Part"][0]["key"], "/library/parts/10001003/0/file.mkv");
         assert_eq!(m["Part"][0]["Stream"][0]["DOVIProfile"], 8);
         assert_eq!(m["Part"][0]["Stream"][2]["key"], "/library/streams/9.srt");
+        assert_eq!(m["Part"][0]["Stream"][2]["selected"], false);
         assert_eq!(m["bitrate"], 66_666);
+    }
+
+    /// **The account's subtitle language is the one that starts ON.** Plex carries no other way to
+    /// say "this sidecar is my pick" — a sidecar has no container ordinal — so `default` and
+    /// `selected` on the track ARE the preference the app restores on play.
+    #[test]
+    fn the_account_language_marks_one_subtitle_selected() {
+        let mut subs = [
+            SubRef { id: 1, lang: "fre".into(), selected: false },
+            SubRef { id: 2, lang: "English".into(), selected: false },
+            SubRef { id: 3, lang: "ger".into(), selected: false },
+        ];
+        mark_preferred_subtitle(&mut subs, Some("de"));
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, true]);
+        // No preference at all: English, as before the preference existed.
+        mark_preferred_subtitle(&mut subs, None);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true, false]);
+        // No match: nothing is claimed, so the file's own order stands.
+        mark_preferred_subtitle(&mut subs, Some("pt-BR"));
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, false]);
+    }
+
+    #[test]
+    fn language_codes_compare_across_the_three_spellings_addons_use() {
+        for (lang, pref) in [
+            ("eng", "en"), ("en", "eng"), ("en-US", "en"), ("English", "en"),
+            ("deu", "de"), ("ger", "de"), ("de", "ger"), ("pt-BR", "pt"),
+        ] {
+            assert_eq!(lang_key(lang), lang_key(pref), "{lang} vs {pref}");
+        }
+        assert_ne!(lang_key("spa"), lang_key("en"), "Spanish is not English");
     }
 }

@@ -1,0 +1,59 @@
+{
+  "policies": [
+    {
+      "action": "integration.use",
+      "resource": "skill:bind-tv-lib-abi",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:crash-triage",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:cut-release",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:decompile-tv-lib",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:fleet-plan",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:profile-tv",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:setup-environment",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:tv-lock",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:tv-session",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:ui-sim",
+      "effect": "deny"
+    },
+    {
+      "action": "integration.use",
+      "resource": "skill:wake-tv",
+      "effect": "deny"
+    }
+  ]
+}

@@ -961,32 +961,33 @@ mod tmdb_metadata_tests {
     fn synthetic_rating_keys_reach_addons_as_tmdb_ids() {
         let backend = Arc::new(RecordingBackend::default());
         let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
-        let response = shim.handle(&Request {
+        let get = || Request {
             method: "GET".into(),
             path: "/nuvio/streams".into(),
             query: HashMap::from([("ratingKey".into(), "1000000603".into())]),
             headers: HashMap::new(),
             body: Vec::new(),
-        });
-        assert_eq!(response.status, 200);
-        let body: Value = serde_json::from_slice(&response.body).unwrap();
-        // A movie has no streams from this backend, but the list is finished: the picker must stop
-        // asking rather than poll to its retry limit.
-        assert_eq!(body["complete"], true);
-        assert_eq!(
-            backend.streams.lock().unwrap().as_slice(),
-            [("movie".to_string(), "tmdb:603".to_string())]
-        );
+        };
+        let body = |r: &Response| serde_json::from_slice::<Value>(&r.body).unwrap();
+        assert_eq!(shim.handle(&get()).status, 200);
+        // The slot starts its stream and subtitle workers as threads: wait for them to report.
         for _ in 0..100 {
-            if !backend.subtitles.lock().unwrap().is_empty() {
+            if !backend.streams.lock().unwrap().is_empty() && !backend.subtitles.lock().unwrap().is_empty() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(
+            backend.streams.lock().unwrap().as_slice(),
+            [("movie".to_string(), "tmdb:603".to_string())]
+        );
+        assert_eq!(
             backend.subtitles.lock().unwrap().as_slice(),
             [("movie".to_string(), "tmdb:603".to_string())]
         );
+        // A movie has no streams from this backend, but the list is finished: the picker must stop
+        // asking rather than poll to its retry limit.
+        assert_eq!(body(&shim.handle(&get()))["complete"], true);
     }
 
     #[test]
@@ -1194,10 +1195,15 @@ impl Shim {
 
     fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
         let (type_, id) = self.stream_target(ident)?;
-        let translated_id = if translate_to_stremio_id(rk).is_some() {
-            TmdbClient::from_env().and_then(|client| resolve_imdb_id(rk, &client))?
-        } else {
-            id
+        let translated_id = match translate_to_stremio_id(rk) {
+            // An IMDb id is preferred where TMDB can name one (some addons rank by it), but it is
+            // an improvement, never a prerequisite: with no TMDB key, or no `/find` match, the
+            // `tmdb:` id is still what the addon knows the title by, and asking for nothing at all
+            // would answer an empty, permanently-"loading" Source Picker.
+            Some(tmdb_id) => TmdbClient::from_env()
+                .and_then(|client| resolve_imdb_id(rk, &client))
+                .unwrap_or(tmdb_id),
+            None => id,
         };
         let mut g = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = g.get(&rk) {
@@ -1259,6 +1265,7 @@ impl Shim {
                     .map(|s| SubRef {
                         id: 0,
                         lang: format!("{}\u{0}{}", s.lang, s.url),
+                        selected: false,
                     })
                     .collect();
             });
@@ -1339,12 +1346,17 @@ impl Shim {
             }
             s.id = id;
         }
+        // The viewer's account language decides which sidecar starts ON, once per slot: the
+        // tracks are cloned below for every Part, so the mark has to live on the slot's own list.
+        let pref = self.account.subtitle_language();
+        shim_media::mark_preferred_subtitle(&mut st.subs, pref.as_deref());
         let subs: Vec<SubRef> = st
             .subs
             .iter()
             .map(|s| SubRef {
                 id: s.id,
                 lang: s.lang.clone(),
+                selected: s.selected,
             })
             .collect();
         let indexed: Vec<Stream> = st.streams.clone();

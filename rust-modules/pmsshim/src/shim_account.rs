@@ -105,6 +105,20 @@ impl Account {
         self.session.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
+    /// The account's subtitle language (`defaultSubtitleLanguage`: the picker's 2-letter code, as
+    /// the app writes it to `/api/v2/user/profile`), or `None` when the viewer never set one.
+    /// It is what the subtitle tracks are ranked against when a part is built — see
+    /// `shim_media::mark_preferred_subtitle`.
+    pub fn subtitle_language(&self) -> Option<String> {
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        prefs
+            .get("defaultSubtitleLanguage")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
     fn save(&self, s: Option<&plx_stremio::nuvio::Session>) {
         let Some(f) = &self.file else { return };
         let profile = if s.is_some() { self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() } else { None };

@@ -242,7 +242,7 @@ fn subtitle_position_lift(position: plx_plex::plex::session::SubtitlePosition) -
     use plx_plex::plex::session::SubtitlePosition;
     match position {
         SubtitlePosition::Low => 0.0,
-        SubtitlePosition::Middle => 40.0,
+        SubtitlePosition::Middle => 50.0,
         SubtitlePosition::High => 320.0,
     }
 }
@@ -1579,6 +1579,14 @@ const HUD_LOGO_RUNG: plx_ui::hero_logo::LogoRung = plx_ui::hero_logo::LogoRung::
 const HUD_LOGO_Y_EPISODE: f32 = SCR_H - 420.0;
 const HUD_LOGO_Y_MOVIE: f32 = SCR_H - 350.0;
 
+/// The rect a `src_w`×`src_h` logo is DRAWN in: [`plx_ui::hero_logo::fit`] sizes it inside the
+/// [`HUD_LOGO_MAX_W`] column, and it is anchored LEFT on [`SB_X`] — the playbar's own left edge —
+/// so a narrow mark lines up with the scrubber instead of floating centred in the column.
+fn hud_logo_rect(src_w: f32, src_h: f32, y: f32) -> Rect {
+    let (w, h) = plx_ui::hero_logo::fit(HUD_LOGO_RUNG, src_w, src_h, HUD_LOGO_MAX_W);
+    Rect::new(SB_X, y + plx_ui::hero_logo::band_h(HUD_LOGO_RUNG) - h, w, h)
+}
+
 /// [`draw_title`] for an item the logo store can resolve: the item's clearLogo through
 /// [`plx_ui::hero_logo::HeroLogo`] — the app's ONE clearLogo path — in place of the display title,
 /// and [`draw_title`] itself while there is no logo to draw.
@@ -1598,10 +1606,13 @@ pub fn draw_title_logo(
     rk: &str,
     measure: &dyn plx_machine::machine::Measure,
 ) {
-    if rk.is_empty() || plx_ui::tex::logo_src(sid, rk).is_none() {
+    let Some((_tex, src_w, src_h)) = (!rk.is_empty())
+        .then(|| plx_ui::tex::logo_src(sid, rk))
+        .flatten()
+    else {
         draw_title(p, kicker, title);
         return;
-    }
+    };
     // Only an episode keeps its kicker: it sits BELOW the logo, in the space the episode layout
     // leaves for it. A film's ctxline sits at the logo's own height (`HUD_LOGO_Y_MOVIE` band spans
     // it), so with a logo up it is not drawn at all rather than colliding with the wordmark.
@@ -1612,13 +1623,13 @@ pub fn draw_title_logo(
         }
         Kicker::Context(_) => HUD_LOGO_Y_MOVIE,
     };
-    let band = Rect::new(
-        SB_X,
-        y,
-        HUD_LOGO_MAX_W,
-        plx_ui::hero_logo::band_h(HUD_LOGO_RUNG),
-    );
-    plx_ui::hero_logo::HeroLogo::new(sid, rk, "", HUD_LOGO_RUNG).draw(p, band, measure);
+    // The band is the DRAWN rect, not the whole column: a logo narrower than the playbar keeps its
+    // left edge on `SB_X` and leaves the rest of the row empty, level with the progress bar.
+    let rect = hud_logo_rect(src_w, src_h, y);
+    let band = Rect::new(rect.x, y, rect.w, plx_ui::hero_logo::band_h(HUD_LOGO_RUNG));
+    plx_ui::hero_logo::HeroLogo::new(sid, rk, "", HUD_LOGO_RUNG)
+        .align(plx_ui::label::HAlign::Left)
+        .draw(p, band, measure);
 }
 
 /// The server the playing item's artwork belongs to — the resolution every other HUD panel already
@@ -2057,6 +2068,32 @@ mod tests {
     }
 
     use super::*;
+
+    /// **The HUD's clearLogo starts on the progress bar's own left edge**, whatever its aspect:
+    /// `fit` sizes the mark and it is anchored on [`SB_X`], never centred in the
+    /// [`HUD_LOGO_MAX_W`] column, so a narrow emblem lines up with the scrubber under it. Both
+    /// layouts (episode, film) take the same left edge.
+    #[test]
+    fn the_hud_clear_logo_is_left_aligned_with_the_progress_bar() {
+        for (src_w, src_h) in [(800.0f32, 310.0f32), (1500.0, 300.0), (400.0, 400.0), (7680.0, 4320.0)] {
+            for y in [HUD_LOGO_Y_EPISODE, HUD_LOGO_Y_MOVIE] {
+                let r = hud_logo_rect(src_w, src_h, y);
+                assert_eq!(r.x, SB_X, "{src_w}×{src_h} did not start on the playbar's margin");
+                assert!(r.w <= HUD_LOGO_MAX_W + 1e-3, "{src_w}×{src_h} overflowed its column at {}", r.w);
+                assert!(
+                    (r.w / r.h - src_w / src_h).abs() < 1e-3,
+                    "{src_w}×{src_h} was distorted to {}×{}",
+                    r.w,
+                    r.h
+                );
+                assert_eq!(
+                    r.y + r.h,
+                    y + plx_ui::hero_logo::band_h(HUD_LOGO_RUNG),
+                    "the logo left the band's anchor line"
+                );
+            }
+        }
+    }
 
     /// **The transport's clocks are resident before the draw, this second's and the next one's.**
     /// On the TV the draw met each new clock string cold AFTER the back-buffer wait (`clear:12.4 …
