@@ -744,6 +744,17 @@ impl PlayerOverlayScreen {
                 }
                 Handled::Yes
             }
+            // **More answers its own OK.** Its rows are `ElemKind::Bare`, so the engine's own
+            // answer for a focused row is an immediate `Activate` — the very same `Self::activate`
+            // (`dispatch.rs`'s OK arm). Declining it instead loses the press whenever the engine
+            // holds no current focus: `FocusEngine::kind_of` starts at `current(owner)?`, and the
+            // modal can be seated with nothing (its `enter` lands, then the group is rebuilt under
+            // it), so OK vanished until a DIRECTION press seeded a cursor through `move_dir`'s
+            // first-group fallback. The panel's own cursor is the seat of record either way.
+            Key::Ok if matches!(self.panel, Panel::More(_)) => {
+                self.activate(cx, fx);
+                Handled::Yes
+            }
             // Not consumed here: the engine's own `Activate`/`PressArm` machinery answers OK by
             // the focused element's `ElemKind` (§7.4), and `Machine::step`'s `Activate`/
             // `PressCommit` arms below spend what it decided (`Self::activate`).

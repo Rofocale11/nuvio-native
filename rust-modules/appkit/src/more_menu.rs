@@ -332,8 +332,10 @@ impl MoreMenuState {
 
     /// The explicit initial focus of a pushed page: none for either — the root's opener is restored
     /// by a pop and a fresh push starts on the page's opening row.
-    fn page_initial(&self, _page: MorePage) -> Option<MoreRow> {
-        None
+    fn page_initial(&self, page: MorePage) -> Option<MoreRow> {
+        // Force the engine to start focused on the first focusable row of the new page (the same
+        // read `pop` uses: an inert note is not a row to land on).
+        self.page_form(page).slots().into_iter().flatten().next().map(|b| b.id)
     }
 
     /// Open `page` above the current one: remember the opener and its scroll, install the page's
@@ -505,7 +507,18 @@ impl MoreMenuState {
     /// OK on the highlighted row: an action to perform (the container dismisses the panel
     /// afterward), or a Nav row that opened its page.
     pub fn on_ok(&mut self) -> MoreOk {
-        match self.form.selected_id().and_then(|id| self.form.index_of(id)).and_then(|i| self.form.activate(i)) {
+        // Ensure visual focus is valid
+        self.seat_valid_focus();
+
+        // If selected_id is None, fallback to the table's visual selection index
+        let idx = if let Some(id) = self.form.selected_id() {
+            self.form.index_of(id)
+        } else {
+            let sel = self.form.table.sel.max(0) as usize;
+            if self.form.binding_at(sel).is_some() { Some(sel) } else { None }
+        };
+
+        match idx.and_then(|i| self.form.activate(i)) {
             Some(Activation::Action(act)) => MoreOk::Action(act),
             Some(Activation::Push(page)) => {
                 self.push(page);
@@ -1003,27 +1016,40 @@ mod tests {
         assert!(!st.pop(), "the root has nothing to pop");
     }
 
-    /// **A cursor that names no row does not survive a frame.** The engine can leave a key behind
-    /// the page now showing, and a page can be installed before its rows land; either way the
-    /// cursor sits on nothing — no pill, and OK reads no id, so the menu looks dead until a
-    /// direction nudges it. The tick re-seats it on the first focusable row.
+    /// **A cursor that names no row never survives a press.** The engine can leave a key behind the
+    /// page now showing, and a page can be installed before its rows land; either way the cursor
+    /// sits on nothing — and both readers now re-seat it on the first focusable row: `on_ok`, so the
+    /// press commits that row instead of being spent nudging the cursor into place, and the tick,
+    /// for a cursor no press has touched yet.
     #[test]
-    fn an_invalid_cursor_is_reseated_on_a_row_by_the_tick() {
+    fn an_invalid_cursor_is_reseated_and_never_eats_the_press() {
         let _serial = plx_base::testlock::serial();
         const DT: f32 = 1.0 / 60.0;
         let m = plx_base::fontcov::advances::ShippedMeasure;
+
         let mut st = menu();
         st.stream_rev = plx_media::route::streams_rev(); // the tick's poll is not under test
         st.form.table.sel = st.form.table.n_rows(); // one past the last row
         assert_eq!(st.form.selected_id(), None, "the cursor names no row");
-        assert_eq!(st.on_ok(), MoreOk::Action(Action::None), "so OK commits nothing");
+        assert_eq!(
+            st.on_ok(),
+            MoreOk::Navigated,
+            "OK seats on the first focusable row and commits IT, not nothing"
+        );
+        assert_eq!(st.page(), Some(MorePage::Source), "which is the Source row's page");
+        st.motion.cancel_slide();
+        assert_eq!(st.sel_id(), Some(MoreRow::OpenAddon(0)), "and the cursor left on a real row");
+
+        let mut st = menu();
+        st.stream_rev = plx_media::route::streams_rev();
+        st.form.table.sel = st.form.table.n_rows();
         st.update(DT, &m);
         assert_eq!(
             st.form.selected_id(),
             Some(&MoreRow::OpenSource),
             "the tick puts the cursor back on the first row"
         );
-        assert_eq!(st.on_ok(), MoreOk::Navigated, "and OK answers again");
+        assert_eq!(st.on_ok(), MoreOk::Navigated, "and OK answers");
     }
 
     /// **A pop lands on a row the returned page still has.** A re-rank can drop the addon that

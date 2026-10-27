@@ -331,12 +331,8 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
         f.groups(cx, &mut groups);
         let Some(cur) = self.current(owner) else {
             // no focus yet: the first group's seat is the last resort (logged once by the caller)
-            let Some(spec) = groups.iter().find(|s| s.len > 0) else {
-                return Outcome::Nothing;
-            };
             self.fell_back = true;
-            let key = self.seat_in(f, &groups, spec, head_of(spec.extent), None, cx);
-            return self.set(owner, key, Some(spec.id), By::Dir);
+            return self.seat_first_in(owner, f, &groups, cx);
         };
         let Some(cur_group) = f.group_of(&cur.elem, cx) else {
             return Outcome::Nothing;
@@ -377,6 +373,35 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
                 self.set(owner, key, Some(dest.id), By::Dir)
             }
         }
+    }
+
+    /// **Seat a scope that has no cursor at all**: the first group with anything in it, by its own
+    /// `Seat` policy (§7.3's no-focus fallback). Shared by [`Self::move_dir`] — where a direction
+    /// press revives the surface — and by the dispatcher's OK arm, which otherwise had no answer
+    /// with no cursor (`kind_of` starts at `current(owner)?`) and dropped the press.
+    pub fn seat_first<H: Host<Elem = K>>(
+        &mut self,
+        owner: InputOwner,
+        f: &dyn Focusable<H>,
+        cx: &Cx<'_, H>,
+    ) -> Outcome<K> {
+        let mut groups = Vec::new();
+        f.groups(cx, &mut groups);
+        self.seat_first_in(owner, f, &groups, cx)
+    }
+
+    fn seat_first_in<H: Host<Elem = K>>(
+        &mut self,
+        owner: InputOwner,
+        f: &dyn Focusable<H>,
+        groups: &[GroupSpec],
+        cx: &Cx<'_, H>,
+    ) -> Outcome<K> {
+        let Some(spec) = groups.iter().find(|s| s.len > 0) else {
+            return Outcome::Nothing;
+        };
+        let key = self.seat_in(f, groups, spec, head_of(spec.extent), None, cx);
+        self.set(owner, key, Some(spec.id), By::Dir)
     }
 
     /// After a landing and before draw (§7.3 step 6): the owner's pure `reconcile` on the
@@ -847,6 +872,27 @@ mod tests {
         t.row(10, 3, 60.0, 700.0, 220.0, 330.0, 240.0);
         out.push(("virtualised", t));
         out
+    }
+
+    /// **An empty scope is seatable by rule, not only by a direction press.** `seat_first` is what
+    /// the dispatcher's OK arm takes when `kind_of` finds no cursor (a surface presented before its
+    /// rows land): without it the press was dropped, with it OK commits the row a direction press
+    /// would have revealed. It must not set `fell_back` — that flag's log belongs to the direction
+    /// press that finds itself lost.
+    #[test]
+    fn seat_first_lands_an_empty_scope_on_the_first_non_empty_group() {
+        rig!(m, v, cx);
+        let (_, t) = trees().into_iter().find(|(n, _)| *n == "table").unwrap();
+        let mut e = FocusEngine::new();
+        assert_eq!(e.current(OWNER), None, "nothing is focused on a fresh engine");
+        let Outcome::Moved { from, to, .. } = e.seat_first(OWNER, &t, &cx) else {
+            panic!("a non-empty group must be seatable with no cursor");
+        };
+        assert_eq!(from, None);
+        assert_eq!(e.current(OWNER), Some(to), "and it becomes the cursor");
+        assert_eq!(t.group_of(&to.elem, &cx), Some(GroupId(2)), "the first non-empty group");
+        assert!(t.place(&to.elem, &cx, At::Drawn).is_some(), "on a row it can place");
+        assert!(!e.take_fell_back(), "the OK path is not logged as a lost direction");
     }
 
     /// `every_stop_times_every_direction_on_the_fixture_trees`: no panic, and every answer is

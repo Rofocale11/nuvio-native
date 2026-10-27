@@ -2171,7 +2171,7 @@ where
                         Outcome::Edge(_) | Outcome::Nothing => {}
                     }
                 } else if *key == Key::Ok && *edge == Edge::Down {
-                    let kind = {
+                    let mut kind = {
                         let Dispatcher { nav, input, .. } = self;
                         let Some(view) = Self::owner_view(nav, entry) else {
                             return;
@@ -2180,6 +2180,34 @@ where
                         let cx = parts.cx::<H>(views, measure);
                         input.engine.kind_of(owner, &view, &cx)
                     };
+                    // **No cursor: seat one, then answer the press.** OK was the one key with no
+                    // fallback of its own — `kind_of` starts at `current(owner)?`, so it answered
+                    // nothing and the press died here, while a DIRECTION press revived the surface
+                    // through `move_dir`'s first-group seat. That is the same seat, taken here.
+                    // A surface can be presented before it holds a cursor: its `enter` lands on a
+                    // group whose rows arrive a frame later, and nothing re-seats on a tick
+                    // (`reconcile` bails on no current focus too).
+                    if kind.is_none() {
+                        let seated = self.focus_resolution(rig, parts, entry, 3, tap,
+                            |engine, view, cx| engine.seat_first(owner, view, cx));
+                        if let Outcome::Moved { from, to, by } = seated {
+                            // the owner's `FocusMoved` arm is what writes the new cursor into its
+                            // own panel; deliver it before the activation that reads that cursor
+                            out.push(Stamped {
+                                from: MachineId::Input,
+                                fx: Fx::Deliver(MachineId::Instance(id), Delivery::Screen(ScreenEvent::FocusMoved { from, to, by })),
+                            });
+                        }
+                        kind = {
+                            let Dispatcher { nav, input, .. } = self;
+                            let Some(view) = Self::owner_view(nav, entry) else {
+                                return;
+                            };
+                            let Split { views, measure, .. } = rig.split();
+                            let cx = parts.cx::<H>(views, measure);
+                            input.engine.kind_of(owner, &view, &cx)
+                        };
+                    }
                     match kind {
                         Some((k, ElemKind::Bare)) => out.push(Stamped {
                             from: MachineId::Input,
