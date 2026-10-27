@@ -241,8 +241,8 @@ fn subtitle_size_scale(size: plx_plex::plex::session::SubtitleSize) -> f32 {
 fn subtitle_position_lift(position: plx_plex::plex::session::SubtitlePosition) -> f32 {
     use plx_plex::plex::session::SubtitlePosition;
     match position {
-        SubtitlePosition::Low => 20.0,
-        SubtitlePosition::Middle => 160.0,
+        SubtitlePosition::Low => 0.0,
+        SubtitlePosition::Middle => 40.0,
         SubtitlePosition::High => 320.0,
     }
 }
@@ -1577,7 +1577,7 @@ const HUD_LOGO_RUNG: plx_ui::hero_logo::LogoRung = plx_ui::hero_logo::LogoRung::
 /// height the logo would float above a gap, so it drops toward the playbar. Every other context
 /// label (an extra's kind, a movie's ctxline) takes the film's placement with it.
 const HUD_LOGO_Y_EPISODE: f32 = SCR_H - 420.0;
-const HUD_LOGO_Y_MOVIE: f32 = SCR_H - 320.0;
+const HUD_LOGO_Y_MOVIE: f32 = SCR_H - 350.0;
 
 /// [`draw_title`] for an item the logo store can resolve: the item's clearLogo through
 /// [`plx_ui::hero_logo::HeroLogo`] — the app's ONE clearLogo path — in place of the display title,
