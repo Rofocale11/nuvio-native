@@ -3456,6 +3456,10 @@ impl Shim {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Response::not_found();
         }
+        // A clearLogo is the one piece of art the app aligns by its EDGE (the hero and the player
+        // HUD both anchor the logo's box), so the transparent margins a logotype is authored with
+        // read as an offset. Only the logo is cropped: a poster or a backdrop owns its full frame.
+        let logo_rk = logo_path_key(source);
         let width: u32 = req.q("width").and_then(|v| v.parse().ok()).unwrap_or(0);
         let height: u32 = req.q("height").and_then(|v| v.parse().ok()).unwrap_or(0);
         let sized = sized_image_url(url, width.max(height.saturating_mul(2) / 3));
@@ -3485,7 +3489,14 @@ impl Shim {
                 None,
             ) {
                 if r.ok() && !r.body.is_empty() {
-                    return Response::bytes(200, sniff_image(&r.body), r.body);
+                    let content_type = sniff_image(&r.body);
+                    // A PNG is the only flavour that carries an alpha border to cut; a JPEG logo
+                    // has none and is served exactly as it came.
+                    let body = match (logo_rk, content_type) {
+                        (Some(rk), "image/png") => logo_png(rk, &url, (width, height), r.body),
+                        _ => r.body,
+                    };
+                    return Response::bytes(200, content_type, body);
                 }
                 status = r.status.max(400);
             }
@@ -3494,7 +3505,93 @@ impl Shim {
     }
 }
 
+/// **A title logo with its transparent border cut away, cached as the PNG the app will draw.**
+/// The app aligns a logo by its box (`plx_ui::hero_logo::place`), and a TMDB/Stash logotype is
+/// authored on a canvas padded with transparency — often more on one side — so the visible mark
+/// lands off the edge it must line up with (the player HUD's `SB_X`, the hero's column). Cutting
+/// the border to the ink's bounding box makes the box and the mark the same rectangle.
+///
+/// Crop-and-re-encode is real CPU work, so the result is stored in the app's own artwork cache
+/// (`plx_platform::imgcache`) under an identity of its OWN (`classify_baked`, kind `logo-ink-v1`)
+/// rather than the transcode slot the front end reads: an install that cached the uncropped bytes
+/// before this existed must not be served them as if they were cropped. The identity is the item,
+/// the logo's URL and the requested size — never the pixels — so the second request for a logo,
+/// this run or after a reboot, is one file read.
+fn logo_png(rk: &str, url: &str, size: (u32, u32), bytes: Vec<u8>) -> Vec<u8> {
+    use plx_platform::imgcache;
+    let key = imgcache::classify_baked(
+        crate::shim_core::MACHINE_ID,
+        "logo-ink-v1",
+        rk,
+        url,
+        size.0.max(1),
+        size.1.max(1),
+    );
+    let generation = imgcache::generation();
+    if let Some(cached) = key.as_ref().and_then(|k| imgcache::read_at(generation, k)) {
+        return cached.bytes;
+    }
+    let Some(cropped) = crop_ink(&bytes) else {
+        // Nothing to cut (no alpha, or the ink already fills the canvas) or bytes that do not
+        // decode: the source is the answer. Not cached — a decode failure must be retried, not
+        // remembered as the crop.
+        return bytes;
+    };
+    if let Some(key) = key.as_ref() {
+        imgcache::write_at(generation, key, &cropped);
+    }
+    cropped
+}
+
+/// The alpha a pixel needs before it counts as ink. A 0 would crop to a stray anti-aliased fringe;
+/// 1/255 is 0.4 % covered and invisible on a television.
+const INK_ALPHA: u8 = 8;
+
+/// `bytes` re-encoded as a PNG with its fully transparent border removed, or `None` when there is
+/// nothing to cut: a source with no alpha channel (a JPEG), a canvas whose ink already reaches
+/// every edge, or bytes that do not decode as an image.
+fn crop_ink(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = image::load_from_memory(bytes).ok()?;
+    if !image.color().has_alpha() {
+        return None;
+    }
+    let rgba = image.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for (x, y, px) in rgba.enumerate_pixels() {
+        if px[3] < INK_ALPHA {
+            continue;
+        }
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x + 1);
+        y1 = y1.max(y + 1);
+    }
+    // Nothing visible at all (`x1 == 0`) or the ink already fills the canvas: the source IS the
+    // crop, and re-encoding it would only cost time.
+    if x1 == 0 || (x0, y0, x1, y1) == (0, 0, w, h) {
+        return None;
+    }
+    let cropped = image::imageops::crop_imm(&rgba, x0, y0, x1 - x0, y1 - y0).to_image();
+    let mut png = Vec::new();
+    cropped
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(png)
+}
+
+/// The ratingKey when `source` is the app's own art path for a title LOGO —
+/// `…/library/metadata/{rk}/clearLogo`, absolute (`http://host/…`) or the bare path the row's
+/// `clearLogo` is fetched by. Nothing else (a poster, a backdrop, an addon URL) is a logo.
+fn logo_path_key(source: &str) -> Option<&str> {
+    let path = source.split('?').next().unwrap_or(source);
+    let mut segs = path.trim_end_matches('/').rsplit('/');
+    let (kind, rk, metadata) = (segs.next()?, segs.next()?, segs.next()?);
+    (kind == "clearLogo" && metadata == "metadata" && !rk.is_empty()).then_some(rk)
+}
+
 fn sniff_image(b: &[u8]) -> &'static str {
+
     if b.starts_with(&[0x89, b'P', b'N', b'G']) {
         "image/png"
     } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
@@ -3704,9 +3801,100 @@ mod playback_regressions {
         worker.join().unwrap();
     }
 
+    /// **A logo's transparent border is cut away, and the cut is remembered.** The app anchors a
+    /// logo by its box, so the padding a logotype is authored with was drawing the mark off the
+    /// edge it must line up with. The second answer comes from `imgcache`: it is returned even
+    /// though the bytes handed in this time are not an image at all, i.e. nothing was decoded again.
+    #[test]
+    fn a_title_logo_is_cropped_to_its_ink_and_the_crop_is_cached() {
+        let url = format!("https://example.invalid/logo/{}.png", std::process::id());
+        let padded = encode_rgba(40, 20, |x, y| ((10..30).contains(&x) && (5..15).contains(&y)).then_some([255, 255, 255, 255]));
+        let cropped = logo_png("424242", &url, (600, 240), padded.clone());
+        assert_ne!(cropped, padded, "the transparent border was served as it came");
+        let drawn = image::load_from_memory(&cropped).unwrap().to_rgba8();
+        assert_eq!(drawn.dimensions(), (20, 10), "the crop is not the ink's bounding box");
+        assert_eq!(
+            logo_png("424242", &url, (600, 240), b"not an image".to_vec()),
+            cropped,
+            "the second request decoded the source again instead of reading the cache"
+        );
+    }
+
+    /// Whatever has no border to cut is served exactly as it came: an opaque image, a mark that
+    /// already fills its canvas, and bytes that are not an image at all.
+    #[test]
+    fn only_a_padded_transparent_logo_is_re_encoded() {
+        let opaque = encode_rgba(12, 12, |_, _| Some([9, 9, 9, 255]));
+        assert!(super::crop_ink(&opaque).is_none(), "an opaque image has no border");
+        let full = encode_rgba(12, 12, |_, _| Some([255, 0, 0, 255]));
+        assert!(super::crop_ink(&full).is_none(), "ink already filling the canvas was re-encoded");
+        assert!(super::crop_ink(b"\x89PNG\r\n\x1a\nnot really").is_none());
+    }
+
+    /// A blank `w`×`h` RGBA PNG whose pixel `(x, y)` is `ink(x, y)`, else transparent.
+    fn encode_rgba(w: u32, h: u32, ink: impl Fn(u32, u32) -> Option<[u8; 4]>) -> Vec<u8> {
+        let mut buf = image::RgbaImage::new(w, h);
+        for (x, y, px) in buf.enumerate_pixels_mut() {
+            *px = image::Rgba(ink(x, y).unwrap_or([0, 0, 0, 0]));
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(buf)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    /// **The `photo` route is where the cut happens** — the app never asks for a logo by CDN URL,
+    /// it asks for `/library/metadata/{rk}/clearLogo`, and that is the path this route sees.
+    #[test]
+    fn the_photo_route_crops_a_clear_logo_but_not_a_poster() {
+        use std::io::{Read, Write};
+        plx_net::net::global_init();
+        let padded = encode_rgba(64, 32, |x, y| ((16..48).contains(&x) && (8..24).contains(&y)).then_some([255, 255, 255, 255]));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = padded.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut buffer = [0; 4096];
+                let _ = stream.read(&mut buffer).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    served.len()
+                )
+                .unwrap();
+                stream.write_all(&served).unwrap();
+            }
+        });
+        let shim = Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default());
+        let art = |kind: &str| Request {
+            method: "GET".into(),
+            path: "/photo/:/transcode".into(),
+            query: HashMap::from([
+                ("url".into(), format!("http://{addr}/library/metadata/4242/{kind}")),
+                ("width".into(), "600".into()),
+                ("height".into(), "240".into()),
+            ]),
+            headers: HashMap::new(),
+            body: vec![],
+        };
+        // A clearLogo path is cropped to its ink; a poster is not the app's title mark.
+        let logo = shim.photo(&art("clearLogo"));
+        assert_eq!(logo.status, 200);
+        assert_eq!(logo.content_type, "image/png");
+        assert_eq!(image::load_from_memory(&logo.body).unwrap().to_rgba8().dimensions(), (32, 16));
+        let poster = shim.photo(&art("thumb"));
+        assert_eq!(poster.body, padded, "an ordinary poster must be served as it came");
+        worker.join().unwrap();
+    }
+
     #[test]
     fn a_failed_poster_provider_falls_back_to_the_original_artwork() {
         use std::io::{Read, Write};
+
         plx_net::net::global_init();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

@@ -777,7 +777,9 @@ name = "plx_pmsshim"
 version = "0.0.0"
 dependencies = [
  "flate2",
+ "image",
  "plx_net",
+ "plx_platform",
  "plx_stremio",
  "png",
  "qrcodegen",

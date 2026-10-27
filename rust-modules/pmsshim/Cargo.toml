@@ -16,6 +16,9 @@ path = "src/bin/serve.rs"
 
 [dependencies]
 plx_net = { path = "../net" }
+# The app's own bounded artwork cache (`imgcache`): a cropped title logo is stored there once
+# instead of re-decoding and re-encoding the same PNG on every request.
+plx_platform = { path = "../platform" }
 plx_stremio = { path = "../stremio" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
@@ -24,6 +27,9 @@ flate2 = "1"
 # The Nuvio sign-in QR the shim serves in place of plex.tv's (both already in the tree via `ui`/`image`).
 qrcodegen = "=1.8.0"
 png = "0.18"
+# Cutting a title logo's transparent border: PNG decode + crop + re-encode, pure Rust, already
+# compiled for the UI (`gfx::img`) at every other feature the tree uses.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

@@ -1577,7 +1577,7 @@ const HUD_LOGO_RUNG: plx_ui::hero_logo::LogoRung = plx_ui::hero_logo::LogoRung::
 /// height the logo would float above a gap, so it drops toward the playbar. Every other context
 /// label (an extra's kind, a movie's ctxline) takes the film's placement with it.
 const HUD_LOGO_Y_EPISODE: f32 = SCR_H - 420.0;
-const HUD_LOGO_Y_MOVIE: f32 = SCR_H - 350.0;
+const HUD_LOGO_Y_MOVIE: f32 = SCR_H - 370.0;
 
 /// The rect a `src_w`×`src_h` logo is DRAWN in: [`plx_ui::hero_logo::fit`] sizes it inside the
 /// [`HUD_LOGO_MAX_W`] column, and it is anchored LEFT on [`SB_X`] — the playbar's own left edge —
