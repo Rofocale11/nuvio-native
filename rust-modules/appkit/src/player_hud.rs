@@ -241,7 +241,7 @@ fn subtitle_size_scale(size: plx_plex::plex::session::SubtitleSize) -> f32 {
 fn subtitle_position_lift(position: plx_plex::plex::session::SubtitlePosition) -> f32 {
     use plx_plex::plex::session::SubtitlePosition;
     match position {
-        SubtitlePosition::Low => 0.0,
+        SubtitlePosition::Low => 20.0,
         SubtitlePosition::Middle => 160.0,
         SubtitlePosition::High => 320.0,
     }
@@ -1572,6 +1572,13 @@ const HUD_LOGO_RUNG: plx_ui::hero_logo::LogoRung = plx_ui::hero_logo::LogoRung::
     fallback_sz: HUD_TITLE_SZ,
 };
 
+/// The clearLogo band's top, per kind of display title. An episode draws its "S1, E1 · Pilot"
+/// kicker UNDER the logo, so its band stays high; a film has no such line, and at the episode's
+/// height the logo would float above a gap, so it drops toward the playbar. Every other context
+/// label (an extra's kind, a movie's ctxline) takes the film's placement with it.
+const HUD_LOGO_Y_EPISODE: f32 = SCR_H - 420.0;
+const HUD_LOGO_Y_MOVIE: f32 = SCR_H - 320.0;
+
 /// [`draw_title`] for an item the logo store can resolve: the item's clearLogo through
 /// [`plx_ui::hero_logo::HeroLogo`] — the app's ONE clearLogo path — in place of the display title,
 /// and [`draw_title`] itself while there is no logo to draw.
@@ -1595,10 +1602,19 @@ pub fn draw_title_logo(
         draw_title(p, kicker, title);
         return;
     }
-    draw_kicker(p, kicker);
+    // Only an episode keeps its kicker: it sits BELOW the logo, in the space the episode layout
+    // leaves for it. A film's ctxline sits at the logo's own height (`HUD_LOGO_Y_MOVIE` band spans
+    // it), so with a logo up it is not drawn at all rather than colliding with the wordmark.
+    let y = match kicker {
+        Kicker::Episode(_) => {
+            draw_kicker(p, kicker);
+            HUD_LOGO_Y_EPISODE
+        }
+        Kicker::Context(_) => HUD_LOGO_Y_MOVIE,
+    };
     let band = Rect::new(
         SB_X,
-        SCR_H - 420.0,
+        y,
         HUD_LOGO_MAX_W,
         plx_ui::hero_logo::band_h(HUD_LOGO_RUNG),
     );
