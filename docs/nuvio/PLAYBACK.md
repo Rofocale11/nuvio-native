@@ -32,6 +32,33 @@ issuer (a 2020 CX firmware lacks newer roots), the request is retried once again
 shared `net::keypin` ladder, so the **control plane (addon JSON via `plx_net::net::request`) gets
 the same fallback**.
 
+## Seeks: what a seek costs here
+
+Every direct-play seek under the shim is a **full reload**, not an in-place re-anchor.
+`player::INPLACE_SEEK_OK` is cleared whenever the Starfish object layout is not the one this
+fork was decompiled against, which is every webOS 5+ firmware (`engine::start_bufferfeed` →
+`inplace_layout_known`; the in-place path reaches LG-private C++ offsets derived from a 4.5
+binary). So a seek = teardown, fresh `Load`, fresh Starfish object, new `Range: bytes=N-`
+transfer. Two things are tuned for that reality:
+
+- **The reopen budget is 3 s** (`SEEK_STUCK_MS`, `player/pump.rs`). The watchdog's job is to
+  catch a *lost* reopen, and it does that by re-interrupting the demuxer — which closes the
+  socket the reopen is blocked on. Over a LAN PMS that reopen takes ~700 ms, so 1.2 s was
+  generous. Through the shim it is: `av_seek_frame` → `seek_cb` → re-ask the shim's Part URL
+  (302 re-issued, a debrid link possibly re-resolved) → a fresh TLS transfer with `Range:`. Two
+  public-internet round trips. A watchdog tuned for one LAN read fires mid-flight and restarts
+  a transfer that was about to land, which is exactly the failure it exists to avoid.
+- **The spinner waits 250 ms** (`SEEK_SPINNER_GRACE_MS`, `player/mod.rs`). A reload that lands
+  inside the grace paints nothing at all — the transport stays up, the playhead is already
+  frozen at the target, and the picture returns. This is a *drawing* grace only:
+  `player::state()` still reports `Seeking` on the frame the seek is requested, because the
+  playhead freeze, `is_playing`, `intended_pos_ns` and the rebuffer accounting all key on that
+  state and none of them should lag. The gate lives in `player_hud::busy()`, the one impure
+  sampler, so `busy_surface` keeps its pure rule.
+
+A seek that never lands still ends: two retries, then a full reload, then the failure read-out.
+The added latency (1.2 s → 3 s per attempt) is paid only by a seek that was already broken.
+
 ## Real metadata: `plx_media::ff::probe::probe_url`
 
 The route, the Load payload (`"video":"H265"`, `"audio":"AC3 PLUS"`), the audio-track pick and
@@ -82,16 +109,57 @@ preference. Without English dialogue, the compatible file default is retained.
 An explicit user audio choice takes precedence over this initial selection.
 
 
-`devcaps` admits DTS only when the TV's codec table lists it (a 2020 CX does not); TrueHD is never
-direct-play. With accurate `Stream(type 2)` rows the route's existing smart-direct-play picks a
-compatible AAC/AC3/EAC3 sibling of a DTS/TrueHD default. **When there is no compatible track the
-route asks the server to convert it — the shim cannot.** The shim must answer such a decision with
-a refusal and the UI says "audio format not supported"; `ff::probe::preferred_audio` is the helper
+`devcaps` decides a track's lane from the TV's own codec table (`Caps::enc_lane_candidate`):
+
+| track | lane |
+|---|---|
+| FLAC / native PCM inside the PCM lane's counts (mono, stereo, 6-ch) | PCM lane, lossless (`ff_pcm.rs`) |
+| FLAC / PCM 3–8 ch the PCM lane does not admit | **AC3 encode lane** (`ff_enc.rs`) |
+| TrueHD / MLP, any channel count | **AC3 encode lane** |
+| DTS, any channel count — **whether or not the table has a `dts` row** | **AC3 encode lane** |
+
+The encode lane is real and shipped: the bundled FFmpeg carries `dca`/`truehd`/`mlp`/`flac`
+decoders and the `ac3_fixed` encoder (`ci/build-ffmpeg.sh`), the demux thread decodes the track,
+folds it to 5.1(side) by channel role in Q15 integer arithmetic, and encodes AC3 640 kbps at
+48 kHz. The Load then declares it exactly as a native AC3 5.1 track (`AudioLaneInfo::Ac3Encode`),
+so the television's hardware sees a format it already decodes. No resampler exists in the build
+(`--disable-swresample`), so the lane takes 48 kHz sources only; the route leaves any other rate
+with the server.
+
+**DTS is deliberately the one unconditional arm.** The two sets this fork runs on have opposite
+DTS problems and the lane is the only answer both accept:
+
+- a set *with* a `dts` row plays the core only — `ff::dts_core_packet` drops the DTS-HD
+  extension, so a 7.1 MA arrives as 5.1 core at 1.5 Mbps, and anything above the row's channel
+  ceiling is refused outright;
+- a set *without* one (a 2020 CX) has no DTS decoder at all, so the same core reaches the
+  pipeline as **silence**.
+
+Folding to AC3 gives both the same 5.1 output, decoded from the full lossless stream (`dca`
+decodes the extension, so nothing is discarded). The log says which path ran:
+`ff: DTS -> AC3 encode lane (DTS-HD extensions decoded, not discarded)` when the lane is on,
+`ff: DTS core extraction on (DTS-HD extensions discarded)` only when it is off.
+
+Consequences the shim must respect:
+
+- **A DTS-only stream is now playable on a set with no DTS row**, provided the table has a
+  measured AC3 row of ≥6 channels (the lane's sink, never assumed). "DTS with no compatible
+  sibling" is no longer a refusal.
+- The direct-play profile states the lane's codecs itself — `enc_lane_profile_codecs` returns
+  `truehd,mlp,dts`, appended to `audioCodec=` (deduped against the table, so `dts` is not listed
+  twice) — and `profile_channel_limit_with` states 8 channels for them. DTS is exempt from the
+  lane's `audio.samplingRate=48000` limitation: a rate the lane refuses falls back to core
+  extraction, which plays at any rate.
+- `preferred_audio`'s `decodable` predicate must be the lane-aware rule, not `audio_has`:
+  a DTS default is decodable when the AC3 5.1 sink exists.
+- `forkknobs`' `encode=off` turns the whole lane off, restoring server conversion and core
+  extraction. The boot line `devcaps: fork lanes …` states the lanes and the encode row in force.
+
+With accurate `Stream(type 2)` rows the route's smart-direct-play still prefers a compatible
+AAC/AC3/EAC3 sibling when one exists. **When there is no track any lane takes, the route asks
+the server to convert it — the shim cannot.** The shim must answer such a decision with a
+refusal and the UI says "audio format not supported"; `ff::probe::preferred_audio` is the helper
 that tells the shim this ahead of time (rank such streams last / mark them in the source list).
-On-device DTS→AC3 was assessed and NOT implemented: the bundled FFmpeg is built
-`--disable-everything` with no audio decoders/encoders; it would need `dca` decode + `ac3`
-encode added to `ci/build-ffmpeg.sh` and an audio-transcode lane in the buffer-feed pump (AU
-timing, seek, A/V sync) — a multi-day change.
 
 ### Dolby Vision on the CX
 

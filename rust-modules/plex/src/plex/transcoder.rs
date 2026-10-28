@@ -234,9 +234,14 @@ fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: Trans
         }
     }
     let (w, h) = caps.hevc_max;
-    // FORK (RichiL10): plus the codecs only the in-app AC3 encode lane decodes (TrueHD, MLP).
+    // FORK (RichiL10): plus the codecs only the in-app AC3 encode lane decodes (TrueHD, MLP,
+    // DTS). Deduped against `caps.audio`: DTS is in the television's own table too, and appending
+    // it blindly put `dts` in `audioCodec=` twice.
     let enc_only = caps.enc_lane_profile_codecs(encode);
-    let dp_audio = &std::iter::once(caps.audio.as_str()).chain(enc_only.iter().copied()).collect::<Vec<_>>().join(",");
+    let dp_audio = &std::iter::once(caps.audio.as_str())
+        .chain(enc_only.iter().copied().filter(|c| !caps.audio_has(c)))
+        .collect::<Vec<_>>()
+        .join(",");
     // The codec-scoped bounds: the row's own axis, never roomier than the shared bound, and only
     // where it is strictly tighter. PMS's way of combining a codec scope with the `*` scope is
     // unverified, so a codec scope must never claim more than the client gate enforces, and it is
@@ -289,9 +294,11 @@ fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: Trans
         .map(|(codec, channels)| format!(
             "+add-limitation(scope=videoAudioCodec&scopeName={codec}&type=upperBound&name=audio.channels&value={channels}&replace=true)"
         ))
-        // FORK (RichiL10): TrueHD/MLP always go through the encode lane, which has no resampler,
-        // so PMS converts any of them above 48 kHz itself.
-        .chain(enc_only.iter().map(|codec| format!(
+        // FORK (RichiL10): TrueHD/MLP and FLAC/PCM always go through the encode lane, which has
+        // no resampler, so PMS converts any of them above 48 kHz itself. DTS is exempt: a rate the
+        // lane refuses falls back to the DTS core (`ff.rs`'s `dts_audio && enc_lane.is_none()`),
+        // which plays at any rate, so capping DTS at 48 kHz would cost a capability it still has.
+        .chain(enc_only.iter().filter(|c| **c != "dts").map(|codec| format!(
             "+add-limitation(scope=videoAudioCodec&scopeName={codec}&type=upperBound&name=audio.samplingRate&value={}&replace=true)",
             plx_platform::devcaps::ENC_LANE_RATE
         )))

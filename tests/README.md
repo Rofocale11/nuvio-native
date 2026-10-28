@@ -72,10 +72,13 @@ harness refuses to grade it.
 
 The player can feed `{h264, hevc}` (plus `av1` / `vp9` on a set whose codec table lists that decoder) × `{aac, ac3, eac3, dts}` in `mkv`/`mp4`/`m4v`.
 Automatic direct play intersects those formats with the TV's codec table and channel limits;
-DTS requires an explicit capability row with a channel ceiling. The implemented Load strings
+DTS requires an explicit capability row with a channel ceiling **only when the AC3 encode lane is
+off** — with it on (the default, and gated on a measured AC3 ≥6-channel row) DTS, TrueHD and MLP
+are decoded in-app and fed as AC3 5.1 48 kHz (`media/src/ff_enc.rs`), so a DTS track plays on a set
+with no `dts` row at all. The implemented Load strings
 are `H264`/`H265` (and `AV1` / `VP9` only on a set whose codec table lists that decoder) and
-`AAC`/`AC3`/`AC3 PLUS`/`DTS`. DTS-HD packets feed only their core;
-TrueHD and other unsupported feed formats still require server conversion. This is the
+`AAC`/`AC3`/`AC3 PLUS`/`DTS`. DTS-HD packets feed only their core when the encode lane is off;
+TrueHD and other unsupported feed formats still require server conversion then. This is the
 implemented format set, not the complete vocabulary accepted by LG's firmware.
 
 | | AC3 | AC3 PLUS | AAC | DTS |

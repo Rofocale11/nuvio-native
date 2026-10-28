@@ -919,7 +919,17 @@ pub fn busy(ps: &plx_media::route::PlaybackSession) -> Busy {
     if plx_base::devtrig::flag("failtest") {
         return Busy::Readout(StatusKind::Failed, plx_media::player::error_caption(ps));
     }
-    busy_surface(ps, plx_media::player::state(ps), plx_media::player::seen_frame())
+    let st = plx_media::player::state(ps);
+    // A seek younger than `SEEK_SPINNER_GRACE_MS` owns nothing yet. This is the ONE impure
+    // sampler, so the grace lands here and nowhere else: `busy_surface` keeps its pure rule and
+    // every test over it still describes what a seek draws once it is old enough to be drawn.
+    // Deliberately before the state is handed on, so a fast seek paints no read-out AND no
+    // inline spinner; the transport itself stays up, pinned by `player::loading` — the playhead
+    // freeze and the direction glyph are `scrubbing`'s business, not the spinner's.
+    if st == plx_media::player::PlaybackState::Seeking && !plx_media::player::seek_spinner_due() {
+        return Busy::None;
+    }
+    busy_surface(ps, st, plx_media::player::seen_frame())
 }
 
 // ---- the transport STATE READ-OUT (the glyph slot just past the elapsed clock) ---------------

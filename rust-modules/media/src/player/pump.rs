@@ -1405,12 +1405,22 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
     // PMS (~700ms): the retry closes the demux socket, so a premature watchdog KILLS an open that
     // was about to succeed and restarts it — at 500ms a rapid tap-burst self-DoS'd into the
     // reload fallback every time (caught by the seek_rapid harness cases).
+    //
+    // 3000 rather than 1200 (2026-10-28): that ~700 ms was measured against a LAN PMS. This fork
+    // plays a shim 302 to a debrid CDN, where `av_seek_frame` reaches `seek_cb`, which closes the
+    // socket, re-asks the shim's Part URL (so the 302 is re-issued and a short-lived debrid link
+    // may be re-resolved), then opens a fresh TLS transfer with `Range: bytes=N-`. That is two
+    // round trips over the public internet, not one read on a gigabit LAN, and a 1200 ms budget
+    // fires the retry while the first reopen is still in flight — the retry then closes the
+    // socket the demuxer is blocked on. Waiting longer costs a genuinely dead seek 1.8 s more
+    // before it takes the same retry path it would have taken anyway; firing early costs every
+    // slow-but-fine seek its reopen.
+    const SEEK_STUCK_MS: u32 = 3000;
     // A claim's worker owns `ControlPhase::Applying` and has no vocabulary for a seek reload
     // reaching in and replacing the encoder/engine out from under it (see `route::flight_outstanding`'s own
     // doc). Skip both this branch and the plain pending-seek branch below while one is in flight —
     // `TX.seek_to_ns` stays exactly where it is and the retranscode/native-audio tail re-checks it
     // once the claim lands (`commit_or_carry_seek`).
-    const SEEK_STUCK_MS: u32 = 1200;
     if eng.flushed && eng.rebase_pending
         && now.wrapping_sub(eng.seek_armed_at) > SEEK_STUCK_MS
         && !crate::route::flight_outstanding()

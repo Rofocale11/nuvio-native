@@ -566,6 +566,10 @@ pub struct Shared {
     // wobble through the seek/rebase. -1 display = not loading.
     pub seeking: AtomicBool,
     pub seek_display_ns: AtomicI64,
+    // When `seeking` was armed (vclock_ms). The HUD's spinner waits
+    // `player::SEEK_SPINNER_GRACE_MS` from this stamp before it admits to a seek, so a seek that
+    // lands inside the grace never paints one. Only meaningful while `seeking` is true.
+    pub seek_armed_ms: AtomicU32,
     // NATIVE audio-track switch (direct-play, no transcode): the 0-based audio stream index
     // to feed. `desired` (-1 = av_find_best_stream) is read by the demuxer to pick the Nth audio
     // stream and PERSISTS across seeks/reloads (reset only on a new item, not in reset_session).
@@ -961,6 +965,7 @@ impl Shared {
             seek_to_ns: AtomicI64::new(-1),
             seek_target_ns: AtomicI64::new(-1),
             seeking: AtomicBool::new(false),
+            seek_armed_ms: AtomicU32::new(0),
             seek_display_ns: AtomicI64::new(-1),
             desired_audio_idx: AtomicI32::new(-1),
             pb_state: AtomicU8::new(PlaybackState::Idle as u8),

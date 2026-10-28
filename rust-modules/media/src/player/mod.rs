@@ -553,6 +553,7 @@ pub fn request_seek(ns: i64) {
     crate::route::note_user_seek_intent(ns);
     SHARED.ended.store(false, Relaxed); // seeking back from the end un-ends the stream
     SHARED.seeking.store(true, Relaxed); // HUD: spinner + freeze the playhead until it lands
+    SHARED.seek_armed_ms.store(vclock_ms(), Relaxed); // …but only after SEEK_SPINNER_GRACE_MS
     SHARED.seek_display_ns.store(ns, Relaxed);
     TX.seek_to_ns.store(ns, Relaxed);
     // Count the request even though the target it carries may be overwritten before the pump
@@ -592,6 +593,29 @@ pub fn abandon_seek() {
 /// spinner and freezes the playhead at `seek_display_ns` instead of wobbling through the reopen.
 pub fn loading(ps: &crate::route::PlaybackSession) -> bool {
     state(ps).is_busy()
+}
+/// How long a seek may stay in flight before the HUD admits to it with a spinner.
+///
+/// The spinner used to appear on the keypress and was therefore the first thing a seek said, even
+/// for the seeks that land in a fraction of this: a direct-play reload reports its Load back in
+/// ~180 ms on the dev set, so the spinner was drawn for less time than it takes to read. Under the
+/// grace, a seek that lands inside it paints nothing at all, and one that really is slow still
+/// shows the spinner — 250 ms late, which is below the threshold at which a wait reads as a wait.
+///
+/// This is a **display** grace and nothing else: `state()` still reports `Seeking` immediately, so
+/// the playhead freeze, the heartbeat's `is_playing` gate, the rebuffer accounting and
+/// `intended_pos_ns` are all unchanged. Only [`crate::player::seek_spinner_due`]'s callers — the
+/// HUD's `busy` sampler — wait.
+pub const SEEK_SPINNER_GRACE_MS: u32 = 250;
+/// Has the in-flight seek outlived [`SEEK_SPINNER_GRACE_MS`]? False when there is no seek at all,
+/// so the HUD's `busy` sampler can ask this one question and mean "draw nothing yet".
+pub fn seek_spinner_due() -> bool {
+    if !SHARED.seeking.load(Relaxed) {
+        return false;
+    }
+    // Wrapping: `vclock_ms` is ms since this process started, and the diff is small by
+    // construction — the same arithmetic `audio_pick_ms` uses.
+    vclock_ms().wrapping_sub(SHARED.seek_armed_ms.load(Relaxed)) >= SEEK_SPINNER_GRACE_MS
 }
 /// true only while the pipeline is actually presenting frames — not resolving, connecting,
 /// buffering or seeking. app.rs gates the heartbeat's `pos=` field on this: on a **direct-play**
@@ -3004,6 +3028,55 @@ mod tests {
 
         SHARED.seeking.store(was_seeking, Relaxed);
         SHARED.seek_display_ns.store(was_display, Relaxed);
+    }
+
+    /// The spinner waits out [`SEEK_SPINNER_GRACE_MS`] before it is drawn, and this is the whole
+    /// mechanism: a stamp taken when the seek is armed, and one question the HUD's sampler asks.
+    ///
+    /// The two halves that must NOT move are asserted here as well, because they are what makes
+    /// this a display grace rather than a state change: `state()` reports `Seeking` on the very
+    /// frame the seek is requested (the playhead freeze, `is_playing` and the rebuffer accounting
+    /// all key on that), while `seek_spinner_due()` answers false until the grace has passed.
+    #[test]
+    fn the_seek_spinner_waits_out_its_grace_while_the_state_does_not() {
+        let _guard = plx_base::testlock::serial();
+        let was_seeking = SHARED.seeking.load(Relaxed);
+        let was_display = SHARED.seek_display_ns.load(Relaxed);
+        let was_armed = SHARED.seek_armed_ms.load(Relaxed);
+        let ps = crate::route::idle_session_for_test();
+
+        assert!(!seek_spinner_due(), "no seek at all: nothing to wait for");
+
+        request_seek(90_000_000_000);
+        assert_eq!(
+            state(&ps),
+            shared::PlaybackState::Seeking,
+            "the state is immediate — only the drawing waits"
+        );
+        assert!(
+            !seek_spinner_due(),
+            "a seek this fresh must not have painted a spinner yet"
+        );
+
+        // Age the stamp past the grace rather than sleeping for it.
+        SHARED.seek_armed_ms.store(
+            vclock_ms().wrapping_sub(SEEK_SPINNER_GRACE_MS + 1),
+            Relaxed,
+        );
+        assert!(
+            seek_spinner_due(),
+            "a seek that outlives the grace owns the spinner after all"
+        );
+
+        abandon_seek();
+        assert!(
+            !seek_spinner_due(),
+            "a settled seek takes its spinner with it, however long it ran"
+        );
+
+        SHARED.seeking.store(was_seeking, Relaxed);
+        SHARED.seek_display_ns.store(was_display, Relaxed);
+        SHARED.seek_armed_ms.store(was_armed, Relaxed);
     }
 
     /// Issue #22: the error must NAME an audio-only stream, and name the right party. On a

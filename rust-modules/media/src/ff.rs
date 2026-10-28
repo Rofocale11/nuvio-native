@@ -8282,7 +8282,16 @@ pub fn demux(
                     (*stream_codecpar(*streams.add(ai as usize))).codec_id
                 )).to_bytes() == b"dts";
                 if dts_audio {
-                    crate::player::log("ff: DTS core extraction on (DTS-HD extensions discarded)");
+                    // The two DTS paths are exclusive (`dts_audio && enc_lane.is_none()` in the
+                    // feed below), and which one runs is decided by the Load's declaration — the
+                    // same `enc::declared()` the lane open reads two lines down. Saying "core
+                    // extraction" unconditionally was a lie on every set this fork ships to: the
+                    // lane takes DTS, `dca` decodes the DTS-HD extension, and nothing is dropped.
+                    crate::player::log(if enc::declared().is_some() {
+                        "ff: DTS -> AC3 encode lane (DTS-HD extensions decoded, not discarded)"
+                    } else {
+                        "ff: DTS core extraction on (DTS-HD extensions discarded)"
+                    });
                 }
                 // FORK (RichiL10): FLAC and native PCM go through the PCM lane in the format the
                 // Load declared (`ff_pcm.rs`); Opus is fed as-is with its declared opusInfo.

@@ -132,7 +132,10 @@ path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
   LG toolchain (`arm-webos-linux-gnueabi`). Crates such as `innertube-rs`, `rusty_ytdl`,
   `rquickjs` or `boa_engine` pull C code or need `libclang`/`bindgen`, and the ARM build fails on
   them. The bundled FFmpeg is built `--disable-everything` plus the demuxers/decoders the player
-  actually uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump.
+  actually uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump. The
+  one place audio is decoded and re-encoded in-app is the fork's AC3 encode lane
+  (`media/src/ff_enc.rs`: `dca`/`truehd`/`mlp`/`flac` decoders, the integer `ac3_fixed` encoder),
+  which is why those components are in the list — see `PLAYBACK.md`.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string like `"tmdb:603"`
   blanks the screen. `ID-MANAGEMENT.md` is how the shim keeps that promise.
 - **No native YouTube trailers.** In-app trailer playback was abandoned: extracting YouTube MP4s on

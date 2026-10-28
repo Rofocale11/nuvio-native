@@ -266,9 +266,24 @@ impl Caps {
     /// | FLAC/PCM inside the PCM lane's admitted channel counts | PCM lane (lossless) |
     /// | FLAC/PCM with 3 to 8 channels the PCM lane does not admit | encode lane |
     /// | TrueHD/MLP, any channel count | encode lane |
+    /// | DTS, any channel count, WHETHER OR NOT the table has a `dts` row | encode lane |
     ///
     /// FLAC/PCM follow their own admission (`flac=off` hands them back to the server too); TrueHD
     /// and MLP are not in any television's table and need only the AC3 sink.
+    ///
+    /// DTS is deliberately unconditional, and this is the ONE arm that does not test the table.
+    /// Every other arm says "the television cannot take this, so we convert it"; DTS says "we
+    /// convert it either way", because the two sets in this fork have opposite DTS problems and
+    /// the lane is the only answer that works for both. A set WITH a `dts` row plays the core —
+    /// `ff::dts_core_packet` drops the DTS-HD extension, so a 7.1 MA arrives as 5.1 core at
+    /// 1.5 Mbps, and anything above the row's channel ceiling is refused outright. A set WITHOUT
+    /// one has no DTS decoder at all, so the same core reaches the pipeline as silence. Folding to
+    /// AC3 5.1 gives both the same 5.1 output from the full lossless stream (`dca` decodes the
+    /// extension, so nothing is discarded), which is what this fork ships.
+    ///
+    /// Consequence to keep in step: [`Caps::enc_lane_profile_codecs`] must list `dts` whenever
+    /// this arm can answer true, or the profile will refuse to direct-play a track the lane would
+    /// have taken and the server will convert it instead.
     pub fn enc_lane_candidate(&self, codec: &str, channels: i64, encode: bool) -> bool {
         if !encode || !self.enc_sink_ok() {
             return false;
@@ -278,7 +293,7 @@ impl Caps {
             c @ ("flac" | "pcm") => {
                 self.audio_has(c) && (3..=8).contains(&channels) && !self.pcm_lane_admits(c, channels)
             }
-            "dts" => self.audio_has("dts"),
+            "dts" => true,
             _ => false,
         }
     }
@@ -620,6 +635,15 @@ fn with_fork_knobs(mut caps: Caps, flac: Option<&str>, opus: Option<&str>) -> Ca
     let lane = |c: &str| caps.audio_channels.get(c).map_or(0, |v| *v);
     let enc = encode_lane_on() && !caps.enc_lane_profile_codecs(true).is_empty();
     if caps.audio_has("flac") || caps.audio_has("pcm") || caps.audio_has("opus") || enc {
+        // FORK (RichiL10): the AC3 encode lane (`ff_enc.rs`). The codec list is the lane's own
+        // (`enc_lane_profile_codecs`), never a second hand-written copy: when DTS joined it the
+        // literal here still read "flac,pcm,truehd" and the boot line named every lane except the
+        // one the set was actually using.
+        let enc_row = if enc {
+            format!("enc ac3<=8 ({})", caps.enc_lane_profile_codecs(true).join(","))
+        } else {
+            "enc off".to_string()
+        };
         plx_base::eventlog::log(&format!(
             "devcaps: fork lanes flac<={} pcm<={} opus<={} dts<={} (dts above it: {}) {}",
             lane("flac"),
@@ -627,8 +651,7 @@ fn with_fork_knobs(mut caps: Caps, flac: Option<&str>, opus: Option<&str>) -> Ca
             lane("opus"),
             lane("dts"),
             if dts_over_ceiling_admitted() { "core" } else { "server" },
-            // FORK (RichiL10): the AC3 encode lane (`ff_enc.rs`).
-            if enc { "enc ac3<=8 (flac,pcm,truehd)" } else { "enc off" },
+            enc_row,
         ));
     }
     caps
@@ -792,7 +815,12 @@ mod tests {
         assert!(caps.audio_supports("dts", 6));
         assert!(!caps.audio_supports_with("dts", 8, false));
         assert!(caps.audio_supports_with("dts", 8, true));
-        assert!(!caps.audio_supports("dts", 0));
+        // DTS is the one codec whose admission no longer comes from the table: the AC3 encode
+        // lane takes it whatever the row says, so even an unknown channel count is admitted and
+        // the lane folds what the stream actually carries (`enc_lane_candidate`).
+        assert!(caps.audio_supports("dts", 0));
+        // Every other MEASURED_ONLY codec still needs a positive channel count.
+        assert!(!caps.audio_supports("flac", 0));
         assert!(caps.audio_supports("aac", 2));
         assert!(caps.audio_supports("aac", 6));
         assert!(!caps.audio_supports("aac", 8));
@@ -1003,13 +1031,53 @@ mod tests {
             assert_eq!(c.profile_channel_limit_with(codec, true), Some(8), "{codec}");
         }
         assert_eq!(c.profile_channel_limit_with("opus", true), Some(6));
-        assert_eq!(c.enc_lane_profile_codecs(true), ["truehd", "mlp"]);
+        assert_eq!(c.enc_lane_profile_codecs(true), ["truehd", "mlp", "dts"]);
         assert!(c.enc_lane_profile_codecs(false).is_empty());
         // flac=off hands FLAC back to the server in both lanes
         let no_flac = with_fork_knobs(c.clone(), Some("off"), None);
         assert!(!no_flac.audio_supports_lanes("flac", 8, 48_000, true, true));
         assert!(no_flac.audio_supports_lanes("truehd", 8, 48_000, true, true));
         assert!(encode_lane_for(None) && encode_lane_for(Some("ac3")) && !encode_lane_for(Some("off")));
+    }
+
+    /// FORK (RichiL10): DTS takes the AC3 encode lane even on a set whose table has NO `dts` row.
+    ///
+    /// The arm used to read `self.audio_has("dts")`, i.e. "encode DTS when the television can
+    /// decode DTS" — the opposite of every other arm in [`Caps::enc_lane_candidate`]. On a set
+    /// with a `dts` row (the dev set) it took the lane, which is why the bug never showed there;
+    /// on a set without one (a 2020 CX) no lane opened, `enc_lane_profile_codecs` still told PMS
+    /// the track direct-plays, and the demuxer's DTS core reached a pipeline with no DTS decoder:
+    /// silence. This pins both halves — the lane opens, and the profile keeps direct-playing it.
+    #[test]
+    fn dts_takes_the_encode_lane_without_a_dts_row() {
+        let with_row = parse(B4).unwrap();
+        assert!(with_row.audio_has("dts"));
+        assert!(with_row.enc_lane_candidate("dts", 6, true));
+        assert!(
+            with_row.enc_lane_candidate("dca-ma", 8, true),
+            "PMS names the track dca-ma; the fold maps it to dts"
+        );
+
+        let no_dts = parse(&B4
+            .replace(r#""DTS""#, r#""DTSX1""#)
+            .replace(r#""DTSH""#, r#""DTSX2""#)
+            .replace(r#""DTSE""#, r#""DTSX3""#))
+        .unwrap();
+        assert!(!no_dts.audio_has("dts"), "the fixture really has no dts row");
+        assert!(
+            no_dts.enc_lane_candidate("dts", 6, true),
+            "no DTS decoder is exactly the case the lane exists for"
+        );
+        assert!(
+            no_dts.audio_supports_at("dts", 6, 48_000),
+            "and the profile must still direct-play it, or the server converts it instead"
+        );
+        assert_eq!(no_dts.profile_channel_limit_with("dts", true), Some(8));
+
+        // The AC3 sink is still the gate for every lane, DTS included.
+        assert!(!Caps::assumed().enc_lane_candidate("dts", 6, true));
+        // ...and `encode=off` still hands DTS back to the core-extraction path.
+        assert!(!with_row.enc_lane_candidate("dts", 6, false));
     }
 
     /// FORK (RichiL10): the encode lane needs a MEASURED AC3 5.1 sink, like every fork lane.

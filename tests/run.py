@@ -3544,13 +3544,13 @@ def op_seek_rapid(lines, final_s):
 
       * a tap that arrives mid-seek is applied by the next pump tick after the in-flight seek
         anchors — which logs `seek(in-place)`;
-      * unless the anchor takes longer than SEEK_STUCK_MS (1200ms), in which case the
+      * unless the anchor takes longer than SEEK_STUCK_MS (pump.rs), in which case the
         stuck-watchdog applies it instead — it swaps the coalesced target out of TX.seek_to_ns
         (pump.rs) and logs `in-place stuck → retry reopen`, so the second `seek(in-place)`
         never comes.
 
     Both are the coalescer working. Which one runs is decided by whether a reopen+av_seek+first
-    keyframe beats 1200ms, i.e. by the network — so the seek count swung 1..5 run to run on
+    keyframe beats that watchdog, i.e. by the network — so the seek count swung 1..5 run to run on
     identical code, and every value below 2 was scored as a failure. That was the wandering seek
     tier. The pump now reports `coalesced=<n>` on both paths (n = requests this seek merged),
     which states the invariant directly and cannot be raced.
