@@ -39,6 +39,14 @@ pub fn stream_row(choice: &plx_plex::plex::nuvio::StreamChoice) -> Row {
 /// is the one fact that cannot differ.
 pub fn stream_row_with(choice: &plx_plex::plex::nuvio::StreamChoice, addon: bool) -> Row {
     let mut facts = Vec::new();
+    // A P2P stream LEADS with its seeder count: whether anybody is still seeding decides whether
+    // the stream plays at all. Torrentio prints `👤 123`, but the shipped font subset (Inter plus
+    // the Noto CJK fallback) carries no emoji, so the count takes the one covered mark that means
+    // peers — the triangle a torrent client puts beside its seeds. `plx_base::fontcov` holds the
+    // coverage contract; a `0` is not worth a fact.
+    if let Some(seeders) = choice.seeders.filter(|n| *n > 0) {
+        facts.push(format!("\u{25b2} {seeders}"));
+    }
     if let Some(codec) = &choice.video_codec { facts.push(codec.to_uppercase()); }
     if choice.hdr.contains("DolbyVision") { facts.push("Dolby Vision".into()); }
     else if choice.hdr != "None" && !choice.hdr.is_empty() { facts.push(choice.hdr.clone()); }
@@ -512,6 +520,25 @@ mod tests {
             group(SourceState::Unauthorized, None, "friend").reachable(),
             "…and this is exactly the answer that made the fourth state worth its own arm"
         );
+    }
+
+    /// **A stream's facts lead with its seeder count**, and only when there is one: `0` and
+    /// missing are both "nothing to say", not "0 peers".
+    #[test]
+    fn a_seeded_stream_leads_its_facts_with_the_count() {
+        let choice = |seeders| plx_plex::plex::nuvio::StreamChoice {
+            label: "4K DV HDR HEVC BluRay Atmos".into(),
+            video_codec: Some("hevc".into()),
+            hdr: "DolbyVision".into(),
+            audio_codec: Some("truehd".into()),
+            size_bytes: Some(20_700_000_000),
+            seeders,
+            ..Default::default()
+        };
+        let facts = |seeders| stream_row(&choice(seeders)).detail;
+        assert_eq!(facts(Some(123)), "\u{25b2} 123 \u{b7} HEVC \u{b7} Dolby Vision \u{b7} TRUEHD \u{b7} 20.7 GB");
+        assert_eq!(facts(Some(0)), "HEVC \u{b7} Dolby Vision \u{b7} TRUEHD \u{b7} 20.7 GB");
+        assert_eq!(facts(None), "HEVC \u{b7} Dolby Vision \u{b7} TRUEHD \u{b7} 20.7 GB");
     }
 
     include!("source_list_contract_tests.rs");

@@ -16,6 +16,8 @@ pub struct StreamChoice {
     pub audio_codec: Option<String>,
     pub size_bytes: Option<u64>,
     pub bitrate_kbps: Option<u64>,
+    /// P2P seeders, read out of the addon's text (`👤 123`, `👤 1.2k`).
+    pub seeders: Option<u32>,
 }
 
 #[derive(Default, serde::Deserialize)]

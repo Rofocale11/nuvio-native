@@ -333,17 +333,29 @@ pub fn size_from_text(text: &str) -> Option<u64> {
 
 /// Seeders/peers: Torrentio `👤 12`, AIOStreams/MediaFusion `👥 12` / `👤 12`, or `seeders: 12`.
 fn seeders_from_text(text: &str) -> Option<u32> {
+    let lower = text.to_lowercase();
     for marker in ["👤", "👥", "seeders:", "seeders", "seeds:", "seeds"] {
-        let lower = text.to_lowercase();
         if let Some(pos) = lower.find(marker) {
             let rest = lower[pos + marker.len()..].trim_start_matches([' ', ':', '\u{fe0f}']);
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = digits.parse() {
+            if let Some(n) = count_from_text(rest) {
                 return Some(n);
             }
         }
     }
     None
+}
+
+/// The number after a count marker: `123`, and the compact `1.2k` / `1.5M` some addons print.
+/// `0` is a real answer (a dead torrent), so only an unreadable run is `None`.
+fn count_from_text(s: &str) -> Option<u32> {
+    let num: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let value: f64 = num.parse().ok()?;
+    let scale = match s[num.len()..].chars().next() {
+        Some('k') => 1_000.0,
+        Some('m') => 1_000_000.0,
+        _ => 1.0,
+    };
+    Some((value * scale) as u32)
 }
 
 /// Debrid-cached markers: `[RD+]`, `[AD+]`, `RD⚡`, `⚡`, `instant`, `cached`.
@@ -497,11 +509,6 @@ fn build_label(info: &StreamInfo, stream: &Stream) -> String {
     if let Some(b) = info.size_bytes {
         parts.push(format_size(b));
     }
-    if let Some(s) = info.seeders {
-        if stream.info_hash.is_some() && stream.url.is_none() {
-            parts.push(format!("{s} peers"));
-        }
-    }
     let mut origin = if stream.addon_name.is_empty() {
         stream.name.as_deref().and_then(|n| n.lines().next()).map(|l| l.trim().to_string()).unwrap_or_default()
     } else {
@@ -582,7 +589,7 @@ mod tests {
         assert_eq!(i.video_codec.as_deref(), Some("h264"));
         assert!(!i.cached);
         assert_eq!(i.container.as_deref(), Some("mkv"));
-        assert_eq!(i.label, "1080p AVC BluRay · 1.8 GB · 45 peers · Torrentio");
+        assert_eq!(i.label, "1080p AVC BluRay · 1.8 GB · Torrentio");
     }
 
     #[test]
@@ -642,6 +649,20 @@ mod tests {
         assert_eq!(i.height, Some(1080));
         assert_eq!(i.size_bytes, Some(1234));
         assert_eq!(i.container.as_deref(), Some("mp4"));
+    }
+
+    /// The compact forms addons print: `123`, `1.2k`, `1.5M`. A `0` is a real count (a dead
+    /// torrent), so it is parsed rather than treated as missing — the label decides what to do
+    /// with it.
+    #[test]
+    fn seeder_counts_read_compact_and_zero_forms() {
+        assert_eq!(seeders_from_text("👤 123 💾 1.81 GB"), Some(123));
+        assert_eq!(seeders_from_text("👤 1.2k 💾 1.81 GB"), Some(1_200));
+        assert_eq!(seeders_from_text("👥 1.5M"), Some(1_500_000));
+        assert_eq!(seeders_from_text("seeders: 42"), Some(42));
+        assert_eq!(seeders_from_text("👤 0"), Some(0));
+        assert_eq!(seeders_from_text("no counts here 1080p"), None);
+        assert_eq!(seeders_from_text("seeders: none"), None);
     }
 
     #[test]
