@@ -17,6 +17,11 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// How often a *playing* report may mirror to the Nuvio account. A paused or stopped report is a
+/// real change and goes at once; the app reports every few seconds, and one API call per report
+/// would be a call per ten seconds for the length of a film.
+const WATCH_PUSH_INTERVAL: Duration = Duration::from_secs(60);
+
 const META_TTL: Duration = Duration::from_secs(6 * 3600);
 const CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 /// How long `/hubs` waits for catalogs that are not cached yet; late ones land in the cache for the
@@ -134,6 +139,9 @@ pub struct Shim {
     cfg: Config,
     keys: Keys,
     watch: WatchState,
+    /// When each item's resume point was last mirrored to the Nuvio account, so a playing report
+    /// (the app sends one every few seconds) does not become one API call every few seconds.
+    watch_pushes: Mutex<HashMap<i64, Instant>>,
     metas: Mutex<HashMap<(String, String), (Instant, Arc<Meta>)>>,
     catalogs: Mutex<HashMap<(String, Option<String>), Arc<Mutex<CatalogCache>>>>,
     catalog_list: Mutex<Option<(Instant, Vec<CatalogInfo>)>>,
@@ -270,6 +278,40 @@ fn rating_of(s: Option<&str>) -> Option<f64> {
 
 fn is_series(type_: &str) -> bool {
     type_ == "series"
+}
+
+/// Whether a report is worth an account call: a paused or stopped one always (it is a real
+/// change), a playing one at most once per [`WATCH_PUSH_INTERVAL`] — the app reports every few
+/// seconds and one call per report would be one per ten seconds for the length of a film.
+fn watch_push_due(last: Option<Instant>, settled: bool, now: Instant) -> bool {
+    settled || last.is_none_or(|at| now.duration_since(at) >= WATCH_PUSH_INTERVAL)
+}
+
+/// The TMDB id behind an addon id. A `tmdb:` or numeric id needs no lookup at all; an IMDb one is
+/// resolved through TMDB, which needs the key and the network — so an install without a TMDB key
+/// syncs only the ids that already are TMDB.
+fn tmdb_id(id: &str, series: bool) -> Option<u64> {
+    let id = plx_stremio::addons::content_level_id(id);
+    let bare = id
+        .strip_prefix("tmdb:")
+        .or_else(|| id.strip_prefix("TMDB:"))
+        .or_else(|| id.strip_prefix("tmdb"))
+        .unwrap_or(&id);
+    if let Ok(n) = bare.trim_start_matches(':').parse::<u64>() {
+        return (n > 0).then_some(n);
+    }
+    let client = TmdbClient::from_env()?;
+    if series { client.series_id(&id).ok().flatten() } else { client.movie_id(&id).ok().flatten() }
+}
+
+/// The series an episode id belongs to: `tt0944947:1:2` → `tt0944947`. Falls back to the entry's
+/// content id when the id carries no season/episode numbers.
+fn episode_series_id<'a>(video_id: &'a str, content_id: &'a str) -> &'a str {
+    video_id
+        .rsplit_once(':')
+        .and_then(|(rest, _)| rest.rsplit_once(':'))
+        .map(|(series, _)| series)
+        .unwrap_or(content_id)
 }
 
 fn season_title(n: u32) -> String {
@@ -1046,6 +1088,7 @@ impl Shim {
             backend,
             keys: Keys::open(dir.as_deref()),
             watch: WatchState::open(dir.as_deref()),
+            watch_pushes: Mutex::new(HashMap::new()),
             cfg,
             metas: Mutex::new(HashMap::new()),
             catalogs: Mutex::new(HashMap::new()),
@@ -1070,6 +1113,107 @@ impl Shim {
 
     pub fn bind_self(self: &Arc<Self>) {
         let _ = self.me.set(Arc::downgrade(self));
+    }
+
+    // ---- account watch progress ------------------------------------------------------------
+
+    /// The identity Nuvio keys a resume point by, for a local ratingKey: `content_id` is the TMDB
+    /// id the account's watch history uses (`tmdb:550`), `video_id` the film's own id or the
+    /// episode's addon id. `None` for an item that has no single position to report — a season, a
+    /// whole series, or a title whose TMDB id cannot be resolved.
+    fn nuvio_watch_identity(&self, rk: i64) -> Option<(String, String, String)> {
+        let ident = self.keys.ident(rk).or_else(|| synthetic_ident(rk))?;
+        match ident {
+            // A series row has no position of its own; its episodes do.
+            Ident::Title { type_, .. } if is_series(&type_) => None,
+            Ident::Title { id, .. } => {
+                let content_id = format!("tmdb:{}", tmdb_id(&id, false)?);
+                Some((content_id.clone(), "movie".into(), content_id))
+            }
+            Ident::Episode { series, video } => {
+                Some((format!("tmdb:{}", tmdb_id(&series, true)?), "series".into(), video))
+            }
+            Ident::Season { .. } => None,
+        }
+    }
+
+    /// Mirror one item's resume point to the account. A paused or stopped report is a real change
+    /// and goes at once; a playing one at most once per [`WATCH_PUSH_INTERVAL`].
+    fn push_watch_progress(&self, rk: i64, offset_ms: i64, duration_ms: i64, state: &str) {
+        if !self.account.signed_in() {
+            return;
+        }
+        let mut pushes = self.watch_pushes.lock().unwrap_or_else(|e| e.into_inner());
+        let settled = matches!(state, "paused" | "stopped");
+        if !watch_push_due(pushes.get(&rk).copied(), settled, Instant::now()) {
+            return;
+        }
+        if pushes.len() >= 512 {
+            pushes.clear();
+        }
+        pushes.insert(rk, Instant::now());
+        drop(pushes);
+        let Some((content_id, content_type, video_id)) = self.nuvio_watch_identity(rk) else { return };
+        self.watch.bind_account_key(&content_id, &video_id, rk);
+        let entry = plx_stremio::nuvio::WatchProgress {
+            content_id,
+            content_type,
+            video_id,
+            position: offset_ms.max(0),
+            duration: duration_ms,
+            last_watched: now_secs() * 1000,
+        };
+        match self.account.push_watch_progress(&[entry]) {
+            Ok(()) => {}
+            Err(error) => {
+                let status = match error { plx_stremio::model::Error::Status(s) => s, _ => 0 };
+                plx_stremio::nuvio::log_account_event(&format!("nuvio account: progress push failed status={status}"));
+            }
+        }
+    }
+
+    /// Pull the account's resume points and merge them into the local watch state, so Continue
+    /// Watching draws what another device played. Runs off the caller's thread.
+    pub fn pull_account_watch(&self) {
+        let Some(me) = self.me.get().and_then(|w| w.upgrade()) else { return };
+        let _ = std::thread::Builder::new().name("pmsshim-watch".into()).spawn(move || {
+            let Ok(entries) = me.account.pull_watch_progress() else { return };
+            let mut merged = 0;
+            for e in entries {
+                // Cheap rejection first: the row snapshot is a meta fetch, so never pay for an
+                // entry the local state already beats.
+                if e.position <= 0 {
+                    continue;
+                }
+                let stamp = e.last_watched / 1000;
+                let Some(rk) = me.account_watch_key(&e) else { continue };
+                if me.watch.get(rk).last_viewed_at > stamp {
+                    continue;
+                }
+                if me.watch.merge_remote(rk, e.position, e.duration, stamp, me.row(rk)) {
+                    me.watch.bind_account_key(&e.content_id, &e.video_id, rk);
+                    merged += 1;
+                }
+            }
+            if merged > 0 {
+                plx_stremio::nuvio::log_account_event(&format!("nuvio account: merged {merged} resume point(s)"));
+            }
+        });
+    }
+
+    /// The local ratingKey an account resume point belongs to: what this device pushed that item
+    /// under, else the key its identity names. Does not bind on a miss — a pull that loses to the
+    /// local state must not grow the map.
+    fn account_watch_key(&self, e: &plx_stremio::nuvio::WatchProgress) -> Option<i64> {
+        if let Some(key) = self.watch.account_key(&e.content_id, &e.video_id) {
+            return Some(key);
+        }
+        let ident = if e.content_type == "series" {
+            Ident::Episode { series: episode_series_id(&e.video_id, &e.content_id).to_string(), video: e.video_id.clone() }
+        } else {
+            Ident::Title { type_: "movie".into(), id: e.content_id.clone() }
+        };
+        Some(self.keys.key_of(&ident))
     }
 
     /// The Stremio-compatible streaming server torrents play through, if any. `None` whenever P2P
@@ -3057,13 +3201,14 @@ impl Shim {
                 let time: Option<i64> = req.q("time").and_then(|v| v.parse().ok());
                 if let (Some(rk), Some(t)) = (rk, time) {
                     let dur = req.q("duration").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let state = req.q("state").unwrap_or("playing");
+                    let state = req.q("state").unwrap_or("playing").to_string();
                     if t > 0 && state != "stopped" || state == "stopped" && t > 0 {
                         let me = self.clone();
                         // The row snapshot may need a meta fetch: never on the reporting request.
                         std::thread::spawn(move || {
                             let row = me.row(rk);
                             me.watch.progress(rk, t, dur, row);
+                            me.push_watch_progress(rk, t, dur, &state);
                         });
                     }
                 }
@@ -3104,6 +3249,10 @@ impl Shim {
             (_, ["actions", "removeFromContinueWatching"]) => {
                 if let Some(rk) = req.q("ratingKey").and_then(|v| v.parse().ok()) {
                     self.watch.clear_progress(rk);
+                    // A cleared resume point must not come back on the next pull: overwrite the
+                    // account's copy with a zero position, which `merge_remote` ignores on the way
+                    // back. ponytail: Nuvio's RPC has no delete verb, so the row stays at 0.
+                    self.push_watch_progress(rk, 0, 0, "stopped");
                 }
                 ok_empty()
             }
@@ -4021,5 +4170,37 @@ mod rating_tests {
         assert_eq!(tomato_score(&MetaPreview::default()), None);
         let m: MetaPreview = serde_json::from_value(json!({"rottenTomatoesRating":101})).unwrap();
         assert_eq!(tomato_score(&m), None);
+    }
+}
+
+#[cfg(test)]
+mod account_progress_tests {
+    use super::*;
+
+    #[test]
+    fn a_playing_report_is_throttled_and_a_settled_one_is_not() {
+        let now = Instant::now();
+        assert!(watch_push_due(None, false, now));
+        assert!(!watch_push_due(Some(now), false, now + Duration::from_secs(59)));
+        assert!(watch_push_due(Some(now), false, now + WATCH_PUSH_INTERVAL));
+        assert!(watch_push_due(Some(now), true, now));
+    }
+
+    #[test]
+    fn an_episode_id_names_its_series() {
+        assert_eq!(episode_series_id("tt0944947:1:2", "tmdb:1396"), "tt0944947");
+        assert_eq!(episode_series_id("tmdb:1396:3:7", "tmdb:1396"), "tmdb:1396");
+        // No season/episode numbers: the content id is the only series name there is.
+        assert_eq!(episode_series_id("tt0944947", "tmdb:1396"), "tmdb:1396");
+    }
+
+    #[test]
+    fn a_tmdb_id_needs_no_lookup_and_an_episode_id_is_stripped_to_its_series() {
+        assert_eq!(tmdb_id("tmdb:550", false), Some(550));
+        assert_eq!(tmdb_id("TMDB:1396", true), Some(1396));
+        assert_eq!(tmdb_id("550", false), Some(550));
+        assert_eq!(tmdb_id("tmdb:1396:3:7", true), Some(1396));
+        assert_eq!(tmdb_id("tmdb:0", false), None);
+        assert_eq!(tmdb_id("", false), None);
     }
 }

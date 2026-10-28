@@ -663,3 +663,161 @@ mod library_tests {
         assert!(library_preview(&json!({"name":"missing identity"})).is_none());
     }
 }
+
+/// One title's resume point, as Nuvio's `sync_push_watch_progress` takes it. Times are ms,
+/// `last_watched` is unix ms.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WatchProgress {
+    pub content_id: String,   // "tmdb:550" (a movie) or "tmdb:1396" (a series)
+    pub content_type: String, // "movie" | "series"
+    pub video_id: String,     // the movie's own id, or the episode's id ("tt0944947:1:2")
+    pub position: i64,
+    pub duration: i64,
+    pub last_watched: i64,
+}
+
+/// Account-backed watch progress. These rows are the household's viewing record; callers must
+/// never log the raw response.
+pub fn push_watch_progress(session: &Session, profile: &str, entries: &[WatchProgress]) -> Result<()> {
+    if entries.is_empty() { return Ok(()); }
+    let c = require_config()?;
+    let (path, payload) = watch_push_body(profile, entries)?;
+    ok(call(&c, "POST", path, Some(&session.access_token), Some(&payload))?)?;
+    Ok(())
+}
+
+fn watch_push_body(profile: &str, entries: &[WatchProgress]) -> Result<(&'static str, Value)> {
+    let pid = library_profile(profile)?;
+    if entries.len() > 50 { return Err(Error::Parse("watch progress batch too large".into())); }
+    let mut rows = Vec::with_capacity(entries.len());
+    for e in entries {
+        if !matches!(e.content_type.as_str(), "movie" | "series")
+            || !watch_id_ok(&e.content_id) || !watch_id_ok(&e.video_id) {
+            return Err(Error::Parse("invalid watch progress entry".into()));
+        }
+        rows.push(json!({
+            "content_id":e.content_id,"content_type":e.content_type,"video_id":e.video_id,
+            "position":e.position,"duration":e.duration,"last_watched":e.last_watched
+        }));
+    }
+    Ok(("/rest/v1/rpc/sync_push_watch_progress", json!({"p_profile_id":pid,"p_entries":rows})))
+}
+
+pub fn pull_watch_progress(session: &Session, profile: &str) -> Result<Vec<WatchProgress>> {
+    let c = require_config()?;
+    let pid = library_profile(profile)?;
+    let v = ok(call(&c, "POST", "/rest/v1/rpc/sync_pull_watch_progress", Some(&session.access_token),
+        Some(&json!({"p_profile_id":pid,"p_limit":200})))?)?;
+    if !v.is_array() { return Err(Error::Parse("invalid watch progress page".into())); }
+    Ok(watch_progress_rows(&v))
+}
+
+fn watch_progress_rows(v: &Value) -> Vec<WatchProgress> {
+    v.as_array().map(|a| a.iter().filter_map(watch_progress_row).collect()).unwrap_or_default()
+}
+
+fn watch_progress_row(v: &Value) -> Option<WatchProgress> {
+    let content_id = str_field(v, &["content_id", "contentId"]);
+    let content_type = str_field(v, &["content_type", "contentType"]);
+    let video_id = str_field(v, &["video_id", "videoId"]);
+    if content_id.is_empty() || video_id.is_empty() || !matches!(content_type.as_str(), "movie" | "series") {
+        return None;
+    }
+    Some(WatchProgress {
+        content_id, content_type, video_id,
+        position: i64_field(v, &["position"]),
+        duration: i64_field(v, &["duration"]),
+        last_watched: i64_field(v, &["last_watched", "lastWatched"]),
+    })
+}
+
+fn watch_id_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control)
+}
+
+fn i64_field(v: &Value, keys: &[&str]) -> i64 {
+    keys.iter().find_map(|k| v.get(*k).and_then(|x| match x {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    })).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn session() -> Session {
+        Session { access_token:"t".into(), refresh_token:"r".into(), user_id:"u".into(), expires_at_unix:0 }
+    }
+
+    fn entry() -> WatchProgress {
+        WatchProgress {
+            content_id:"tmdb:550".into(), content_type:"movie".into(), video_id:"tmdb:550".into(),
+            position:60_000, duration:7_200_000, last_watched:1_700_000_000_000,
+        }
+    }
+
+    #[test]
+    fn watch_push_body_is_profile_scoped_and_ms_shaped() {
+        let (path, body) = watch_push_body("3", &[entry()]).unwrap();
+        assert_eq!(path, "/rest/v1/rpc/sync_push_watch_progress");
+        assert_eq!(body["p_profile_id"], 3);
+        let rows = body["p_entries"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], json!({
+            "content_id":"tmdb:550","content_type":"movie","video_id":"tmdb:550",
+            "position":60_000,"duration":7_200_000,"last_watched":1_700_000_000_000i64
+        }));
+    }
+
+    #[test]
+    fn empty_watch_progress_batch_is_a_noop() {
+        // Returns before config/profile validation and before any request.
+        assert!(push_watch_progress(&session(), "not-a-profile", &[]).is_ok());
+        let (path, body) = watch_push_body("1", &[]).unwrap();
+        assert_eq!(path, "/rest/v1/rpc/sync_push_watch_progress");
+        assert_eq!(body["p_entries"], json!([]));
+    }
+
+    #[test]
+    fn watch_push_rejects_bad_profile_type_ids_and_oversized_batch() {
+        assert!(matches!(watch_push_body("0", &[entry()]), Err(Error::Parse(_))));
+        assert!(matches!(watch_push_body("x", &[entry()]), Err(Error::Parse(_))));
+        let mut e = entry();
+        e.content_type = "episode".into();
+        assert!(matches!(watch_push_body("1", &[e]), Err(Error::Parse(_))));
+        let mut e = entry();
+        e.video_id = String::new();
+        assert!(matches!(watch_push_body("1", &[e]), Err(Error::Parse(_))));
+        let mut e = entry();
+        e.content_id = "a".repeat(513);
+        assert!(matches!(watch_push_body("1", &[e]), Err(Error::Parse(_))));
+        let mut e = entry();
+        e.content_id = "tmdb:\u{7}".into();
+        assert!(matches!(watch_push_body("1", &[e]), Err(Error::Parse(_))));
+        let many = vec![entry(); 51];
+        assert!(matches!(watch_push_body("1", &many), Err(Error::Parse(_))));
+        assert!(watch_push_body("1", &vec![entry(); 50]).is_ok());
+    }
+
+    #[test]
+    fn watch_progress_rows_map_and_drop_malformed_rows() {
+        let rows = watch_progress_rows(&json!([
+            {"content_id":"tmdb:550","content_type":"movie","video_id":"tmdb:550",
+             "position":1000,"duration":2000,"last_watched":3000},
+            {"contentId":"tmdb:1396","contentType":"series","videoId":"tt0944947:1:2",
+             "position":"4000","duration":5000.0,"lastWatched":6000},
+            {"content_id":"","content_type":"movie","video_id":"tmdb:1"},
+            {"content_id":"tmdb:2","content_type":"clip","video_id":"tmdb:2"},
+            {"content_id":"tmdb:3","content_type":"movie","video_id":""}
+        ]));
+        assert_eq!(rows, vec![
+            WatchProgress { content_id:"tmdb:550".into(), content_type:"movie".into(), video_id:"tmdb:550".into(),
+                position:1000, duration:2000, last_watched:3000 },
+            WatchProgress { content_id:"tmdb:1396".into(), content_type:"series".into(), video_id:"tt0944947:1:2".into(),
+                position:4000, duration:5000, last_watched:6000 },
+        ]);
+        assert!(watch_progress_rows(&Value::Null).is_empty());
+    }
+}

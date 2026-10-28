@@ -3,8 +3,9 @@
 A native LG webOS client for Stremio/Nuvio addons, maintained by [Chris](https://github.com/current).
 This is a fork of [PlxNative](https://github.com/GLinnik21/plx-native); its upstream authors and GPL license are retained.
 
-See [the Nuvio handoff](docs/nuvio/HANDOFF.md), [architecture](docs/nuvio/ARCHITECTURE.md),
-[playback](docs/nuvio/PLAYBACK.md), and [validation](docs/nuvio/VALIDATION.md) for this fork's build and TV instructions.
+See [architecture](docs/nuvio/ARCHITECTURE.md), [ID management](docs/nuvio/ID-MANAGEMENT.md),
+[TMDB enrichment](docs/nuvio/TMDB.md), [playback](docs/nuvio/PLAYBACK.md) and
+[watch progress](docs/nuvio/WATCH-PROGRESS.md) for this fork's design, build and TV instructions.
 The native debug and stable app IDs are `com.nuvionative.app.debug` and `com.nuvionative.app`.
 
 The following documentation describes the upstream Plex client and may not apply to the Nuvio addon backend.

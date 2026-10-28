@@ -110,6 +110,9 @@ struct WatchFile {
     items: HashMap<String, Watch>,
     /// The row snapshot of every item with progress, so Continue Watching draws without a fetch.
     rows: HashMap<String, serde_json::Value>,
+    /// `content_id|video_id` → the ratingKey this device pushed it under, so a resume point pulled
+    /// back from the account lands on the same item instead of a duplicate keyed by its TMDB id.
+    account_keys: HashMap<String, i64>,
 }
 
 pub struct WatchState {
@@ -165,6 +168,49 @@ impl WatchState {
             g.rows.insert(key.to_string(), r);
         }
         self.save(&g);
+    }
+
+    /// Apply a resume point pulled from the account. The newer side wins: a local report made after
+    /// the remote one is the truth, so the merge only lands when `last_viewed_at` is at least the
+    /// local stamp. Returns whether anything changed (so a caller can log/report a real merge).
+    pub fn merge_remote(
+        &self,
+        key: i64,
+        offset_ms: i64,
+        duration_ms: i64,
+        last_viewed_at: i64,
+        row: Option<serde_json::Value>,
+    ) -> bool {
+        if offset_ms <= 0 {
+            return false;
+        }
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let w = g.items.entry(key.to_string()).or_default();
+        if last_viewed_at < w.last_viewed_at {
+            return false;
+        }
+        w.offset_ms = offset_ms;
+        if duration_ms > 0 {
+            w.duration_ms = duration_ms;
+        }
+        w.last_viewed_at = last_viewed_at;
+        if let Some(r) = row {
+            g.rows.insert(key.to_string(), r);
+        }
+        self.save(&g);
+        true
+    }
+
+    /// Remember which local item an account resume point was pushed under.
+    pub fn bind_account_key(&self, content_id: &str, video_id: &str, key: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.account_keys.insert(format!("{content_id}|{video_id}"), key);
+        self.save(&g);
+    }
+
+    pub fn account_key(&self, content_id: &str, video_id: &str) -> Option<i64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.account_keys.get(&format!("{content_id}|{video_id}")).copied()
     }
 
     pub fn scrobble(&self, key: i64, watched: bool) {
@@ -234,5 +280,26 @@ mod tests {
         w.progress(5, 9500, 10_000, None);
         assert_eq!(w.get(5).view_count, 1);
         assert!(w.in_progress().is_empty());
+    }
+
+    #[test]
+    fn merge_remote_takes_only_the_newer_side() {
+        let w = WatchState::open(None);
+        w.progress(7, 1000, 10_000, None);
+        let local_stamp = w.get(7).last_viewed_at;
+        // Older than the local report: ignored.
+        assert!(!w.merge_remote(7, 4000, 10_000, local_stamp - 60, None));
+        assert_eq!(w.get(7).offset_ms, 1000);
+        // Newer: lands, and its row snapshot becomes the Continue Watching row.
+        assert!(w.merge_remote(7, 4000, 20_000, local_stamp + 60, Some(serde_json::json!({"ratingKey": "7"}))));
+        let got = w.get(7);
+        assert_eq!((got.offset_ms, got.duration_ms, got.last_viewed_at), (4000, 20_000, local_stamp + 60));
+        assert_eq!(w.in_progress().len(), 1);
+        // No resume point: nothing to merge.
+        assert!(!w.merge_remote(7, 0, 20_000, local_stamp + 120, None));
+        // A finished title keeps its view count but accepts a resume point.
+        w.scrobble(8, true);
+        assert!(w.merge_remote(8, 2000, 10_000, now_secs() + 60, None));
+        assert_eq!((w.get(8).view_count, w.get(8).offset_ms), (1, 2000));
     }
 }

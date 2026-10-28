@@ -4,6 +4,10 @@ NuvioNative is a fork of PlxNative (GPL-3.0-or-later, upstream GLinnik21/plx-nat
 browses and plays content from Stremio addons — the same addons a user configured in Nuvio — with
 PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
+Companion documents: `ID-MANAGEMENT.md` (numeric keys, the key table, synthetic keys),
+`TMDB.md` (detail enrichment, person pages, collections), `PLAYBACK.md` (the stream → decoder
+path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
+
 ## Findings that drive the design
 
 - **Nuvio has no reusable backend service.** NuvioTVSmart (the code behind the webOS app
@@ -37,20 +41,60 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
 - Catalogs → PMS library sections and Home hubs. Metas → movie/show/season/episode items.
   Search → `/hubs/search`. Streams → the item's `Media[]` list (one Media per stream, with
-  resolution/codec/HDR/size/bitrate from `plx_stremio::classify`), so PlxNative's existing
-  version/source picker is the stream picker. Part URLs redirect (or proxy, when headers are
-  needed) to the stream's real URL. The decision endpoint waits for discovery/probing
-  and refuses media that cannot direct play; the native route uses its probed fields.
-  The Streams overlay uses `/nuvio/streams` and `/nuvio/select`, retaining the shim's
-  ranked index instead of confusing it with the selected-first Media list.
-- **A press opens the picker; a pick IS the play.** The Detail page's **Streams** pill, an
-  episode's still (for THAT episode), the Home hero's **Play** (for the billboard's film) and a
-  movie page's pill all raise the same `ContentPanel::AltSources` panel, and the commit starts the
-  thing the panel was about — `AppMsg::NuvioStreamSelected` is what a successful `/nuvio/select`
-  delivers back to the page that opened it. On an ordinary Plex server the picker is not offered,
-  so those presses play or navigate as before. A pick is taken while addons are still answering,
-  and it ends the shim's own wait: `Shim::ranked`'s `chosen` argument stops the grace/deadline wait
-  once a stream is recorded, so the `/decision` and `Part` that follow a pick answer at once.
+  resolution/codec/HDR/size/bitrate from `plx_stremio::classify`). Each Media also carries
+  `addon_name`, the `Addon::label()` of the addon that returned it (empty only on the
+  "Finding streams…" placeholder). Part URLs redirect (or proxy, when headers are needed) to the
+  stream's real URL. The decision endpoint waits for discovery/probing and refuses media that
+  cannot direct play; the native route uses its probed fields.
+- **The stream pickers are two-level menus, not flat lists** — the player's `…` popover, the
+  Detail page's **Streams** pill and the Home hero's Play all open the same panel and behave
+  identically:
+  1. **the addons that answered for the item**, in ranked order (the addon holding the best stream
+     leads), each stating how many streams it offered;
+  2. **one addon's streams**, best first, headed by that addon's name — the page's rows omit the
+     addon from their fact line, because the band already says it.
+  Picking a stream commits it; BACK walks one level at a time before the panel closes. The addon
+  label is the shim's own `addon_name` (the `Media[]` field), which `/nuvio/streams` returns as
+  `addon`. Grouping rules: `plx_appkit::source_list::addon_groups` (the route's ranked
+  `(index, label, addon_name)` list) and `addon_pages` (the panel's own `StreamChoice[]`, which
+  also carries the stream's technical facts). `route::AVAILABLE_STREAMS` is written only through
+  `route::set_available_streams`, so a revision stamp tells the player panel's per-tick poll that
+  nothing moved.
+- **A press opens the picker; a pick IS the play.** Every surface that used to start a file
+  directly raises this panel first, and the commit starts the thing the panel was about:
+  - **Detail page**: the hero's **Streams** pill lists the page's own item; an **episode's still**
+    opens the same panel for THAT episode (`ContentPanel::AltSources { item }` names the subject,
+    so the show page's own item is overridden) and the pick starts the episode;
+  - **Home**: the hero's **Play** raises it for the billboard's film (`item` names it, since Home
+    has no page item of its own; the panel opens centred, `item_menu::fallback_anchor`). A show or
+    season hero still plays its on-deck episode — it has no stream list of its own;
+  - **a movie page's pill** plays the movie on the pick, exactly as its Play button does. The pick
+    used to only re-read the item, which left the film sitting on its page with the new stream
+    selected and nothing playing.
+
+  A picker on any other source (an ordinary Plex server) is not offered at all: it has no stream
+  list, so those presses play or navigate exactly as before. `AppMsg::NuvioStreamSelected` is what
+  a successful commit delivers back to the page that opened the panel — the panel names no item, so
+  Detail remembers which episode (or, for the movie pill, none) its picker was about, and Home
+  remembers which hero item.
+- **A pick never waits for the addons to finish.** The panel polls `/nuvio/streams` until every
+  addon has reported (`complete`), and the press is taken the whole time — `stream_selecting` is
+  the only latch (one commit at a time), never the in-flight list read. On the shim's side a pick
+  also ends the wait: `Shim::ranked`'s `chosen` argument stops the grace/deadline wait as soon as
+  `/nuvio/select` has recorded a stream, so the `/decision` and the `Part` that follow a pick
+  answer immediately instead of sitting out `stream_grace` — or, for a picked entry the local
+  playable test does not recognise, the whole 60 s deadline. The Detail page's own fetch and
+  `/nuvio/streams` pass `chosen: false`: their list keeps filling progressively.
+- **The player's Source page carries no quality ladder.** Under the shim a playback's quality is a
+  property of the STREAM picked — the shim resolves a concrete file and the route plays it — so a
+  list of bitrate ceilings beside the stream list would be a second answer to the same question.
+  The ladder exists only in Settings > Playback, where it is a policy for ordinary Plex servers.
+  (It was drawn in the player popover until 2026-10-26.) The failure read-out's `Change Source`
+  button opens this picker and is offered under Force Direct Play too: Force overrides every
+  quality RUNG, not which file plays.
+- The stream pick itself is `/nuvio/select?index=` on the shim's own ranked index, then a fresh
+  resolve of the same item; the Media list a `/decision` returns is selected-first and must not be
+  confused with it.
 - Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
   loaded/saved through the authenticated storage helper. Stable/debug/nightly own
   separate records. The helper verifies readback before import files are removed.
@@ -75,8 +119,29 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   `/nuvio/library`, runs requests on a worker and refreshes Home after a confirmed
   reply; the shelf pages through `/hubs/nuvio/list`.
 - Watch state / progress: stored locally by the shim (the app already reports timeline to "the
-  server"). Developer Mode's writable-directory fallback is `/tmp`, so this state
-  and the key table are not yet durable across TV reboots.
+  server") and mirrored to the active profile through Nuvio's `sync_push_watch_progress` /
+  `sync_pull_watch_progress` RPCs, so Continue Watching follows the account across devices. A
+  paused or stopped report goes at once, a playing one at most once per 60 s per item; the newer
+  `last_viewed_at` wins on the way back. See `WATCH-PROGRESS.md`. Developer Mode's
+  writable-directory fallback is `/tmp`, so the local copy and the key table are not yet durable
+  across TV reboots — the account copy is.
+
+## Constraints that shape the code
+
+- **Pure Rust only — no C libraries or JS engines in the TV build.** The app compiles for an ancient
+  LG toolchain (`arm-webos-linux-gnueabi`). Crates such as `innertube-rs`, `rusty_ytdl`,
+  `rquickjs` or `boa_engine` pull C code or need `libclang`/`bindgen`, and the ARM build fails on
+  them. The bundled FFmpeg is built `--disable-everything` plus the demuxers/decoders the player
+  actually uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump.
+- **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string like `"tmdb:603"`
+  blanks the screen. `ID-MANAGEMENT.md` is how the shim keeps that promise.
+- **No native YouTube trailers.** In-app trailer playback was abandoned: extracting YouTube MP4s on
+  the TV without C libraries is too unstable. A detail row may carry a trailer thumbnail
+  (`Extras` with `ratingKey: "trailer"` and a YouTube poster), but
+  `/library/metadata/{rk}/trailer` is not a route the shim answers — the press fails rather than
+  playing. Do not re-add extraction.
+- **The shim is a loopback PMS.** One in-process HTTP server (`plx_pmsshim`, default
+  `127.0.0.1:32420`) speaking the Plex dialect, in the same process as the UI.
 
 ## Crates
 
@@ -85,6 +150,15 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 | `rust-modules/stremio` (`plx_stremio`) | backend | `plx_base`, `plx_net`, serde |
 | `rust-modules/pmsshim` (`plx_pmsshim`) | shim | `plx_stremio`, `plx_base` |
 | app wiring (boot, appinfo, settings) | lead/integration | all |
+
+## Build and release
+
+- **Host simulator:** `make -j10 sim-linux` (needs the Linux `libav*`/libass host libraries staged
+  in `pkg/`); `make sim-macos` on macOS.
+- **TV build (.ipk):** `make ipk`. A release is cut by pushing a tag
+  (`git tag -a v0.8.1 -m "…" && git push origin v0.8.1`); the GitHub Actions runner builds the
+  `.ipk` and attaches it to the Release. Do not add `libclang` or ARM cross-compiler steps to the
+  workflow unless C code is genuinely being compiled — which it should not be.
 
 ## App identity
 

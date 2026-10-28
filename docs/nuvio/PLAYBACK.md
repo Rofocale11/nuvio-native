@@ -171,5 +171,3 @@ and visible English subtitles with the physical remote. P7 HDR10 fallback remain
 unverified. Fresh follow-up release QR approval reached the local server and loaded
 account addons. English audio default behavior is host-tested; physical confirmation
 on a newly started stream remains pending.
-See `VALIDATION.md`
-for the stable install's final checks.

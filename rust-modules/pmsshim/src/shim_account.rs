@@ -26,6 +26,10 @@ use std::sync::{Arc, Mutex};
 /// persists it and swaps it into the running backend.
 pub type AddonSink = Arc<dyn Fn(plx_stremio::addons::AddonSet) + Send + Sync>;
 
+/// Receives a nudge when a profile has been selected (the shim then merges the account's resume
+/// points into its local watch state).
+pub type WatchSink = Arc<dyn Fn() + Send + Sync>;
+
 const PROFILE_UUID_PREFIX: &str = "nuvio-profile-";
 
 pub struct Account {
@@ -37,6 +41,7 @@ pub struct Account {
     prefs: Arc<Mutex<serde_json::Map<String, Value>>>,
     next_pin: AtomicI64,
     sink: Mutex<Option<AddonSink>>,
+    watch_sink: Mutex<Option<WatchSink>>,
     /// The token handed to the app in place of a plex.tv account token.
     token: String,
     origin: Mutex<String>,
@@ -82,6 +87,7 @@ impl Account {
             prefs: Arc::new(Mutex::new(prefs)),
             next_pin: AtomicI64::new(1_000_001),
             sink: Mutex::new(None),
+            watch_sink: Mutex::new(None),
             token: token.to_string(),
             origin: Mutex::new(String::new()),
         }
@@ -95,6 +101,11 @@ impl Account {
 
     pub fn set_sink(&self, sink: AddonSink) {
         *self.sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+    }
+
+    /// Set once at boot, like `set_sink`.
+    pub fn set_watch_sink(&self, sink: WatchSink) {
+        *self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
 
     pub fn set_origin(&self, origin: &str) {
@@ -194,6 +205,39 @@ impl Account {
         context.cached = Some((std::time::Instant::now(), rows));
         plx_stremio::nuvio::log_account_event(if saved { "nuvio: My List add confirmed" } else { "nuvio: My List remove confirmed" });
         Ok(())
+    }
+
+    /// Report resume points to the account, for the active profile.
+    pub fn push_watch_progress(&self, entries: &[plx_stremio::nuvio::WatchProgress]) -> plx_stremio::model::Result<()> {
+        let session = self.fresh_session().ok_or(plx_stremio::model::Error::Status(401))?;
+        if !self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.user_id == session.user_id) {
+            return Err(plx_stremio::model::Error::Status(401));
+        }
+        // No `library` guard is held here: a push runs while the player is reporting, and
+        // `load_profile` wants that lock.
+        let pid = self.profile_id(&session)?;
+        plx_stremio::nuvio::push_watch_progress(&session, &pid, entries)
+    }
+
+    /// The account's resume points for the active profile.
+    pub fn pull_watch_progress(&self) -> plx_stremio::model::Result<Vec<plx_stremio::nuvio::WatchProgress>> {
+        let session = self.fresh_session().ok_or(plx_stremio::model::Error::Status(401))?;
+        if !self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.user_id == session.user_id) {
+            return Err(plx_stremio::model::Error::Status(401));
+        }
+        let pid = self.profile_id(&session)?;
+        plx_stremio::nuvio::pull_watch_progress(&session, &pid)
+    }
+
+    /// The active profile id, resolving the first profile when none was picked — the same fallback
+    /// `saved_library` uses. The `library` lock is not held across the HTTP call that resolves it.
+    fn profile_id(&self, session: &plx_stremio::nuvio::Session) -> plx_stremio::model::Result<String> {
+        if let Some(pid) = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() {
+            return Ok(pid);
+        }
+        let pid = plx_stremio::nuvio::profiles(session)?.first().map(|p| p.id.clone()).unwrap_or_else(|| "1".into());
+        self.library.lock().unwrap_or_else(|e| e.into_inner()).profile = Some(pid.clone());
+        Ok(pid)
     }
 
     /// The plex.tv surface. `segs` are the path segments after `api/v2`.
@@ -345,6 +389,7 @@ impl Account {
     fn load_profile(&self, profile: Option<&str>) {
         let Some(session) = self.fresh_session() else { return };
         let Some(sink) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
+        let watch_sink = self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let profile = profile.map(str::to_string);
         let library = self.library.clone();
         let file = self.file.clone();
@@ -363,6 +408,13 @@ impl Account {
             if context.generation != generation { return; }
             context.profile = Some(pid.clone());
             if let Some(file) = file { let p = prefs.lock().unwrap_or_else(|e| e.into_inner()).clone(); save_session_file(&file, Some(&session), Some(&pid), &p); }
+            // The sink's merge path pulls the account's resume points, which wants `library`:
+            // drop the guard first or the two deadlock.
+            drop(context);
+            if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation { return; }
+            if let Some(watch) = watch_sink {
+                watch();
+            }
             if let Ok(addons) = plx_stremio::nuvio::addons(&session, &pid) {
                 if !addons.is_empty() {
                     sink(plx_stremio::addons::AddonSet { addons });

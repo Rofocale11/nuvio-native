@@ -69,6 +69,11 @@ pub fn start_on(backend: Arc<dyn Backend>, cfg: Config, host: &str, port: u16) -
     let shim = Arc::new(crate::shim_pms::Shim::new(backend, cfg));
     shim.bind_self();
     shim.account.set_origin(&format!("http://127.0.0.1:{port}"));
+    // Continue Watching is account-backed: merge the account's resume points at boot, and again
+    // whenever the profile changes (a profile's history is its own).
+    let s3 = shim.clone();
+    shim.account.set_watch_sink(Arc::new(move || s3.pull_account_watch()));
+    shim.pull_account_watch();
     let s2 = shim.clone();
     let handler: Arc<crate::shim_http::Handler> = Arc::new(move |req: &crate::shim_http::Request| s2.handle(req));
     std::thread::Builder::new().name("pmsshim".into()).spawn(move || crate::shim_http::serve(listener, handler))?;
