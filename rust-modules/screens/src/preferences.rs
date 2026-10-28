@@ -24,6 +24,8 @@ use plx_ui::form::{Form, FormId, FormSection, FormTable, RowKey, RowKind};
 use plx_ui::frame::Budget;
 use plx_machine::machine::{Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId,
     Handled, InputEvent, InputKind, InstanceId, Key, LogicalState, Machine, MachineId};
+use plx_ui::text_buffer::TextBuffer;
+use plx_machine::machine::TextEdit;
 use plx_ui::screen::{DrawFrame, Enter, FocusSource, FocusTarget, HitSource, RenderStrategy,
     Screen, ScreenEvent};
 use plx_ui::table::Row;
@@ -83,7 +85,7 @@ impl Kind {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), Language(String), Mode(i64), Forced(i64) }
+enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), Language(String), Mode(i64), Forced(i64), P2pEnabled(bool), P2pServer(Option<String>) }
 
 /// The hashed half of a transaction: what the page shows while a load or save is in flight.
 struct Io { busy: bool, status: String }
@@ -214,6 +216,8 @@ impl Txn {
             Value::NextEpisode(mode) => PreferenceCmd::NextEpisode { mode, reply },
             Value::DeckPress(mode) => PreferenceCmd::DeckPress { mode, reply },
             Value::SkipInterval(interval) => PreferenceCmd::SkipInterval { interval, reply },
+            Value::P2pEnabled(on) => PreferenceCmd::P2pEnabled { on, reply },
+            Value::P2pServer(url) => PreferenceCmd::P2pServer { url, reply },
             _ => return,
         };
         self.pending = Some(Pending::Local(rx)); io.busy = true; self.saving = true;
@@ -273,7 +277,7 @@ impl Txn {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowId { Field(PickerKind), Retry }
+enum RowId { Field(PickerKind), Retry, P2pToggle, P2pServer }
 impl FormId for RowId {
     /// Hand-assigned, per page: each field's position in ITS page's list (what its table index was
     /// before the page moved onto a form, so a recorded focus on a field row is unchanged), Retry
@@ -289,11 +293,13 @@ impl FormId for RowId {
             Self::Field(PickerKind::DeckPress) => 7,
             Self::Field(PickerKind::RatingSource) => 8,
             Self::Retry => 6,
+            Self::P2pToggle => 9,
+            Self::P2pServer => 10,
         })
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action { Open, Retry }
+enum Action { Open, Retry, ToggleP2p, EditP2pServer }
 
 struct State {
     kind: Kind, selected: u32, io: Io,
@@ -326,6 +332,12 @@ pub struct PreferencesPage {
     deck_press: DeckPress,
     skip_interval: SkipInterval,
     rating_source: plx_plex::plex::session::RatingSource,
+    /// The P2P switch and engine URL the rows were last built from (not canonical state, like
+    /// `look`), so a save landing elsewhere rebuilds the two P2P rows.
+    p2p: (bool, Option<String>),
+    /// The Server URL being typed, while the television's keyboard is up. A draft until OK commits
+    /// it; the row's read-out draws it, and the session holds nothing until then.
+    draft: Option<TextBuffer>,
 }
 impl PreferencesPage {
     pub fn new(entry: EntryId, kind: Kind) -> Self {
@@ -335,7 +347,8 @@ impl PreferencesPage {
             copy: String::new(), txn: Txn::new(false),
             look: (plx_media::route::subtitle_size(), plx_media::route::subtitle_position()),
             next_episode: plx_media::route::next_episode_mode(), deck_press: plx_media::route::deck_press(),
-            skip_interval: plx_media::route::skip_interval(), rating_source: plx_plex::plex::nuvio::rating_source() };
+            skip_interval: plx_media::route::skip_interval(), rating_source: plx_plex::plex::nuvio::rating_source(),
+            p2p: plx_plex::plex::nuvio::p2p(), draft: None };
         s.rebuild(None);
         s
     }
@@ -364,13 +377,23 @@ impl PreferencesPage {
         self.deck_press = plx_media::route::deck_press();
         self.skip_interval = plx_media::route::skip_interval();
         self.rating_source = plx_plex::plex::nuvio::rating_source();
+        self.p2p = plx_plex::plex::nuvio::p2p();
         self.copy = copy_text(Subject::Page(self.state.kind), &self.state.io.status, self.state.direct_play).into_owned();
+        // The draft's text outlives the borrow `FieldListInputs` takes of it: `form.set` below needs
+        // the page mutably, and the row read-out is the one thing built from the page's own state.
+        let draft = self.draft.as_ref().map(|d| d.text().to_owned());
         let inputs = FieldListInputs {
             kind: self.state.kind, quality: self.state.quality, direct_play: self.state.direct_play,
             prefs: self.txn.prefs(), busy: self.state.io.busy, show_retry: !self.state.io.status.is_empty(),
+            p2p: self.p2p.clone(), p2p_draft: draft.as_deref(),
         };
         self.state.values = fields_of(&inputs).iter()
             .map(|&f| field_readout(f, inputs.quality, inputs.direct_play, inputs.prefs)).collect();
+        if self.state.kind == Kind::Playback {
+            self.state.values.push(if self.p2p.0 { plx_platform::i18n::msg::settings_playback_p2p_on() }
+                else { plx_platform::i18n::msg::settings_playback_p2p_off() }.into());
+            self.state.values.push(p2p_server_value(self.p2p.1.as_deref(), draft.as_deref()));
+        }
         self.form.table.compact = false; self.form.table.header_ink = theme::TEXT_READING; self.form.table.list_focused = true;
         self.form.set(field_form(&inputs), keep.as_ref());
         self.state.selected = self.form.key_at(self.form.table.sel.max(0) as usize).map_or(0, |k| k.0);
@@ -389,6 +412,72 @@ impl PreferencesPage {
                 fx.invalidate(plx_machine::present::Provenance::Input);
             }
             Some(Action::Open) | None => {}
+            Some(Action::ToggleP2p) => {
+                self.txn.save_local(&mut self.state.io, Value::P2pEnabled(!self.p2p.0), fx);
+                self.rebuild_keeping();
+                fx.invalidate(plx_machine::present::Provenance::Input);
+            }
+            Some(Action::EditP2pServer) => self.begin_url_edit(fx),
+        }
+    }
+    /// Raise the television's keyboard on the saved Server URL. The text lives in `draft` until OK
+    /// commits it, so BACK leaves the session exactly as it was.
+    fn begin_url_edit(&mut self, fx: &mut Effects<'_, InnerHost>) {
+        let url = self.p2p.1.clone().unwrap_or_default();
+        self.draft = Some(TextBuffer::new(url.clone(), url.len()));
+        // Addressed to the page ITSELF, which is what `Effects` already knows: the sink is built
+        // per instance (`Effects::from_handle` in `settings::RouteSurface::deliver`), so `fx.from()`
+        // is this page's own `InstanceId` and no `instance` field has to be carried. The surface
+        // re-addresses it to its own id on the way out — see `RouteSurface::forward`.
+        fx.push(Fx::Deliver(fx.from(), Delivery::Keyboard { up: true }));
+        self.rebuild_keeping();
+        fx.invalidate(plx_machine::present::Provenance::Input);
+    }
+    /// Put the keyboard away and, when `commit`, save the draft: an empty field means "probe the
+    /// engine's default ports" (`None`), which is what a person clearing the row is asking for.
+    fn end_url_edit(&mut self, commit: bool, fx: &mut Effects<'_, InnerHost>) {
+        let Some(draft) = self.draft.take() else { return };
+        fx.push(Fx::Deliver(fx.from(), Delivery::Keyboard { up: false }));
+        let typed = draft.into_text();
+        let url = Some(typed.trim().to_owned()).filter(|u| !u.is_empty());
+        if commit && url != self.p2p.1 {
+            self.txn.save_local(&mut self.state.io, Value::P2pServer(url), fx);
+        }
+        self.rebuild_keeping();
+        fx.invalidate(plx_machine::present::Provenance::Input);
+    }
+    /// Apply one edit to the URL draft: the row's read-out IS the draft, so the form is rebuilt to
+    /// show the keystroke.
+    fn type_edit(&mut self, edit: &TextEdit, fx: &mut Effects<'_, InnerHost>) {
+        if let Some(draft) = &mut self.draft {
+            draft.edit(edit);
+            self.rebuild_keeping();
+            fx.invalidate(plx_machine::present::Provenance::Input);
+        }
+    }
+    /// The keyboard's events while the Server URL is being typed. OK commits, BACK cancels, and
+    /// Up/Down commit and then move the cursor as they always would.
+    fn url_input<K>(&mut self, kind: &InputKind<K>, fx: &mut Effects<'_, InnerHost>) -> Handled {
+        match kind {
+            InputKind::Text(edit) => { self.type_edit(edit, fx); Handled::Yes }
+            InputKind::SystemKeyboard(false) => { self.end_url_edit(true, fx); Handled::Yes }
+            InputKind::Key { key, sym, edge, .. } if *edge != Edge::Up => {
+                // The remote edits the text itself, as it does in Search: the television's
+                // keyboard sends whole commits, a physical backspace arrives as a key.
+                let edit = match (*key, *sym) {
+                    (Key::Left, _) => Some(TextEdit::Left), (Key::Right, _) => Some(TextEdit::Right),
+                    (_, plx_ui::consts::SDLK_BACKSPACE) => Some(TextEdit::Backspace),
+                    (_, plx_ui::consts::SDLK_CLEAR) => Some(TextEdit::Clear), _ => None,
+                };
+                if let Some(edit) = edit { self.type_edit(&edit, fx); return Handled::Yes; }
+                match key {
+                    Key::Back => { self.end_url_edit(false, fx); Handled::Yes }
+                    Key::Ok => { self.end_url_edit(true, fx); Handled::Yes }
+                    Key::Up | Key::Down => { self.end_url_edit(true, fx); Handled::No }
+                    _ => Handled::No,
+                }
+            }
+            _ => Handled::No,
         }
     }
 }
@@ -488,6 +577,40 @@ struct FieldListInputs<'a> {
     busy: bool,
     /// Show the Retry row: the account kind has a non-empty status message and nothing is in flight.
     show_retry: bool,
+    /// Settings > Playback's P2P switch and engine URL (`nuvio::p2p`).
+    p2p: (bool, Option<String>),
+    /// The URL being typed on the Playback page, while the television's keyboard is up.
+    p2p_draft: Option<&'a str>,
+}
+/// The Server URL row's read-out when it is not being typed: the saved address, else the local
+/// engine's default ports. An empty field is a choice, not a missing value.
+fn p2p_server_readout(url: Option<&str>) -> String {
+    url.filter(|u| !u.trim().is_empty()).map_or_else(|| plx_platform::i18n::msg::settings_playback_p2p_default().into(), str::to_owned)
+}
+/// The Server URL row's read-out in every state, draft included.
+///
+/// **The read-out IS the field while the television's keyboard is up.** A [`Row`] is a label, a
+/// sub-line and a trailing read-out — it has no text widget of its own — so the caret after the
+/// value is the only thing that says "your keystrokes land here", and it must be drawn or the row
+/// looks inert while it is in fact taking input.
+fn p2p_server_value(url: Option<&str>, draft: Option<&str>) -> String {
+    draft.map_or_else(|| p2p_server_readout(url), |d| format!("{d}|"))
+}
+/// The Playback page's own P2P section: the switch, then the engine address it applies to.
+fn p2p_section(inputs: &FieldListInputs<'_>) -> FormSection<RowId, Action, SettingsPage> {
+    let (on, ref url) = inputs.p2p;
+    let editing = inputs.p2p_draft.is_some();
+    let readout = p2p_server_value(url.as_deref(), inputs.p2p_draft);
+    FormSection::new(plx_platform::i18n::msg::settings_playback_p2p())
+        .item(RowId::P2pToggle, RowKind::Toggle, Action::ToggleP2p,
+            Row::new(plx_platform::i18n::msg::settings_playback_p2p_enable())
+                .detail(plx_platform::i18n::msg::settings_playback_p2p_enable_detail())
+                .toggle(on).dim(inputs.busy))
+        // No chevron while editing: the row is not a door then, it is the field.
+        .item(RowId::P2pServer, RowKind::Button, Action::EditP2pServer,
+            Row::new(plx_platform::i18n::msg::settings_playback_p2p_server())
+                .detail(plx_platform::i18n::msg::settings_playback_p2p_server_detail())
+                .value(&readout).chevron(!editing).dim(inputs.busy))
 }
 /// The page's field list as a [`Form`]: each field a `Nav` item onto its picker page, plus the
 /// Audio & Subtitles Retry button, built from [`FieldListInputs`] alone.
@@ -507,7 +630,13 @@ fn field_form(inputs: &FieldListInputs<'_>) -> Form<RowId, Action, SettingsPage>
     section = section.item_if(inputs.kind == Kind::AudioSubtitles && !inputs.busy && inputs.show_retry,
         RowId::Retry, RowKind::Button, Action::Retry,
         Row::new(plx_platform::i18n::msg::settings_audio_retry()).detail(plx_platform::i18n::msg::settings_audio_retry_detail()));
-    Form::new().section(section)
+    let form = Form::new().section(section);
+    // P2P streaming is a Playback policy, not an account preference: it rides its own section so the
+    // list keeps saying which of the two a row writes to.
+    match inputs.kind {
+        Kind::Playback => form.section(p2p_section(inputs)),
+        Kind::AudioSubtitles => form,
+    }
 }
 fn mode_label(mode: DirectPlayMode) -> &'static str {
     match mode { DirectPlayMode::Auto => plx_platform::i18n::msg::settings_playback_auto(), DirectPlayMode::Forced => plx_platform::i18n::msg::settings_playback_forced(), DirectPlayMode::Disabled => plx_platform::i18n::msg::settings_playback_disabled() }
@@ -573,7 +702,8 @@ impl Machine<InnerHost> for PreferencesPage {
                     || self.next_episode != plx_media::route::next_episode_mode()
                     || self.deck_press != plx_media::route::deck_press()
                     || self.skip_interval != plx_media::route::skip_interval()
-                    || self.rating_source != plx_plex::plex::nuvio::rating_source() {
+                    || self.rating_source != plx_plex::plex::nuvio::rating_source()
+                    || self.p2p != plx_plex::plex::nuvio::p2p() {
                     self.rebuild_keeping();
                     // An empty loading table had no engine seat. Give its first landing (or
                     // Retry row) one so OK works immediately, without moving an existing
@@ -592,6 +722,10 @@ impl Machine<InnerHost> for PreferencesPage {
                 Handled::Yes
             }
             ScreenEvent::Activate(key) => { self.activate(*key, fx); Handled::Yes }
+            // The Server URL's keyboard owns the remote while it is up: its events must not reach
+            // the form, which would move the cursor out from under the field.
+            ScreenEvent::Input(input) if self.draft.is_some() => self.url_input(&input.kind, fx),
+            ScreenEvent::WillLeave(_) | ScreenEvent::Unmount => { self.end_url_edit(false, fx); Handled::No }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Right, at_edge: true, .. }, .. }) => {
                 if let Some(key) = cx.focus.current.and_then(|k| form_right_target(&self.form, k.elem)) {
                     self.activate(key, fx);
@@ -634,7 +768,7 @@ impl Screen<InnerHost> for PreferencesPage {
 pub fn nav_items_for_test(kind: Kind, prefs: Option<&AudioPreferences>) -> Vec<(u32, SettingsPage)> {
     let mut form: FormTable<RowId, Action, SettingsPage> = FormTable::new(BAND);
     form.set(field_form(&FieldListInputs { kind, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs, busy: false, show_retry: false }), None);
+        prefs, busy: false, show_retry: false, p2p: (false, None), p2p_draft: None }), None);
     (0..form.table.n_rows() as usize).filter_map(|i| match form.binding_at(i)?.kind.clone() {
         RowKind::Nav(dest) => Some((form.key_at(i)?.0, dest)),
         _ => None,

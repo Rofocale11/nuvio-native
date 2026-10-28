@@ -638,6 +638,21 @@ pub struct Session {
     pub deck_press: DeckPress,
     #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
     pub rating_source: RatingSource,
+    /// **May the Source Picker offer peer-to-peer (torrent) streams at all.** Install-wide like
+    /// [`Session::playback_quality`], because the peer-to-peer engine is a property of the
+    /// network the set sits on, not of whoever is watching. Off by default: a stream that needs
+    /// a local engine to play is not a stream this client can play, so listing it only offers a
+    /// pick that cannot start. Skipped at the default so a session predating this field
+    /// serializes exactly as it did before.
+    #[serde(default, deserialize_with = "de_soft_bool", skip_serializing_if = "is_false")]
+    pub p2p_enabled: bool,
+    /// **The peer-to-peer engine's base URL** (`http://127.0.0.1:2710`). `None` means "probe the
+    /// engine's default localhost ports", which is what every build before this field did.
+    /// Stored so a person running the engine on another host or port can say so once instead of
+    /// the client guessing. Soft-parsed like every other preference: a corrupt value costs the
+    /// setting, never the credentials.
+    #[serde(default, deserialize_with = "de_soft_nonempty_string", skip_serializing_if = "Option::is_none")]
+    pub p2p_server_url: Option<String>,
     /// **Device-wide ambient memory**: the last hero `UltraBlurColors` envelope Home actually
     /// rendered on this television, so a route in the Settings/first-run family that opens
     /// BEFORE Home has fetched anything this boot — first-run consent moved ahead of the
@@ -752,6 +767,10 @@ struct CanonicalSessionPreferences {
     deck_press: DeckPress,
     #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
     rating_source: RatingSource,
+    #[serde(default, deserialize_with = "de_soft_bool", skip_serializing_if = "is_false")]
+    p2p_enabled: bool,
+    #[serde(default, deserialize_with = "de_soft_nonempty_string", skip_serializing_if = "Option::is_none")]
+    p2p_server_url: Option<String>,
     #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
     plaintext_consent: Vec<PlaintextConsent>,
     #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
@@ -791,6 +810,8 @@ impl Default for CanonicalSessionPreferences {
             skip_interval: SkipInterval::Seconds10,
             deck_press: DeckPress::Details,
             rating_source: RatingSource::Imdb,
+            p2p_enabled: false,
+            p2p_server_url: None,
             plaintext_consent: Vec::new(),
             server_key_pins: Vec::new(),
             audio_enhancements: crate::plex::AudioEnhancements::NONE,
@@ -844,6 +865,8 @@ fn split_public(session: &Session) -> Result<plx_platform::storage::state::Publi
         skip_interval: session.skip_interval,
         deck_press: session.deck_press,
         rating_source: session.rating_source,
+        p2p_enabled: session.p2p_enabled,
+        p2p_server_url: session.p2p_server_url.clone(),
         plaintext_consent: session.plaintext_consent.clone(),
         server_key_pins: session.server_key_pins.clone(),
         audio_enhancements: session.audio_enhancements,
@@ -919,6 +942,8 @@ pub fn join_canonical(
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
         rating_source: preferences.rating_source,
+        p2p_enabled: preferences.p2p_enabled,
+        p2p_server_url: preferences.p2p_server_url,
         plaintext_consent: preferences.plaintext_consent,
         server_key_pins: preferences.server_key_pins,
         audio_enhancements: preferences.audio_enhancements,
@@ -953,6 +978,8 @@ fn public_session(public: &plx_platform::storage::state::PublicPayload) -> Sessi
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
         rating_source: preferences.rating_source,
+        p2p_enabled: preferences.p2p_enabled,
+        p2p_server_url: preferences.p2p_server_url,
         plaintext_consent: preferences.plaintext_consent,
         server_key_pins: preferences.server_key_pins,
         audio_enhancements: preferences.audio_enhancements,
@@ -2429,6 +2456,12 @@ fn default_true() -> bool {
     true
 }
 
+/// `skip_serializing_if` for a switch whose default is off, so a session that never turned it on
+/// writes exactly what it wrote before the field existed.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Same soft parse as [`de_soft_bool`], but garbage and a missing value stay on. Used where the
 /// product default is on ([`Session::trailer_autoplay`]).
 fn de_soft_bool_on<'de, D>(d: D) -> Result<bool, D::Error>
@@ -2635,6 +2668,21 @@ impl Session {
     pub fn rating_source(&self) -> RatingSource { self.rating_source }
     pub fn with_rating_source(&self, source: RatingSource) -> Self {
         let mut next = self.clone(); next.rating_source = source; next
+    }
+
+    /// May the Source Picker offer peer-to-peer streams (see [`Session::p2p_enabled`]).
+    pub fn p2p_enabled(&self) -> bool { self.p2p_enabled }
+    pub fn with_p2p_enabled(&self, enabled: bool) -> Self {
+        let mut next = self.clone(); next.p2p_enabled = enabled; next
+    }
+
+    /// The peer-to-peer engine's base URL, `None` for its default localhost ports.
+    pub fn p2p_server_url(&self) -> Option<&str> { self.p2p_server_url.as_deref() }
+    pub fn with_p2p_server_url(&self, url: Option<String>) -> Self {
+        let mut next = self.clone();
+        // An empty field means "unset", not "the engine is at the empty address".
+        next.p2p_server_url = url.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
+        next
     }
 
     pub fn deck_press(&self) -> DeckPress {

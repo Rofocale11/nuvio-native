@@ -318,6 +318,19 @@ pub(crate) fn adopt() {
     }
 }
 
+/// Whether WE have asked for the panel and have not dismissed it yet — the mirror of the static
+/// [`STARTED`] latch, for the app's own text router.
+///
+/// `app::run`'s `SDL_TEXTINPUT` arm has to decide between two consumers: `screens::search`, which
+/// drains this module's queue itself, and every other field, which is an ordinary screen and can
+/// only be reached by an `InputKind::Text` event through the dispatcher. It used to answer that
+/// with "is the top page Search" alone, so text typed on a settings field was queued for a drainer
+/// that was never coming. `STARTED` is the right question: it is set by the same call that asked
+/// the platform for the panel, so it is true exactly while some field wants the keystrokes.
+pub(crate) fn started() -> bool {
+    unsafe { *addr_of!(STARTED) }
+}
+
 /// Take everything committed since the last call, in order, and clear the buffer.
 ///
 /// A `Vec<String>` and not a single `String` because one commit is not one character: an IME can

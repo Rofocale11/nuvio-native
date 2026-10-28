@@ -10,8 +10,10 @@
 //!   reinstall only when a persistent writable directory is available. Developer Mode falls
 //!   back to `/tmp`, so watch progress and key mappings can be lost on reboot.
 //! - Streams are probed with the bundled FFmpeg at play time ([`prober`]).
-//! - Torrents play through a Stremio-compatible streaming server: `<data>/settings.json`'s
-//!   `torrentServer`, else an explicitly enabled (`enableTorrents`) local scan.
+//! - Torrents play through a Stremio-compatible streaming server, and only when the person turned
+//!   P2P Streaming on in Settings > Playback: `Session::p2p_server_url`, else a scan of the
+//!   engine's default local ports. The imported `settings.json` seed is deliberately not honoured
+//!   — an off switch that an import can flip is not a switch.
 //!
 //! Never logs an addon URL: Nuvio/AIOStreams URLs embed credentials. Hosts at most.
 
@@ -59,13 +61,6 @@ fn data_dir() -> PathBuf {
         }
     }
     candidates[2].clone()
-}
-
-#[derive(serde::Deserialize, Default)]
-#[serde(default, rename_all = "camelCase")]
-struct Settings {
-    torrent_server: Option<String>,
-    enable_torrents: bool,
 }
 
 /// `{"local_storage": {"installedAddonUrls": "<raw>", ...}, "profile_id": "1"}`.
@@ -192,13 +187,8 @@ pub(crate) fn boot() {
         set.addons.len(),
         describe(&set)
     ));
-    let settings: Settings = std::fs::read(data.join("settings.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
     let cfg = plx_pmsshim::Config {
         data_dir: Some(data.join("shim")),
-        torrent_server: settings.torrent_server.clone(),
         ..Default::default()
     };
     let backend = Arc::new(plx_pmsshim::AddonBackend::new(set));
@@ -258,8 +248,7 @@ pub(crate) fn boot() {
     let _ = BACKEND.set(backend.clone());
     let _ = HANDLE.set(handle);
     shim.warm();
-    // Off the boot path: manifests an import could not carry, and a streaming server on this TV.
-    let need_server = settings.enable_torrents && settings.torrent_server.is_none();
+    // Off the boot path: manifests an import could not carry.
     let _ = plx_base::task::spawn("nuvio-boot", move || {
         if fresh_import {
             let mut set = backend.snapshot();
@@ -270,11 +259,27 @@ pub(crate) fn boot() {
                 shim.warm();
             }
         }
-        if need_server {
-            if let Some(s) = plx_stremio::torrent::probe_local_server() {
-                log("nuvio: streaming server found on this device; torrents enabled");
-                shim.set_torrent_server(Some(s));
-            }
+    });
+}
+
+/// Push the session's P2P preference into the running shim: whether torrent/magnet streams may be
+/// offered at all, and the engine they play through (`Session::p2p_server_url`).
+///
+/// With P2P on and no URL configured, the engine's default local ports are probed — on a worker,
+/// never the caller's thread, because five refused connections cost seconds. This is the probe
+/// `boot` used to run off the import file; it is now driven by the preference, so turning the
+/// switch off really does stop torrents from being listed.
+pub(crate) fn restore_p2p(enabled: bool, server: Option<String>) {
+    let Some(handle) = handle() else { return };
+    let shim = handle.shim.clone();
+    shim.set_p2p(enabled, server);
+    if !enabled || shim.torrent_server().is_some() {
+        return;
+    }
+    let _ = plx_base::task::spawn("nuvio-p2p", move || {
+        if let Some(url) = plx_stremio::torrent::probe_local_server() {
+            log("nuvio: streaming server found on this device");
+            shim.set_p2p(true, Some(url));
         }
     });
 }

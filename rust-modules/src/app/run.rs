@@ -1459,7 +1459,7 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // nobody drains. Gating here would also be a second, weaker copy of a rule
         // that lives in one place — and it would flip a frame away from the field's
         // own edit state, because the route changes at the fade floor.
-        if super::bridge::search_owns_input(&app.pages) {
+        if super::bridge::search_owns_input(&app.pages) || crate::textinput::started() {
             let text = crate::textinput::decode(&app.ev);
             ingest_text(app, &text, crate::textinput::available(), plx_machine::machine::Source::Sdl);
         } else {

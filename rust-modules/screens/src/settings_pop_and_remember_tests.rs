@@ -1,12 +1,43 @@
 //! `forward`-driven `Fx::Remember`/`Fx::Nav(NavOp::Pop)` ownership: who may project a
 //! remembered selection, and when a Pop is the surface's own dismissal rather than an inner
-//! pop.
+//! pop. Plus the one `Delivery` a page can legitimately emit, which `forward` has to re-address.
 
 use super::*;
 #[allow(unused_imports)]
 use super::test_support::*;
 use plx_machine::present::Present;
 use plx_ui::screen::By;
+
+/// **A page's keyboard request is a DISPATCHER delivery, and `forward` is its only road out of
+/// the surface.** OK on Settings > Playback's *Server URL* row runs
+/// `PreferencesPage::begin_url_edit`, which pushes `Fx::Deliver(_, Delivery::Keyboard { up:
+/// true })` — and `forward` used to handle only `Delivery::Screen` and send every other delivery
+/// into its structural-op arm: a `debug_assert` under `cfg(debug_assertions)` and a SILENT DROP
+/// in a release build. That is why the row did nothing at all on the television (no keyboard, no
+/// edit state) while the page's own logic, driven directly, was correct.
+///
+/// The re-address matters as much as the forwarding. `dispatch`'s keyboard arm accepts a
+/// delivery only from the instance that `nav.instance_of(owner_entry)` names, and inside a
+/// surface that entry is the SURFACE — so the page's own id would be refused even if it arrived
+/// intact. Hence the assertion is on `self.id`, not on the page's instance.
+#[test]
+fn a_page_keyboard_request_survives_forward_addressed_to_the_surface() {
+    let _g = plx_base::testlock::serial();
+    let _sess = scratch_session("surface-keyboard-forward");
+    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Playback,
+        plx_data::pms::HubsSnapshot::empty_for_test().view());
+    step(&mut s, ScreenEvent::Mount, None);
+    let page = s.inner.top().unwrap().inst.as_ref().unwrap().id;
+    assert_ne!(page, s.id, "the harness is pointless if the page is the surface");
+    for up in [true, false] {
+        let out = forwarded(&mut s, Fx::Deliver(MachineId::Instance(page), Delivery::Keyboard { up }));
+        let delivered: Vec<_> = out.iter().filter_map(|s| match &s.fx {
+            Fx::Deliver(to, Delivery::Keyboard { up }) => Some((*to, *up)),
+            _ => None,
+        }).collect();
+        assert_eq!(delivered, [(MachineId::Instance(s.id), up)], "up={up}");
+    }
+}
 
 #[test]
 fn only_current_inner_instance_can_project_remembered_selection() {

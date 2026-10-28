@@ -309,6 +309,19 @@ impl RouteSurface {
                     MachineId::Instance(self.id),
                     Delivery::Screen(ScreenEvent::Enter(e)),
                 )),
+                // **The system keyboard is the DISPATCHER's resource, and its ownership rule is
+                // about the ENTRY, not the page.** `dispatch::execute_deliver` accepts a
+                // `Delivery::Keyboard` only from the instance that `nav.instance_of(owner_entry)`
+                // names — and for a page inside this surface that entry is the SURFACE, whose
+                // instance is `self.id`. So the page's request is re-addressed here, exactly as
+                // `Enter` above is. It used to fall through to the arm below, which is a
+                // `debug_assert` in a debug build and a silent drop in a release one: that is why
+                // OK on Settings > Playback's Server URL row raised no keyboard and entered no
+                // edit state, even though the page's own `begin_url_edit` ran and pushed this.
+                Fx::Deliver(_, Delivery::Keyboard { up }) => fx.push(Fx::Deliver(
+                    MachineId::Instance(self.id),
+                    Delivery::Keyboard { up },
+                )),
                 Fx::App(a) => fx.push(Fx::App(a)),
                 Fx::Log(l) => fx.push(Fx::Log(l)),
                 Fx::Press(arm) => fx.push(Fx::Press(arm)),

@@ -54,6 +54,24 @@ pub fn set_rating_source(source: super::session::RatingSource) -> bool {
         .is_some_and(|write| matches!(write.classify(), super::session::async_persistence::CompletionOutcome::Durable(_)))
 }
 
+/// Settings > Playback's P2P switch and engine URL, through the session cache: whether the Source
+/// Picker may offer peer-to-peer streams, and the streaming server they play through (`None` probes
+/// the default local ports). The shim is told both at boot and after every save.
+pub fn p2p() -> (bool, Option<String>) {
+    let session = super::session::peek();
+    (session.p2p_enabled(), session.p2p_server_url().map(str::to_owned))
+}
+/// Called on the storage worker; publish only a verified DB8/file write.
+pub fn set_p2p_enabled(enabled: bool) -> bool {
+    super::session::update_with_outcome(|s| Some(s.with_p2p_enabled(enabled)))
+        .is_some_and(|write| matches!(write.classify(), super::session::async_persistence::CompletionOutcome::Durable(_)))
+}
+/// Called on the storage worker; publish only a verified DB8/file write.
+pub fn set_p2p_server(url: Option<String>) -> bool {
+    super::session::update_with_outcome(|s| Some(s.with_p2p_server_url(url)))
+        .is_some_and(|write| matches!(write.classify(), super::session::async_persistence::CompletionOutcome::Durable(_)))
+}
+
 
 #[derive(Clone, Copy, Default, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -15,6 +15,10 @@ pub struct Config {
     pub data_dir: Option<PathBuf>,
     /// A Stremio-compatible streaming server (`http://host:11470`) for `infoHash` streams.
     pub torrent_server: Option<String>,
+    /// May peer-to-peer (torrent/magnet) streams be offered at all. Off by default: a torrent the
+    /// client has no engine for is a pick that cannot start, so it is not listed. The app's
+    /// Settings > Playback switch sets this at boot (`nuvio::restore_p2p`).
+    pub p2p_enabled: bool,
     /// How long a detail request waits for addons' streams at most.
     pub stream_deadline: Duration,
     /// Once one playable stream has arrived, how much longer to wait for the rest.
@@ -28,6 +32,7 @@ impl Default for Config {
         Config {
             data_dir: None,
             torrent_server: None,
+            p2p_enabled: false,
             stream_deadline: Duration::from_secs(60),
             stream_grace: Duration::from_millis(2500),
             token: "nuvionative-local".into(),

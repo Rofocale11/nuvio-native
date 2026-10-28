@@ -1009,6 +1009,9 @@ pub(crate) unsafe fn construct(
     plx_media::route::restore_next_episode_mode(session.next_episode_mode());
     plx_media::route::restore_skip_interval(session.skip_interval());
     plx_media::route::restore_deck_press(session.deck_press());
+    // P2P streaming is a shim policy, not a route one: the shim decides what the Source Picker
+    // may list, so it is told the same moment every other install-wide preference is restored.
+    super::nuvio::restore_p2p(session.p2p_enabled(), session.p2p_server_url().map(str::to_owned));
     // The subtitle tone rides the same file and the same moment: a preference, restored once.
     plx_media::player::restore_subtitle_tone(session.subtitle_tone());
     plx_media::player::restore_audio_enhancements(session.audio_enhancements());

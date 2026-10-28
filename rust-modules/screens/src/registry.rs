@@ -83,6 +83,10 @@ pub enum PreferenceCmd {
         reply: std::sync::mpsc::Sender<AccountPreferenceReply>,
     },
     RatingSource { source: plx_plex::plex::session::RatingSource, reply: std::sync::mpsc::Sender<bool> },
+    /// Settings > Playback's P2P switch: whether the Source Picker may offer torrent streams.
+    P2pEnabled { on: bool, reply: std::sync::mpsc::Sender<bool> },
+    /// The streaming server those streams play through (`None` probes the default local ports).
+    P2pServer { url: Option<String>, reply: std::sync::mpsc::Sender<bool> },
     Quality { quality: plx_plex::plex::session::PlaybackQuality, reply: std::sync::mpsc::Sender<bool> },
     DirectPlay { mode: plx_plex::plex::session::DirectPlayMode, reply: std::sync::mpsc::Sender<bool> },
     NextEpisode { mode: plx_plex::plex::session::NextEpisodeMode, reply: std::sync::mpsc::Sender<bool> },

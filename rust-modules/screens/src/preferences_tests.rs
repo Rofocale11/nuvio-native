@@ -2,7 +2,7 @@
 //! (`preferences/picker_tests.rs`); this file also owns the fixtures both share.
 use super::*;
 use plx_plex::plex::account::PreferenceRequest;
-use plx_machine::machine::{FocusRead, InputOwner, PressRead, Stamped, Tick};
+use plx_machine::machine::{FocusRead, InputOwner, PressRead, Source, Stamped, Tick};
 use plx_machine::present::Present;
 use plx_ui::fixture::FixtureMeasure;
 
@@ -190,14 +190,26 @@ fn every_field_reports_the_page_whose_list_shows_it() {
     let prefs = AudioPreferences::default();
     for kind in [Kind::Playback, Kind::AudioSubtitles] {
         let inputs = FieldListInputs { kind, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-            prefs: Some(&prefs), busy: false, show_retry: false };
+            prefs: Some(&prefs), busy: false, show_retry: false, p2p: (false, None), p2p_draft: None };
         for &field in fields_of(&inputs) {
             assert_eq!(field.kind(), kind, "{field:?} is listed by {kind:?}");
         }
     }
     let audio = FieldListInputs { kind: Kind::AudioSubtitles, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs: Some(&prefs), busy: false, show_retry: false };
+        prefs: Some(&prefs), busy: false, show_retry: false, p2p: (false, None), p2p_draft: None };
     assert_eq!(fields_of(&audio), &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles]);
+}
+
+/// The Server URL row: the saved address while it is idle, else the local engine's default ports
+/// — an empty field is a choice, not a missing value. While a draft is live the row shows the
+/// draft plus a caret instead; that composition is [`p2p_server_value`], asserted below through
+/// the page's own state.
+#[test]
+fn the_server_url_row_shows_the_saved_address_or_the_default() {
+    assert_eq!(p2p_server_readout(Some("http://10.0.0.2:2710")), "http://10.0.0.2:2710");
+    assert_eq!(p2p_server_readout(Some("   ")), plx_platform::i18n::msg::settings_playback_p2p_default());
+    assert_eq!(p2p_server_readout(None), plx_platform::i18n::msg::settings_playback_p2p_default());
+    assert_eq!(p2p_server_value(Some("http://10.0.0.2:2710"), Some("http://10.0.0.3:2710")), "http://10.0.0.3:2710|");
 }
 
 /// The Continue Watching row: shipped default is Open details, the picker lists the two options
@@ -228,4 +240,63 @@ fn the_continue_watching_row_defaults_to_open_details_and_its_picker_saves_the_p
         _ => None,
     });
     assert_eq!(saved, Some(DeckPress::Play));
+}
+
+/// Every keyboard delivery in `emitted`, as its `up` flag.
+fn keyboards(emitted: &[Stamped<InnerHost>]) -> Vec<bool> {
+    emitted.iter().filter_map(|e| match &e.fx {
+        Fx::Deliver(_, Delivery::Keyboard { up }) => Some(*up),
+        _ => None,
+    }).collect()
+}
+fn key_event(key: Key) -> ScreenEvent<InnerHost> {
+    ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
+        kind: InputKind::Key { key, sym: 0, wcode: 0, edge: Edge::Down, at_edge: false } })
+}
+
+/// **OK on the Server URL row asks for the keyboard and opens the draft it types into.**
+///
+/// The reported bug ("nothing happens") was NOT here — this page emitted the delivery correctly
+/// and `RouteSurface::forward` dropped it, which `settings_pop_and_remember_tests`'
+/// `a_page_keyboard_request_survives_forward_addressed_to_the_surface` pins from the other side.
+/// The page half is pinned too, so a later refactor cannot quietly stop asking and leave only the
+/// surface test green.
+#[test]
+fn ok_on_the_server_url_row_raises_the_keyboard_and_opens_a_draft() {
+    let _serial = plx_base::testlock::serial();
+    let _session = plx_plex::plex::session::TempSession::new("pref-url-open");
+    let mut page = PreferencesPage::new(EntryId(0), Kind::Playback);
+    let key = RowId::P2pServer.key().0;
+    let emitted = drive(&mut page, ScreenEvent::Activate(key), key);
+    assert_eq!(keyboards(&emitted), [true]);
+    assert!(page.draft.is_some());
+}
+
+/// The draft is the read-out while it is live — with the caret that is the ONLY thing on screen
+/// saying keystrokes land here (a `Row` has no text widget of its own) — and OK commits what was
+/// typed while BACK throws it away and leaves the saved address alone.
+#[test]
+fn the_caret_shows_the_draft_then_ok_commits_it_and_back_discards_it() {
+    let _serial = plx_base::testlock::serial();
+    let _session = plx_plex::plex::session::TempSession::new("pref-url-type");
+    let typed = "http://10.0.0.9:2710";
+    for (commit, want) in [(true, Some(typed)), (false, None)] {
+        let mut page = PreferencesPage::new(EntryId(0), Kind::Playback);
+        let key = RowId::P2pServer.key().0;
+        drive(&mut page, ScreenEvent::Activate(key), key);
+        drive(&mut page, ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
+            kind: InputKind::Text(TextEdit::Clear) }), key);
+        drive(&mut page, ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
+            kind: InputKind::Text(TextEdit::Commit(typed.into())) }), key);
+        assert_eq!(page.draft.as_ref().unwrap().text(), typed);
+        assert!(page.state.values.iter().any(|v| v == &format!("{typed}|")), "the caret is drawn");
+        let emitted = drive(&mut page, key_event(if commit { Key::Ok } else { Key::Back }), key);
+        assert_eq!(keyboards(&emitted), [false], "the keyboard goes away either way");
+        assert!(page.draft.is_none());
+        let saved: Vec<_> = emitted.iter().filter_map(|e| match &e.fx {
+            Fx::App(AppFx::Preferences(PreferenceCmd::P2pServer { url, .. })) => Some(url.clone()),
+            _ => None,
+        }).collect();
+        assert_eq!(saved, want.map(|u| Some(u.to_owned())).into_iter().collect::<Vec<_>>());
+    }
 }

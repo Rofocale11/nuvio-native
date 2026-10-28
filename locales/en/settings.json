@@ -717,6 +717,38 @@
       "count": "i64"
     }
   },
+  "settings.playback.p2p": {
+    "value": "P2P Streaming",
+    "description": "Settings > Playback section heading: the peer-to-peer (torrent) streaming settings."
+  },
+  "settings.playback.p2p_enable": {
+    "value": "Enable P2P",
+    "description": "Settings > Playback toggle: whether torrent streams may be offered in the Source Picker."
+  },
+  "settings.playback.p2p_enable.detail": {
+    "value": "Offer torrents in the Source Picker.",
+    "description": "Settings > Playback: what the Enable P2P toggle does."
+  },
+  "settings.playback.p2p_server": {
+    "value": "Server URL",
+    "description": "Settings > Playback: the address of the streaming server torrents play through."
+  },
+  "settings.playback.p2p_server.detail": {
+    "value": "Empty uses the local engine's ports.",
+    "description": "Settings > Playback: what the Server URL field is for."
+  },
+  "settings.playback.p2p_default": {
+    "value": "Default",
+    "description": "Settings > Playback Server URL read-out when no address is set: the local engine's default ports."
+  },
+  "settings.playback.p2p_on": {
+    "value": "On",
+    "description": "Settings > Playback read-out for the P2P switch when it is on."
+  },
+  "settings.playback.p2p_off": {
+    "value": "Off",
+    "description": "Settings > Playback read-out for the P2P switch when it is off."
+  },
   "settings.audio.language": {
     "value": "Preferred audio language",
     "description": "Settings, consent or sign-in UI: settings.audio.language"

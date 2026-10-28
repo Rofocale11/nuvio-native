@@ -35,6 +35,26 @@ pub(super) fn execute(command: PreferenceCmd) {
                 plx_machine::idle::invalidate();
             });
         }
+        PreferenceCmd::P2pEnabled { on, reply } => {
+            let _ = plx_base::storage_worker::submit_retained(move || {
+                let saved = plx_plex::plex::nuvio::set_p2p_enabled(on);
+                // The shim's policy is live: the next Source Picker asks under the new switch.
+                if saved { super::nuvio::restore_p2p(on, plx_plex::plex::nuvio::p2p().1); }
+                let _ = reply.send(saved);
+                plx_machine::idle::invalidate();
+            });
+        }
+        PreferenceCmd::P2pServer { url, reply } => {
+            let _ = plx_base::storage_worker::submit_retained(move || {
+                let saved = plx_plex::plex::nuvio::set_p2p_server(url);
+                if saved {
+                    let (enabled, server) = plx_plex::plex::nuvio::p2p();
+                    super::nuvio::restore_p2p(enabled, server);
+                }
+                let _ = reply.send(saved);
+                plx_machine::idle::invalidate();
+            });
+        }
         PreferenceCmd::Quality { quality, reply } => {
             let _ = plx_base::storage_worker::submit_retained(move || {
                 let _ = reply.send(plx_media::route::set_default_quality(quality));

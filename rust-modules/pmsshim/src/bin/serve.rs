@@ -13,6 +13,9 @@ fn main() {
     let port: u16 = val("--port").and_then(|v| v.parse().ok()).unwrap_or(32400);
     let host = val("--host").unwrap_or_else(|| "127.0.0.1".into());
     let mut cfg = plx_pmsshim::Config { data_dir: val("--data").map(Into::into), torrent_server: val("--torrent-server"), ..Default::default() };
+    // A streaming server named on the command line IS the P2P switch: the app's Settings page
+    // owns the real preference, and this bin has no Settings page.
+    cfg.p2p_enabled = cfg.torrent_server.is_some();
     if let Some(t) = val("--token") {
         cfg.token = t;
     }

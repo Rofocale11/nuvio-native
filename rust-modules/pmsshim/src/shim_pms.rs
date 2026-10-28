@@ -13,7 +13,7 @@ use plx_stremio::addons_tmdb::{
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -159,6 +159,10 @@ pub struct Shim {
     /// Torrent markers resolved on a streaming server (`/create`), by marker + ratingKey.
     resolved: Mutex<HashMap<(i64, String), String>>,
     torrent_server: std::sync::RwLock<Option<String>>,
+    /// Whether peer-to-peer streams may be offered at all (see [`Config::p2p_enabled`]). Read by
+    /// [`Shim::torrent_server`], so every stream list, pick and resolve that goes through a
+    /// streaming server is gated by this one switch.
+    p2p_enabled: AtomicBool,
     /// Audio codecs this TV decodes (`devcaps`); empty = unknown, rank on video alone.
     audio_codecs: std::sync::RwLock<Vec<String>>,
     /// Set by [`Shim::bind_self`]: background work started from a `&self` method.
@@ -594,6 +598,22 @@ mod tmdb_metadata_tests {
         assert_eq!(preview.release_info.as_deref(), Some("2021-12-15"));
     }
 
+    /// The switch gates the engine, not just the Settings row: `torrent_server` is what
+    /// `shim_media::rank`/`playable_url` consult, so `None` is what drops every torrent stream.
+    #[test]
+    fn p2p_off_hides_the_streaming_server_and_clearing_the_url_takes_effect() {
+        let shim = Shim::new(Arc::new(TmdbMetaBackend), Config { torrent_server: Some("http://127.0.0.1:2710".into()), ..Config::default() });
+        assert_eq!(shim.torrent_server(), None, "P2P is off until Settings says otherwise");
+        shim.set_p2p(true, None);
+        assert_eq!(shim.torrent_server(), None, "no URL configured: the app probes the default ports");
+        shim.set_p2p(true, Some("  http://192.168.1.9:2710  ".into()));
+        assert_eq!(shim.torrent_server().as_deref(), Some("http://192.168.1.9:2710"));
+        shim.set_p2p(true, None);
+        assert_eq!(shim.torrent_server(), None, "clearing the field is not ignored");
+        shim.set_p2p(false, Some("http://192.168.1.9:2710".into()));
+        assert_eq!(shim.torrent_server(), None, "the switch outranks a configured URL");
+    }
+
     #[test]
     fn tmdb_related_rating_key_resolves_to_full_metadata() {
         let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
@@ -1020,6 +1040,7 @@ impl Shim {
     pub fn new(backend: Arc<dyn Backend>, cfg: Config) -> Shim {
         let dir = cfg.data_dir.clone();
         let cfg_ts = cfg.torrent_server.clone();
+        let cfg_p2p = cfg.p2p_enabled;
         let cfg_token = cfg.token.clone();
         Shim {
             backend,
@@ -1040,6 +1061,7 @@ impl Shim {
             probes: crate::shim_probe::ProbeCache::default(),
             resolved: Mutex::new(HashMap::new()),
             torrent_server: std::sync::RwLock::new(cfg_ts),
+            p2p_enabled: AtomicBool::new(cfg_p2p),
             audio_codecs: std::sync::RwLock::new(Vec::new()),
             me: std::sync::OnceLock::new(),
             account: crate::shim_account::Account::new(dir.as_deref(), &cfg_token),
@@ -1050,12 +1072,36 @@ impl Shim {
         let _ = self.me.set(Arc::downgrade(self));
     }
 
-    /// The Stremio-compatible streaming server torrents play through, if any.
+    /// The Stremio-compatible streaming server torrents play through, if any. `None` whenever P2P
+    /// is off, which is what makes [`shim_media::rank`] and `playable_url` drop every torrent and
+    /// magnet stream: an unplayable pick is not offered.
     pub fn torrent_server(&self) -> Option<String> {
+        if !self.p2p_enabled() {
+            return None;
+        }
         self.torrent_server
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Is peer-to-peer streaming on (Settings > Playback > P2P Streaming)?
+    pub fn p2p_enabled(&self) -> bool {
+        self.p2p_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Apply the session's P2P preference: the switch, and the engine's base URL (`None` = probe
+    /// the default local ports). The URL is assigned, not merged, so clearing the field in
+    /// Settings takes effect without a relaunch.
+    pub fn set_p2p(&self, enabled: bool, server: Option<String>) {
+        self.p2p_enabled.store(enabled, Ordering::Relaxed);
+        *self.torrent_server.write().unwrap_or_else(|e| e.into_inner()) =
+            server.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
+        // The lists that were ranked under the old policy no longer answer it.
+        self.streams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// The audio codecs this TV decodes: a stream whose label names another ranks after the

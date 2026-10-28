@@ -18,13 +18,13 @@ fn frame_w() -> f32 {
 }
 
 fn playback(quality: Quality, direct_play: DirectPlayMode) -> FieldListInputs<'static> {
-    FieldListInputs { kind: Kind::Playback, quality, direct_play, prefs: None, busy: false, show_retry: false }
+    FieldListInputs { kind: Kind::Playback, quality, direct_play, prefs: None, busy: false, show_retry: false, p2p: (false, None), p2p_draft: None }
 }
 
 fn audio(prefs: Option<&AudioPreferences>) -> FieldListInputs<'_> {
     FieldListInputs {
         kind: Kind::AudioSubtitles, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs, busy: false, show_retry: false,
+        prefs, busy: false, show_retry: false, p2p: (false, None), p2p_draft: None,
     }
 }
 
