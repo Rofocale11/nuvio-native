@@ -177,6 +177,7 @@ pub fn open_following(
             MEDIA_SEND_TIMEOUT_MS,
             req.deadline,
             req.deadline.is_some(),
+            true, // media: arm the one-shot cold-start grace for the first body byte
             checkpoint,
         );
         let status = match opened {

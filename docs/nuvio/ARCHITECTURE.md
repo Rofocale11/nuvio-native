@@ -147,7 +147,8 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
 - **Data directory.** `appPath` is `/tmp/nuvio-serverp2p` unless `APP_PATH` overrides it, and
   `cacheRoot` follows `appPath`. The generated settings and state are therefore
   `/tmp/nuvio-serverp2p/server-settings.json`,
-  `/tmp/nuvio-serverp2p/stremio-cache/`, and `/tmp/nuvio-serverp2p/httpsCert.json`. `/tmp` is
+  `/tmp/nuvio-serverp2p/stremio-cache/` (only while caching is on), and
+  `/tmp/nuvio-serverp2p/httpsCert.json`. `/tmp` is
   writable on read-only production installs, and with `cacheSize: 0` nothing there needs to survive
   a reboot. `boot.rs` creates the directory and refuses to spawn when it is owned by a different
   uid, logging `rm -rf /tmp/nuvio-serverp2p` rather than trying to chown it. Startup also removes
@@ -157,6 +158,19 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   `0`; the local addon and stream proxy are off. A fresh `/tmp` therefore reports
   `cacheSize: 0` and `transcodeMaxWidth: 0` from `/settings`. The settings module logs the
   effective values as `nuvio: settings cacheSize=<n> transcodeMaxWidth=<n> dataDir=<path>`.
+- **Memory-only store when caching is off.** With `cacheSize: 0` (also `--no-cache` or
+  `DISABLE_CACHING`), `getDefaults` configures a 32 MiB circular buffer (`type: "memory"`) with a
+  24 MiB read-ahead, and nothing on that path touches disk: `getCachePath` does not create
+  `stremio-cache/`, the engine does not write its `.torrent` sidecar under the cache path, and the
+  `engine-created` cache-size sweep (a tree walk plus a `df` child) is skipped. Turning caching on
+  restores the disk chunk store and the size-driven cleanup unchanged.
+- **Response head first, pieces later.** `handleTorrent` flushes the `200`/`206` head before
+  pumping, so an empty swarm delays the body rather than the HTTP response — which is what keeps
+  the player's 15 s header read from expiring. `/:infoHash/create` then selects the first two
+  pieces of the guessed or known file before answering, so they download during the shim's `302`
+  handoff and the player's open; the selection is bounded, so an abandoned create cannot pull the
+  whole file. The player's own cold-start budget is the `MEDIA_FIRST_BYTE_TIMEOUT_MS` grace
+  described in `PLAYBACK.md`.
 - **Start.** On a live boot — `app::boot::construct`, never a controlled/replay boot, a host run or
   a test — `app::boot::start_p2p_service` creates `/tmp/nuvio-serverp2p` and spawns
   `/usr/bin/node server.js` with its working directory set to `<app_dir>/js-service`. If

@@ -97,9 +97,18 @@ or unreachable); say so instead of starting the player.
 
 The probe also **pre-warms** slow sources: a cold torrent on the app's own streaming server
 (`js-service/server.js`, spawned as a child of the native app; see `ARCHITECTURE.md` "The P2P
-streaming server") can take far longer than the player's 15 s plaintext header timeout
-(`stream.rs MEDIA_RECV_TIMEOUT_MS`) and curl's 30 s low-speed floor; probing at decision time
-(generous deadline) means the player's own open hits a warmed torrent.
+streaming server") can take far longer than the steady-state media inactivity timeout
+(`stream.rs MEDIA_RECV_TIMEOUT_MS`, 15 s) and curl's 30 s low-speed floor; probing at decision
+time (generous deadline) means the player's own open hits a warmed torrent.
+
+Cold starts that skip the probe are covered by a **first-byte grace**. A plaintext media open
+arms `MEDIA_FIRST_BYTE_TIMEOUT_MS` (45 s) on its socket for the FIRST body byte only; the first
+successful read restores `MEDIA_RECV_TIMEOUT_MS` (15 s) for the rest of the transfer. It is
+armed by `redirect::open_following` (the media path), never by `http_open`/`http_open_until_result`
+(the control plane), and a caller's absolute deadline still outranks it. The header read keeps
+its 15 s, which suffices because `server.js` flushes the response head as soon as a range request
+is accepted instead of holding it until the first piece; the end-to-end shape of that handoff is
+in `ARCHITECTURE.md` "The P2P streaming server".
 
 ### Audio
 

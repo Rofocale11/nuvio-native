@@ -364,3 +364,72 @@ fn a_connection_that_never_answers_leaves_no_status_rather_than_a_code() {
     assert_eq!(hs_status(&*hs), 0, "a refused connection must not wear a status");
     http_close(&mut *hs);
 }
+
+/// The cold-start grace is a property of the SOCKET OPTION, not of a timer: a media open arms
+/// `MEDIA_FIRST_BYTE_TIMEOUT_MS`, the first successful read puts `MEDIA_RECV_TIMEOUT_MS` back,
+/// and a control-plane open never gets the longer wait in the first place.
+#[test]
+fn only_a_media_open_gets_the_first_byte_grace_and_the_first_read_ends_it() {
+    let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec();
+    let (port, h) = one_shot_server(resp);
+    let host = std::ffi::CString::new("127.0.0.1").unwrap();
+    let path = std::ffi::CString::new("/media").unwrap();
+    let extra = std::ffi::CString::new("").unwrap();
+    let mut hs = http_stream_boxed();
+    let opened = http_open_with_timeouts(
+        &mut *hs,
+        host.as_ptr(),
+        port as c_int,
+        path.as_ptr(),
+        extra.as_ptr(),
+        "GET",
+        CONNECT_TIMEOUT_MS,
+        MEDIA_RECV_TIMEOUT_MS,
+        MEDIA_SEND_TIMEOUT_MS,
+        None,
+        false,
+        true,
+        &mut NoCheckpoint,
+    );
+    assert_eq!(opened, Ok(()), "a 200 must open");
+    let fd = hs.fd();
+    assert_eq!(hs.first_byte_grace, 1, "a media open arms the grace");
+    assert_eq!(
+        unsafe { socket_timeout(fd, libc::SO_RCVTIMEO) },
+        Some(std::time::Duration::from_millis(
+            MEDIA_FIRST_BYTE_TIMEOUT_MS as u64
+        )),
+        "the first body byte may wait the cold-start budget"
+    );
+
+    let mut buf = [0u8; 8];
+    let n = http_read(&mut *hs, buf.as_mut_ptr(), buf.len() as c_int);
+    assert_eq!(n, 2, "the body must be delivered");
+    assert_eq!(hs.first_byte_grace, 0, "the first byte spends the grace");
+    assert_eq!(
+        unsafe { socket_timeout(fd, libc::SO_RCVTIMEO) },
+        Some(std::time::Duration::from_millis(
+            MEDIA_RECV_TIMEOUT_MS as u64
+        )),
+        "the steady-state contract is back"
+    );
+    http_close(&mut *hs);
+    h.join().unwrap();
+
+    let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec();
+    let (port, h) = one_shot_server(resp);
+    let (mut hs, opened) = open_against(port);
+    assert_eq!(opened, 0);
+    assert_eq!(
+        hs.first_byte_grace, 0,
+        "a control-plane open must never be given the longer wait"
+    );
+    assert_eq!(
+        unsafe { socket_timeout(hs.fd(), libc::SO_RCVTIMEO) },
+        Some(std::time::Duration::from_millis(
+            MEDIA_RECV_TIMEOUT_MS as u64
+        )),
+    );
+    http_close(&mut *hs);
+    h.join().unwrap();
+}

@@ -64,6 +64,9 @@ pub struct HttpStream {
     /// 1 once the body has been fully consumed and the fd is still open. A second open
     /// may reuse only when this is set — an unread body would poison the next request.
     body_done: c_int,
+    /// 1 once a media open has armed the cold-start grace for its FIRST body byte and no body
+    /// byte has reached the caller yet. Reader-thread only, like `body_done`.
+    first_byte_grace: c_int,
     /// 1 once the current chunked-trailer line has seen a non-CR byte. Drain can return
     /// `HTTP_READ_DEADLINE` mid-trailer and resume on a later call; a stack `line_empty = true`
     /// on every entry treated the first `\n` of `\r\n\r\n` as the terminator and left leftover
@@ -135,6 +138,21 @@ impl HttpStream {
     fn body_is_done(&self) -> bool {
         self.body_done != 0
     }
+    /// The first body byte of a media open reached its caller: spend the one-shot cold-start
+    /// grace and put the socket back on the ordinary media inactivity contract. A no-op when no
+    /// grace was armed, and reader-thread only, like `body_done`.
+    #[inline]
+    fn end_first_byte_grace(&mut self) {
+        if self.first_byte_grace == 0 {
+            return;
+        }
+        self.first_byte_grace = 0;
+        let fd = self.fd();
+        if fd >= 0 {
+            // SAFETY: `fd` is this stream's live socket, owned by the reader calling this.
+            unsafe { set_socket_timeouts(fd, MEDIA_RECV_TIMEOUT_MS, MEDIA_SEND_TIMEOUT_MS) };
+        }
+    }
     /// Reset every per-request field EXCEPT `fd` and `interrupted`. `http_open` used to
     /// `write_bytes`-memset the whole struct, which wrote the ATOMIC fd non-atomically — and
     /// momentarily as 0, i.e. stdin — while another thread could be loading it in
@@ -158,6 +176,7 @@ impl HttpStream {
         self.chunk_left = 0;
         self.keep_alive = 0;
         self.body_done = 0;
+        self.first_byte_grace = 0;
         self.trailer_line_has_content = 0;
         self.location_len = 0;
     }
@@ -720,6 +739,11 @@ fn header_is_chunked(hdr: &[u8]) -> bool {
 /// Eyeballs (RFC 8305), which a blocking module with no thread of its own cannot run.
 const CONNECT_TIMEOUT_MS: c_int = 8000;
 const MEDIA_RECV_TIMEOUT_MS: c_int = 15_000;
+/// One-shot cold-start grace for a media open's FIRST body byte: a BitTorrent swarm may need
+/// longer than the steady-state inactivity contract to find peers and produce its first piece,
+/// and the streaming server's body begins only with that piece. Spent once — the first body byte
+/// to reach the reader restores `MEDIA_RECV_TIMEOUT_MS` (see `end_first_byte_grace`).
+const MEDIA_FIRST_BYTE_TIMEOUT_MS: c_int = 45_000;
 const MEDIA_SEND_TIMEOUT_MS: c_int = 10_000;
 
 /// The ordinary plaintext media inactivity contract. Candidate reserve projections may wake a
@@ -1123,6 +1147,7 @@ pub fn http_open(
         MEDIA_SEND_TIMEOUT_MS,
         None,
         false,
+        false,
         &mut NoCheckpoint,
     ))
 }
@@ -1150,6 +1175,7 @@ pub fn http_open_probe(
         timeout_ms,
         timeout_ms,
         None,
+        false,
         false,
         &mut NoCheckpoint,
     ))
@@ -1186,6 +1212,7 @@ pub fn http_open_until_result(
         MEDIA_SEND_TIMEOUT_MS,
         Some(deadline),
         true,
+        false,
         checkpoint,
     )
 }
@@ -1210,6 +1237,7 @@ fn http_open_with_timeouts(
     send_timeout_ms: c_int,
     open_deadline: Option<Instant>,
     restore_media_timeouts: bool,
+    first_byte_grace: bool,
     checkpoint: &mut dyn Checkpoint,
 ) -> Result<(), HttpOpenError> {
     if hs.is_null() || host.is_null() || path.is_null() {
@@ -1258,6 +1286,7 @@ fn http_open_with_timeouts(
                 method,
                 open_deadline,
                 restore_media_timeouts,
+                first_byte_grace,
                 pacer,
             ) {
                 Ok(()) => return Ok(()),
@@ -1389,6 +1418,7 @@ fn http_open_with_timeouts(
             method,
             open_deadline,
             restore_media_timeouts,
+            first_byte_grace,
             pacer,
         )
     }
@@ -1404,6 +1434,7 @@ unsafe fn perform_http_request(
     method: &str,
     open_deadline: Option<Instant>,
     restore_media_timeouts: bool,
+    first_byte_grace: bool,
     pacer: &mut Pacer,
 ) -> Result<(), HttpOpenError> {
     // build + send the request (default Accept only if caller set none)
@@ -1580,11 +1611,24 @@ unsafe fn perform_http_request(
     if hs.content_length == 0 && hs.chunked == 0 {
         finish_body(hs);
     }
-    if restore_media_timeouts {
+    if first_byte_grace {
+        hs.first_byte_grace = 1;
+    }
+    if restore_media_timeouts || first_byte_grace {
         // The absolute open snapshot and its short socket options belong only to
         // DNS/connect/send/headers. A paused candidate body is still a live media transfer;
-        // restore the ordinary inactivity contract before returning it to AVIO.
-        set_socket_timeouts(fd, MEDIA_RECV_TIMEOUT_MS, MEDIA_SEND_TIMEOUT_MS);
+        // restore the ordinary inactivity contract before returning it to AVIO — or, for a media
+        // open that asked for it, the one-shot cold-start grace for the first body byte. The
+        // caller's absolute deadline still outranks both wherever one was supplied.
+        set_socket_timeouts(
+            fd,
+            if first_byte_grace {
+                MEDIA_FIRST_BYTE_TIMEOUT_MS
+            } else {
+                MEDIA_RECV_TIMEOUT_MS
+            },
+            MEDIA_SEND_TIMEOUT_MS,
+        );
     }
     Ok(())
 }
@@ -1737,11 +1781,11 @@ pub fn http_read_until(
             }
             hs.chunk_left -= got as i64;
             hs.consumed += got as i64;
-            return if got > 0 {
-                got as c_int
-            } else {
-                hs_closed_or_idle_read_result(hs)
-            };
+            if got > 0 {
+                hs.end_first_byte_grace();
+                return got as c_int;
+            }
+            return hs_closed_or_idle_read_result(hs);
         }
         if hs.fd() < 0 && (hs.bpos as usize) >= (hs.blen as usize) {
             return hs_closed_or_idle_read_result(hs);
@@ -1766,6 +1810,7 @@ pub fn http_read_until(
             std::ptr::copy_nonoverlapping(hs.buf.as_ptr().add(hs.bpos as usize), dst, take);
             hs.bpos += take as c_int;
             hs.consumed += take as i64;
+            hs.end_first_byte_grace();
             if hs.content_length >= 0 && hs.consumed >= hs.content_length {
                 finish_body(hs);
             }
@@ -1795,6 +1840,7 @@ pub fn http_read_until(
                 return if short { -1 } else { 0 };
             }
             hs.consumed += r as i64;
+            hs.end_first_byte_grace();
             if hs.content_length >= 0 && hs.consumed >= hs.content_length {
                 finish_body(hs);
             }
