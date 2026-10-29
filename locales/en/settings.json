@@ -1234,5 +1234,17 @@
   "settings.ratings.tomatoes": {
     "value": "Rotten Tomatoes",
     "description": "Rating provider brand."
+  },
+  "settings.addons.section": {
+    "value": "Addons",
+    "description": "Settings, account, onboarding or privacy UI: settings.addons.section"
+  },
+  "settings.addons.title": {
+    "value": "Addons",
+    "description": "Settings, account, onboarding or privacy UI: settings.addons.title"
+  },
+  "settings.addons.detail": {
+    "value": "Enable or disable installed addons for this session",
+    "description": "Settings, account, onboarding or privacy UI: settings.addons.detail"
   }
 }

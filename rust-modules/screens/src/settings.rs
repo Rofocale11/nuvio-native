@@ -459,6 +459,7 @@ fn mount_page(
         SettingsPage::Language => Box::new(LanguagePage::new(entry)),
         SettingsPage::Contribute => Box::new(super::legal::DocumentPage::contribute(entry)),
         SettingsPage::Playback => Box::new(super::preferences::PreferencesPage::new(entry, super::preferences::Kind::Playback)),
+        SettingsPage::Addons => Box::new(super::addons::AddonsPage::new(entry)),
         SettingsPage::AudioSubtitles => Box::new(super::preferences::PreferencesPage::new(entry, super::preferences::Kind::AudioSubtitles)),
         SettingsPage::Legal => Box::new(super::legal::LegalIndex::new(entry)),
         SettingsPage::About => Box::new(super::legal::DocumentPage::about(entry)),
@@ -964,6 +965,7 @@ enum RootId {
     Favourites,
     Playback,
     AudioSubtitles,
+    Addons,
     Language,
     AutoSignIn,
     TrailerAutoplay,
@@ -983,6 +985,7 @@ impl FormId for RootId {
         RowKey(match self {
             RootId::Playback => 1,
             RootId::AudioSubtitles => 2,
+            RootId::Addons => 13,
             RootId::Favourites => 3,
             RootId::Language => 4,
             RootId::AutoSignIn => 5,
@@ -1134,6 +1137,16 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
                 .detail(plx_platform::i18n::msg::settings_audio_detail())
                 .chevron(true),
         );
+    let addons = FormSection::new(plx_platform::i18n::msg::settings_addons_section())
+        .visible(signed_in)
+        .item(
+            RootId::Addons,
+            RowKind::Nav(SettingsPage::Addons),
+            Action::Door,
+            Row::new(plx_platform::i18n::msg::settings_addons_title())
+                .detail(plx_platform::i18n::msg::settings_addons_detail())
+                .chevron(true),
+        );
     let system = FormSection::new(plx_platform::i18n::msg::settings_system_section())
         .item(
             RootId::Language,
@@ -1207,6 +1220,7 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
     Form::new()
         .section(libraries)
         .section(playback)
+        .section(addons)
         .section(system)
         .section(plaintext)
         .section(privacy)

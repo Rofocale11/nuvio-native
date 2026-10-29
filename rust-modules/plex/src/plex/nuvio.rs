@@ -91,3 +91,26 @@ impl Client {
         serde_json::from_slice(&self.body_2xx(&path.build(), method, &[])?).ok()
     }
 }
+
+use std::sync::{Arc, OnceLock};
+
+/// Runtime control over the installed addon set, registered by the app at boot (the screens
+/// layer may not name `pmsshim` directly). `installed` returns `(key, display name, enabled)`.
+pub trait AddonControl: Send + Sync {
+    fn installed(&self) -> Vec<(String, String, bool)>;
+    fn set_enabled(&self, key: String, enabled: bool) -> bool;
+}
+
+static ADDON_CONTROL: OnceLock<Arc<dyn AddonControl>> = OnceLock::new();
+
+pub fn register_addon_control(ctl: Arc<dyn AddonControl>) {
+    let _ = ADDON_CONTROL.set(ctl);
+}
+
+pub fn installed_addons() -> Vec<(String, String, bool)> {
+    ADDON_CONTROL.get().map(|c| c.installed()).unwrap_or_default()
+}
+
+pub fn set_addon_enabled(key: String, enabled: bool) -> bool {
+    ADDON_CONTROL.get().map(|c| c.set_enabled(key, enabled)).unwrap_or(false)
+}

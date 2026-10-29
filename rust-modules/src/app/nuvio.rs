@@ -230,6 +230,60 @@ pub(crate) fn boot() {
     }
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
+    // Apply session-scoped addon enable/disable overrides from nuvio-session.json.
+    {
+        let account = &handle.shim.account;
+        let mut set = backend.snapshot();
+        for a in set.addons.iter_mut() {
+            if let Some(b) = account.addon_enabled_override(&a.transport_url) {
+                a.disabled = !b;
+            }
+        }
+        backend.replace(set);
+        handle.shim.addons_changed();
+    }
+    // Expose addon control to Settings (screens layer cannot name pmsshim directly).
+    {
+        struct Ctl {
+            backend: std::sync::Arc<plx_pmsshim::AddonBackend>,
+            shim: std::sync::Arc<plx_pmsshim::shim_pms::Shim>,
+        }
+        impl plx_plex::plex::nuvio::AddonControl for Ctl {
+            fn installed(&self) -> Vec<(String, String, bool)> {
+                self.backend
+                    .snapshot()
+                    .addons
+                    .into_iter()
+                    .map(|a| {
+                        let name = a.display_name.clone().unwrap_or_else(|| a.manifest.name.clone());
+                        (a.transport_url, name, !a.disabled)
+                    })
+                    .collect()
+            }
+            fn set_enabled(&self, key: String, enabled: bool) -> bool {
+                let mut set = self.backend.snapshot();
+                let mut found = false;
+                for a in set.addons.iter_mut() {
+                    if a.transport_url == key {
+                        a.disabled = !enabled;
+                        found = true;
+                    }
+                }
+                if !found {
+                    return false;
+                }
+                self.backend.replace(set);
+                self.shim.account.set_addon_enabled(&key, enabled);
+                self.shim.addons_changed();
+                self.shim.warm();
+                true
+            }
+        }
+        plx_plex::plex::nuvio::register_addon_control(std::sync::Arc::new(Ctl {
+            backend: backend.clone(),
+            shim: handle.shim.clone(),
+        }));
+    }
     // A Nuvio sign-in (the QR screen) or a profile pick hands its addons over here.
     {
         let (backend, shim, path) = (backend.clone(), shim.clone(), addons_path.clone());

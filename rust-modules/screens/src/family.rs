@@ -70,6 +70,8 @@ pub enum SettingsPage {
     Contribute,
     /// Install-wide playback defaults.
     Playback,
+    /// Installed Nuvio addons, with per-addon enable/disable.
+    Addons,
     /// Plex account audio and subtitle preferences.
     AudioSubtitles,
     /// Favorite libraries — the onboard screen in Settings mode.
@@ -142,6 +144,7 @@ impl ScreenArg for SettingsPage {
             SettingsPage::Playback => 108,
             SettingsPage::AudioSubtitles => 109,
             SettingsPage::Language => 110,
+            SettingsPage::Addons => 113,
             SettingsPage::Contribute => 111,
             SettingsPage::Favourites => 101,
             SettingsPage::Privacy => 102,
@@ -183,6 +186,7 @@ impl LogicalState for SettingsPage {
             | SettingsPage::Contribute
             | SettingsPage::Playback
             | SettingsPage::AudioSubtitles
+            | SettingsPage::Addons
             | SettingsPage::Favourites
             | SettingsPage::Privacy
             | SettingsPage::Legal
@@ -198,6 +202,7 @@ impl LogicalState for SettingsPage {
             SettingsPage::Contribute => "contribute",
             SettingsPage::Playback => "playback",
             SettingsPage::AudioSubtitles => "audio-subtitles",
+            SettingsPage::Addons => "addons",
             SettingsPage::Favourites => "favourites",
             SettingsPage::Privacy => "privacy",
             SettingsPage::Legal => "legal",

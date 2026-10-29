@@ -130,6 +130,32 @@ impl Account {
             .map(str::to_string)
     }
 
+    /// Local (session-scoped) enable/disable override for an addon, keyed by transport URL.
+    pub fn addon_enabled_override(&self, key: &str) -> Option<bool> {
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        prefs.get("addonEnabled").and_then(Value::as_object).and_then(|m| m.get(key)).and_then(Value::as_bool)
+    }
+
+    /// Persist a local enable/disable override for an addon into `nuvio-session.json`.
+    pub fn set_addon_enabled(&self, key: &str, enabled: bool) {
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let profile = if session.is_some() {
+            self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone()
+        } else {
+            None
+        };
+        let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let map = prefs.entry("addonEnabled".to_string()).or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(m) = map {
+            m.insert(key.to_string(), Value::Bool(enabled));
+        }
+        let prefs_clone = prefs.clone();
+        drop(prefs);
+        if let Some(f) = &self.file {
+            save_session_file(f, session.as_ref(), profile.as_deref(), &prefs_clone);
+        }
+    }
+
     fn save(&self, s: Option<&plx_stremio::nuvio::Session>) {
         let Some(f) = &self.file else { return };
         let profile = if s.is_some() { self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() } else { None };
@@ -415,8 +441,15 @@ impl Account {
             if let Some(watch) = watch_sink {
                 watch();
             }
-            if let Ok(addons) = plx_stremio::nuvio::addons(&session, &pid) {
+            if let Ok(mut addons) = plx_stremio::nuvio::addons(&session, &pid) {
                 if !addons.is_empty() {
+                    // Apply session-scoped enable/disable overrides from nuvio-session.json.
+                    let overrides = prefs.lock().unwrap_or_else(|e| e.into_inner()).get("addonEnabled").and_then(Value::as_object).cloned().unwrap_or_default();
+                    for a in addons.iter_mut() {
+                        if let Some(b) = overrides.get(&a.transport_url).and_then(Value::as_bool) {
+                            a.disabled = !b;
+                        }
+                    }
                     sink(plx_stremio::addons::AddonSet { addons });
                 }
             }
@@ -482,6 +515,17 @@ fn save_session_file(
                 let _ = std::fs::rename(&tmp, file);
             }
         }
-        None => { let _ = std::fs::remove_file(file); }
+        None => {
+            if prefs.is_empty() {
+                let _ = std::fs::remove_file(file);
+            } else {
+                let mut value = serde_json::Map::new();
+                value.insert("preferences".to_string(), Value::Object(prefs.clone()));
+                let tmp = file.with_extension("json.tmp");
+                if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() {
+                    let _ = std::fs::rename(&tmp, file);
+                }
+            }
+        }
     }
 }
