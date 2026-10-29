@@ -63,6 +63,17 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-${{ runner.arch }}-
 
+      - name: Cache bundled FFmpeg
+        # The prefix AND the verified upstream tarball, keyed by the build script (same cache as
+        # build-package.yml). A miss falls back to ci/build-ffmpeg.sh's retried fetch; a hit avoids
+        # both the network and the ~2-minute rebuild.
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/ffmpeg-prefix
+            vendor/ffmpeg-build
+          key: ffmpeg-${{ runner.arch }}-${{ hashFiles('ci/build-ffmpeg.sh') }}
+
       - name: Build the IPK
         shell: bash
         run: |

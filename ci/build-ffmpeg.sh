@@ -386,7 +386,14 @@ ensure_tar() {
   if ! tarball_ok "$cand"; then
     rm -f "$cand"
     echo "ffmpeg: fetching $VERSION"
-    curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$cand"
+    # THE SAME URL IS RETRIED, never substituted: this tarball is the LGPL corresponding source,
+    # and the sha256 below is pinned to the bytes upstream publishes. ffmpeg.org resets the odd
+    # GitHub-runner connection (`curl: (35) Recv failure: Connection reset by peer`), which is
+    # transient and must not fail a release build on its first attempt. `--retry-all-errors` is
+    # what covers a reset during the handshake, where curl's ordinary --retry does not.
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+      --connect-timeout 20 --max-time 600 \
+      "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$cand"
   fi
   mv "$cand" "$TAR"
 }

@@ -649,18 +649,31 @@ pub(crate) fn start_p2p_service() {
         if slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) {
             return;
         }
-        match std::process::Command::new("node")
+        // The absolute path first: the jail's PATH is not root's PATH, and `node` may be absent
+        // from it even though /usr/bin/node exists and is world-executable. A firmware that keeps
+        // the interpreter elsewhere still gets the PATH lookup as the fallback.
+        let node: &std::path::Path = if std::path::Path::new("/usr/bin/node").is_file() {
+            std::path::Path::new("/usr/bin/node")
+        } else {
+            std::path::Path::new("node")
+        };
+        match std::process::Command::new(node)
             .arg(&server)
             .current_dir(&js_dir)
             .spawn()
         {
             Ok(child) => {
-                plx_base::eventlog::log(&format!("nuvio: P2P server started (pid {})", child.id()));
+                plx_base::eventlog::log(&format!(
+                    "nuvio: P2P server started with {} (pid {})",
+                    node.display(),
+                    child.id()
+                ));
                 *slot = Some(child);
             }
-            Err(e) => {
-                plx_base::eventlog::log(&format!("nuvio: could not start the P2P server: {e}"))
-            }
+            Err(e) => plx_base::eventlog::log(&format!(
+                "nuvio: could not start the P2P server with {}: {e}",
+                node.display()
+            )),
         }
     }
 }
