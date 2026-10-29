@@ -134,24 +134,33 @@ see "The P2P streaming server" below.
 ## The P2P streaming server
 
 Torrent (`infoHash`) streams need a Stremio-compatible streaming server. The app ships Stremio's
-desktop `server.js` and its `server-settings.json`, and runs the server as a **direct child
-process** of the native app.
+desktop `server.js` and runs the server as a **direct child process** of the native app.
 
 - **Why not an LS2 service.** `services.json` plus `luna-send` is the usual webOS shape, but this
   firmware's Node lacks the `palmbus`/`pmloglib` native modules, so a Node service cannot register
   or answer. A child process needs only the interpreter and the app's own directory.
-- **Payload.** `make ipk` stages `js-service/server.js` and `js-service/server-settings.json` into
+- **Payload.** `make ipk` stages `js-service/server.js` into
   `usr/palm/applications/<APPID>/js-service/` inside the package. `make deploy` refreshes
   `<app_dir>/js-service/` on the television, and `make install` re-installs the whole package. The
-  shipped settings zero the cache (`cacheSize: 0`) and transcode output (`transcodeMaxWidth`,
-  `transcodeMaxBitRate`), and leave the local addon and stream proxy off, so the server does not
-  consume the app partition.
+  server generates its settings under `/tmp`; nothing settings-shaped is shipped.
+- **Data directory.** `appPath` is `/tmp/nuvio-serverp2p` unless `APP_PATH` overrides it, so
+  `server-settings.json`, `stremio-cache/`, and `httpsCert.json` all live there. `/tmp` is
+  writable on read-only production installs, and with `cacheSize: 0` nothing there needs to survive
+  a reboot. `boot.rs` creates the directory and refuses to spawn when it is owned by a different
+  uid, logging `rm -rf /tmp/nuvio-serverp2p` rather than trying to chown it. Startup also removes
+  a legacy `<app_dir>/.stremio-server/` and the earlier `<app_dir>/nuvio-serverp2p/`, logging each
+  removal; both are non-fatal and idempotent.
+- **Generated defaults.** `cacheSize` and `transcodeMaxWidth` are `0`; `transcodeMaxBitRate` is
+  `0`; the local addon and stream proxy are off. The settings module logs the effective values as
+  `nuvio: settings cacheSize=<n> transcodeMaxWidth=<n> dataDir=<path>`.
 - **Start.** On a live boot — `app::boot::construct`, never a controlled/replay boot, a host run or
-  a test — `app::boot::start_p2p_service` spawns `/usr/bin/node server.js` with its working
-  directory set to `<app_dir>/js-service`. If `/usr/bin/node` is absent, it falls back to `node` on
-  `PATH`. The child handle lives in a process-global slot; the event log records the interpreter
-  and pid (`nuvio: P2P server started with …`) or the exact spawn error. The spawn does not block
-  the first frame.
+  a test — `app::boot::start_p2p_service` creates `/tmp/nuvio-serverp2p` and spawns
+  `/usr/bin/node server.js` with its working directory set to `<app_dir>/js-service`. If
+  `/usr/bin/node` is absent, it falls back to `node` on `PATH`. The child's stdout and stderr
+  append to `/tmp/nuvio-p2p.log` (both are discarded if the file cannot be opened). The child
+  handle lives in a process-global slot; the event log records the interpreter and pid
+  (`nuvio: P2P server started with …`) or the exact spawn error. The spawn does not block the
+  first frame.
 - **Stop.** `app::run::shutdown` calls `app::boot::stop_p2p_service`, which kills and reaps the
   child before the process exits. Backgrounding does not reach `shutdown`; a hard crash can orphan
   the child, because no `PR_SET_PDEATHSIG` is set.

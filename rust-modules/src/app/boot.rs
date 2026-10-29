@@ -629,8 +629,9 @@ pub(crate) unsafe fn boot(
 static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 
 /// Start the headless P2P server as a DIRECT CHILD of this process: `node server.js` from
-/// `paths::app_dir()/js-service`, with `server-settings.json` beside it as its working directory
-/// requires. This firmware's Node has no `palmbus`/`pmloglib`, so there is no LS2 service and no
+/// `paths::app_dir()/js-service`. Its settings, cache and certificate live under
+/// `/tmp/nuvio-serverp2p` (or `$APP_PATH`), and its stdout/stderr append to `/tmp/nuvio-p2p.log`.
+/// This firmware's Node has no `palmbus`/`pmloglib`, so there is no LS2 service and no
 /// `luna-send` here.
 ///
 /// Television-only: the host and test builds must not spawn a server. A controlled or replay boot
@@ -638,12 +639,62 @@ static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mut
 pub(crate) fn start_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
-        let js_dir = plx_base::paths::app_dir().join("js-service");
+        use std::os::unix::fs::MetadataExt;
+
+        let app_dir = plx_base::paths::app_dir();
+        let cleanup = |path: &std::path::Path, what: &str| match std::fs::remove_dir_all(path) {
+            Ok(()) => {
+                plx_base::eventlog::log(&format!("nuvio: removed {what} at {}", path.display()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => plx_base::eventlog::log(&format!(
+                "nuvio: could not remove {what} at {}: {e}",
+                path.display()
+            )),
+        };
+        cleanup(&app_dir.join(".stremio-server"), "legacy P2P data");
+        cleanup(&app_dir.join("nuvio-serverp2p"), "unused app-local P2P data");
+
+        let js_dir = app_dir.join("js-service");
         let server = js_dir.join("server.js");
         if !server.is_file() {
             plx_base::eventlog::log("nuvio: js-service/server.js is missing; P2P server not started");
             return;
         }
+
+        // `/tmp` is writable on read-only production installs, and with `cacheSize: 0` nothing
+        // here needs to survive a reboot. The app directory is not used for state.
+        let p2p_dir = std::path::Path::new("/tmp/nuvio-serverp2p");
+        if let Err(e) = std::fs::create_dir_all(p2p_dir) {
+            plx_base::eventlog::log(&format!(
+                "nuvio: could not create {}: {e}",
+                p2p_dir.display()
+            ));
+            return;
+        }
+        match std::fs::metadata(p2p_dir) {
+            Ok(meta) => {
+                let euid = unsafe { libc::geteuid() };
+                if meta.uid() != euid {
+                    plx_base::eventlog::log(&format!(
+                        "nuvio: {} is owned by uid {}, not uid {}; run `rm -rf {}` and relaunch",
+                        p2p_dir.display(),
+                        meta.uid(),
+                        euid,
+                        p2p_dir.display()
+                    ));
+                    return;
+                }
+            }
+            Err(e) => {
+                plx_base::eventlog::log(&format!(
+                    "nuvio: could not stat {}: {e}",
+                    p2p_dir.display()
+                ));
+                return;
+            }
+        }
+
         let mut slot = P2P_CHILD.lock().unwrap_or_else(|e| e.into_inner());
         // Already running (Ok(None) is the live case); a reaped or failed child is replaced.
         if slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) {
@@ -657,11 +708,24 @@ pub(crate) fn start_p2p_service() {
         } else {
             std::path::Path::new("node")
         };
-        match std::process::Command::new(node)
-            .arg(&server)
-            .current_dir(&js_dir)
-            .spawn()
-        {
+        let mut command = std::process::Command::new(node);
+        command.arg(&server).current_dir(&js_dir);
+        let open_log =
+            || std::fs::OpenOptions::new().create(true).append(true).open("/tmp/nuvio-p2p.log");
+        match (open_log(), open_log()) {
+            (Ok(out), Ok(err)) => {
+                command.stdout(std::process::Stdio::from(out));
+                command.stderr(std::process::Stdio::from(err));
+            }
+            _ => {
+                command.stdout(std::process::Stdio::null());
+                command.stderr(std::process::Stdio::null());
+                plx_base::eventlog::log(
+                    "nuvio: could not open /tmp/nuvio-p2p.log; node output discarded",
+                );
+            }
+        }
+        match command.spawn() {
             Ok(child) => {
                 plx_base::eventlog::log(&format!(
                     "nuvio: P2P server started with {} (pid {})",

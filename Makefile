@@ -1754,7 +1754,7 @@ STAGE       := ipkroot/data/usr/palm/applications/$(APPID)
 # The headless Node P2P server rides INSIDE the application directory, not the LS2 service tree:
 # this firmware's Node lacks `palmbus`/`pmloglib`, so the Rust app spawns `node server.js` as a
 # direct child from `paths::app_dir()/js-service`.
-JS_SERVICE_FILES = js-service/server.js js-service/server-settings.json
+JS_SERVICE_FILES = js-service/server.js
 
 # The .ipk is REPRODUCIBLE: same commit + same toolchain -> same sha256. That matters because the
 # manifest carries that hash and every user's TV verifies it at install time (there is no code
@@ -1817,7 +1817,7 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 	cp $(APP_FILES) $(STAGE)/
 	cp $(LICENSE_FILES) $(STAGE)/licenses/
 	@# The Node P2P server is payload in the app's own directory; the Rust half spawns it from
-	@# `paths::app_dir()/js-service`, with `server-settings.json` beside `server.js`.
+	@# `paths::app_dir()/js-service`. Its settings/cache are generated under /tmp, not shipped.
 	@mkdir -p $(STAGE)/js-service
 	cp $(JS_SERVICE_FILES) $(STAGE)/js-service/
 	@# Strip the STAGED copy only, never pkg/plxnative. ~2.4 MB of .symtab+.strtab (30% of the

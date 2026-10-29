@@ -10816,7 +10816,9 @@
             self.transcodeProfile = self.hasOwnProperty("transcodeProfile") ? self.transcodeProfile : null,
             self.allTranscodeProfiles = [],
             self.proxyStreamsEnabled = !!self.hasOwnProperty("proxyStreamsEnabled") && self.proxyStreamsEnabled,
-            self.load(), self;
+            self.load(),
+            console.error("nuvio: settings cacheSize=" + self.cacheSize + " transcodeMaxWidth=" + self.transcodeMaxWidth + " dataDir=" + self.appPath),
+            self;
     })(appPath);
 }, function (module, exports, __webpack_require__) {
     const miniget = __webpack_require__(146);
@@ -33684,11 +33686,11 @@
         }
     };
 }, function (module, exports, __webpack_require__) {
-    var path = __webpack_require__(4);
-    if (!(appPath = process.env.APP_PATH)) {
-        // `<app_dir>` is the parent of the directory holding this bundle (`<app_dir>/js-service`).
-        var script = process.argv[1] || path.join(process.cwd(), "server.js");
-        var appPath = path.join(path.dirname(path.dirname(path.resolve(script))), "nuvio-serverp2p");
+    var appPath;
+    if (process.env.APP_PATH) {
+        appPath = process.env.APP_PATH;
+    } else {
+        appPath = "/tmp/nuvio-serverp2p";
     }
     module.exports = appPath;
 }, function (module, exports, __webpack_require__) {
