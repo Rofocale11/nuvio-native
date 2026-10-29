@@ -102,6 +102,11 @@ see "The P2P streaming server" below.
 - Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
   loaded/saved through the authenticated storage helper. Stable/debug/nightly own
   separate records. The helper verifies readback before import files are removed.
+- Session-scoped addon enable/disable: Settings > Addons lists the installed addons for the active
+  profile and toggles them for this session. The override (keyed by the addon's canonical transport
+  URL) is stored under `preferences.addonEnabled` in `nuvio-session.json` and applied on top of the
+  account's own `enabled` flag whenever a profile's addons are loaded; the running `AddonBackend`
+  is swapped and its caches cleared so disabled addons disappear immediately.
 - Torrents (`infoHash`): played through the headless Node server the app spawns from its own
   `js-service/` directory, as `<server>/<infoHash>/<fileIdx>`, with
   `http://127.0.0.1:11470` as the default address. See "The P2P streaming server" below.
