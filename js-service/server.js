@@ -43903,7 +43903,7 @@
             }));
         }
         enginefs.STREAM_TIMEOUT = 2e4, enginefs.ENGINE_TIMEOUT = 12e4, enginefs.on("engine-created", (function (hash) {
-            console.log("Engine created for " + hash), cache.clearCache(enginefs.getCachePath(""), settings.cacheSize, 0);
+            console.log("Engine created for " + hash), (argv.noCache || 0 == settings.cacheSize) || cache.clearCache(enginefs.getCachePath(""), settings.cacheSize, 0);
         })), enginefs.on("engine-destroyed", (function (hash) {
             console.log("Engine " + hash + " destroyed");
         })), enginefs.on("engine-idle", (function (hash) {
@@ -43918,7 +43918,7 @@
             console.error("Engine invalid piece " + p + " for " + hash);
         })), enginefs.getCachePath = function (ih) {
             var err, cacheDir = path.join(settings.cacheRoot, "stremio-cache");
-            try {
+            if (!(argv.noCache || 0 == settings.cacheSize)) try {
                 mkdirp.sync(cacheDir);
             } catch (e) {
                 err = e;
@@ -69040,7 +69040,8 @@
             result["announce-list"] = [];
             var buf = bncode.encode(result), tor = parseTorrent(buf);
             verifications || (verifications = tor.pieces), engine.torrent || ontorrent(tor),
-                fs.writeFile(torrentPath, buf, (function (err) {
+                // Memory store: <path>/cache is never created, so do not write the sidecar there.
+                opts.circularBuffer || fs.writeFile(torrentPath, buf, (function (err) {
                     err && console.error(err);
                 }));
         }));
