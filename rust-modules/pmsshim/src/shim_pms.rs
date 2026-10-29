@@ -1621,6 +1621,7 @@ impl Shim {
             "art": p.background.clone().unwrap_or_default(),
             "addedAt": 0, "updatedAt": 0,
             "Genre": tags(&p.genres, false),
+            "UltraBlurColors": blur_colors(&poster),
         });
         // The addon's title logo is PMS's `clearLogo`; `/photo/…?url=…/clearLogo` resolves it back
         // out of this row, so the heroes get real title art instead of the text fallback.
@@ -1986,6 +1987,7 @@ impl Shim {
             "librarySectionKey": format!("/library/sections/{SECTION_MOVIES}"),
             "summary": collection.overview.clone().unwrap_or_default(),
             "thumb": poster, "childCount": collection.parts.len(),
+            "UltraBlurColors": blur_colors(&poster),
             // TMDB lists a franchise in release order, which is PMS's own default here.
             "collectionSort": 0, "addedAt": 0, "updatedAt": 0,
         })
@@ -2352,6 +2354,7 @@ impl Shim {
             "parentRatingKey": show_rk.to_string(), "parentKey": format!("/library/metadata/{show_rk}"),
             "parentTitle": m.name, "parentThumb": m.poster.clone().unwrap_or_default(),
             "thumb": m.poster.clone().unwrap_or_default(), "art": m.background.clone().unwrap_or_default(),
+            "UltraBlurColors": blur_colors(&m.poster.clone().unwrap_or_default()),
             "librarySectionID": SECTION_SHOWS, "librarySectionTitle": "TV Shows",
             "librarySectionKey": format!("/library/sections/{SECTION_SHOWS}"),
             "summary": m.description.clone().unwrap_or_default(),
@@ -2383,6 +2386,7 @@ impl Shim {
             "grandparentArt": m.background.clone().unwrap_or_default(),
             "thumb": v.thumbnail.clone().or_else(|| m.background.clone()).unwrap_or_default(),
             "art": m.background.clone().unwrap_or_default(),
+            "UltraBlurColors": blur_colors(m.background.as_deref().unwrap_or_default()),
             "summary": v.overview.clone().unwrap_or_default(),
             "librarySectionID": SECTION_SHOWS, "librarySectionTitle": "TV Shows",
             "librarySectionKey": format!("/library/sections/{SECTION_SHOWS}"),
@@ -2661,6 +2665,10 @@ impl Shim {
                         Ident::Season { series, .. } | Ident::Episode { series, .. } => series,
                     };
                     row["thumb"] = json!(self.poster_url(&id, row["thumb"].as_str()));
+                }
+                if row.get("UltraBlurColors").is_none() {
+                    row["UltraBlurColors"] =
+                        blur_colors(row["thumb"].as_str().unwrap_or_default());
                 }
                 Some(row)
             })
@@ -4203,4 +4211,54 @@ mod account_progress_tests {
         assert_eq!(tmdb_id("tmdb:0", false), None);
         assert_eq!(tmdb_id("", false), None);
     }
+}
+
+/// Deterministic four-corner `UltraBlurColors` envelope derived from a poster URL's hash.
+fn blur_colors(seed: &str) -> serde_json::Value {
+    fn fnv(s: &str) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in s.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+    fn hsl_to_hex(h: f32, s: f32, l: f32) -> String {
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = l - c / 2.0;
+        let (r1, g1, b1) = if h < 60.0 {
+            (c, x, 0.0)
+        } else if h < 120.0 {
+            (x, c, 0.0)
+        } else if h < 180.0 {
+            (0.0, c, x)
+        } else if h < 240.0 {
+            (0.0, x, c)
+        } else if h < 300.0 {
+            (x, 0.0, c)
+        } else {
+            (c, 0.0, x)
+        };
+        let r = ((r1 + m) * 255.0).round() as u8;
+        let g = ((g1 + m) * 255.0).round() as u8;
+        let b = ((b1 + m) * 255.0).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", r, g, b)
+    }
+    let h = fnv(if seed.is_empty() { "nuvio" } else { seed });
+    let mut corners: Vec<String> = vec![String::new(); 4];
+    for i in 0..4u64 {
+        let hue = (((h >> (i * 13)) as f32 / (1u64 << 13) as f32) * 360.0
+            + (i as f32 * 97.0))
+            % 360.0;
+        let sat = 0.62 + (((h >> (i * 7 + 3)) & 0x7f) as f32 / 127.0) * 0.28;
+        let light = 0.34 + (((h >> (i * 5 + 11)) & 0x3f) as f32 / 63.0) * 0.16;
+        corners[i as usize] = hsl_to_hex(hue, sat, light);
+    }
+    serde_json::json!({
+        "topLeft": corners[0],
+        "topRight": corners[1],
+        "bottomRight": corners[2],
+        "bottomLeft": corners[3],
+    })
 }
