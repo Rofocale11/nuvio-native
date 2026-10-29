@@ -1264,6 +1264,11 @@ deploy: pkg/plxnative pkg/plxnative-storage $(FFMPEG_STAGED) $(SENTRY_NATIVE_STA
 	# television with no separate line to remember here — which is what `pkg/splash.png` needed and
 	# never got: it was staged into every `.ipk` and never scp'd by this recipe.
 	$(SCP) $(DEPLOY_FILES) tv:$(APPDIR)/
+	@# The Node P2P server rides in the app directory (`paths::app_dir()/js-service`), not the LS2
+	@# service tree: this firmware's Node lacks palmbus/pmloglib. `scp` to a directory preserves
+	@# basenames; the app respawns the child on its next launch.
+	$(SSH) 'mkdir -p $(APPDIR)/js-service'
+	$(SCP) $(JS_SERVICE_FILES) tv:$(APPDIR)/js-service/
 	@if [ -n "$(TURBOJPEG_SO)" ]; then \
 	  $(SSH) 'test -f $(APPDIR)/libturbojpeg.so.0' || $(SCP) $(TURBOJPEG_SO) tv:$(APPDIR)/libturbojpeg.so.0; \
 	else echo "note: no libturbojpeg in the sysroot — capture JPEG mode will use the slow encoder"; fi
@@ -1291,14 +1296,17 @@ deploy: pkg/plxnative pkg/plxnative-storage $(FFMPEG_STAGED) $(SENTRY_NATIVE_STA
 # the crash handler and the FFmpeg libraries take their own path to the device above and are just
 # as capable of silently drifting, so they are verified too.
 VERIFY_FILES = pkg/plxnative $(SENTRY_HANDLER) $(FFMPEG_STAGED) $(DEPLOY_FILES) pkg/plxnative-storage \
-               $(if $(LAB),pkg/lab.json,)
+               $(JS_SERVICE_FILES) $(if $(LAB),pkg/lab.json,)
 verify-deploy: tv-lock-require
 	@echo "verify-deploy: comparing $(words $(VERIFY_FILES)) files against $(APPID) [$(FLAVOR)]"
 	@# The storage helper lands in $(SERVICEDIR), a different directory from everything else here —
 	@# `ci/verify-deploy.py` keys purely by basename (see its module doc), so a second `cd && md5sum`
 	@# appended to the same ssh round trip merges into one stream it already knows how to read,
 	@# rather than needing a transport of its own.
-	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out pkg/plxnative-storage,$(VERIFY_FILES))) 2>&1; \
+	@# ...and the JS payload in its own subdirectory. `filter-out` keeps those two out of the
+	@# APPDIR-root md5sum; `ci/verify-deploy.py` keys every entry by basename.
+	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out pkg/plxnative-storage $(JS_SERVICE_FILES),$(VERIFY_FILES))) 2>&1; \
+	         cd $(APPDIR)/js-service && md5sum $(notdir $(JS_SERVICE_FILES)) 2>&1; \
 	         cd $(SERVICEDIR) && md5sum plxnative-storage 2>&1' | \
 	  python3 ci/verify-deploy.py $(VERIFY_FILES)
 
@@ -1743,11 +1751,10 @@ IPK         := pkg/$(APPID)_$(IPK_VERSION)_arm.ipk
 # what `paths::app_id` reads at runtime — so ci/mkipk.py and ci/check-package.py both assert it
 # equals the staged `appinfo.json`'s `id`.
 STAGE       := ipkroot/data/usr/palm/applications/$(APPID)
-# The headless Node P2P server is a webOS SERVICE inside the main package: one package owns one
-# application plus zero or more services, so this rides `usr/palm/services/<id>/` in the same .ipk
-# (the tar root is `ipkroot/data`, which is why the staged path carries the `data/` segment).
-P2P_SERVICE_ID    = com.nuvionative.app.service
-P2P_SERVICE_STAGE = ipkroot/data/usr/palm/services/$(P2P_SERVICE_ID)
+# The headless Node P2P server rides INSIDE the application directory, not the LS2 service tree:
+# this firmware's Node lacks `palmbus`/`pmloglib`, so the Rust app spawns `node server.js` as a
+# direct child from `paths::app_dir()/js-service`.
+JS_SERVICE_FILES = js-service/server.js js-service/server-settings.json
 
 # The .ipk is REPRODUCIBLE: same commit + same toolchain -> same sha256. That matters because the
 # manifest carries that hash and every user's TV verifies it at install time (there is no code
@@ -1809,14 +1816,10 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 	rm -rf ipkroot/data/usr && mkdir -p $(STAGE)/licenses
 	cp $(APP_FILES) $(STAGE)/
 	cp $(LICENSE_FILES) $(STAGE)/licenses/
-	@# The P2P server, as a webOS SERVICE of this package: its descriptor (`ipkroot/services.json`)
-	@# and payload must be staged BEFORE `ci/mkipk.py` runs, because that is what adds the service
-	@# to `usr/palm/packages/<id>/packageinfo.json`. `server.js` is 0755 so the application manager
-	@# can start it directly; `add_tree` normalises the same member to 0755 in the archive.
-	@mkdir -p $(P2P_SERVICE_STAGE)
-	cp js-service/server.js js-service/server-settings.json $(P2P_SERVICE_STAGE)/
-	cp ipkroot/services.json $(P2P_SERVICE_STAGE)/services.json
-	@chmod 755 $(P2P_SERVICE_STAGE)/server.js
+	@# The Node P2P server is payload in the app's own directory; the Rust half spawns it from
+	@# `paths::app_dir()/js-service`, with `server-settings.json` beside `server.js`.
+	@mkdir -p $(STAGE)/js-service
+	cp $(JS_SERVICE_FILES) $(STAGE)/js-service/
 	@# Strip the STAGED copy only, never pkg/plxnative. ~2.4 MB of .symtab+.strtab (30% of the
 	@# download, on a device whose app partition is 615 MB total and shared with every other app).
 	@# It must not be pkg/plxnative because tools/crash-report.sh symbolizes a crash PC against

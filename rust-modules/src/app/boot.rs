@@ -623,34 +623,58 @@ pub(crate) unsafe fn boot(
     }
 }
 
-/// Start the headless P2P server service (`com.nuvionative.app.service`) through the television's
-/// service bus, on a worker so its start-up cannot delay the first frame.
+/// The spawned `node server.js` child, killed on app exit. A `Mutex` because boot owns the handle
+/// at startup and teardown takes it from a different call site.
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Start the headless P2P server as a DIRECT CHILD of this process: `node server.js` from
+/// `paths::app_dir()/js-service`, with `server-settings.json` beside it as its working directory
+/// requires. This firmware's Node has no `palmbus`/`pmloglib`, so there is no LS2 service and no
+/// `luna-send` here.
 ///
-/// The two-second wait lets the set settle after a boot/reinstall before the service is asked to
-/// start. Television-only: the command does not exist on a host, and a controlled or replay boot
-/// must not touch the device.
+/// Television-only: the host and test builds must not spawn a server. A controlled or replay boot
+/// never reaches this call either (see `construct`).
 pub(crate) fn start_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
-        let spawned = std::thread::Builder::new()
-            .name("nuvio-p2p-start".into())
-            .spawn(|| {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let started = std::process::Command::new("luna-send")
-                    .args([
-                        "-n",
-                        "1",
-                        "-f",
-                        "luna://com.nuvionative.app.service/start",
-                        "{}",
-                    ])
-                    .status();
-                if !started.is_ok_and(|s| s.success()) {
-                    plx_base::eventlog::log("nuvio: the P2P service did not start");
-                }
-            });
-        if spawned.is_err() {
-            plx_base::eventlog::log("nuvio: could not start the P2P service worker");
+        let js_dir = plx_base::paths::app_dir().join("js-service");
+        let server = js_dir.join("server.js");
+        if !server.is_file() {
+            plx_base::eventlog::log("nuvio: js-service/server.js is missing; P2P server not started");
+            return;
+        }
+        let mut slot = P2P_CHILD.lock().unwrap_or_else(|e| e.into_inner());
+        // Already running (Ok(None) is the live case); a reaped or failed child is replaced.
+        if slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) {
+            return;
+        }
+        match std::process::Command::new("node")
+            .arg(&server)
+            .current_dir(&js_dir)
+            .spawn()
+        {
+            Ok(child) => {
+                plx_base::eventlog::log(&format!("nuvio: P2P server started (pid {})", child.id()));
+                *slot = Some(child);
+            }
+            Err(e) => {
+                plx_base::eventlog::log(&format!("nuvio: could not start the P2P server: {e}"))
+            }
+        }
+    }
+}
+
+/// Kill the spawned P2P server and reap it, so closing the app does not leave `node` holding the
+/// television's RAM. A no-op when nothing was started.
+pub(crate) fn stop_p2p_service() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        let mut slot = P2P_CHILD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut child) = slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            plx_base::eventlog::log("nuvio: P2P server stopped");
         }
     }
 }

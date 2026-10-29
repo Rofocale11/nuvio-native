@@ -80,25 +80,6 @@ import flavor  # noqa: E402  — ci/flavor.py, which DECIDES a flavour's id and 
 EPOCH = 1262304000
 STORAGE_PERMISSIONS = ["database.operation", "securitykey.operation"]
 
-# The headless Node P2P server is a webOS SERVICE of the main package, under
-# `usr/palm/services/<id>/`. The Makefile stages the payload and `ipkroot/services.json` before
-# this runs; `write_packageinfo` then lists it beside the private storage helper.
-#
-# THIS IS THE CONTRACT `storage_archive_errors` grades the archived copy against, and it must stay
-# byte-for-byte equal (as JSON) to the tracked `ipkroot/services.json`. `launch` is part of that
-# descriptor; a change made to one file without the other is exactly what this check catches.
-P2P_SERVICE_ID = "com.nuvionative.app.service"
-P2P_SERVICE_DESCRIPTOR = {
-    "id": P2P_SERVICE_ID,
-    "description": "Nuvio P2P Server",
-    "services": [{
-        "name": P2P_SERVICE_ID,
-        "command": "node",
-        "args": ["server.js"],
-        "launch": True,
-    }],
-}
-
 
 def stage_storage_service(repo: Path, data: Path, app: dict) -> Path:
     """Stage the native owner whose installer-generated LS2 name survives app restarts."""
@@ -135,24 +116,6 @@ def storage_archive_errors(blob: bytes, app_id: str) -> list[str]:
             files = {n for n, m in members.items() if m.isfile() and n.startswith("usr/palm/services/")}
             if not {prefix + "services.json", prefix + "plxnative-storage"}.issubset(files):
                 errors.append("service payload must contain exactly this flavor's descriptor and helper")
-            # The Node P2P service is optional for the storage-only fixtures, but when it is
-            # present its descriptor and executable must be the ones the package advertises.
-            expected_services = [service_id]
-            p2p_prefix = f"usr/palm/services/{P2P_SERVICE_ID}/"
-            if any(n.startswith(p2p_prefix) for n in members):
-                expected_services.append(P2P_SERVICE_ID)
-                descriptor = members.get(p2p_prefix + "services.json")
-                server = members.get(p2p_prefix + "server.js")
-                if descriptor is None or not descriptor.isfile():
-                    errors.append("P2P service descriptor is missing")
-                else:
-                    try:
-                        if json.load(tf.extractfile(descriptor)) != P2P_SERVICE_DESCRIPTOR:
-                            errors.append("P2P service descriptor differs")
-                    except ValueError:
-                        errors.append("P2P service descriptor is not JSON")
-                if server is None or not server.isfile() or server.mode & 0o7777 != 0o755:
-                    errors.append("P2P server must be a regular executable with mode 0755")
             executable = members.get(prefix + "plxnative-storage")
             if executable is None or not executable.isfile() or executable.mode & 0o7777 != 0o755:
                 errors.append("storage helper must be a regular executable with mode 0755")
@@ -174,7 +137,7 @@ def storage_archive_errors(blob: bytes, app_id: str) -> list[str]:
                 else:
                     if metadata.get("id") != app_id or metadata.get("requiredPermissions") != STORAGE_PERMISSIONS:
                         errors.append("app/package identity or storage capability groups differ")
-                    if name.endswith("packageinfo.json") and (metadata.get("app") != app_id or metadata.get("services") != expected_services):
+                    if name.endswith("packageinfo.json") and (metadata.get("app") != app_id or metadata.get("services") != [service_id]):
                         errors.append("package/app/service membership differs")
             if any(Path(n).name in {"auth.json", "session.json", "consent.json", "state.json", "rendezvous.json", "storage.sock"} for n in members):
                 errors.append("runtime credentials or rendezvous files must not be packaged")
@@ -200,7 +163,7 @@ def add_tree(tf: tarfile.TarFile, src: Path, arc_root: str, skip: set = ()) -> N
         ti.mtime = EPOCH
         # Normalise mode: the binary and directories executable, everything else 0644. Otherwise
         # a stray local chmod changes the archive.
-        ti.mode = 0o755 if (ti.isdir() or p.name in {"plxnative", "plxnative-storage", "sentry-crash", "server.js"}) else 0o644
+        ti.mode = 0o755 if (ti.isdir() or p.name in {"plxnative", "plxnative-storage", "sentry-crash"}) else 0o644
         if ti.isfile():
             with open(p, "rb") as fh:
                 tf.addfile(ti, fh)
@@ -231,16 +194,11 @@ def write_packageinfo(data: Path, app: dict) -> Path:
     pkg_dir = data / "usr" / "palm" / "packages" / app["id"]
     pkg_dir.mkdir(parents=True, exist_ok=True)
     out = pkg_dir / "packageinfo.json"
-    # The private storage helper is always staged; the Node P2P service only when the Makefile
-    # has laid its descriptor down, which keeps the storage-only fixtures valid.
-    services = [app["id"] + ".storage"]
-    if (data / "usr" / "palm" / "services" / P2P_SERVICE_ID / "services.json").is_file():
-        services.append(P2P_SERVICE_ID)
     # Key order and 4-space indent match what `ares-package` emits, so a diff against a
     # stock-tooling package shows only the values.
     out.write_text(json.dumps({
         "app": app["id"],
-        "services": services,
+        "services": [app["id"] + ".storage"],
         "requiredPermissions": STORAGE_PERMISSIONS,
         "id": app["id"],
         "loc_name": app["title"],

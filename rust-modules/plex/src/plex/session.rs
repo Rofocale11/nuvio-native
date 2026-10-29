@@ -407,10 +407,10 @@ impl std::fmt::Debug for OpaqueExtensions {
 }
 
 
-/// The P2P engine's address when the person has not configured one: the headless `Nuvio P2P`
-/// service (`com.nuvionative.app.service`) the client starts at boot on the television's own
-/// loopback. The stored field stays `None` until something is saved, so a session predating the
-/// field still serializes unchanged; readers resolve through [`Session::p2p_server_url`].
+/// The P2P engine's address when the person has not configured one: the headless Node server
+/// (`js-service/server.js`) the client spawns at boot on the television's own loopback. The stored
+/// field stays `None` until something is saved, so a session predating the field still serializes
+/// unchanged; readers resolve through [`Session::p2p_server_url`].
 pub const DEFAULT_P2P_SERVER_URL: &str = "http://127.0.0.1:11470";
 
 /// The full persisted session. Empty fields mean "not logged in yet" for that stage.
