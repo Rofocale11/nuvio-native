@@ -427,9 +427,7 @@ jobs:
           tag='${{ needs.guard.outputs.tag }}'
           note="docs/release-notes/$tag.md"
           [ -f "$note" ] || { echo "::error::$note is missing — the release would publish with no notes"; exit 1; }
-          # dist/ holds the main app AND the separate P2P package; the note's hash and sizes
-          # describe the main app, so name it rather than picking up both lines.
-          ipk=$(ls dist/*.ipk | grep -vF 'com.nuvionative.app.p2p_')
+          ipk=$(ls dist/*.ipk)
           sha=$(sha256sum "$ipk" | cut -d' ' -f1)
           commit=$(git rev-parse HEAD)
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

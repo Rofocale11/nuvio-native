@@ -80,10 +80,19 @@ import flavor  # noqa: E402  — ci/flavor.py, which DECIDES a flavour's id and 
 EPOCH = 1262304000
 STORAGE_PERMISSIONS = ["database.operation", "securitykey.operation"]
 
-# The headless P2P server ships as its OWN package: webOS' package model is one application per
-# package (`packageinfo.json` carries a single `app` field), so it cannot ride inside the main ipk
-# as a second `applications/` directory — `appinstalld` would register only the main app.
-P2P_APP_ID = "com.nuvionative.app.p2p"
+# The headless Node P2P server is a webOS SERVICE of the main package, under
+# `usr/palm/services/<id>/`. The Makefile stages the payload and `ipkroot/services.json` before
+# this runs; `write_packageinfo` then lists it beside the private storage helper.
+P2P_SERVICE_ID = "com.nuvionative.app.service"
+P2P_SERVICE_DESCRIPTOR = {
+    "id": P2P_SERVICE_ID,
+    "description": "Nuvio P2P Server",
+    "services": [{
+        "name": P2P_SERVICE_ID,
+        "command": "node",
+        "args": ["server.js"],
+    }],
+}
 
 
 def stage_storage_service(repo: Path, data: Path, app: dict) -> Path:
@@ -121,6 +130,24 @@ def storage_archive_errors(blob: bytes, app_id: str) -> list[str]:
             files = {n for n, m in members.items() if m.isfile() and n.startswith("usr/palm/services/")}
             if not {prefix + "services.json", prefix + "plxnative-storage"}.issubset(files):
                 errors.append("service payload must contain exactly this flavor's descriptor and helper")
+            # The Node P2P service is optional for the storage-only fixtures, but when it is
+            # present its descriptor and executable must be the ones the package advertises.
+            expected_services = [service_id]
+            p2p_prefix = f"usr/palm/services/{P2P_SERVICE_ID}/"
+            if any(n.startswith(p2p_prefix) for n in members):
+                expected_services.append(P2P_SERVICE_ID)
+                descriptor = members.get(p2p_prefix + "services.json")
+                server = members.get(p2p_prefix + "server.js")
+                if descriptor is None or not descriptor.isfile():
+                    errors.append("P2P service descriptor is missing")
+                else:
+                    try:
+                        if json.load(tf.extractfile(descriptor)) != P2P_SERVICE_DESCRIPTOR:
+                            errors.append("P2P service descriptor differs")
+                    except ValueError:
+                        errors.append("P2P service descriptor is not JSON")
+                if server is None or not server.isfile() or server.mode & 0o7777 != 0o755:
+                    errors.append("P2P server must be a regular executable with mode 0755")
             executable = members.get(prefix + "plxnative-storage")
             if executable is None or not executable.isfile() or executable.mode & 0o7777 != 0o755:
                 errors.append("storage helper must be a regular executable with mode 0755")
@@ -142,7 +169,7 @@ def storage_archive_errors(blob: bytes, app_id: str) -> list[str]:
                 else:
                     if metadata.get("id") != app_id or metadata.get("requiredPermissions") != STORAGE_PERMISSIONS:
                         errors.append("app/package identity or storage capability groups differ")
-                    if name.endswith("packageinfo.json") and (metadata.get("app") != app_id or metadata.get("services") != [service_id]):
+                    if name.endswith("packageinfo.json") and (metadata.get("app") != app_id or metadata.get("services") != expected_services):
                         errors.append("package/app/service membership differs")
             if any(Path(n).name in {"auth.json", "session.json", "consent.json", "state.json", "rendezvous.json", "storage.sock"} for n in members):
                 errors.append("runtime credentials or rendezvous files must not be packaged")
@@ -199,11 +226,16 @@ def write_packageinfo(data: Path, app: dict) -> Path:
     pkg_dir = data / "usr" / "palm" / "packages" / app["id"]
     pkg_dir.mkdir(parents=True, exist_ok=True)
     out = pkg_dir / "packageinfo.json"
+    # The private storage helper is always staged; the Node P2P service only when the Makefile
+    # has laid its descriptor down, which keeps the storage-only fixtures valid.
+    services = [app["id"] + ".storage"]
+    if (data / "usr" / "palm" / "services" / P2P_SERVICE_ID / "services.json").is_file():
+        services.append(P2P_SERVICE_ID)
     # Key order and 4-space indent match what `ares-package` emits, so a diff against a
     # stock-tooling package shows only the values.
     out.write_text(json.dumps({
         "app": app["id"],
-        "services": [app["id"] + ".storage"],
+        "services": services,
         "requiredPermissions": STORAGE_PERMISSIONS,
         "id": app["id"],
         "loc_name": app["title"],
@@ -306,75 +338,8 @@ def write_ar(out: Path, members: list) -> None:
                 fh.write(b"\n")   # members are 2-byte aligned
 
 
-def package_p2p(repo: Path) -> Path:
-    """Build the `com.nuvionative.app.p2p` package from the staged `js-service/` tree.
-
-    The Makefile copies `js-service/` into `ipkroot/p2p/data/usr/palm/applications/<id>/`; this
-    writes the package descriptor and a control file DERIVED from that staged `appinfo.json`, then
-    the same deterministic archive the main package uses. One application per package is a webOS
-    rule, not a choice here: `appinstalld` reads the single `app` field from `packageinfo.json`.
-
-    Television-only payload, like the main app's: `server.js` is staged 0755 by `add_tree` because
-    the application manager starts `main` directly.
-    """
-    root = repo / "ipkroot" / "p2p"
-    stage = root / "data" / "usr" / "palm" / "applications" / P2P_APP_ID
-    staged = sorted(p.name for p in stage.parent.glob("*")) if stage.parent.is_dir() else []
-    if staged != [P2P_APP_ID]:
-        raise SystemExit(f"staged applications/{staged} is not exactly [{P2P_APP_ID!r}] — "
-                         "run `make ipk`, which copies js-service/ into it")
-    for name in ("appinfo.json", "server.js", "server-settings.json"):
-        if not (stage / name).is_file():
-            raise SystemExit(f"{stage / name} is missing — the P2P payload is incomplete")
-    app = json.loads((stage / "appinfo.json").read_text())
-    if app.get("id") != P2P_APP_ID:
-        raise SystemExit(f"js-service/appinfo.json declares id={app.get('id')!r}, not {P2P_APP_ID!r}")
-
-    pkg_dir = root / "data" / "usr" / "palm" / "packages" / app["id"]
-    pkg_dir.mkdir(parents=True, exist_ok=True)
-    (pkg_dir / "packageinfo.json").write_text(json.dumps({
-        "app": app["id"],
-        "id": app["id"],
-        "loc_name": app["title"],
-        "package_format_version": 2,
-        "vendor": app["vendor"],
-        "version": app["version"],
-        "services": [],
-    }, indent=4) + "\n")
-
-    kib = (sum(p.stat().st_size for p in (root / "data").rglob("*") if p.is_file()) + 1023) // 1024
-    ctl = root / "ctl"
-    ctl.mkdir(parents=True, exist_ok=True)
-    (ctl / "control").write_text("\n".join([
-        f"Package: {app['id']}",
-        f"Version: {app['version']}",
-        "Section: misc",
-        "Priority: optional",
-        "Architecture: arm",
-        f"Installed-Size: {kib}",
-        f"Maintainer: {app['vendor']}",
-        f"Description: {app['title']} — headless streaming server for Nuvio Native",
-        "webOS-Package-Format-Version: 2",
-        "webOS-Packager-Version: plxnative-mkipk/1",
-    ]) + "\n")
-
-    write_targz(root / "control.tar.gz", ctl, "")
-    write_targz(root / "data.tar.gz", root / "data", "")
-    (root / "debian-binary").write_bytes(b"2.0\n")
-    ipk = repo / "pkg" / f"{app['id']}_{app['version']}_arm.ipk"
-    write_ar(ipk, [(n, (root / n).read_bytes())
-                   for n in ("debian-binary", "control.tar.gz", "data.tar.gz")])
-    print(f"wrote {ipk.name} ({ipk.stat().st_size} bytes) — packageinfo.json for {app['id']}, "
-          f"Installed-Size {kib} KiB")
-    return ipk
-
-
 def main() -> int:
     repo = Path(__file__).resolve().parent.parent
-    # `--nuvio-p2p` builds the P2P server's own package from the staged js-service/ tree.
-    if sys.argv[1:2] == ["--nuvio-p2p"]:
-        package_p2p(repo)
-        return 0
     # WHICH INSTALL this package is for. `--emit-appinfo <flavour> <path>` writes just the derived
     # descriptor and stops — that is how `make deploy` gets the appinfo it scp's, through THIS
     # transform rather than a second writer, so the file on the television and the file in the .ipk

@@ -1,0 +1,14 @@
+{
+  "id": "com.nuvionative.app.service",
+  "description": "Nuvio P2P Server",
+  "services": [
+    {
+      "name": "com.nuvionative.app.service",
+      "command": "node",
+      "args": [
+        "server.js"
+      ],
+      "launch": true
+    }
+  ]
+}

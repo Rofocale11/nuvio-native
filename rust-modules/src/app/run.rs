@@ -2925,9 +2925,9 @@ pub(crate) unsafe fn heartbeat(app: &mut App, fr: &mut Frame) {
         }
 }
 
-/// Close the headless P2P server application so its RAM is free for the next launch.
+/// Close the headless P2P server service so its RAM is free for the next launch.
 ///
-/// Television-only, like the launch in `boot::start_p2p_service`. The worker is JOINED rather than
+/// Television-only, like the start in `boot::start_p2p_service`. The worker is JOINED rather than
 /// detached: this runs at the very end of the process, and a detached thread would be killed by
 /// process exit before `luna-send` delivered the close.
 pub(crate) fn stop_p2p_service() {
@@ -2940,8 +2940,8 @@ pub(crate) fn stop_p2p_service() {
                     .args([
                         "-n",
                         "1",
-                        "luna://com.webos.applicationManager/close",
-                        r#"{"id": "com.nuvionative.app.p2p"}"#,
+                        "luna://com.webos.service.bus/closeService",
+                        r#"{"serviceName":"com.nuvionative.app.service"}"#,
                     ])
                     .status();
             });
@@ -2949,7 +2949,7 @@ pub(crate) fn stop_p2p_service() {
             Ok(worker) => {
                 let _ = worker.join();
             }
-            Err(_) => plx_base::eventlog::log("nuvio: could not start the P2P stop worker"),
+            Err(_) => plx_base::eventlog::log("nuvio: could not start the P2P service stop worker"),
         }
     }
 }

@@ -408,7 +408,7 @@ impl std::fmt::Debug for OpaqueExtensions {
 
 
 /// The P2P engine's address when the person has not configured one: the headless `Nuvio P2P`
-/// application (`com.nuvionative.app.p2p`) the client launches at boot on the television's own
+/// service (`com.nuvionative.app.service`) the client starts at boot on the television's own
 /// loopback. The stored field stays `None` until something is saved, so a session predating the
 /// field still serializes unchanged; readers resolve through [`Session::p2p_server_url`].
 pub const DEFAULT_P2P_SERVER_URL: &str = "http://127.0.0.1:11470";

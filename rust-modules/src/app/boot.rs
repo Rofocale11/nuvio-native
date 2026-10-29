@@ -623,12 +623,12 @@ pub(crate) unsafe fn boot(
     }
 }
 
-/// Launch the headless P2P server application (`com.nuvionative.app.p2p`) through the television's
-/// application manager, on a worker so its start-up cannot delay the first frame.
+/// Start the headless P2P server service (`com.nuvionative.app.service`) through the television's
+/// service bus, on a worker so its start-up cannot delay the first frame.
 ///
-/// The two-second wait lets the set settle after a boot/reinstall before a second application is
-/// asked to start. Television-only: the command does not exist on a host, and a controlled or
-/// replay boot must not touch the device.
+/// The two-second wait lets the set settle after a boot/reinstall before the service is asked to
+/// start. Television-only: the command does not exist on a host, and a controlled or replay boot
+/// must not touch the device.
 pub(crate) fn start_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
@@ -636,21 +636,21 @@ pub(crate) fn start_p2p_service() {
             .name("nuvio-p2p-start".into())
             .spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                let launched = std::process::Command::new("luna-send")
+                let started = std::process::Command::new("luna-send")
                     .args([
                         "-n",
                         "1",
                         "-f",
-                        "luna://com.webos.applicationManager/launch",
-                        r#"{"id": "com.nuvionative.app.p2p"}"#,
+                        "luna://com.nuvionative.app.service/start",
+                        "{}",
                     ])
                     .status();
-                if !launched.is_ok_and(|s| s.success()) {
-                    plx_base::eventlog::log("nuvio: the P2P application did not launch");
+                if !started.is_ok_and(|s| s.success()) {
+                    plx_base::eventlog::log("nuvio: the P2P service did not start");
                 }
             });
         if spawned.is_err() {
-            plx_base::eventlog::log("nuvio: could not start the P2P launch worker");
+            plx_base::eventlog::log("nuvio: could not start the P2P service worker");
         }
     }
 }

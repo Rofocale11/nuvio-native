@@ -100,7 +100,7 @@ path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
   separate records. The helper verifies readback before import files are removed.
 - Torrents (`infoHash`): played through a Stremio-compatible streaming server URL as
   `<server>/<infoHash>/<fileIdx>`, where the server is the session's address — the headless
-  `com.nuvionative.app.p2p` application on loopback `http://127.0.0.1:11470` unless overridden.
+  `com.nuvionative.app.service` service on loopback `http://127.0.0.1:11470` unless overridden.
   Debrid-resolved HTTP links from Torrentio/AIOStreams play directly. Local server scanning is off
   by default and requires `enableTorrents`; a configured `torrentServer` can be used directly.
 - Release discovery permits plaintext credentials for the registered in-process shim

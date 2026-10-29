@@ -408,11 +408,8 @@ jobs:
         # the tool rather than retyped — `docs/release-notes/README.md` bans retyping it and this
         # is what makes that possible.
         run: |
-          # The P2P server is packaged separately (one app per webOS package); this check grades
-          # the MAIN app, so name it rather than globbing both artifacts.
-          main_ipk=$(ls pkg/*.ipk | grep -vF 'com.nuvionative.app.p2p_')
           webosbrew-ipk-verify --details --format markdown \
-            --fw-releases '>=4.0' "$main_ipk" | tee pkg/ipk-verify.md | tee -a "$GITHUB_STEP_SUMMARY"
+            --fw-releases '>=4.0' pkg/*.ipk | tee pkg/ipk-verify.md | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Firmware compatibility gates (per-binary database check)
         # Checks each shipped binary (`fwcompat`) against the local webosbrew compat-checker
@@ -444,9 +441,7 @@ jobs:
           { echo; echo '```'; cat "$matrix"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - id: name
-        # `make ipk` writes the main app AND the separate P2P package; the manifest below
-        # describes the main app, so exclude the P2P artifact by its fixed id.
-        run: echo "ipk=$(ls pkg/*.ipk | grep -vF 'com.nuvionative.app.p2p_')" >> "$GITHUB_OUTPUT"
+        run: echo "ipk=$(ls pkg/*.ipk)" >> "$GITHUB_OUTPUT"
 
       - name: Generate the Homebrew Channel manifest
         # -r false: the app needs no root. Device-proven — it runs jailed as uid 6910 under LG's

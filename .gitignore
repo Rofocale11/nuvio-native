@@ -19,8 +19,6 @@ pkg/ipk.sha256
 ipkroot/*.tar.gz
 ipkroot/debian-binary
 ipkroot/data/usr/
-# the headless P2P server's own package staging (`ci/mkipk.py --nuvio-p2p`)
-ipkroot/p2p/
 
 # CI's webOS NDK install root (.github/actions/webos-ndk); a toolchain, never source
 .webos-ndk/

@@ -265,7 +265,7 @@ pub(crate) fn boot() {
 /// Push the session's P2P preference into the running shim: whether torrent/magnet streams may be
 /// offered at all, and the engine they play through (`Session::p2p_server_url`).
 ///
-/// The session's accessor resolves an unsaved preference to the headless P2P application's loopback
+/// The session's accessor resolves an unsaved preference to the headless P2P service's loopback
 /// address, so an ordinary boot hands `Some` here. A `None` from a direct caller still probes the
 /// engine's default local ports — on a worker, never the caller's thread, because five refused
 /// connections cost seconds. Either way the switch drives the shim, so turning P2P off really does

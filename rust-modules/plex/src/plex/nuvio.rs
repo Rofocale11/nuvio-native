@@ -58,7 +58,7 @@ pub fn set_rating_source(source: super::session::RatingSource) -> bool {
 
 /// Settings > Playback's P2P switch and engine URL, through the session cache: whether the Source
 /// Picker may offer peer-to-peer streams, and the streaming server they play through (the headless
-/// P2P application's loopback address unless configured). The shim is told both at boot and after
+/// P2P service's loopback address unless configured). The shim is told both at boot and after
 /// every save.
 pub fn p2p() -> (bool, Option<String>) {
     let session = super::session::peek();
