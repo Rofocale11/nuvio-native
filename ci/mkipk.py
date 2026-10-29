@@ -80,6 +80,11 @@ import flavor  # noqa: E402  — ci/flavor.py, which DECIDES a flavour's id and 
 EPOCH = 1262304000
 STORAGE_PERMISSIONS = ["database.operation", "securitykey.operation"]
 
+# The headless P2P server ships as its OWN package: webOS' package model is one application per
+# package (`packageinfo.json` carries a single `app` field), so it cannot ride inside the main ipk
+# as a second `applications/` directory — `appinstalld` would register only the main app.
+P2P_APP_ID = "com.nuvionative.app.p2p"
+
 
 def stage_storage_service(repo: Path, data: Path, app: dict) -> Path:
     """Stage the native owner whose installer-generated LS2 name survives app restarts."""
@@ -163,7 +168,7 @@ def add_tree(tf: tarfile.TarFile, src: Path, arc_root: str, skip: set = ()) -> N
         ti.mtime = EPOCH
         # Normalise mode: the binary and directories executable, everything else 0644. Otherwise
         # a stray local chmod changes the archive.
-        ti.mode = 0o755 if (ti.isdir() or p.name in {"plxnative", "plxnative-storage", "sentry-crash"}) else 0o644
+        ti.mode = 0o755 if (ti.isdir() or p.name in {"plxnative", "plxnative-storage", "sentry-crash", "server.js"}) else 0o644
         if ti.isfile():
             with open(p, "rb") as fh:
                 tf.addfile(ti, fh)
@@ -301,8 +306,75 @@ def write_ar(out: Path, members: list) -> None:
                 fh.write(b"\n")   # members are 2-byte aligned
 
 
+def package_p2p(repo: Path) -> Path:
+    """Build the `com.nuvionative.app.p2p` package from the staged `js-service/` tree.
+
+    The Makefile copies `js-service/` into `ipkroot/p2p/data/usr/palm/applications/<id>/`; this
+    writes the package descriptor and a control file DERIVED from that staged `appinfo.json`, then
+    the same deterministic archive the main package uses. One application per package is a webOS
+    rule, not a choice here: `appinstalld` reads the single `app` field from `packageinfo.json`.
+
+    Television-only payload, like the main app's: `server.js` is staged 0755 by `add_tree` because
+    the application manager starts `main` directly.
+    """
+    root = repo / "ipkroot" / "p2p"
+    stage = root / "data" / "usr" / "palm" / "applications" / P2P_APP_ID
+    staged = sorted(p.name for p in stage.parent.glob("*")) if stage.parent.is_dir() else []
+    if staged != [P2P_APP_ID]:
+        raise SystemExit(f"staged applications/{staged} is not exactly [{P2P_APP_ID!r}] — "
+                         "run `make ipk`, which copies js-service/ into it")
+    for name in ("appinfo.json", "server.js", "server-settings.json"):
+        if not (stage / name).is_file():
+            raise SystemExit(f"{stage / name} is missing — the P2P payload is incomplete")
+    app = json.loads((stage / "appinfo.json").read_text())
+    if app.get("id") != P2P_APP_ID:
+        raise SystemExit(f"js-service/appinfo.json declares id={app.get('id')!r}, not {P2P_APP_ID!r}")
+
+    pkg_dir = root / "data" / "usr" / "palm" / "packages" / app["id"]
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    (pkg_dir / "packageinfo.json").write_text(json.dumps({
+        "app": app["id"],
+        "id": app["id"],
+        "loc_name": app["title"],
+        "package_format_version": 2,
+        "vendor": app["vendor"],
+        "version": app["version"],
+        "services": [],
+    }, indent=4) + "\n")
+
+    kib = (sum(p.stat().st_size for p in (root / "data").rglob("*") if p.is_file()) + 1023) // 1024
+    ctl = root / "ctl"
+    ctl.mkdir(parents=True, exist_ok=True)
+    (ctl / "control").write_text("\n".join([
+        f"Package: {app['id']}",
+        f"Version: {app['version']}",
+        "Section: misc",
+        "Priority: optional",
+        "Architecture: arm",
+        f"Installed-Size: {kib}",
+        f"Maintainer: {app['vendor']}",
+        f"Description: {app['title']} — headless streaming server for Nuvio Native",
+        "webOS-Package-Format-Version: 2",
+        "webOS-Packager-Version: plxnative-mkipk/1",
+    ]) + "\n")
+
+    write_targz(root / "control.tar.gz", ctl, "")
+    write_targz(root / "data.tar.gz", root / "data", "")
+    (root / "debian-binary").write_bytes(b"2.0\n")
+    ipk = repo / "pkg" / f"{app['id']}_{app['version']}_arm.ipk"
+    write_ar(ipk, [(n, (root / n).read_bytes())
+                   for n in ("debian-binary", "control.tar.gz", "data.tar.gz")])
+    print(f"wrote {ipk.name} ({ipk.stat().st_size} bytes) — packageinfo.json for {app['id']}, "
+          f"Installed-Size {kib} KiB")
+    return ipk
+
+
 def main() -> int:
     repo = Path(__file__).resolve().parent.parent
+    # `--nuvio-p2p` builds the P2P server's own package from the staged js-service/ tree.
+    if sys.argv[1:2] == ["--nuvio-p2p"]:
+        package_p2p(repo)
+        return 0
     # WHICH INSTALL this package is for. `--emit-appinfo <flavour> <path>` writes just the derived
     # descriptor and stops — that is how `make deploy` gets the appinfo it scp's, through THIS
     # transform rather than a second writer, so the file on the television and the file in the .ipk

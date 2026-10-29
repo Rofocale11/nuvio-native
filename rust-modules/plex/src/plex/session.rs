@@ -407,6 +407,12 @@ impl std::fmt::Debug for OpaqueExtensions {
 }
 
 
+/// The P2P engine's address when the person has not configured one: the headless `Nuvio P2P`
+/// application (`com.nuvionative.app.p2p`) the client launches at boot on the television's own
+/// loopback. The stored field stays `None` until something is saved, so a session predating the
+/// field still serializes unchanged; readers resolve through [`Session::p2p_server_url`].
+pub const DEFAULT_P2P_SERVER_URL: &str = "http://127.0.0.1:11470";
+
 /// The full persisted session. Empty fields mean "not logged in yet" for that stage.
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Session {
@@ -646,11 +652,11 @@ pub struct Session {
     /// serializes exactly as it did before.
     #[serde(default, deserialize_with = "de_soft_bool", skip_serializing_if = "is_false")]
     pub p2p_enabled: bool,
-    /// **The peer-to-peer engine's base URL** (`http://127.0.0.1:2710`). `None` means "probe the
-    /// engine's default localhost ports", which is what every build before this field did.
-    /// Stored so a person running the engine on another host or port can say so once instead of
-    /// the client guessing. Soft-parsed like every other preference: a corrupt value costs the
-    /// setting, never the credentials.
+    /// **The peer-to-peer engine's base URL** ([`DEFAULT_P2P_SERVER_URL`] unless configured).
+    /// `None` means "not saved", and [`Session::p2p_server_url`] resolves that to the built-in
+    /// loopback address of the headless P2P application. Stored so a person running the engine on
+    /// another host or port can say so once instead of the client guessing. Soft-parsed like every
+    /// other preference: a corrupt value costs the setting, never the credentials.
     #[serde(default, deserialize_with = "de_soft_nonempty_string", skip_serializing_if = "Option::is_none")]
     pub p2p_server_url: Option<String>,
     /// **Device-wide ambient memory**: the last hero `UltraBlurColors` envelope Home actually
@@ -811,7 +817,7 @@ impl Default for CanonicalSessionPreferences {
             deck_press: DeckPress::Details,
             rating_source: RatingSource::Imdb,
             p2p_enabled: false,
-            p2p_server_url: None,
+            p2p_server_url: Some(DEFAULT_P2P_SERVER_URL.to_owned()),
             plaintext_consent: Vec::new(),
             server_key_pins: Vec::new(),
             audio_enhancements: crate::plex::AudioEnhancements::NONE,
@@ -2676,8 +2682,11 @@ impl Session {
         let mut next = self.clone(); next.p2p_enabled = enabled; next
     }
 
-    /// The peer-to-peer engine's base URL, `None` for its default localhost ports.
-    pub fn p2p_server_url(&self) -> Option<&str> { self.p2p_server_url.as_deref() }
+    /// The engine address to use, never `None`: an unsaved preference resolves to
+    /// [`DEFAULT_P2P_SERVER_URL`], the loopback address of the headless P2P application.
+    pub fn p2p_server_url(&self) -> Option<&str> {
+        Some(self.p2p_server_url.as_deref().unwrap_or(DEFAULT_P2P_SERVER_URL))
+    }
     pub fn with_p2p_server_url(&self, url: Option<String>) -> Self {
         let mut next = self.clone();
         // An empty field means "unset", not "the engine is at the empty address".

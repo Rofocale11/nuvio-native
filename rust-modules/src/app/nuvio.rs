@@ -265,10 +265,11 @@ pub(crate) fn boot() {
 /// Push the session's P2P preference into the running shim: whether torrent/magnet streams may be
 /// offered at all, and the engine they play through (`Session::p2p_server_url`).
 ///
-/// With P2P on and no URL configured, the engine's default local ports are probed — on a worker,
-/// never the caller's thread, because five refused connections cost seconds. This is the probe
-/// `boot` used to run off the import file; it is now driven by the preference, so turning the
-/// switch off really does stop torrents from being listed.
+/// The session's accessor resolves an unsaved preference to the headless P2P application's loopback
+/// address, so an ordinary boot hands `Some` here. A `None` from a direct caller still probes the
+/// engine's default local ports — on a worker, never the caller's thread, because five refused
+/// connections cost seconds. Either way the switch drives the shim, so turning P2P off really does
+/// stop torrents from being listed.
 pub(crate) fn restore_p2p(enabled: bool, server: Option<String>) {
     let Some(handle) = handle() else { return };
     let shim = handle.shim.clone();

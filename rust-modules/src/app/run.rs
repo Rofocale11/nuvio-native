@@ -2925,12 +2925,43 @@ pub(crate) unsafe fn heartbeat(app: &mut App, fr: &mut Frame) {
         }
 }
 
+/// Close the headless P2P server application so its RAM is free for the next launch.
+///
+/// Television-only, like the launch in `boot::start_p2p_service`. The worker is JOINED rather than
+/// detached: this runs at the very end of the process, and a detached thread would be killed by
+/// process exit before `luna-send` delivered the close.
+pub(crate) fn stop_p2p_service() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        let stopped = std::thread::Builder::new()
+            .name("nuvio-p2p-stop".into())
+            .spawn(|| {
+                let _ = std::process::Command::new("luna-send")
+                    .args([
+                        "-n",
+                        "1",
+                        "luna://com.webos.applicationManager/close",
+                        r#"{"id": "com.nuvionative.app.p2p"}"#,
+                    ])
+                    .status();
+            });
+        match stopped {
+            Ok(worker) => {
+                let _ = worker.join();
+            }
+            Err(_) => plx_base::eventlog::log("nuvio: could not start the P2P stop worker"),
+        }
+    }
+}
+
 /// Teardown after the loop: abandon the pending report, stop the feed, wait for the stop
 /// scrobble, close the capture stream and the poster workers, quit SDL.
 pub(crate) unsafe fn shutdown(
     ps: &mut plx_media::route::PlaybackSession,
     pa: &mut plx_media::player::adapter::PlayerAdapter,
 ) {
+    // Before SDL goes away, while the application manager can still answer.
+    stop_p2p_service();
     plx_media::player::report::abandon_pending(ps);
     if is_started() {
         plx_media::player::stop_bufferfeed(ps, pa);

@@ -623,6 +623,38 @@ pub(crate) unsafe fn boot(
     }
 }
 
+/// Launch the headless P2P server application (`com.nuvionative.app.p2p`) through the television's
+/// application manager, on a worker so its start-up cannot delay the first frame.
+///
+/// The two-second wait lets the set settle after a boot/reinstall before a second application is
+/// asked to start. Television-only: the command does not exist on a host, and a controlled or
+/// replay boot must not touch the device.
+pub(crate) fn start_p2p_service() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        let spawned = std::thread::Builder::new()
+            .name("nuvio-p2p-start".into())
+            .spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let launched = std::process::Command::new("luna-send")
+                    .args([
+                        "-n",
+                        "1",
+                        "-f",
+                        "luna://com.webos.applicationManager/launch",
+                        r#"{"id": "com.nuvionative.app.p2p"}"#,
+                    ])
+                    .status();
+                if !launched.is_ok_and(|s| s.success()) {
+                    plx_base::eventlog::log("nuvio: the P2P application did not launch");
+                }
+            });
+        if spawned.is_err() {
+            plx_base::eventlog::log("nuvio: could not start the P2P launch worker");
+        }
+    }
+}
+
 pub(super) fn apply_deferred_capture(rec: &mut super::recorder::Recplay,
     gate: &plx_machine::landgate::Gate,
     deferred: plx_plex::plex::session::DeferredLoad) -> Result<(), &'static str> {
@@ -1760,6 +1792,11 @@ pub(crate) unsafe fn construct(
         } else {
             maybe_ask_consent(&mut app.pages);
         }
+    }
+    // The headless P2P server starts behind the UI (a worker with its own settle delay), never on
+    // the boot thread and never on a controlled/replay boot.
+    if !controlled {
+        start_p2p_service();
     }
     Ok(app)
 }

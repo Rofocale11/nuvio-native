@@ -1,0 +1,11 @@
+{
+  "id": "com.nuvionative.app.p2p",
+  "version": "1.0.0",
+  "vendor": "Nuvio",
+  "type": "native",
+  "main": "server.js",
+  "title": "Nuvio P2P",
+  "visible": false,
+  "noWindow": true,
+  "requiredPermissions": ["networking", "internet", "time.query", "activity.operation"]
+}

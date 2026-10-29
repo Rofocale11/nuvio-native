@@ -1743,6 +1743,14 @@ IPK         := pkg/$(APPID)_$(IPK_VERSION)_arm.ipk
 # what `paths::app_id` reads at runtime — so ci/mkipk.py and ci/check-package.py both assert it
 # equals the staged `appinfo.json`'s `id`.
 STAGE       := ipkroot/data/usr/palm/applications/$(APPID)
+# The headless P2P server (`js-service/`) is its OWN package, not a second directory inside the
+# main ipk: webOS' package model is ONE application per package (`packageinfo.json` carries a
+# single `app`), and `appinstalld` would register only the main app. `ci/mkipk.py --nuvio-p2p`
+# derives its control file and packageinfo from the staged `js-service/appinfo.json`.
+P2P_APPID   = com.nuvionative.app.p2p
+P2P_VERSION := $(shell python3 -c "import json;print(json.load(open('js-service/appinfo.json'))['version'])" 2>/dev/null)
+P2P_STAGE   = ipkroot/p2p/data/usr/palm/applications/$(P2P_APPID)
+P2P_IPK     := pkg/$(P2P_APPID)_$(P2P_VERSION)_arm.ipk
 
 # The .ipk is REPRODUCIBLE: same commit + same toolchain -> same sha256. That matters because the
 # manifest carries that hash and every user's TV verifies it at install time (there is no code
@@ -1819,6 +1827,13 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 	@# Only THIS flavour's artifact — packaging one must never delete the other's.
 	rm -f pkg/$(APPID)_*_arm.ipk
 	FLAVOR=$(FLAVOR) python3 ci/mkipk.py
+	@# ...and the headless P2P server as its own package (one application per webOS package, see
+	@# P2P_APPID above). The payload is js-service/ verbatim; ci/mkipk.py stages server.js 0755
+	@# because the application manager starts `main` directly.
+	rm -rf ipkroot/p2p && mkdir -p $(P2P_STAGE)
+	cp -R js-service/. $(P2P_STAGE)/
+	rm -f pkg/$(P2P_APPID)_*_arm.ipk
+	python3 ci/mkipk.py --nuvio-p2p
 	python3 ci/stage-link-evidence.py pkg/plxnative-storage ipkroot/data/usr/palm/services/$(APPID).storage/plxnative-storage \
 	  --evidence-base pkg/link-evidence/$(FLAVOR)/plxnative-storage
 	@# Emitted from INSIDE pkg/ so the line carries the bare filename. With the `pkg/` prefix
@@ -1907,8 +1922,17 @@ install: ipk tv-lock-require
 	  luna://com.webos.appInstallService/dev/install \
 	  \"{\\\"id\\\":\\\"$(APPID)\\\",\\\"ipkUrl\\\":\\\"/tmp/$(notdir $(IPK))\\\",\\\"subscribe\\\":true}\"" /dev/null' | head -20
 	$(SSH) 'rm -f /tmp/$(notdir $(IPK))'
+	@# The P2P server is a SEPARATE package (one application per webOS package), so it is
+	@# installed the same way. Reinstalling it on every `make install` is deliberate: it is tiny
+	@# next to the main app and there is no `deploy` path for its payload.
+	@echo "installing $(P2P_IPK) as $(P2P_APPID) on the TV"
+	$(SCP) $(P2P_IPK) tv:/tmp/
+	$(SSH) 'script -qc "luna-send -i -a com.webos.appInstallService \
+	  luna://com.webos.appInstallService/dev/install \
+	  \"{\\\"id\\\":\\\"$(P2P_APPID)\\\",\\\"ipkUrl\\\":\\\"/tmp/$(notdir $(P2P_IPK))\\\",\\\"subscribe\\\":true}\"" /dev/null' | head -20
+	$(SSH) 'rm -f /tmp/$(notdir $(P2P_IPK))'
 	@$(MAKE) --no-print-directory deploy FLAVOR=$(FLAVOR) RELEASE=$(RELEASE)
-	@echo "installed and deployed $(APPID)"
+	@echo "installed and deployed $(APPID) (and $(P2P_APPID))"
 
 # Remove a flavour from the television. Refuses the stable id: uninstalling the app the household
 # watches with is not something a make target should make easy, and appinstalld gives no undo.
