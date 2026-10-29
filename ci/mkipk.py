@@ -83,6 +83,10 @@ STORAGE_PERMISSIONS = ["database.operation", "securitykey.operation"]
 # The headless Node P2P server is a webOS SERVICE of the main package, under
 # `usr/palm/services/<id>/`. The Makefile stages the payload and `ipkroot/services.json` before
 # this runs; `write_packageinfo` then lists it beside the private storage helper.
+#
+# THIS IS THE CONTRACT `storage_archive_errors` grades the archived copy against, and it must stay
+# byte-for-byte equal (as JSON) to the tracked `ipkroot/services.json`. `launch` is part of that
+# descriptor; a change made to one file without the other is exactly what this check catches.
 P2P_SERVICE_ID = "com.nuvionative.app.service"
 P2P_SERVICE_DESCRIPTOR = {
     "id": P2P_SERVICE_ID,
@@ -91,6 +95,7 @@ P2P_SERVICE_DESCRIPTOR = {
         "name": P2P_SERVICE_ID,
         "command": "node",
         "args": ["server.js"],
+        "launch": True,
     }],
 }
 
