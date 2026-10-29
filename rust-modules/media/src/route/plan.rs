@@ -2670,7 +2670,14 @@ pub(super) fn pick_dp_audio_pref(
 
 pub(super) fn audio_direct_plays(mode: DirectPlayMode, codec: &str, channels: i64) -> bool {
     if mode == DirectPlayMode::Forced {
+        // Forced means no conversion at all — neither a server transcode nor
+        // the client-side AC3 encode lane. Codecs that only reach the decoder
+        // through the encode lane (TrueHD/MLP) are therefore refused; DTS keeps
+        // its core-extraction fallback and bypasses the channel limits.
         let codec = plx_platform::devcaps::dp_audio_key(codec);
+        if codec.eq_ignore_ascii_case("truehd") || codec.eq_ignore_ascii_case("mlp") {
+            return false;
+        }
         plx_plex::plex::DP_AUDIO_CODECS.split(',').any(|c| c.eq_ignore_ascii_case(codec))
     } else {
         plx_plex::plex::is_dp_audio_track(codec, channels)

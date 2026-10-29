@@ -16120,6 +16120,18 @@
             engines[hash].files[idx].select();
         }));
     }
+    // /create has already waited for metadata, so the first pieces are selected there and start
+    // downloading during the redirect and the player's open. Never blocks the /create response,
+    // and only a bounded window is selected so a create for a stream nobody plays cannot pull
+    // the whole file.
+    var PREWARM_PIECES = 2;
+    function prewarmFile(engine, idx) {
+        if (!engine || !(idx >= 0) || !engine.torrent || !engine.torrent.files[idx]) return;
+        var file = engine.torrent.files[idx], pieceLength = engine.torrent.pieceLength,
+            from = file.offset / pieceLength | 0,
+            to = Math.min((file.offset + file.length - 1) / pieceLength | 0, from + PREWARM_PIECES - 1);
+        engine.select(from, to, !1);
+    }
     var jsonHead = {
         "Content-Type": "application/json"
     };
@@ -16189,8 +16201,8 @@
             return req.headers["enginefs-prio"] && (opts.priority = parseInt(req.headers["enginefs-prio"]) || 1),
                 range ? (res.statusCode = 206, res.setHeader("Content-Length", range.end - range.start + 1),
                     res.setHeader("Content-Range", "bytes " + range.start + "-" + range.end + "/" + handle.length),
-                    "HEAD" === req.method ? res.end() : void pump(handle.createReadStream(util._extend(range, opts)), res)) : (res.setHeader("Content-Length", handle.length),
-                        "HEAD" === req.method ? res.end() : void pump(handle.createReadStream(opts), res));
+                    res.flushHeaders(), "HEAD" === req.method ? res.end() : void pump(handle.createReadStream(util._extend(range, opts)), res)) : (res.setHeader("Content-Length", handle.length),
+                        res.flushHeaders(), "HEAD" === req.method ? res.end() : void pump(handle.createReadStream(opts), res));
         }));
     }
     function createApp() {
@@ -16301,6 +16313,7 @@
                 }
                 body.guessFileIdx && !engineStats.hasOwnProperty("guessedFileIdx") && (engineStats.guessedFileIdx = GuessFileIdx(engineStats.files, body.guessFileIdx));
             }
+            prewarmFile(engines[ih], engineStats.guessedFileIdx);
             res.end(JSON.stringify(engineStats));
         }));
     })), router.all("/create", (function (req, res) {
@@ -43946,10 +43959,10 @@
                     pulse: DOWNLOAD_SPEED_HARD_LIMIT
                 }
             };
-            return (argv.noCache || 0 == settings.cacheSize) && (defaults.buffer = 15728640,
+            return (argv.noCache || 0 == settings.cacheSize) && (defaults.buffer = 25165824,
                 defaults.circularBuffer = {
                     type: "memory",
-                    size: 20971520
+                    size: 33554432
                 }, defaults.swarmCap = {
                     minPeers: MIN_PEERS_FOR_STABLE,
                     maxBuffer: .75
