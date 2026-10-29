@@ -39,6 +39,10 @@ path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
      Stremio addons (Cinemeta, Torrentio, AIOStreams, …), Nuvio account backend
 ```
 
+The P2P streaming server is the one component outside that process: a `node` child spawned from
+the app's own `js-service/` directory. It is the streaming server torrent picks resolve through;
+see "The P2P streaming server" below.
+
 - Catalogs → PMS library sections and Home hubs. Metas → movie/show/season/episode items.
   Search → `/hubs/search`. Streams → the item's `Media[]` list (one Media per stream, with
   resolution/codec/HDR/size/bitrate from `plx_stremio::classify`). Each Media also carries
@@ -98,10 +102,9 @@ path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
 - Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
   loaded/saved through the authenticated storage helper. Stable/debug/nightly own
   separate records. The helper verifies readback before import files are removed.
-- Torrents (`infoHash`): played through a Stremio-compatible streaming server URL as
-  `<server>/<infoHash>/<fileIdx>`, where the server is the session's address — the headless Node
-  server the app spawns from its own `js-service/` directory, on loopback
-  `http://127.0.0.1:11470` unless overridden.
+- Torrents (`infoHash`): played through the headless Node server the app spawns from its own
+  `js-service/` directory, as `<server>/<infoHash>/<fileIdx>`, with
+  `http://127.0.0.1:11470` as the default address. See "The P2P streaming server" below.
   Debrid-resolved HTTP links from Torrentio/AIOStreams play directly. Local server scanning is off
   by default and requires `enableTorrents`; a configured `torrentServer` can be used directly.
 - Release discovery permits plaintext credentials for the registered in-process shim
@@ -128,6 +131,39 @@ path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
   writable-directory fallback is `/tmp`, so the local copy and the key table are not yet durable
   across TV reboots — the account copy is.
 
+## The P2P streaming server
+
+Torrent (`infoHash`) streams need a Stremio-compatible streaming server. The app ships Stremio's
+desktop `server.js` and its `server-settings.json`, and runs the server as a **direct child
+process** of the native app.
+
+- **Why not an LS2 service.** `services.json` plus `luna-send` is the usual webOS shape, but this
+  firmware's Node lacks the `palmbus`/`pmloglib` native modules, so a Node service cannot register
+  or answer. A child process needs only the interpreter and the app's own directory.
+- **Payload.** `make ipk` stages `js-service/server.js` and `js-service/server-settings.json` into
+  `usr/palm/applications/<APPID>/js-service/` inside the package. `make deploy` refreshes
+  `<app_dir>/js-service/` on the television, and `make install` re-installs the whole package. The
+  shipped settings zero the cache (`cacheSize: 0`) and transcode output (`transcodeMaxWidth`,
+  `transcodeMaxBitRate`), and leave the local addon and stream proxy off, so the server does not
+  consume the app partition.
+- **Start.** On a live boot — `app::boot::construct`, never a controlled/replay boot, a host run or
+  a test — `app::boot::start_p2p_service` spawns `/usr/bin/node server.js` with its working
+  directory set to `<app_dir>/js-service`. If `/usr/bin/node` is absent, it falls back to `node` on
+  `PATH`. The child handle lives in a process-global slot; the event log records the interpreter
+  and pid (`nuvio: P2P server started with …`) or the exact spawn error. The spawn does not block
+  the first frame.
+- **Stop.** `app::run::shutdown` calls `app::boot::stop_p2p_service`, which kills and reaps the
+  child before the process exits. Backgrounding does not reach `shutdown`; a hard crash can orphan
+  the child, because no `PR_SET_PDEATHSIG` is set.
+- **Address and switch.** The session preference `p2p_server_url` defaults to
+  `http://127.0.0.1:11470` (`plx_plex::plex::session::DEFAULT_P2P_SERVER_URL`); an explicit value
+  overrides it. The shim is told the address and the switch at boot and after every save. The
+  server is spawned whatever the switch says — `p2p_enabled` only controls whether the Source
+  Picker offers torrent streams.
+- **Failure is local.** A missing `server.js`, a missing interpreter or a bind failure is logged
+  and leaves the app fully usable; torrent picks simply cannot play. Debrid-resolved HTTP links do
+  not use this server.
+
 ## Constraints that shape the code
 
 - **Pure Rust only — no C libraries or JS engines in the TV build.** The app compiles for an ancient
@@ -137,7 +173,9 @@ path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
   actually uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump. The
   one place audio is decoded and re-encoded in-app is the fork's AC3 encode lane
   (`media/src/ff_enc.rs`: `dca`/`truehd`/`mlp`/`flac` decoders, the integer `ac3_fixed` encoder),
-  which is why those components are in the list — see `PLAYBACK.md`.
+  which is why those components are in the list — see `PLAYBACK.md`. The P2P server is an external
+  `node` child process (see above), not an embedded JS engine: nothing here links a JS runtime into
+  the app.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string like `"tmdb:603"`
   blanks the screen. `ID-MANAGEMENT.md` is how the shim keeps that promise.
 - **No native YouTube trailers.** In-app trailer playback was abandoned: extracting YouTube MP4s on

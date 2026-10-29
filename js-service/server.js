@@ -10798,7 +10798,8 @@
                 console.error("Cannot update settings", e.message);
             }
         }, self.appPath = appPath, self.cacheRoot = self.hasOwnProperty("cacheRoot") ? self.cacheRoot : appPath,
-            self.cacheSize = process.env.DISABLE_CACHING ? 0 : self.hasOwnProperty("cacheSize") ? self.cacheSize : "android" === process.platform ? 0 : 2147483648,
+            self.cacheSize = process.env.DISABLE_CACHING ? 0 : self.hasOwnProperty("cacheSize") ? self.cacheSize : 0,
+            self.transcodeMaxWidth = self.hasOwnProperty("transcodeMaxWidth") ? self.transcodeMaxWidth : 0,
             self.btMaxConnections = isPositiveInteger(self.btMaxConnections) ? self.btMaxConnections : 55,
             self.btHandshakeTimeout = isPositiveInteger(self.btHandshakeTimeout) ? self.btHandshakeTimeout : 2e4,
             self.btRequestTimeout = isPositiveInteger(self.btRequestTimeout || self.btConnectionTimeout) ? self.btRequestTimeout : 4e3,
@@ -10811,9 +10812,10 @@
             self.transcodeMaxBitRate = isPositiveInteger(self.transcodeMaxBitRate) ? self.transcodeMaxBitRate : 0,
             self.transcodeConcurrency = isPositiveInteger(self.transcodeConcurrency) ? self.transcodeConcurrency : 1,
             self.transcodeTrackConcurrency = isPositiveInteger(self.transcodeTrackConcurrency) ? self.transcodeTrackConcurrency : 1,
-            self.transcodeHardwareAccel = !self.hasOwnProperty("transcodeHardwareAccel") || self.transcodeHardwareAccel,
+            self.transcodeHardwareAccel = self.hasOwnProperty("transcodeHardwareAccel") ? self.transcodeHardwareAccel : false,
             self.transcodeProfile = self.hasOwnProperty("transcodeProfile") ? self.transcodeProfile : null,
-            self.allTranscodeProfiles = [], self.transcodeMaxWidth = self.hasOwnProperty("transcodeMaxWidth") ? self.transcodeMaxWidth : 1920,
+            self.allTranscodeProfiles = [],
+            self.proxyStreamsEnabled = !!self.hasOwnProperty("proxyStreamsEnabled") && self.proxyStreamsEnabled,
             self.load(), self;
     })(appPath);
 }, function (module, exports, __webpack_require__) {
@@ -33682,10 +33684,11 @@
         }
     };
 }, function (module, exports, __webpack_require__) {
-    var pkg = __webpack_require__(378), path = __webpack_require__(4), os = __webpack_require__(21);
+    var path = __webpack_require__(4);
     if (!(appPath = process.env.APP_PATH)) {
-        var appPath = path.join(os.tmpdir(), pkg.name);
-        "linux" === process.platform ? appPath = path.join(process.env.HOME, "." + pkg.name) : "darwin" === process.platform ? appPath = path.join(process.env.HOME, "Library", "Application Support", pkg.name) : "win32" === process.platform ? appPath = path.join(process.env.APPDATA, "stremio", pkg.name) : console.error("Unable to determine application path - export 'APP_PATH' instead");
+        // `<app_dir>` is the parent of the directory holding this bundle (`<app_dir>/js-service`).
+        var script = process.argv[1] || path.join(process.cwd(), "server.js");
+        var appPath = path.join(path.dirname(path.dirname(path.resolve(script))), "nuvio-serverp2p");
     }
     module.exports = appPath;
 }, function (module, exports, __webpack_require__) {
