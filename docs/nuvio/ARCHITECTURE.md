@@ -60,10 +60,10 @@ see "The P2P streaming server" below.
   Picking a stream commits it; BACK walks one level at a time before the panel closes. The addon
   label is the shim's own `addon_name` (the `Media[]` field), which `/nuvio/streams` returns as
   `addon`. Grouping rules: `plx_appkit::source_list::addon_groups` (the route's ranked
-  `(index, label, addon_name)` list) and `addon_pages` (the panel's own `StreamChoice[]`, which
-  also carries the stream's technical facts). `route::AVAILABLE_STREAMS` is written only through
-  `route::set_available_streams`, so a revision stamp tells the player panel's per-tick poll that
-  nothing moved.
+  `(index, label, addon_name, seeders)` list) and `addon_pages` (the panel's own `StreamChoice[]`,
+  which also carries the stream's technical facts). `route::AVAILABLE_STREAMS` is written only
+  through `route::set_available_streams`, so a revision stamp tells the player panel's per-tick
+  poll that nothing moved.
 - **A press opens the picker; a pick IS the play.** Every surface that used to start a file
   directly raises this panel first, and the commit starts the thing the panel was about:
   - **Detail page**: the hero's **Streams** pill lists the page's own item; an **episode's still**

@@ -106,7 +106,7 @@ pub enum MorePage {
 
 impl MorePage {
     /// The title band's text; an addon page is titled by the addon itself.
-    fn title(self, streams: &[(usize, String, String)]) -> String {
+    fn title(self, streams: &[(usize, String, String, Option<u32>)]) -> String {
         match self {
             Self::Source => plx_platform::i18n::msg::widgets_menu_source().to_string(),
             Self::Addon(i) => match crate::source_list::addon_groups(streams).get(i) {
@@ -175,10 +175,11 @@ pub struct MoreMenuState {
     /// menu uses: a row set that changes height animates the top edge, bottom and right stay on the
     /// anchor, and a push or pop slides the two pages.
     motion: PanelMotion,
-    /// The ranked stream list the pages were last built from, `(index, label, addon)`. Held so a
-    /// pushed page is built from the SAME list its opener was, and so a live change to it can be
-    /// noticed ([`Self::refresh_to`]) — the global the route publishes is read once per rebuild.
-    streams: Vec<(usize, String, String)>,
+    /// The ranked stream list the pages were last built from, `(index, label, addon, seeders)`.
+    /// Held so a pushed page is built from the SAME list its opener was, and so a live change to it
+    /// can be noticed ([`Self::refresh_to`]) — the global the route publishes is read once per
+    /// rebuild.
+    streams: Vec<(usize, String, String, Option<u32>)>,
     /// The route's revision of that list as of the last rebuild, so the tick's poll is one atomic
     /// load rather than a copy of every label on every frame.
     stream_rev: u32,
@@ -213,22 +214,25 @@ impl FormId for MoreRow {
 
 /// Is the Source row offered? An empty list has nothing to open onto — a row leading to an empty
 /// page would read as a menu that failed to load.
-fn source_offered(streams: &[(usize, String, String)]) -> bool {
+fn source_offered(streams: &[(usize, String, String, Option<u32>)]) -> bool {
     !streams.is_empty()
 }
 
-/// One addon's streams, as `(ranked index, label)` — what [`MorePage::Addon`]'s page lists.
-fn streams_of(streams: &[(usize, String, String)], indices: &[usize]) -> Vec<(usize, String)> {
+/// One addon's streams, as `(ranked index, label, seeders)` — what [`MorePage::Addon`]'s page lists.
+fn streams_of(
+    streams: &[(usize, String, String, Option<u32>)],
+    indices: &[usize],
+) -> Vec<(usize, String, Option<u32>)> {
     indices
         .iter()
-        .filter_map(|i| streams.iter().find(|(index, _, _)| index == i))
-        .map(|(index, label, _)| (*index, label.clone()))
+        .filter_map(|i| streams.iter().find(|(index, _, _, _)| index == i))
+        .map(|(index, label, _, seeders)| (*index, label.clone(), *seeders))
         .collect()
 }
 
 /// The ROOT as a pure form: the Source drill-in (headerless, like the Subtitles root's Style —
 /// it reads out how many streams there are), then Options.
-fn root_form(rows: &[Action], streams: &[(usize, String, String)]) -> MoreForm {
+fn root_form(rows: &[Action], streams: &[(usize, String, String, Option<u32>)]) -> MoreForm {
     let mut options = FormSection::new(plx_platform::i18n::msg::widgets_menu_options());
 
     // the streams are reached through the Source row, so they are not an option
@@ -251,7 +255,7 @@ fn root_form(rows: &[Action], streams: &[(usize, String, String)]) -> MoreForm {
 ///
 /// Nothing about playback quality is drawn here: under the shim a stream IS a quality, so a rung
 /// list beside the stream list would be a second answer to the same question.
-fn source_form(streams: &[(usize, String, String)]) -> MoreForm {
+fn source_form(streams: &[(usize, String, String, Option<u32>)]) -> MoreForm {
     let addons = crate::source_list::addon_groups(streams)
         .into_iter()
         .enumerate()
@@ -268,17 +272,24 @@ fn source_form(streams: &[(usize, String, String)]) -> MoreForm {
 }
 
 /// One addon's page: its streams, best first. Nothing is checked — the shim's selected index is
-/// not read back here — and every row commits its own [`Action::SetStream`].
-fn addon_form(group: usize, streams: &[(usize, String, String)]) -> MoreForm {
+/// not read back here — and every row commits its own [`Action::SetStream`]. A P2P stream states
+/// its seeder count on the fact line, in the Detail picker's own `▲ 123` form
+/// ([`crate::source_list::seeders_fact`]): it is the one fact that decides whether that stream
+/// plays at all, and the player's picker used to be the only place it went missing.
+fn addon_form(group: usize, streams: &[(usize, String, String, Option<u32>)]) -> MoreForm {
     let indices = crate::source_list::addon_groups(streams)
         .get(group)
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
     let sec = streams_of(streams, &indices)
         .into_iter()
-        .fold(FormSection::new(""), |sec, (index, label)| {
+        .fold(FormSection::new(""), |sec, (index, label, seeders)| {
             let a = Action::SetStream(index);
-            sec.item(MoreRow::Act(a), RowKind::Choice, a, Row::new(label).server_label())
+            let mut row = Row::new(label).server_label();
+            if let Some(fact) = crate::source_list::seeders_fact(seeders) {
+                row = row.detail(fact).server_detail();
+            }
+            sec.item(MoreRow::Act(a), RowKind::Choice, a, row)
         });
     Form::new().section(sec)
 }
@@ -420,7 +431,11 @@ impl MoreMenuState {
 
     /// [`Self::refresh`] against explicit answers (what a test or a probe supplies in place of the
     /// live route).
-    fn refresh_to(&mut self, rows: Vec<Action>, streams: Vec<(usize, String, String)>) -> bool {
+    fn refresh_to(
+        &mut self,
+        rows: Vec<Action>,
+        streams: Vec<(usize, String, String, Option<u32>)>,
+    ) -> bool {
         if rows == self.rows && streams == self.streams {
             return false;
         }
@@ -723,7 +738,7 @@ where
 fn rows_for() -> Vec<Action> {
     let mut v: Vec<Action> = Vec::new();
 
-    for (index, _, _) in plx_media::route::AVAILABLE_STREAMS
+    for (index, _, _, _) in plx_media::route::AVAILABLE_STREAMS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
@@ -744,8 +759,8 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
         Action::SetStream(index) => {
             let streams = plx_media::route::AVAILABLE_STREAMS.lock().unwrap();
             streams.iter()
-                .find(|(i, _, _)| *i == index)
-                .map(|(_, label, _)| label.clone())
+                .find(|(i, _, _, _)| *i == index)
+                .map(|(_, label, _, _)| label.clone())
                 .unwrap_or_else(|| format!("Stream #{index}"))
                 .into()
         }
@@ -810,22 +825,22 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
 mod tests {
     use super::*;
 
-    type Streams = Vec<(usize, String, String)>;
+    type Streams = Vec<(usize, String, String, Option<u32>)>;
 
     /// A ranked stream list with two addons answering for one item: Torrentio twice (the best
     /// stream and a third), Sootio once. The order is ranked, so this is also the order the pages
     /// must show.
     fn two_addons() -> Streams {
         vec![
-            (3, "4k DV".to_string(), "Torrentio".to_string()),
-            (5, "1080p".to_string(), "Sootio".to_string()),
-            (7, "720p".to_string(), "Torrentio".to_string()),
+            (3, "4k DV".to_string(), "Torrentio".to_string(), Some(123)),
+            (5, "1080p".to_string(), "Sootio".to_string(), None),
+            (7, "720p".to_string(), "Torrentio".to_string(), None),
         ]
     }
 
     /// The menu built over an explicit row list and stream list — no process-global state, so
     /// these tests do not need a serial lock or a route.
-    fn state(rows: Vec<Action>, streams: &[(usize, String, String)]) -> MoreMenuState {
+    fn state(rows: Vec<Action>, streams: &[(usize, String, String, Option<u32>)]) -> MoreMenuState {
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true;
         form.set_or_open(root_form(&rows, streams), None);
@@ -875,6 +890,38 @@ mod tests {
     fn value_of(st: &mut MoreMenuState, id: MoreRow) -> Option<String> {
         let i = st.form.index_of(&id)?;
         st.form.table.row_mut(i as i32).and_then(|r| r.value.clone())
+    }
+
+    /// The fact line under a row's label (`""` when the row carries none).
+    fn detail_of(st: &mut MoreMenuState, id: MoreRow) -> Option<String> {
+        let i = st.form.index_of(&id)?;
+        st.form.table.row_mut(i as i32).map(|r| r.detail.clone())
+    }
+
+    /// **A P2P stream states its seeder count on the player's addon page.** The player used to
+    /// carry only `(index, label, addon)` to its menu, so the count the Detail page's picker leads
+    /// with was dropped on the way into playback. It is the one fact that decides whether a torrent
+    /// stream plays at all, so the player's page says it too — in the same `▲ 123` form (the shipped
+    /// font subset has no emoji) — and a stream that named no peer count says nothing rather than
+    /// `▲ 0`.
+    #[test]
+    fn the_addon_page_reads_out_a_p2p_streams_seeders() {
+        let mut st = source_page();
+        st.focus_key(MoreRow::OpenAddon(0).key().0);
+        assert_eq!(st.on_ok(), MoreOk::Navigated);
+        st.motion.cancel_slide();
+        assert_eq!(st.page(), Some(MorePage::Addon(0)));
+        assert_eq!(
+            detail_of(&mut st, MoreRow::Act(Action::SetStream(3))),
+            Some("\u{25b2} 123".into()),
+            "the seeded stream leads with its peer count, as the Detail picker's row does"
+        );
+        assert!(
+            detail_of(&mut st, MoreRow::Act(Action::SetStream(7)))
+                .unwrap_or_default()
+                .is_empty(),
+            "a stream that named no peers carries no fact line"
+        );
     }
 
     #[test]
@@ -1062,7 +1109,7 @@ mod tests {
         assert_eq!(st.on_ok(), MoreOk::Navigated);
         st.motion.cancel_slide();
         // by BACK, the second addon has answered no more: its row, the opener, is gone
-        st.streams = vec![(3, "4k DV".to_string(), "Torrentio".to_string())];
+        st.streams = vec![(3, "4k DV".to_string(), "Torrentio".to_string(), Some(123))];
 
         assert!(st.pop());
         assert_eq!(st.page(), Some(MorePage::Source));
@@ -1188,7 +1235,7 @@ mod tests {
         assert_eq!(st.page(), Some(MorePage::Addon(1)));
         // Sootio answers once more: the list this page was built from has changed under it
         let mut longer = two_addons();
-        longer.push((9, "720p".to_string(), "Sootio".to_string()));
+        longer.push((9, "720p".to_string(), "Sootio".to_string(), Some(11)));
         assert!(st.refresh_to(rows_for(), longer.clone()), "a longer list is a change");
         assert!(!st.refresh_to(rows_for(), longer.clone()), "and only once");
         assert_eq!(st.page(), Some(MorePage::Addon(1)), "still on the page");
@@ -1215,7 +1262,7 @@ mod tests {
         st.motion.cancel_slide();
 
         // the second addon answers no more: the page's position now names nobody
-        let narrower = vec![(3, "4k DV".to_string(), "Torrentio".to_string())];
+        let narrower = vec![(3, "4k DV".to_string(), "Torrentio".to_string(), Some(123))];
         assert!(st.refresh_to(rows_for(), narrower.clone()));
         assert_eq!(st.page(), Some(MorePage::Source), "back to the addon list");
         assert!(!st.transitioning(), "a page that vanished does not slide away");
@@ -1448,9 +1495,9 @@ mod focus_tests {
     #[test]
     fn every_row_fits_the_panel_in_every_language() {
         use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
-        let streams: Vec<(usize, String, String)> = vec![
-            (3, "4k DV".to_string(), "Torrentio".to_string()),
-            (5, "1080p".to_string(), "Sootio".to_string()),
+        let streams: Vec<(usize, String, String, Option<u32>)> = vec![
+            (3, "4k DV".to_string(), "Torrentio".to_string(), Some(123)),
+            (5, "1080p".to_string(), "Sootio".to_string(), None),
         ];
         let mut out = Vec::new();
         let rows = rows_for();

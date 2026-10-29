@@ -712,8 +712,8 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                             self.stream_error = list.is_none();
                             if let Some(list) = list {
                                 // FORK (RichiL10): Cache the streams immediately when loaded
-                                let saved: Vec<(usize, String, String)> = list.streams.iter()
-                                    .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default()))
+                                let saved: Vec<(usize, String, String, Option<u32>)> = list.streams.iter()
+                                    .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default(), s.seeders))
                                     .collect();
                                 plx_media::route::set_available_streams(saved);
 

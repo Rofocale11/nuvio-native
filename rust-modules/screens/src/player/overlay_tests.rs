@@ -168,9 +168,9 @@ fn with_streams<R>(test: impl FnOnce() -> R) -> R {
         std::mem::take(&mut *slot)
     };
     plx_media::route::set_available_streams(vec![
-        (3, "4k DV".to_string(), "Torrentio".to_string()),
-        (5, "1080p".to_string(), "Sootio".to_string()),
-        (7, "720p".to_string(), "Torrentio".to_string()),
+        (3, "4k DV".to_string(), "Torrentio".to_string(), Some(123)),
+        (5, "1080p".to_string(), "Sootio".to_string(), None),
+        (7, "720p".to_string(), "Torrentio".to_string(), Some(42)),
     ]);
     let out = test();
     plx_media::route::set_available_streams(previous);

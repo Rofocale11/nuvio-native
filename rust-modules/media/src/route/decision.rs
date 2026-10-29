@@ -21,10 +21,13 @@ use super::flight::*;
 use super::plan::*;
 
 /// Global storage for the last fetched Nuvio streams so the in-player menu can read them:
-/// `(ranked index, label, addon name)`. The addon is the shim's `addon_name` — the same value the
-/// item's `Media[]` carries — because the menu groups its Source page by it. Write it ONLY through
+/// `(ranked index, label, addon name, seeders)`. The addon is the shim's `addon_name` — the same
+/// value the item's `Media[]` carries — because the menu groups its Source page by it. `seeders` is
+/// the P2P peer count the addon printed (`None` for a stream that named none), which the addon page
+/// reads out beside the release exactly as the Detail page's picker does. Write it ONLY through
 /// [`set_available_streams`], which bumps [`streams_rev`].
-pub static AVAILABLE_STREAMS: Mutex<Vec<(usize, String, String)>> = Mutex::new(Vec::new());
+pub static AVAILABLE_STREAMS: Mutex<Vec<(usize, String, String, Option<u32>)>> =
+    Mutex::new(Vec::new());
 
 /// Bumped on every [`set_available_streams`]: the menu polls the list each tick, and a stamp lets
 /// it tell "unchanged" from "arrived" without copying the labels (three Strings per stream) once
@@ -32,7 +35,7 @@ pub static AVAILABLE_STREAMS: Mutex<Vec<(usize, String, String)>> = Mutex::new(V
 static STREAMS_REV: AtomicU32 = AtomicU32::new(0);
 
 /// Publish the ranked stream list (the shim's `/nuvio/streams` answer) for the player menu.
-pub fn set_available_streams(list: Vec<(usize, String, String)>) {
+pub fn set_available_streams(list: Vec<(usize, String, String, Option<u32>)>) {
     *AVAILABLE_STREAMS.lock().unwrap_or_else(|e| e.into_inner()) = list;
     STREAMS_REV.fetch_add(1, Ordering::Relaxed);
 }
@@ -43,7 +46,7 @@ pub fn streams_rev() -> u32 {
 }
 
 /// A copy of the published list (only on a revision change — see [`streams_rev`]).
-pub fn available_streams() -> Vec<(usize, String, String)> {
+pub fn available_streams() -> Vec<(usize, String, String, Option<u32>)> {
     AVAILABLE_STREAMS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 

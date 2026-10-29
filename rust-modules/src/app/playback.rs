@@ -398,8 +398,8 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
                     for _attempt in 1..=10 {
                         if let Some(list) = client.nuvio_streams(&fetch_rk) {
                             if !list.streams.is_empty() {
-                                let saved: Vec<(usize, String, String)> = list.streams.iter()
-                                    .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default()))
+                                let saved: Vec<(usize, String, String, Option<u32>)> = list.streams.iter()
+                                    .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default(), s.seeders))
                                     .collect();
                                 plx_media::route::set_available_streams(saved);
                                 plx_machine::idle::invalidate(); // <--- THIS TRIGGERS THE LIVE UPDATE!

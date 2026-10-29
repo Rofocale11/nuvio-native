@@ -34,18 +34,26 @@ pub fn stream_row(choice: &plx_plex::plex::nuvio::StreamChoice) -> Row {
     stream_row_with(choice, true)
 }
 
+/// The seeder count as one fact line — `▲ 123` — or `None` when there is nothing to say.
+///
+/// Torrentio prints `👤 123`, but the shipped font subset (Inter plus the Noto CJK fallback)
+/// carries no emoji, so the count takes the one covered mark that means peers — the triangle a
+/// torrent client puts beside its seeds. `plx_base::fontcov` holds the coverage contract; a `0` is
+/// not worth a fact. Shared with the in-player Source page (`plx_appkit::more_menu`), so the two
+/// pickers cannot drift on the one fact a P2P stream must state.
+pub fn seeders_fact(seeders: Option<u32>) -> Option<String> {
+    seeders.filter(|n| *n > 0).map(|n| format!("\u{25b2} {n}"))
+}
+
 /// [`stream_row`] with the source named on it or not. A row on its OWN addon's page omits it — the
 /// page's title band already says whose streams these are, and a fixed trailing word on every row
 /// is the one fact that cannot differ.
 pub fn stream_row_with(choice: &plx_plex::plex::nuvio::StreamChoice, addon: bool) -> Row {
     let mut facts = Vec::new();
     // A P2P stream LEADS with its seeder count: whether anybody is still seeding decides whether
-    // the stream plays at all. Torrentio prints `👤 123`, but the shipped font subset (Inter plus
-    // the Noto CJK fallback) carries no emoji, so the count takes the one covered mark that means
-    // peers — the triangle a torrent client puts beside its seeds. `plx_base::fontcov` holds the
-    // coverage contract; a `0` is not worth a fact.
-    if let Some(seeders) = choice.seeders.filter(|n| *n > 0) {
-        facts.push(format!("\u{25b2} {seeders}"));
+    // the stream plays at all. See [`seeders_fact`].
+    if let Some(fact) = seeders_fact(choice.seeders) {
+        facts.push(fact);
     }
     if let Some(codec) = &choice.video_codec { facts.push(codec.to_uppercase()); }
     if choice.hdr.contains("DolbyVision") { facts.push("Dolby Vision".into()); }
@@ -106,9 +114,9 @@ pub fn addon_pages(choices: &[plx_plex::plex::nuvio::StreamChoice]) -> Vec<Addon
 /// An untagged stream groups under the empty name (one group, drawn with the fallback word) rather
 /// than being dropped: a stream the viewer can play must stay reachable whatever the shim said
 /// about its source.
-pub fn addon_groups(streams: &[(usize, String, String)]) -> Vec<(String, Vec<usize>)> {
+pub fn addon_groups(streams: &[(usize, String, String, Option<u32>)]) -> Vec<(String, Vec<usize>)> {
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-    for (index, _, addon) in streams {
+    for (index, _, addon, _) in streams {
         match groups.iter_mut().find(|(name, _)| name == addon) {
             Some((_, list)) => list.push(*index),
             None => groups.push((addon.clone(), vec![*index])),
