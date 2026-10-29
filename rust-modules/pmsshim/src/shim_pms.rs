@@ -126,6 +126,9 @@ struct SlotState {
     /// A stream (arrival index) the user picked; it leads `Media[]`.
     selected: Option<usize>,
     subs: Vec<SubRef>,
+    /// Subtitle addons have reported (possibly empty). `ranked` may wait on this so a play does not
+    /// start before the sidecars it must auto-enable have arrived.
+    subs_done: bool,
 }
 
 struct StreamSlot {
@@ -1443,7 +1446,7 @@ impl Shim {
             st.done = true;
             slot.cv.notify_all();
         }
-        let _ = std::thread::Builder::new()
+        let subs_spawned = std::thread::Builder::new()
             .name("pmsshim-subs".into())
             .spawn(move || {
                 let subs = subs_backend.subtitles(&st, &sid);
@@ -1458,7 +1461,17 @@ impl Shim {
                         selected: false,
                     })
                     .collect();
-            });
+                g.subs_done = true;
+                drop(g);
+                slot_subs.cv.notify_all();
+            })
+            .is_ok();
+        if !subs_spawned {
+            let mut g = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+            g.subs_done = true;
+            drop(g);
+            slot.cv.notify_all();
+        }
         Some(slot)
     }
 
@@ -1490,12 +1503,15 @@ impl Shim {
         let mut st = slot.state.lock().unwrap_or_else(|e| e.into_inner());
         let ts_owned = self.torrent_server();
         let ts = ts_owned.as_deref();
+        // Only block playback on subtitle addons when the viewer actually has a preferred
+        // subtitle language; otherwise there is nothing to auto-enable, so return streams at once.
+        let wait_for_subs = self.account.subtitle_language().is_some();
         let mut first_playable: Option<Instant> = None;
         loop {
-            if st.done {
+            if st.done && (!wait_for_subs || st.subs_done) {
                 break;
             }
-            if chosen && st.selected.is_some_and(|i| i < st.streams.len()) {
+            if chosen && st.selected.is_some_and(|i| i < st.streams.len()) && (!wait_for_subs || st.subs_done) {
                 break;
             }
             let elapsed = slot.started.elapsed();
@@ -1513,6 +1529,7 @@ impl Shim {
             let mut wait = deadline - elapsed;
             if let Some(t) = first_playable {
                 let g = self.cfg.stream_grace.saturating_sub(t.elapsed());
+                // Strict 2.5s cap: a slow subtitle addon never blocks playback.
                 if g.is_zero() {
                     break;
                 }
