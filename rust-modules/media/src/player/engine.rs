@@ -118,31 +118,17 @@ pub const fn feed_leads_ms() -> (i64, i64) {
 // frames are tiny) yet large enough to cushion the single demux thread briefly blocking on a full
 // video lane.
 //
-// **The video cap is 10 MiB, and it stopped matching the Load payload's `srcBufferLevelVideo`
-// (8 MiB) on purpose.** Those are two different buffers: this one sits between our demux thread
-// and our pump, and that one is what Starfish will hold. They were equal because 8 MiB was copied
-// from the payload, not because anything requires it — feeding past Starfish's own level returns
-// `'B'` and the pump retries, which is the backpressure path every playback already uses.
+// AQ_VIDEO_BYTES = 50 MiB, AQ_AUDIO_BYTES = 4 MiB (commit acc2ad19). Sized so a UHD remux over
+// Wi-Fi does not stall on every hiccup longer than the feed lead: at 90 Mbit/s the old 10 MiB cap
+// held ~0.9 s, while 50 MiB holds ~4.4 s. The audio lane is kept in the same ratio so a DTS-HD
+// MA track (3.6 Mbit/s) never fills first and blocks the single demux thread while the video lane
+// still has room. Memory is only spent when the link outruns the decoder.
 //
-// **What the 2 MiB buys, and why it is not a guess.** The reserve the adaptive controller can ever
-// see is `B_max = feed_lead + queue_bytes*8 / R_elementary` — a queue term that falls as `1/R`
-// while the upshift guard it has to clear is `Omega(D)`. R2 of the plan of record showed those
-// crossing at about 15.7 Mbit/s of media at 8 MiB, i.e. **the top of the ladder is unreachable for
-// any guard of that shape**, and no control law fixes a plant that cannot hold the reserve its own
-// guard demands. `tools/abr-plant-sweep.py` prices this at +555 ms of climbable ceiling WITH the
-// graded-reject feed and **+17 ms without it** — inside a measured 167 ms noise floor — so the two
-// levers are one decision and neither is worth landing alone.
-// `docs/measurements/p0-plant-sizing.md` is the record; `requiredMemory` is 160 MB, so +2 MiB RSS
-// on a 32-bit set is inside the budget already declared.
+// `requiredMemory` in pkg/appinfo.json is 280 MB, matching this declaration; the 50 MB + 4 MB here
+// sit alongside the node P2P server baseline (~40 MB) plus its 15 MB + 20 MB buffers, decoder /
+// display frames and the image cache.
 const AQ_VIDEO_BYTES: c_long = 50 * 1024 * 1024;
 const AQ_AUDIO_BYTES: c_long = 4 * 1024 * 1024;
-// **96 MiB / 8 MiB, up from 10 MiB / 1 MiB (fork, measured 2026-09-22 on an LG B4 / webOS
-// 10.3.1).** Sized for a UHD remux over Wi-Fi: at 90 Mbit/s the old video cap held 0.9 s, so with
-// the 1.6 s feed lead the whole reserve was ~2.5 s and every Wi-Fi hiccup longer than that
-// stalled. 96 MiB is ~9 s at 90 Mbit/s (20 s at 40), and the audio lane is kept in the same ratio
-// so a DTS-HD MA track (3.6 Mbit/s) never fills first and blocks the single demux thread while
-// the video lane still has room. The memory is only spent when the link outruns the decoder;
-// `requiredMemory` in pkg/appinfo.json moved with it (160 -> 280 MB).
 
 pub struct SampleBuf {
     pub data: Vec<u8>,

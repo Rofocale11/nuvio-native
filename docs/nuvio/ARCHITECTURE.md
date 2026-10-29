@@ -141,18 +141,22 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   or answer. A child process needs only the interpreter and the app's own directory.
 - **Payload.** `make ipk` stages `js-service/server.js` into
   `usr/palm/applications/<APPID>/js-service/` inside the package. `make deploy` refreshes
-  `<app_dir>/js-service/` on the television, and `make install` re-installs the whole package. The
-  server generates its settings under `/tmp`; nothing settings-shaped is shipped.
-- **Data directory.** `appPath` is `/tmp/nuvio-serverp2p` unless `APP_PATH` overrides it, so
-  `server-settings.json`, `stremio-cache/`, and `httpsCert.json` all live there. `/tmp` is
+  `<app_dir>/js-service/` on the television, and `make install` re-installs the whole package.
+  `server.js` is the only JS payload: the old `js-service/server-settings.json` is gone, and both
+  `make deploy` and `verify-deploy` copy/check only `server.js`.
+- **Data directory.** `appPath` is `/tmp/nuvio-serverp2p` unless `APP_PATH` overrides it, and
+  `cacheRoot` follows `appPath`. The generated settings and state are therefore
+  `/tmp/nuvio-serverp2p/server-settings.json`,
+  `/tmp/nuvio-serverp2p/stremio-cache/`, and `/tmp/nuvio-serverp2p/httpsCert.json`. `/tmp` is
   writable on read-only production installs, and with `cacheSize: 0` nothing there needs to survive
   a reboot. `boot.rs` creates the directory and refuses to spawn when it is owned by a different
   uid, logging `rm -rf /tmp/nuvio-serverp2p` rather than trying to chown it. Startup also removes
   a legacy `<app_dir>/.stremio-server/` and the earlier `<app_dir>/nuvio-serverp2p/`, logging each
   removal; both are non-fatal and idempotent.
 - **Generated defaults.** `cacheSize` and `transcodeMaxWidth` are `0`; `transcodeMaxBitRate` is
-  `0`; the local addon and stream proxy are off. The settings module logs the effective values as
-  `nuvio: settings cacheSize=<n> transcodeMaxWidth=<n> dataDir=<path>`.
+  `0`; the local addon and stream proxy are off. A fresh `/tmp` therefore reports
+  `cacheSize: 0` and `transcodeMaxWidth: 0` from `/settings`. The settings module logs the
+  effective values as `nuvio: settings cacheSize=<n> transcodeMaxWidth=<n> dataDir=<path>`.
 - **Start.** On a live boot — `app::boot::construct`, never a controlled/replay boot, a host run or
   a test — `app::boot::start_p2p_service` creates `/tmp/nuvio-serverp2p` and spawns
   `/usr/bin/node server.js` with its working directory set to `<app_dir>/js-service`. If

@@ -87,7 +87,7 @@ use super::{
     SegmentSample,
 };
 
-/// Video AU queue byte cap. `player::engine::AQ_VIDEO_BYTES` = `96 * 1024 * 1024`, carried by value
+/// Video AU queue byte cap. `player::engine::AQ_VIDEO_BYTES` = `50 * 1024 * 1024`, carried by value
 /// because this plant must not depend on the app's own model of itself (see the module note). If
 /// that constant moves, [`tests::the_plant_constants_still_match_the_pipeline`] fails — and it did,
 /// which is how the Phase 0 enlargement reached this file rather than being forgotten in it.
@@ -106,7 +106,7 @@ pub(super) const CENSUS_VIDEO_QUEUE_BYTES: u64 = 4 * 1024 * 1024;
 /// binding one at the low rungs (320, 720), so the census reproduction has to run at the audio
 /// size it was measured with, not at the size that ships.
 pub(super) const CENSUS_AUDIO_QUEUE_BYTES: u64 = 1024 * 1024;
-/// Audio AU queue byte cap. `player::engine::AQ_AUDIO_BYTES` = `8 * 1024 * 1024`.
+/// Audio AU queue byte cap. `player::engine::AQ_AUDIO_BYTES` = `4 * 1024 * 1024`.
 pub(super) const AUDIO_QUEUE_BYTES: u64 = 4 * 1024 * 1024;
 /// Video feed-ahead throttle. `player::engine::MAX_FEED_AHEAD_NS` = 1.6 s.
 pub(super) const VIDEO_LEAD_MS: i64 = 1_600;
