@@ -39,12 +39,16 @@ they no longer do, because the TV's version moves with the firmware (libavformat
 **These libraries are covered by the GNU Lesser General Public License, version 2.1 or later.** A
 complete copy of that licence is supplied with this package at `licenses/LGPL-2.1.txt`.
 
-**Complete corresponding source.** The exact upstream tarball these were built from —
-`ffmpeg-9.0.tar.xz`, sha256 `7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52`,
-from <https://ffmpeg.org/releases/> — is attached to every PlxNative release alongside the `.ipk`.
-The sources are **unmodified**: no patches are applied. The complete configure invocation that
-produced them, including every enabled component, is `ci/build-ffmpeg.sh` in the PlxNative
-repository, which is also attached to each release.
+**Complete corresponding source.** The exact upstream source archive these were built from is
+attached to every PlxNative release alongside the `.ipk`: either the pristine
+`ffmpeg-9.0.tar.xz` from <https://ffmpeg.org/releases/> (sha256
+`7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52`), or — when that host is
+unreachable — the official GitHub tag archive `FFmpeg-n9.0.tar.gz`
+(<https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.tar.gz>), sha256
+`d97647ace36a307f17ba2bca052d68937487bed8682e1eb9b6737076a9c442b7`, published under the
+normalized name `ffmpeg-9.0.tar.gz`. The sources are **unmodified**: no patches are applied. The
+complete configure invocation that produced them, including every enabled component, is
+`ci/build-ffmpeg.sh` in the PlxNative repository, which is also attached to each release.
 
 **Configuration.** Built with `--disable-everything` plus an explicit component list, **without**
 `--enable-gpl`, `--enable-version3` or `--enable-nonfree`, so no GPL-licensed or non-free FFmpeg

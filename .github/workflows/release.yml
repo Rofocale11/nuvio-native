@@ -526,7 +526,7 @@ jobs:
             dist/*.ipk
             dist/*.manifest.json
             dist/ipk.sha256
-            dist/ffmpeg-*.tar.xz
+            dist/ffmpeg-*.tar.*
             dist/build-ffmpeg.sh
             dist/plxnative-source-*.tar.gz*
             dist/source-rebuild.json

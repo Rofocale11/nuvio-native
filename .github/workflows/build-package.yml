@@ -518,7 +518,7 @@ jobs:
         if: inputs.source-asset
         run: |
           set -euo pipefail
-          tarball=$(ls vendor/ffmpeg-build/ffmpeg-*.tar.xz)
+          tarball=$(ls vendor/ffmpeg-build/ffmpeg-*.tar.*)
           cp "$tarball" pkg/
           cp ci/build-ffmpeg.sh pkg/
           echo "LGPL source: $(basename "$tarball") + build-ffmpeg.sh" >> "$GITHUB_STEP_SUMMARY"
@@ -591,7 +591,7 @@ jobs:
             pkg/*.ipk
             pkg/*.manifest.json
             pkg/ipk.sha256
-            pkg/ffmpeg-*.tar.xz
+            pkg/ffmpeg-*.tar.*
             pkg/build-ffmpeg.sh
             pkg/ipk-verify.md
             pkg/gates.md

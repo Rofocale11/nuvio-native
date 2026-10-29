@@ -61,7 +61,12 @@
 set -eu
 
 VERSION=9.0
+# The pristine ffmpeg.org release tarball (`.tar.xz`).
 SHA256=7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52
+# FALLBACK: GitHub's generated tag archive (`n<VERSION>.tar.gz`), used only when ffmpeg.org is
+# unreachable. It is a DIFFERENT archive (different container, one extra top-level name), so it has
+# its own pin. GitHub regenerates tag archives rarely; a deliberate regeneration is a re-pin here.
+SHA256_GITHUB=d97647ace36a307f17ba2bca052d68937487bed8682e1eb9b6737076a9c442b7
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NDK=${WEBOS_SDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
 SYSROOT="$NDK/arm-webos-linux-gnueabi/sysroot"
@@ -93,7 +98,7 @@ HOST=${HOST:-}
 # to, because a runner is ephemeral and caches the prefix rather than the objects.
 #
 # The TARBALL is deliberately NOT in the cache. It is the LGPL corresponding source that
-# `release.yml` publishes beside each release (`ls vendor/ffmpeg-build/ffmpeg-*.tar.xz`), so it
+# `release.yml` publishes beside each release (`ls vendor/ffmpeg-build/ffmpeg-*.tar.*`), so it
 # belongs with the checkout, it is 10 MB, and both the cross and host builds now share the one
 # copy instead of downloading it twice.
 if [ -n "$HOST" ]; then
@@ -353,7 +358,10 @@ fi
 SRC="$WORK/ffmpeg-$VERSION"
 mkdir -p "$WORK" "$TARDIR"
 
-TAR="$TARDIR/ffmpeg-$VERSION.tar.xz"
+TAR_XZ="$TARDIR/ffmpeg-$VERSION.tar.xz"
+TAR_GZ="$TARDIR/ffmpeg-$VERSION.tar.gz"
+TAR=""            # the archive actually used, set by ensure_tar
+FFMPEG_SOURCE=""  # which upstream served it, printed for the CI log
 # The tarball stays in the checkout (release.yml publishes it as the LGPL corresponding source),
 # but it is FETCHED once per machine: a fresh worktree copies the cached one rather than pulling
 # 11 MB over the network again. The sha256 below is checked either way, so a corrupt or
@@ -371,33 +379,72 @@ TAR="$TARDIR/ffmpeg-$VERSION.tar.xz"
 # that no longer matches — a hard failure, on bytes the checkout never fetched, with no way to
 # recover but to know to delete the file.
 CACHED_TAR="$CACHE_ROOT/ffmpeg/ffmpeg-$VERSION-$(printf '%s' "$SHA256" | cut -c1-12).tar.xz"
+CACHED_TAR_GITHUB="$CACHE_ROOT/ffmpeg/ffmpeg-$VERSION-$(printf '%s' "$SHA256_GITHUB" | cut -c1-12).tar.gz"
 # THE SHARED PATHNAME IS NEVER UNLINKED, only ever replaced by rename. The ARM and host builds
 # hold different configuration locks by design and share this one file, so after a same-version
 # re-pin both can find it stale at once — and an `rm` by the second would delete the good copy the
 # first had just put there, failing that build's own verification a moment later. Everything
 # happens on a pid-local candidate; `mv` publishes it, and two processes publishing identical
 # verified bytes is harmless.
-tarball_ok() { [ -f "$1" ] && [ "$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1)" = "$SHA256" ]; }
+tarball_ok() { [ -f "$1" ] && [ "$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ]; }
+# ffmpeg.org times out and resets from both developer networks and GitHub's: `--retry-all-errors`
+# is required so a TLS reset (exit 35), not just a timeout, is retried.
+fetch() {
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "$1" -o "$2"
+}
+cache_to_checkout() { # <cached archive> <checkout path>
+  cp "$1" "$2.$$.part" 2>/dev/null || return 1
+  mv "$2.$$.part" "$2" 2>/dev/null
+}
 ensure_tar() {
-  tarball_ok "$TAR" && return 0
-  cand="$TAR.$$.part"
-  rm -f "$cand"
-  if [ -n "$CACHE_ROOT" ] && [ -f "$CACHED_TAR" ]; then cp "$CACHED_TAR" "$cand" 2>/dev/null || true; fi
-  if ! tarball_ok "$cand"; then
-    rm -f "$cand"
-    echo "ffmpeg: fetching $VERSION"
-    # THE SAME URL IS RETRIED, never substituted: this tarball is the LGPL corresponding source,
-    # and the sha256 below is pinned to the bytes upstream publishes. ffmpeg.org resets the odd
-    # GitHub-runner connection (`curl: (35) Recv failure: Connection reset by peer`), which is
-    # transient and must not fail a release build on its first attempt. `--retry-all-errors` is
-    # what covers a reset during the handshake, where curl's ordinary --retry does not.
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
-      --connect-timeout 20 --max-time 600 \
-      "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$cand"
+  # A verified copy already in this checkout wins, the pristine release tarball first.
+  if tarball_ok "$TAR_XZ" "$SHA256"; then
+    TAR="$TAR_XZ"; FFMPEG_SOURCE="ffmpeg.org release tarball"; return 0
   fi
-  mv "$cand" "$TAR"
+  if tarball_ok "$TAR_GZ" "$SHA256_GITHUB"; then
+    TAR="$TAR_GZ"; FFMPEG_SOURCE="GitHub FFmpeg tag archive"; return 0
+  fi
+  # ...then the machine-wide copy, same preference.
+  if [ -n "$CACHE_ROOT" ]; then
+    if tarball_ok "$CACHED_TAR" "$SHA256" && cache_to_checkout "$CACHED_TAR" "$TAR_XZ"; then
+      TAR="$TAR_XZ"; FFMPEG_SOURCE="ffmpeg.org release tarball (machine cache)"; return 0
+    fi
+    if tarball_ok "$CACHED_TAR_GITHUB" "$SHA256_GITHUB" && cache_to_checkout "$CACHED_TAR_GITHUB" "$TAR_GZ"; then
+      TAR="$TAR_GZ"; FFMPEG_SOURCE="GitHub FFmpeg tag archive (machine cache)"; return 0
+    fi
+  fi
+  # Network, primary first. The same URL is retried, never substituted with a different version.
+  cand="$TAR_XZ.$$.part"; rm -f "$cand"
+  echo "ffmpeg: fetching $VERSION from ffmpeg.org"
+  if fetch "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" "$cand"; then
+    if tarball_ok "$cand" "$SHA256"; then
+      mv "$cand" "$TAR_XZ"; TAR="$TAR_XZ"; FFMPEG_SOURCE="ffmpeg.org release tarball"; return 0
+    fi
+    echo "ffmpeg: ffmpeg.org served bytes that do not match the pinned sha256" >&2
+  else
+    echo "ffmpeg: ffmpeg.org fetch failed" >&2
+  fi
+  rm -f "$cand"
+  # ...then the official GitHub tag archive. It extracts to `FFmpeg-n<version>/`, normalized below.
+  echo "ffmpeg: falling back to the GitHub tag archive" >&2
+  cand="$TAR_GZ.$$.part"; rm -f "$cand"
+  if fetch "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$VERSION.tar.gz" "$cand"; then
+    if tarball_ok "$cand" "$SHA256_GITHUB"; then
+      mv "$cand" "$TAR_GZ"; TAR="$TAR_GZ"; FFMPEG_SOURCE="GitHub FFmpeg tag archive"; return 0
+    fi
+    echo "ffmpeg: GitHub served bytes that do not match the pinned sha256" >&2
+  else
+    echo "ffmpeg: GitHub tag archive fetch failed" >&2
+  fi
+  rm -f "$cand"
+  echo "ffmpeg: no verified $VERSION source archive from ffmpeg.org or GitHub" >&2
+  exit 1
 }
 ensure_tar
+# Keep exactly the archive this build used: the release step globs `ffmpeg-*.tar.*` and must not
+# pick up a stale sibling from an earlier source.
+if [ "$TAR" = "$TAR_GZ" ]; then rm -f "$TAR_XZ"; else rm -f "$TAR_GZ"; fi
+echo "ffmpeg: source $FFMPEG_SOURCE"
 # Verify before extracting, and before CACHING: this tarball becomes code inside the shipped
 # package. The order matters more than it looks now that the cache is machine-wide — publishing
 # first meant a bad download, or a corrupt tarball already sitting in the checkout, was copied to
@@ -407,15 +454,23 @@ ensure_tar
 # carrying from before the pin moved, most likely, `vendor/` being gitignored and surviving every
 # branch switch. So reaching a mismatch HERE means the bytes upstream served do not match the pin,
 # which is the case that must stop the build.
+want="$SHA256"
+case "$TAR" in *.tar.gz) want="$SHA256_GITHUB" ;; esac
 have=$(shasum -a 256 "$TAR" | cut -d' ' -f1)
-if [ "$have" != "$SHA256" ]; then
+if [ "$have" != "$want" ]; then
   echo "ffmpeg: SHA256 MISMATCH for $TAR" >&2
-  echo "  expected $SHA256" >&2
+  echo "  expected $want" >&2
   echo "  got      $have" >&2
   exit 1
 fi
-if [ -n "$CACHE_ROOT" ] && [ ! -f "$CACHED_TAR" ]; then
-  cp "$TAR" "$CACHED_TAR.$$.part" && mv "$CACHED_TAR.$$.part" "$CACHED_TAR"
+if [ -n "$CACHE_ROOT" ]; then
+  case "$TAR" in
+    *.tar.gz) cached="$CACHED_TAR_GITHUB" ;;
+    *) cached="$CACHED_TAR" ;;
+  esac
+  if [ ! -f "$cached" ]; then
+    cp "$TAR" "$cached.$$.part" && mv "$cached.$$.part" "$cached"
+  fi
 fi
 
 # EXTRACTION IS TRANSACTIONAL, because `[ -d "$SRC" ]` is not a test of completeness. Interrupt
@@ -437,7 +492,19 @@ if [ ! -d "$SRC" ]; then
   rm -rf "$stage"
   mkdir -p "$stage"
   tar xf "$TAR" -C "$stage"
-  if [ -d "$SRC" ]; then rm -rf "$stage"; else mv "$stage/ffmpeg-$VERSION" "$SRC"; rm -rf "$stage"; fi
+  # ffmpeg.org extracts to `ffmpeg-<version>/`; GitHub's tag archive extracts to
+  # `FFmpeg-n<version>/`. Normalize both to the path every include and the prefix expect.
+  if [ -d "$stage/ffmpeg-$VERSION" ]; then
+    mv "$stage/ffmpeg-$VERSION" "$SRC"
+  elif [ -d "$stage/FFmpeg-n$VERSION" ]; then
+    mv "$stage/FFmpeg-n$VERSION" "$SRC"
+  else
+    echo "ffmpeg: $TAR did not contain ffmpeg-$VERSION/ or FFmpeg-n$VERSION/" >&2
+    ls -la "$stage" >&2
+    rm -rf "$stage"
+    exit 1
+  fi
+  rm -rf "$stage"
 fi
 
 cd "$SRC"

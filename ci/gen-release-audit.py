@@ -515,7 +515,7 @@ def generate(args) -> str:
     out.append("### FFmpeg and the LGPL position")
     out.append("")
     cfg = next((ffmpeg_configuration(d) for n, d in sorted(sos.items()) if "avutil" in n), None)
-    tarballs = sorted(dist.glob("ffmpeg-*.tar.xz"))
+    tarballs = sorted(dist.glob("ffmpeg-*.tar.*"))
     rows = []
     if tarballs:
         tb = tarballs[0]
@@ -524,14 +524,16 @@ def generate(args) -> str:
     script = dist / "build-ffmpeg.sh"
     if script.exists():
         text = script.read_text()
-        pinned = re.search(r"^SHA256=([0-9a-f]{64})", text, re.M)
+        pins = re.findall(r"^SHA256(?:_GITHUB)?=([0-9a-f]{64})", text, re.M)
         code = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
         banned = sorted({f for f in ("--enable-gpl", "--enable-nonfree", "--enable-version3")
                          if f in code})
         rows.append(row("build script", f"`{script.name}` attached, sha256 `{sha256(script.read_bytes())[:16]}`"))
-        if pinned:
-            rows.append(row("upstream tarball pinned in the script", f"`{pinned.group(1)}`"
-                            + ("" if not tarballs or pinned.group(1) == sha256(tarballs[0].read_bytes())
+        if pins:
+            actual = sha256(tarballs[0].read_bytes()) if tarballs else None
+            rows.append(row("upstream tarball pinned in the script",
+                            ", ".join(f"`{p}`" for p in pins)
+                            + ("" if actual is None or actual in pins
                                else " — **does not match the attached tarball**")))
         rows.append(row("copyleft-widening flags",
                         "none of `--enable-gpl`, `--enable-nonfree`, `--enable-version3` "

@@ -61,13 +61,30 @@ def main():
     for name, recipe in [('ffmpeg', 'ci/build-ffmpeg.sh'), ('sentry-native', 'ci/build-sentry-native.sh')]:
         text = (root / recipe).read_text()
         version = re.search(r'^VERSION=([^\s]+)', text, re.M).group(1)
-        checksum = re.search(r'^SHA256=([a-f0-9]{64})', text, re.M).group(1)
-        filename = ('ffmpeg-' + version + '.tar.xz' if name == 'ffmpeg'
-                    else 'sentry-native-' + version + '.tar.gz')
-        relative = ('vendor/ffmpeg-build/' if name == 'ffmpeg' else 'vendor/') + filename
-        data, _ = read_regular(args.archive_root.resolve(), relative)
-        if digest(data) != checksum:
-            fail('pinned source archive checksum mismatch: ' + filename)
+        if name == 'ffmpeg':
+            # The build prefers the ffmpeg.org release tarball and falls back to the official
+            # GitHub tag archive, so publish whichever one is actually in the checkout.
+            candidates = [
+                ('ffmpeg-' + version + '.tar.xz',
+                 re.search(r'^SHA256=([a-f0-9]{64})', text, re.M).group(1)),
+                ('ffmpeg-' + version + '.tar.gz',
+                 re.search(r'^SHA256_GITHUB=([a-f0-9]{64})', text, re.M).group(1)),
+            ]
+            folder = 'vendor/ffmpeg-build/'
+            for filename, checksum in candidates:
+                if not (args.archive_root.resolve() / folder / filename).is_file():
+                    continue
+                data, _ = read_regular(args.archive_root.resolve(), folder + filename)
+                if digest(data) == checksum:
+                    break
+            else:
+                fail('no pinned FFmpeg source archive found (ffmpeg.org or GitHub)')
+        else:
+            checksum = re.search(r'^SHA256=([a-f0-9]{64})', text, re.M).group(1)
+            filename = 'sentry-native-' + version + '.tar.gz'
+            data, _ = read_regular(args.archive_root.resolve(), 'vendor/' + filename)
+            if digest(data) != checksum:
+                fail('pinned source archive checksum mismatch: ' + filename)
         (output / filename).write_bytes(data)
         deps.append({'id': name, 'version': version, 'license': 'LGPL-2.1-or-later' if name == 'ffmpeg' else 'MIT',
                      'sources': [{'path': filename, 'sha256': checksum}], 'recipes': [recipe],
