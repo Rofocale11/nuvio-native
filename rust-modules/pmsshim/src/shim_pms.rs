@@ -111,13 +111,23 @@ fn parse_catalog_sort(raw: Option<&str>) -> Option<(CatalogSort, bool)> {
 
 /// The Sort menu advertised through `includeMeta=1` and `/sorts`. Popularity is the catalog's own
 /// order (Cinemeta and Torrentio already rank by it); the other three are computed in memory.
-fn sort_entries() -> Value {
-    json!([
-        {"key": "popularity", "defaultDirection": "desc", "title": "Popularity"},
-        {"key": "rating", "defaultDirection": "desc", "title": "Rating"},
-        {"key": "releaseDate", "defaultDirection": "desc", "title": "Release Date"},
-        {"key": "titleSort", "defaultDirection": "asc", "title": "Title"}
-    ])
+/// Cinemeta only supports Popularity and Rating; other addons (TMDB, custom) also support
+/// Release Date and Title.
+fn sort_entries_for(addon_id: Option<&str>) -> Value {
+    let cinemeta = addon_id == Some("com.linvo.cinemeta");
+    if cinemeta {
+        json!([
+            {"key": "popularity", "defaultDirection": "desc", "title": "Popularity"},
+            {"key": "rating", "defaultDirection": "desc", "title": "Rating"}
+        ])
+    } else {
+        json!([
+            {"key": "popularity", "defaultDirection": "desc", "title": "Popularity"},
+            {"key": "rating", "defaultDirection": "desc", "title": "Rating"},
+            {"key": "releaseDate", "defaultDirection": "desc", "title": "Release Date"},
+            {"key": "titleSort", "defaultDirection": "asc", "title": "Title"}
+        ])
+    }
 }
 
 /// TMDB's standard movie genres. The shim offers these even when an addon declares no `genre`
@@ -3697,7 +3707,7 @@ impl Shim {
                             let kind = if k == SECTION_SHOWS { "show" } else { "movie" };
                             vec![json!({"key": format!("/library/sections/{k}/all"),
                                 "type": kind, "title": kind, "active": true,
-                                "Sort": sort_entries()})]
+                                "Sort": sort_entries_for(None)})]
                         } else {
                             catalogs
                                 .iter()
@@ -3709,7 +3719,7 @@ impl Shim {
                                         "catalogKey": c.key,
                                         "title": c.title,
                                         "active": active == Some(c.key.as_str()),
-                                        "Sort": sort_entries()
+                                        "Sort": sort_entries_for(c.key.split('/').next())
                                     })
                                 })
                                 .collect()
@@ -3738,7 +3748,8 @@ impl Shim {
                 Response::json(&container(json!({"Directory": dirs})))
             }
             ["sorts"] => {
-                Response::json(&container(json!({"Sort": sort_entries()})))
+                let addon_id = self.section_catalog(req, k).and_then(|c| c.key.split('/').next().map(str::to_string));
+                Response::json(&container(json!({"Sort": sort_entries_for(addon_id.as_deref())})))
             }
             ["filters"] => {
                 Response::json(&container(json!({"Filter": [
