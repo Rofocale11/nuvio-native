@@ -25,7 +25,6 @@ mod deferred_tests;
 #[cfg(test)]
 mod navigation_tests;
 #[cfg(test)]
-mod shelf_action_tests;
 #[cfg(test)]
 mod foreign_replacement_tests;
 #[cfg(test)]
@@ -138,14 +137,6 @@ fn readout(table: SecFetch, sections: usize, fetch: SecFetch, total: i64) -> Rea
         SecFetch::Ready if total == 0 => Readout::Empty,
         SecFetch::Ready => Readout::Grid,
     }
-}
-
-/// Is the shelf run above the grid final? `Fetching` (the first answer is still inside its
-/// bounded first-paint window) and `Staged` (an answer held until the page may move — which a
-/// hidden page always may, so it commits on the next frame) both mean the grid's offset is about
-/// to change. A publication with no identity has no section behind it and nothing to wait for.
-fn shelves_settled(hubs: plx_data::stores::browse::HubsView<'_>) -> bool {
-    hubs.id().is_none() || hubs.publication() == plx_data::browse::section_hubs::Publication::Committed
 }
 
 /// A retained page body, also remountable from its entry-owned LibraryMemory.
@@ -427,46 +418,13 @@ impl LibraryScreen {
             self.relayout(cx.focus.current);
             return;
         }
-        let hubs = H::section_hubs(cx);
-        let publication = hubs.id().zip(hubs.revision());
-        if self.shelf_publication != publication {
-            let mut old = std::mem::take(&mut self.shelves);
-            if let Some(section) = &identity {
-                for (index, shelf) in hubs.shelves().iter().enumerate() {
-                    let group = GroupId(self.keys.register(
-                        LibraryIdentity::Control { section: section.clone(), kind: "shelf-group".into(), key: shelf.id.clone() },
-                        GroupId(0), index));
-                    let elems = shelf.items.iter().enumerate().map(|(col, item)| {
-                        let identity = if item.rk.is_empty() {
-                            LibraryIdentity::ShelfSlot { section: section.clone(), hub: shelf.id.clone(), publication: self.query.unwrap_or(0), slot: col as u32 }
-                        } else {
-                            LibraryIdentity::Shelf { section: section.clone(), hub: shelf.id.clone(), sid: item.sid, rk: item.rk.clone() }
-                        };
-                        self.keys.register(identity, group, col)
-                    }).collect();
-                    let cards = old.iter().position(|row| row.id == shelf.id && row.landscape == shelf.landscape)
-                        .map(|i| old.remove(i).cards).unwrap_or_else(|| {
-                            let mut cards = hub_cards(self.entry, shelf.landscape);
-                            let saved = self.viewports.iter().find(|view| Some(view.epoch) == epoch && view.section == *section)
-                                .and_then(|view| view.shelves.iter().find(|(id, _)| *id == shelf.id));
-                            if let Some((_, x)) = saved {
-                                cards.restore_scroll(*x, shelf.items.len());
-                            }
-                            cards
-                        });
-                    let heading = shelf.link.as_ref()
-                        .map(|_| {
-                            let control = |kind: &str| LibraryIdentity::Control {
-                                section: section.clone(), kind: kind.into(), key: shelf.id.clone() };
-                            let heading_group = GroupId(self.keys.register(control("shelf-heading-group"), GroupId(0), index));
-                            let elem = self.keys.register(control("shelf-heading"), heading_group, 0);
-                            (heading_group, elem)
-                        });
-                    self.shelves.push(HubShelf { id: shelf.id.clone(), group, heading, elems, landscape: shelf.landscape, cards });
-                }
-            }
-            self.shelf_publication = publication;
-        }
+        // **The Library opens on its grid, never on a horizontal hub run.** The section already
+        // fixes the content type, so the old "Library Recommended" shelves only pushed Type/Sort/
+        // Filter and the grid down the page. The screen no longer asks for `/hubs/sections/{k}`
+        // (`PublishShelves` is not emitted), and any publication left over from an older page is
+        // dropped here. Home's shelves are a different store (`pms`) and are unaffected.
+        self.shelves.clear();
+        self.shelf_publication = None;
         self.pair.detail.refresh(cx, &mut self.keys);
         self.relayout(cx.focus.current);
         self.pair.master.refresh(cx, &mut self.keys);
@@ -790,6 +748,7 @@ impl LibraryScreen {
             GridAction::Unwatched { desired } => plx_data::stores::browse::QueryEdit::Unwatched(desired),
             GridAction::Genre { id } => plx_data::stores::browse::QueryEdit::Genre(id),
             GridAction::LibraryType(kind) => plx_data::stores::browse::QueryEdit::LibraryType(kind),
+            GridAction::Catalog(key) => plx_data::stores::browse::QueryEdit::Catalog(key),
         }));
         if let Some(target) = selected {
             let query = query.filter(|(address, _)| *address == target).map(|(_, edit)| edit);
@@ -946,6 +905,7 @@ impl LibraryScreen {
                     QueryEdit::Unwatched(desired) => GridAction::Unwatched { desired: *desired },
                     QueryEdit::Genre(id) => GridAction::Genre { id: id.clone() },
                     QueryEdit::LibraryType(kind) => GridAction::LibraryType(*kind),
+                    QueryEdit::Catalog(key) => GridAction::Catalog(key.clone()),
                 };
                 if matches!(&action, GridAction::Unwatched { desired } if *desired == H::listing(cx).unwatched())
                     && self.pending.section().is_none() && self.address(cx) == Some(target)
@@ -1031,13 +991,11 @@ impl LibraryScreen {
                     directory.preferred(kind).is_some() || directory.kind_fetch(kind) == SecFetch::Loading
                 });
                 let ready = self.readout != Readout::Loading && !waiting_for_kind;
-                // A section's reveal also waits for the document ABOVE its grid. Its shelves are
-                // a separate fetch that sets the grid's absolute offset, so revealing on the
-                // listing alone drew the grid at the top and then dropped it by the shelves'
-                // height when they landed (owner report item 9, the section half). A grid-only
-                // swap keeps its own `ready`: its shelves are already the document it fades inside.
-                let shelves = shelves_settled(H::section_hubs(cx));
-                let page_commit = self.page_fade.tick(tick.dt(), ready && shelves);
+                // The Library never publishes shelves, so there is no document above the grid to
+                // wait for. It must not gate on `H::section_hubs`: that snapshot always carries
+                // an id whose publication starts `Fetching`, so waiting for it would hold the
+                // page dark forever after the fade-out.
+                let page_commit = self.page_fade.tick(tick.dt(), ready);
                 let grid_commit = self.grid_fade.tick(tick.dt(), ready);
                 if page_commit || (grid_commit && self.pending.section().is_none()) { self.flush(fx); }
                 if self.live {
@@ -1077,12 +1035,10 @@ impl LibraryScreen {
                     self.relayout(focused);
                     let hint = self.hint_input(cx);
                     self.hold_hint.step(hint, tick.ms, dt, &mut |ev| fx.note(ev));
-                    // A first seat that applies a bookmarked scroll clamps it to the document, so
-                    // behind a section reveal it waits for the same shelves the reveal does:
-                    // seated on the shelfless interim, a bookmark deep in the grid landed short of
-                    // where the reader left. A head seat needs no wait — `provisional` follows the
-                    // head when the shelves land — and a page already on screen seats as it did.
-                    let settled = shelves || !self.page_fade.is_swapping() || self.restore_scroll.is_none();
+                    // With no shelves above the grid, the listing's document is final as soon as
+                    // the answer is laid out. A page already on screen seats as it did, and a
+                    // fresh one waits only for its own fade.
+                    let settled = !self.page_fade.is_swapping() || self.restore_scroll.is_none();
                     if self.initial && settled && self.layout.first().is_some() && self.seed_cursor(cx, fx) {
                         self.initial = false;
                         let group = match self.layout.seat_for_scroll(&self.run, self.scroll.pos, self.layout.visible_rows(self.scroll.pos).0) {
@@ -1117,10 +1073,8 @@ impl LibraryScreen {
                     let (lo, hi) = self.layout.visible_rows(self.scroll.pos);
                     self.store(target, LibraryWork::Want { lo: lo.saturating_sub(1) * self.layout.cols(), hi: (hi + 1) * self.layout.cols() }, fx);
                     self.store(target, LibraryWork::Letters, fx);
-                    let at_head = self.scroll.pos.abs() < 1.0 && self.scroll.vel.abs() < 1.0 && self.scroll_target.abs() < 0.5;
-                    fx.push(Fx::App(AppFx::Library(LibraryReq::PublishShelves {
-                        target, at_head, hidden_page: self.page_fade.is_swapping() && self.page_fade.alpha() <= 0.01,
-                    })));
+                    // No `PublishShelves`: the Library is grid-only and never asks for the
+                    // section's hub rows (see `sync`).
                 }
                 fx.push(Fx::App(AppFx::StoreWork(StoreWork::Browse)));
             }
@@ -1355,11 +1309,6 @@ impl HubShelf {
 }
 fn row_style(row: &HubShelf) -> &'static RowStyle { hub_style(row.landscape) }
 fn hub_style(landscape: bool) -> &'static RowStyle { if landscape { &RowStyle::EPISODE } else { &RowStyle::HOME } }
-/// A hub shelf's card section. Cards a screen's width off to either side still paint: a popped
-/// card's shadow reaches onto the screen from beyond its edge.
-fn hub_cards(entry: EntryId, landscape: bool) -> plx_ui::cards::Shelf {
-    plx_ui::cards::Shelf::new(entry, hub_style(landscape)).cull_margin(32.0)
-}
 /// The panel the shelves' cards are placed and hit-tested in: everything under the top bar.
 fn content_clip() -> Rect {
     Rect::new(0.0, plx_ui::widgets::TOP_BAR_BOTTOM, SCR_W, SCR_H - plx_ui::widgets::TOP_BAR_BOTTOM)

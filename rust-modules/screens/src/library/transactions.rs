@@ -37,6 +37,7 @@ pub(super) enum GridAction {
     Unwatched { desired: bool },
     Genre { id: Option<String> },
     LibraryType(plx_data::browse::LibraryType),
+    Catalog(Option<String>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -78,7 +79,7 @@ impl PendingTransactions {
     }
 }
 
-pub(super) const SHAPE: &str = "PendingTransactions{section:Option<{epoch:u32,index:u32,identity:{sid:u32,key:u64},kind:u32}>,grid:Option<{target:{epoch:u32,sid:u32,section:u64,query:u32},action:Sort{key:str,desc:bool}|Unwatched{desired:bool}|Genre{id:Option<str>}|LibraryType{code:u32}}>}";
+pub(super) const SHAPE: &str = "PendingTransactions{section:Option<{epoch:u32,index:u32,identity:{sid:u32,key:u64},kind:u32}>,grid:Option<{target:{epoch:u32,sid:u32,section:u64,query:u32},action:Sort{key:str,desc:bool}|Unwatched{desired:bool}|Genre{id:Option<str>}|LibraryType{code:u32}|Catalog{key:Option<str>}}>}";
 
 impl plx_machine::machine::LogicalState for PendingTransactions {
     fn write(&self, c: &mut plx_machine::machine::Canon) {
@@ -97,6 +98,7 @@ impl plx_machine::machine::LogicalState for PendingTransactions {
                 GridAction::Unwatched { desired } => { c.u32(1).bool(*desired); }
                 GridAction::Genre { id } => { c.u32(2).option(id.as_deref(), |c, id| { c.str(id); }); }
                 GridAction::LibraryType(kind) => { c.u32(3).u32(kind.code()); }
+                GridAction::Catalog(key) => { c.u32(4).option(key.as_deref(), |c, key| { c.str(key); }); }
             }
         });
     }

@@ -117,6 +117,11 @@ fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
 ```
 
 - `unwrap_or(id)` leaves real catalog items untouched — their `Ident` id is already the Stremio id.
+- **A real catalog item whose own id is `tmdb:<n>` is translated too.** `Shim::addon_id_for`
+  splits the episode tail (`tmdb:1396:1:2` → `tmdb:1396` + `:1:2`), asks TMDB's
+  `/movie|tv/{id}/external_ids`, and rejoins the tail with the IMDb id. The result is cached by
+  `(type, content id)` so a polling picker costs one lookup, and a miss (no `TMDB_API_KEY`, no
+  IMDb id) falls back to the original `tmdb:` id rather than asking an addon for nothing.
 - Because `slot()` is the single entry point for both threads, a new addon-facing call must go
   through it (or translate explicitly) or it will leak synthetic keys.
 - `/nuvio/streams` additionally accepts a synthetic key that has **no** `Ident` (synthetic keys are

@@ -441,6 +441,7 @@ pub enum QueryEdit {
     Unwatched(bool),
     Genre(Option<String>),
     LibraryType(LibraryType),
+    Catalog(Option<String>),
 }
 
 #[derive(Clone, Debug)]

@@ -120,9 +120,24 @@ impl Client {
         directory: &str,
         metadata_type: Option<i64>,
     ) -> Option<MediaContainer> {
+        self.section_directory_with_catalog(section_key, directory, metadata_type, None)
+    }
+
+    /// The same directory scoped to one catalog (`?catalog=<key>`), so the genre list matches the
+    /// catalog the grid is browsing. `None` keeps the server's default catalog.
+    pub fn section_directory_with_catalog(
+        &self,
+        section_key: i64,
+        directory: &str,
+        metadata_type: Option<i64>,
+        catalog: Option<&str>,
+    ) -> Option<MediaContainer> {
         let mut query = QueryBuilder::new(format!("/library/sections/{section_key}/{directory}"));
         if let Some(metadata_type) = metadata_type {
             query = query.int("type", metadata_type);
+        }
+        if let Some(catalog) = catalog.filter(|c| !c.is_empty()) {
+            query = query.str("catalog", catalog);
         }
         self.get_json(&query.build())
     }

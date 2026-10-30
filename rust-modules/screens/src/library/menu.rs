@@ -278,23 +278,59 @@ fn listing_kind(
 }
 
 /// The TYPE menu: every [`LibraryType`] the section's kind offers, the current one checked.
+#[cfg(test)]
 fn type_draft(section_kind: SecKind, current: LibraryType) -> MenuDraft {
+    type_draft_with_catalogs(section_kind, current, &[], None)
+}
+
+/// The TYPE menu, server-driven when the shim advertises catalogs. Each catalog is one row and
+/// the selection travels as `?catalog=<key>`. An empty catalog list is the golden fallback: the
+/// hardcoded [`LibraryType`] menu, so an addon failure never blanks the screen.
+fn type_draft_with_catalogs(
+    section_kind: SecKind,
+    current: LibraryType,
+    catalogs: &[plx_data::browse::CatalogEntry],
+    selected_catalog: Option<&str>,
+) -> MenuDraft {
     let mut section = MenuSection::new(plx_platform::i18n::msg::browse_library_filter_by());
     let mut selected = None;
-    for &kind in LibraryType::offered(section_kind) {
-        let identity = format!("type:{}", kind.code());
-        if kind == current { selected = Some(identity.clone()); }
-        section = choice(
-            section,
-            identity,
-            Action::Edit(QueryEdit::LibraryType(kind)),
-            Row::new(kind.title(section_kind)).checked(kind == current),
-        );
-    }
     let mut stamp = Stamp::default();
     stamp.tag(13);
     stamp.tag(u8::from(section_kind == SecKind::Show));
-    stamp.u32(current.code());
+    if catalogs.is_empty() {
+        stamp.u32(current.code());
+        for &kind in LibraryType::offered(section_kind) {
+            let identity = format!("type:{}", kind.code());
+            if kind == current { selected = Some(identity.clone()); }
+            section = choice(
+                section,
+                identity,
+                Action::Edit(QueryEdit::LibraryType(kind)),
+                Row::new(kind.title(section_kind)).checked(kind == current),
+            );
+        }
+    } else {
+        stamp.tag(1);
+        for catalog in catalogs {
+            stamp.str(&catalog.key);
+            stamp.str(&catalog.title);
+        }
+        let active = selected_catalog
+            .and_then(|key| catalogs.iter().find(|c| c.key == key))
+            .or_else(|| catalogs.first());
+        stamp.str(active.map_or("", |catalog| catalog.key.as_str()));
+        for catalog in catalogs {
+            let identity = format!("catalog:{}", catalog.key);
+            let checked = active.is_some_and(|a| a.key == catalog.key);
+            if checked { selected = Some(identity.clone()); }
+            section = choice(
+                section,
+                identity,
+                Action::Edit(QueryEdit::Catalog(Some(catalog.key.clone()))),
+                Row::new(catalog.title.clone()).checked(checked),
+            );
+        }
+    }
     MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected }
 }
 
@@ -451,7 +487,12 @@ impl LibraryMenu {
         };
         let mut section = MenuSection::new(title);
         match self.kind {
-            LibraryMenuKind::Type => return type_draft(listing_kind(listing, directory), listing.library_type()),
+            LibraryMenuKind::Type => return type_draft_with_catalogs(
+                listing_kind(listing, directory),
+                listing.library_type(),
+                listing.catalogs(),
+                listing.catalog(),
+            ),
             LibraryMenuKind::Sort => {
                 return sort_draft(listing.sorts(), listing.sort_index(), listing.sort_desc());
             }
@@ -975,6 +1016,27 @@ mod tests {
         // The same checked row names a different menu in the other kind of library.
         assert_ne!(type_draft(SecKind::Movie, LibraryType::Collections).stamp,
             lay(type_draft(SecKind::Show, LibraryType::Collections)).stamp);
+    }
+
+    #[test]
+    fn catalog_type_menu_lists_server_catalogs_and_falls_back_when_empty() {
+        let catalogs = vec![
+            plx_data::browse::CatalogEntry { key: "addon/movie/popular".into(), title: "Cinemeta Popular".into(), active: true },
+            plx_data::browse::CatalogEntry { key: "addon/movie/top".into(), title: "Torrentio Top Rated".into(), active: false },
+        ];
+        let draft = lay(type_draft_with_catalogs(SecKind::Movie, LibraryType::Primary, &catalogs, Some("addon/movie/top")));
+        assert_eq!(draft.sections[0].rows.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(),
+            ["Cinemeta Popular", "Torrentio Top Rated"]);
+        assert!(!draft.sections[0].rows[0].checked);
+        assert!(draft.sections[0].rows[1].checked);
+        assert_eq!(draft.selected, 1);
+        assert!(matches!(draft.rows[1].1, Action::Edit(QueryEdit::Catalog(Some(ref key))) if key == "addon/movie/top"));
+
+        // The golden fallback: no server catalogs means the old hardcoded Type menu, never blank.
+        let fallback = lay(type_draft_with_catalogs(SecKind::Movie, LibraryType::Collections, &[], None));
+        assert_eq!(fallback.sections[0].rows.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(),
+            ["Movies", "Collections"]);
+        assert!(matches!(fallback.rows[1].1, Action::Edit(QueryEdit::LibraryType(LibraryType::Collections))));
     }
 
     #[test]

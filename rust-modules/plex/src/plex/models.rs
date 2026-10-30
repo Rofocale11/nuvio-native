@@ -144,6 +144,20 @@ pub struct Meta {
 /// when the v1.5 facet menu consumes it; DTOs here keep only consumed fields.)
 #[derive(Deserialize, Default)]
 pub struct MetaType {
+    /// Listing URL for this type/catalog, e.g. `/library/sections/1/all?catalog=...`.
+    /// Empty when the server did not supply one (legacy/real PMS entries may omit it).
+    #[serde(default)]
+    pub key: String,
+    /// Plex type id or arbitrary catalog selector token. Kept as a string so a shim can carry
+    /// catalog keys without colliding with Plex's numeric type ids.
+    #[serde(rename = "type", default)]
+    pub type_id: String,
+    #[serde(default)]
+    pub title: String,
+    /// Shim extension: the stable catalog key this entry selects. Real PMS entries omit it, which
+    /// is exactly what keeps the client on its hardcoded Type menu for ordinary servers.
+    #[serde(rename = "catalogKey", default)]
+    pub catalog_key: String,
     #[serde(default, deserialize_with = "de_i64")]
     pub active: i64, // bool on the wire; de_i64 folds true/false/"1"
     #[serde(rename = "Sort", default)]

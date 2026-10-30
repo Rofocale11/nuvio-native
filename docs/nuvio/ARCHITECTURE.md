@@ -50,6 +50,28 @@ see "The P2P streaming server" below.
   "Finding streams…" placeholder). Part URLs redirect (or proxy, when headers are needed) to the
   stream's real URL. The decision endpoint waits for discovery/probing and refuses media that
   cannot direct play; the native route uses its probed fields.
+- **A Library section's Type menu is a catalog selector, not a movie/show switch.** The section
+  already fixes the content type, so `includeMeta=1` returns one `MediaContainer.Meta.Type[]` entry
+  per browseable catalog of that type. Each entry carries the shim extension `catalogKey`, the
+  display `title`, `active` for the catalog the current page came from, and the same `Sort[]` menu.
+  Selecting a row sends `?catalog=<key>` on `/library/sections/{k}/all`; the shim resolves the key
+  against `plx_stremio`'s browse catalogs, fetches only that catalog, applies `?genre=` (defensively
+  in memory when the addon does not declare genre support) and sorts in memory by `popularity`
+  (the catalog's own order), `rating`, `releaseDate`, or `titleSort`. `/library/sections/{k}/genre`
+  merges the catalog's declared genres with TMDB's standard list (movie or TV by section), so the
+  Filter menu is populated even when the addon declares no `genre` extra; a TMDB genre the addon
+  does not declare is matched against the rows' `Genre[]` in memory, alias-aware so `Sci-Fi` and
+  `Science Fiction` are the same filter. `/library/sections/{k}/genre?catalog=<key>` scopes the
+  list to the selected catalog; standalone `/sorts` and `/filters` return the same menus for
+  clients that ask directly.
+  **The Library tab is grid-only.** It never requests `/hubs/sections/{k}` and never emits
+  `PublishShelves`, so Movies/TV Shows open with Type/Sort/Filter immediately above the grid
+  instead of below a run of horizontal hub rows. Home's shelves are a different store and are
+  unaffected.
+  The extension is deliberately additive. A real PMS, or a shim whose addons failed to load, sends
+  entries without `catalogKey`; the client then falls back to its hardcoded `LibraryType` menu, so
+  the screen never goes blank. Catalog keys are shim-local strings and never become `ratingKey`s —
+  the numeric-key invariant in `ID-MANAGEMENT.md` is unchanged.
 - **The stream pickers are two-level menus, not flat lists** — the player's `…` popover, the
   Detail page's **Streams** pill and the Home hero's Play all open the same panel and behave
   identically:

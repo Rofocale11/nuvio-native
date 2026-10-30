@@ -81,6 +81,23 @@ pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
   (`meta("movie", "tmdb:<id>")` / `meta("series", "tmdb:<id>")`) and otherwise from TMDB, with a
   synthetic ratingKey.
 
+## Library genres and sorts (the menu baseline)
+
+The Library's Filter and Sort menus come from the shim, not from TMDB directly. They combine:
+
+- **The catalog's own declarations** (its `extra` genres and native order), which are what the
+  addon actually accepts;
+- **a static TMDB baseline** (`TMDB_MOVIE_GENRES` / `TMDB_TV_GENRES` in `shim_pms.rs`) plus the
+  Popularity / Rating / Release Date / Title sorts, so a catalog with no `genre` extra still has a
+  usable menu.
+
+A baseline genre is matched against the fetched rows' `Genre[]` in memory, with no per-item TMDB
+request: `genre_key` folds case and punctuation and treats `Sci-Fi` and `Science Fiction` as one,
+while compound names (`Action & Adventure`, `Sci-Fi & Fantasy`) match either half. Popularity is
+the catalog's own order; Rating reads `imdb_rating`, Release Date reads `release_info`. A numeric
+PMS tag id is resolved back to its display name before matching. Fetching is bounded to 20 pages,
+so an in-memory filter cannot page forever.
+
 ## TV show limitations
 
 - **A TMDB-only related show has no episodes.** TMDB recommendations carry no season/episode list,

@@ -12,6 +12,7 @@ use plx_stremio::addons_tmdb::{
 };
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -79,6 +80,177 @@ fn synthetic_person_id(rk: i64) -> Option<u64> {
 /// A synthetic collection ratingKey's TMDB collection id.
 fn synthetic_collection_id(rk: i64) -> Option<u64> {
     (rk >= TMDB_COLLECTION_KEY_BASE).then_some((rk - TMDB_COLLECTION_KEY_BASE) as u64)
+}
+
+/// The orders the shim can compute from a Stremio `MetaPreview` without another fetch. These are
+/// the TMDB-facing baseline plus Title; a catalog's own order is the Popularity answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatalogSort {
+    Popularity,
+    Rating,
+    ReleaseDate,
+    Title,
+}
+
+/// `sort=key[:asc|desc]`. Unknown keys are ignored so a stale saved view cannot empty a page.
+fn parse_catalog_sort(raw: Option<&str>) -> Option<(CatalogSort, bool)> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (key, direction) = raw.split_once(':').unwrap_or((raw, ""));
+    let sort = match key {
+        "popularity" => CatalogSort::Popularity,
+        "titleSort" | "title" => CatalogSort::Title,
+        "rating" | "audienceRating" => CatalogSort::Rating,
+        "releaseDate" | "originallyAvailableAt" | "year" => CatalogSort::ReleaseDate,
+        _ => return None,
+    };
+    Some((sort, direction.eq_ignore_ascii_case("desc")))
+}
+
+/// The Sort menu advertised through `includeMeta=1` and `/sorts`. Popularity is the catalog's own
+/// order (Cinemeta and Torrentio already rank by it); the other three are computed in memory.
+fn sort_entries() -> Value {
+    json!([
+        {"key": "popularity", "defaultDirection": "desc", "title": "Popularity"},
+        {"key": "rating", "defaultDirection": "desc", "title": "Rating"},
+        {"key": "releaseDate", "defaultDirection": "desc", "title": "Release Date"},
+        {"key": "titleSort", "defaultDirection": "asc", "title": "Title"}
+    ])
+}
+
+/// TMDB's standard movie genres. The shim offers these even when an addon declares no `genre`
+/// extra, and filters the fetched rows in memory against the same names.
+const TMDB_MOVIE_GENRES: &[&str] = &[
+    "Action", "Adventure", "Animation", "Comedy", "Crime", "Documentary", "Drama",
+    "Family", "Fantasy", "History", "Horror", "Music", "Mystery", "Romance",
+    "Science Fiction", "TV Movie", "Thriller", "War", "Western",
+];
+
+/// TMDB's standard TV genres (they differ from the movie list in `help`/`format` only).
+const TMDB_TV_GENRES: &[&str] = &[
+    "Action & Adventure", "Animation", "Comedy", "Crime", "Documentary", "Drama",
+    "Family", "Kids", "Mystery", "News", "Reality", "Sci-Fi & Fantasy", "Soap",
+    "Talk", "War & Politics", "Western",
+];
+
+/// The TMDB baseline for a section's content type.
+fn tmdb_genres(series: bool) -> &'static [&'static str] {
+    if series { TMDB_TV_GENRES } else { TMDB_MOVIE_GENRES }
+}
+
+/// Fold a genre name to its comparison key: letters and digits only, lower-cased, with the two
+/// spellings of science fiction made one. "Sci-Fi" and "Science Fiction" are the same genre.
+fn genre_key(name: &str) -> String {
+    let key: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if key == "scifi" { "sciencefiction".into() } else { key }
+}
+
+/// The `&`/`/` halves of a compound genre (`Action & Adventure`), each folded by [`genre_key`].
+fn genre_parts(name: &str) -> Vec<String> {
+    name.split(['&', '/'])
+        .map(genre_key)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// `candidate` names the same genre as `wanted`. A compound TMDB name matches either of its
+/// halves, and "Sci-Fi" matches "Science Fiction".
+fn genre_matches(candidate: &str, wanted: &str) -> bool {
+    let (have, want) = (genre_parts(candidate), genre_parts(wanted));
+    !have.is_empty() && have.iter().any(|part| want.contains(part))
+}
+
+fn catalog_rating_of(meta: &MetaPreview) -> Option<f64> {
+    meta.imdb_rating
+        .as_deref()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .or_else(|| {
+            meta.rotten_tomatoes_rating
+                .as_deref()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+        })
+}
+
+fn catalog_year_of(meta: &MetaPreview) -> Option<i32> {
+    let text = meta.release_info.as_deref()?.trim();
+    let year = text.get(..4)?.parse::<i32>().ok()?;
+    (1000..=3000).contains(&year).then_some(year)
+}
+
+fn compare_catalog(a: &MetaPreview, b: &MetaPreview, sort: CatalogSort) -> CmpOrdering {
+    match sort {
+        // The catalog already arrives in its own popularity order; sorting is a no-op.
+        CatalogSort::Popularity => CmpOrdering::Equal,
+        CatalogSort::Title => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        CatalogSort::Rating => match (catalog_rating_of(a), catalog_rating_of(b)) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(CmpOrdering::Equal),
+            (Some(_), None) => CmpOrdering::Less,
+            (None, Some(_)) => CmpOrdering::Greater,
+            (None, None) => CmpOrdering::Equal,
+        },
+        CatalogSort::ReleaseDate => match (catalog_date_of(a), catalog_date_of(b)) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => CmpOrdering::Less,
+            (None, Some(_)) => CmpOrdering::Greater,
+            (None, None) => CmpOrdering::Equal,
+        },
+    }
+}
+
+/// The comparable release date (`YYYY-MM-DD`, else the year) as a string; missing dates sort last.
+fn catalog_date_of(meta: &MetaPreview) -> Option<String> {
+    let text = meta.release_info.as_deref()?.trim();
+    if let Some(date) = text.get(..10) {
+        if date.as_bytes().get(4) == Some(&b'-') && date.as_bytes().get(7) == Some(&b'-') {
+            return Some(date.to_string());
+        }
+    }
+    catalog_year_of(meta).map(|year| format!("{year:04}"))
+}
+
+/// Merge a catalog's declared genre options with the TMDB baseline, de-duplicating spellings.
+fn merged_genres(declared: &[String], series: bool) -> Vec<String> {
+    let mut out: Vec<String> = declared.iter().filter(|g| !g.trim().is_empty()).cloned().collect();
+    for genre in tmdb_genres(series) {
+        if !out.iter().any(|have| genre_matches(have, genre)) {
+            out.push((*genre).to_string());
+        }
+    }
+    out
+}
+
+/// Resolve a request's `genre` value against the merged list: a display name stays as it is, a
+/// numeric PMS tag id (what a real client sends) maps back to its name, and an unknown value is
+/// kept so the in-memory filter still applies instead of silently listing everything.
+fn resolve_genre<'a>(genres: &'a [String], raw: &'a str) -> &'a str {
+    genres
+        .iter()
+        .map(String::as_str)
+        .find(|genre| genre_matches(genre, raw) || tag_id(genre).to_string() == raw)
+        .unwrap_or(raw)
+}
+
+/// Split a Stremio content id from its episode suffix: `tmdb:1396:1:2` → (`tmdb:1396`, `:1:2`).
+fn split_content_id(id: &str) -> (&str, &str) {
+    let base = plx_stremio::addons::content_level_id(id);
+    if base.is_empty() || base == id {
+        return (id, "");
+    }
+    match id.strip_prefix(base.as_str()) {
+        Some(suffix) => (&id[..base.len()], suffix),
+        None => (id, ""),
+    }
+}
+
+/// The TMDB number in `tmdb:603`, or `None` for an id an addon already understands (`tt…`, `kitsu…`).
+fn tmdb_content_number(id: &str) -> Option<u64> {
+    id.strip_prefix("tmdb:")?.parse().ok().filter(|n| *n > 0)
 }
 
 /// The Stremio id addons know a synthetic related ratingKey by (`tmdb:603`), if it is synthetic.
@@ -169,6 +341,9 @@ pub struct Shim {
     pub probes: crate::shim_probe::ProbeCache,
     /// Torrent markers resolved on a streaming server (`/create`), by marker + ratingKey.
     resolved: Mutex<HashMap<(i64, String), String>>,
+    /// `tmdb:` content ids already asked of TMDB's `/external_ids`, by `(type, content id)`.
+    /// `None` is a settled miss: addons get the catalog's own id, exactly as before.
+    imdb_ids: Mutex<HashMap<(String, String), Option<String>>>,
     torrent_server: std::sync::RwLock<Option<String>>,
     /// Whether peer-to-peer streams may be offered at all (see [`Config::p2p_enabled`]). Read by
     /// [`Shim::torrent_server`], so every stream list, pick and resolve that goes through a
@@ -272,7 +447,10 @@ fn runtime_ms(s: Option<&str>) -> Option<i64> {
 
 fn date_of(s: Option<&str>) -> Option<String> {
     let s = s?;
-    (s.len() >= 10 && s.as_bytes()[4] == b'-').then(|| s[..10].to_string())
+    // `get` keeps a multi-byte release string from panicking on a non-char boundary.
+    s.get(..10)
+        .filter(|date| date.as_bytes().get(4) == Some(&b'-'))
+        .map(str::to_string)
 }
 
 fn rating_of(s: Option<&str>) -> Option<f64> {
@@ -1106,6 +1284,7 @@ impl Shim {
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
             probes: crate::shim_probe::ProbeCache::default(),
             resolved: Mutex::new(HashMap::new()),
+            imdb_ids: Mutex::new(HashMap::new()),
             torrent_server: std::sync::RwLock::new(cfg_ts),
             p2p_enabled: AtomicBool::new(cfg_p2p),
             audio_codecs: std::sync::RwLock::new(Vec::new()),
@@ -1310,17 +1489,45 @@ impl Shim {
         })
     }
 
-    /// Rows `[start, start+size)` of a catalog and the total to report.
+    /// Every browseable catalog belonging to this section's content type, in addon order.
+    fn section_catalogs(&self, section: i64) -> Vec<CatalogInfo> {
+        self.backend
+            .all_catalogs()
+            .into_iter()
+            .filter(|c| {
+                if section == SECTION_SHOWS {
+                    is_series(&c.type_)
+                } else {
+                    c.type_ == "movie"
+                }
+            })
+            .collect()
+    }
+
+    /// The catalog the request asked for, or the section's first catalog.
+    fn section_catalog(&self, req: &Request, section: i64) -> Option<CatalogInfo> {
+        let cats = self.section_catalogs(section);
+        req.q("catalog")
+            .and_then(|key| cats.iter().find(|c| c.key == key).cloned())
+            .or_else(|| self.first_catalog(section))
+            .or_else(|| cats.into_iter().next())
+    }
+
+    /// Rows `[start, start+size)` of a catalog and the total to report. `fetch_genre` is what the
+    /// addon is asked for (only when it declares the genre); `match_genre` is applied in memory
+    /// to the fetched rows when it does not.
     fn catalog_range(
         &self,
         key: &str,
-        genre: Option<&str>,
+        fetch_genre: Option<&str>,
+        match_genre: Option<&str>,
+        sort: Option<(CatalogSort, bool)>,
         start: usize,
         size: usize,
     ) -> (Vec<MetaPreview>, i64) {
         let entry = {
             let mut g = self.catalogs.lock().unwrap_or_else(|e| e.into_inner());
-            let k = (key.to_string(), genre.map(str::to_string));
+            let k = (key.to_string(), match_genre.or(fetch_genre).map(genre_key));
             let fresh = g.get(&k).is_some_and(|c| {
                 c.lock().unwrap_or_else(|e| e.into_inner()).at.elapsed() < CATALOG_TTL
             });
@@ -1338,13 +1545,25 @@ impl Shim {
         };
         // One fetcher per catalog at a time: the lock is held across the page fetch on purpose.
         let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+        // Popularity IS the catalog's own order, so it needs no full read; the other keys do.
+        let sorted = sort.is_some_and(|(kind, _)| kind != CatalogSort::Popularity);
         let mut guard = 0;
-        while c.rows.len() < start + size && !c.exhausted && guard < 20 {
+        // A sorted listing needs the WHOLE catalog before it can answer a page correctly; an
+        // unsorted one stops as soon as the requested window is covered.
+        while !c.exhausted
+            && guard < 20
+            && (sorted || match_genre.is_some() || c.rows.len() < start.saturating_add(size))
+        {
             guard += 1;
-            match self.backend.catalog_page(key, c.rows.len() as u32, genre) {
+            match self.backend.catalog_page(key, c.rows.len() as u32, fetch_genre) {
                 Ok(page) => {
                     let before = c.rows.len();
                     for p in page {
+                        if match_genre
+                            .is_some_and(|g| !p.genres.iter().any(|x| genre_matches(x, g)))
+                        {
+                            continue;
+                        }
                         if !c.rows.iter().any(|r| r.id == p.id) {
                             c.rows.push(p);
                         }
@@ -1356,7 +1575,14 @@ impl Shim {
                 Err(()) => break,
             }
         }
-        let rows = c.rows.iter().skip(start).take(size).cloned().collect();
+        let mut ordered: Vec<&MetaPreview> = c.rows.iter().collect();
+        if let Some((sort, desc)) = sort.filter(|(kind, _)| *kind != CatalogSort::Popularity) {
+            ordered.sort_by(|a, b| compare_catalog(a, b, sort));
+            if desc {
+                ordered.reverse();
+            }
+        }
+        let rows = ordered.into_iter().skip(start).take(size).cloned().collect();
         let total = c.rows.len() as i64 + if c.exhausted { 0 } else { MORE_HINT };
         (rows, total)
     }
@@ -1386,18 +1612,55 @@ impl Shim {
         }
     }
 
+    /// The id an addon should be asked for: the catalog's own id, upgraded to the IMDb id TMDB
+    /// names when it is a `tmdb:<id>`. Episodes keep their `:S:E` tail. A miss (no TMDB key, or no
+    /// external id) leaves the original id, because an empty Source Picker is worse than one an
+    /// addon may still resolve.
+    fn addon_id_for(&self, type_: &str, id: &str) -> String {
+        let (base, suffix) = split_content_id(id);
+        let Some(tmdb_id) = tmdb_content_number(base) else {
+            return id.to_string();
+        };
+        let key = (type_.to_string(), base.to_string());
+        let cached = self
+            .imdb_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        let resolved = match cached {
+            Some(hit) => hit,
+            None => {
+                let imdb = TmdbClient::from_env()
+                    .and_then(|client| {
+                        if is_series(type_) {
+                            client.tv_external_ids(tmdb_id).ok().flatten()
+                        } else {
+                            client.movie_external_ids(tmdb_id).ok().flatten()
+                        }
+                    })
+                    .filter(|imdb| imdb.starts_with("tt"));
+                let mut g = self.imdb_ids.lock().unwrap_or_else(|e| e.into_inner());
+                if g.len() > 512 {
+                    g.clear();
+                }
+                g.insert(key, imdb.clone());
+                imdb
+            }
+        };
+        match resolved {
+            Some(imdb) => format!("{imdb}{suffix}"),
+            None => id.to_string(),
+        }
+    }
+
     fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
         let (type_, id) = self.stream_target(ident)?;
-        let translated_id = match translate_to_stremio_id(rk) {
-            // An IMDb id is preferred where TMDB can name one (some addons rank by it), but it is
-            // an improvement, never a prerequisite: with no TMDB key, or no `/find` match, the
-            // `tmdb:` id is still what the addon knows the title by, and asking for nothing at all
-            // would answer an empty, permanently-"loading" Source Picker.
-            Some(tmdb_id) => TmdbClient::from_env()
-                .and_then(|client| resolve_imdb_id(rk, &client))
-                .unwrap_or(tmdb_id),
-            None => id,
-        };
+        // Synthetic related keys have no `Ident` in the table; they name the title as `tmdb:<id>`
+        // to addons. Both that and a real catalog item whose id IS a `tmdb:` id go through the
+        // same translation, so Torrentio and the subtitle addons get the IMDb id they index by.
+        let addon_id = translate_to_stremio_id(rk).unwrap_or(id);
+        let translated_id = self.addon_id_for(&type_, &addon_id);
         let mut g = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = g.get(&rk) {
             if s.started.elapsed() < STREAM_TTL {
@@ -2854,7 +3117,7 @@ impl Shim {
     /// rows so the app keeps the catalog's own title (`hub_title::localized_hub_title` falls back to
     /// it). A section's own hubs must not: there that family is retitled "Recently Added".
     fn catalog_hub(&self, i: usize, c: &CatalogInfo, count: usize, pageable: bool) -> Value {
-        let (rows, total) = self.catalog_range(&c.key, None, 0, count);
+        let (rows, total) = self.catalog_range(&c.key, None, None, None, 0, count);
         let series = is_series(&c.type_);
         let rows: Vec<Value> = rows
             .iter()
@@ -3164,7 +3427,7 @@ impl Shim {
                     SECTION_MOVIES
                 };
                 let (start, size) = page_params(req);
-                self.catalog_listing(self.first_catalog(section), None, start, size.unwrap_or(12))
+                self.catalog_listing(self.first_catalog(section), None, None, start, size.unwrap_or(12))
             }
             (_, ["hubs", "sections", k]) => {
                 let section: i64 = k.parse().unwrap_or(0);
@@ -3209,7 +3472,7 @@ impl Shim {
                     .parse::<usize>()
                     .ok()
                     .and_then(|i| self.catalog_list().into_iter().nth(i));
-                self.catalog_listing(cat, None, start, size.unwrap_or(50))
+                self.catalog_listing(cat, None, None, start, size.unwrap_or(50))
             }
             (_, ["hubs", "search"]) => self.search(
                 req.q("query").unwrap_or(""),
@@ -3346,6 +3609,7 @@ impl Shim {
         &self,
         cat: Option<CatalogInfo>,
         genre: Option<&str>,
+        sort: Option<(CatalogSort, bool)>,
         start: usize,
         size: usize,
     ) -> Response {
@@ -3354,7 +3618,21 @@ impl Shim {
                 json!({"Metadata": [], "totalSize": 0, "offset": start}),
             ));
         };
-        let (rows, total) = self.catalog_range(&cat.key, genre, start, size.min(200));
+        // The Filter menu offers the catalog's own genres plus TMDB's; a value the addon does not
+        // declare is filtered in memory from the fetched rows, so a TMDB baseline genre works even
+        // when the catalog has no `genre` extra at all.
+        let all = merged_genres(&cat.genres, is_series(&cat.type_));
+        let wanted = genre.map(|g| resolve_genre(&all, g)).filter(|g| !g.is_empty());
+        // A declared genre is forwarded under the addon's OWN spelling; anything else (the TMDB
+        // baseline included) is matched against the fetched rows here.
+        let native = wanted.and_then(|g| cat.genres.iter().find(|have| genre_matches(have, g)));
+        let (fetch_genre, match_genre) = match native {
+            Some(name) => (Some(name.as_str()), None),
+            None => (None, wanted),
+        };
+        let (rows, total) = self.catalog_range(
+            &cat.key, fetch_genre, match_genre, sort, start, size.min(200),
+        );
         let rows: Vec<Value> = rows.iter().map(|p| self.preview_row(p)).collect();
         Response::json(&container(
             json!({"Metadata": rows, "totalSize": total, "offset": start}),
@@ -3365,30 +3643,73 @@ impl Shim {
         if k != SECTION_MOVIES && k != SECTION_SHOWS {
             return Response::json_status(404, &container(json!({})));
         }
-        let cat = self.first_catalog(k);
         match rest {
             ["all"] | ["recentlyAdded"] | ["newest"] => {
                 let (start, size) = page_params(req);
                 let genre = req.q("genre").filter(|g| !g.is_empty());
-                let mut resp = self.catalog_listing(cat, genre, start, size.unwrap_or(60));
+                let sort = parse_catalog_sort(req.q("sort"));
+                // The catalog selector: `?catalog=<key>` picks one catalog; absent falls back to
+                // the section's first catalog exactly as before.
+                let cat = self.section_catalog(req, k);
+                let mut resp = self.catalog_listing(cat.clone(), genre, sort, start, size.unwrap_or(60));
                 if req.q("includeMeta") == Some("1") {
                     if let Ok(mut v) = serde_json::from_slice::<Value>(&resp.body) {
-                        let kind = if k == SECTION_SHOWS { "show" } else { "movie" };
-                        v["MediaContainer"]["Meta"] = json!({"Type": [{"key": format!("/library/sections/{k}/all?type={}", if k == SECTION_SHOWS { 2 } else { 1 }),
-                            "type": kind, "title": kind, "active": true,
-                            "Sort": [{"key": "titleSort", "defaultDirection": "asc", "title": "Popular"}]}]});
+                        let catalogs = self.section_catalogs(k);
+                        let active = cat.as_ref().map(|c| c.key.as_str());
+                        let types: Vec<Value> = if catalogs.is_empty() {
+                            let kind = if k == SECTION_SHOWS { "show" } else { "movie" };
+                            vec![json!({"key": format!("/library/sections/{k}/all"),
+                                "type": kind, "title": kind, "active": true,
+                                "Sort": sort_entries()})]
+                        } else {
+                            catalogs
+                                .iter()
+                                .map(|c| {
+                                    let listing = format!("/library/sections/{k}/all?catalog={}", pct_encode(&c.key));
+                                    json!({
+                                        "key": listing,
+                                        "type": if k == SECTION_SHOWS { "show" } else { "movie" },
+                                        "catalogKey": c.key,
+                                        "title": c.title,
+                                        "active": active == Some(c.key.as_str()),
+                                        "Sort": sort_entries()
+                                    })
+                                })
+                                .collect()
+                        };
+                        v["MediaContainer"]["Meta"] = json!({"Type": types});
                         resp = Response::json(&v);
                     }
                 }
                 resp
             }
             ["genre"] => {
-                let genres = cat.map(|c| c.genres).unwrap_or_default();
+                // The genre list belongs to the SELECTED catalog, so the filter menu matches the
+                // grid's current catalog rather than the section's first one. Its own declared
+                // genres come first; the TMDB baseline fills the rest so the Filter menu is never
+                // empty, even for a catalog that declares no `genre` extra.
+                let cat = self.section_catalog(req, k);
+                let series = cat.as_ref().map_or(k == SECTION_SHOWS, |c| is_series(&c.type_));
+                let genres = merged_genres(
+                    cat.as_ref().map(|c| c.genres.as_slice()).unwrap_or_default(),
+                    series,
+                );
                 let dirs: Vec<Value> = genres
                     .iter()
                     .map(|g| json!({"key": g, "title": g, "fastKey": format!("/library/sections/{k}/all?genre={}", pct_encode(g))}))
                     .collect();
                 Response::json(&container(json!({"Directory": dirs})))
+            }
+            ["sorts"] => {
+                Response::json(&container(json!({"Sort": sort_entries()})))
+            }
+            ["filters"] => {
+                Response::json(&container(json!({"Filter": [
+                    {"filter": "genre", "filterType": "string",
+                     "key": format!("/library/sections/{k}/genre"), "title": "Genre"},
+                    {"filter": "unwatched", "filterType": "boolean",
+                     "key": format!("/library/sections/{k}/all?unwatched=1"), "title": "Unwatched"}
+                ]})))
             }
             ["firstCharacter"] => {
                 Response::json(&container(json!({"Directory": [], "Metadata": []})))
@@ -4278,4 +4599,157 @@ fn blur_colors(seed: &str) -> serde_json::Value {
         "bottomRight": corners[2],
         "bottomLeft": corners[3],
     })
+}
+
+#[cfg(test)]
+mod catalog_selector_tests {
+    use super::*;
+
+    fn meta(name: &str, rating: Option<&str>, year: Option<&str>, genres: &[&str]) -> MetaPreview {
+        MetaPreview {
+            id: format!("tt-{name}"),
+            name: name.into(),
+            imdb_rating: rating.map(str::to_string),
+            release_info: year.map(str::to_string),
+            genres: genres.iter().map(|g| g.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    struct GenreBackend;
+
+    impl Backend for GenreBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            vec![CatalogInfo {
+                key: "genre/movie/all".into(),
+                title: "All".into(),
+                type_: "movie".into(),
+                genres: Vec::new(),
+            }]
+        }
+        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+            Ok(vec![meta("Alpha", Some("8.0"), Some("2020-01-02"), &["Science Fiction"])])
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> { Vec::new() }
+        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> { None }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> { Vec::new() }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> { Vec::new() }
+    }
+
+    fn get(path: &str, query: &[(&str, &str)]) -> Request {
+        Request {
+            method: "GET".into(),
+            path: path.into(),
+            query: query.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parses_only_the_sorts_the_shim_advertises() {
+        assert_eq!(parse_catalog_sort(Some("titleSort")), Some((CatalogSort::Title, false)));
+        assert_eq!(parse_catalog_sort(Some("rating:desc")), Some((CatalogSort::Rating, true)));
+        assert_eq!(parse_catalog_sort(Some("releaseDate:desc")), Some((CatalogSort::ReleaseDate, true)));
+        assert_eq!(parse_catalog_sort(Some("year:asc")), Some((CatalogSort::ReleaseDate, false)));
+        assert_eq!(parse_catalog_sort(Some("popularity:desc")), Some((CatalogSort::Popularity, true)));
+        assert_eq!(parse_catalog_sort(Some("addedAt:desc")), None);
+        assert_eq!(parse_catalog_sort(None), None);
+    }
+
+    #[test]
+    fn compares_catalogs_by_the_advertised_keys() {
+        let a = meta("Alpha", Some("7.1"), Some("2001-01-01"), &["Action"]);
+        let b = meta("beta", Some("8.4"), Some("2020-01-01"), &["Drama"]);
+        assert_eq!(compare_catalog(&a, &b, CatalogSort::Title), CmpOrdering::Less);
+        assert_eq!(compare_catalog(&a, &b, CatalogSort::Rating), CmpOrdering::Less);
+        assert_eq!(compare_catalog(&a, &b, CatalogSort::ReleaseDate), CmpOrdering::Less);
+        assert_eq!(compare_catalog(&b, &a, CatalogSort::Rating), CmpOrdering::Greater);
+        // Popularity is the catalog's own order: never a re-sort.
+        assert_eq!(compare_catalog(&a, &b, CatalogSort::Popularity), CmpOrdering::Equal);
+        // Missing scores/dates sort last rather than pretending to be zero.
+        let missing = meta("Gamma", None, None, &[]);
+        assert_eq!(compare_catalog(&a, &missing, CatalogSort::Rating), CmpOrdering::Less);
+        assert_eq!(compare_catalog(&missing, &a, CatalogSort::ReleaseDate), CmpOrdering::Greater);
+    }
+
+    #[test]
+    fn genre_matching_folds_addon_and_tmdb_spellings() {
+        assert!(genre_matches("Sci-Fi", "Science Fiction"));
+        assert!(genre_matches("Science Fiction", "Sci-Fi"));
+        assert!(genre_matches("Action", "Action & Adventure"));
+        assert!(genre_matches("Fantasy", "Sci-Fi & Fantasy"));
+        assert!(!genre_matches("Comedy", "Action"));
+        assert!(!genre_matches("", "Action"));
+    }
+
+    #[test]
+    fn the_genre_menu_merges_the_tmdb_baseline_without_duplicates() {
+        let merged = merged_genres(&["Sci-Fi".into(), "Action".into()], false);
+        assert_eq!(merged[0], "Sci-Fi");
+        assert_eq!(merged.iter().filter(|g| genre_key(g) == genre_key("Science Fiction")).count(), 1);
+        assert!(merged.iter().any(|g| g == "Drama"));
+        let series = merged_genres(&[], true);
+        assert!(series.iter().any(|g| g == "Sci-Fi & Fantasy"));
+        let id = tag_id("Drama").to_string();
+        assert_eq!(resolve_genre(&merged, &id), "Drama");
+    }
+
+    #[test]
+    fn a_tmdb_content_id_is_split_from_its_episode_tail() {
+        assert_eq!(split_content_id("tmdb:1396:1:2"), ("tmdb:1396", ":1:2"));
+        assert_eq!(split_content_id("tt0944947:1:2"), ("tt0944947", ":1:2"));
+        assert_eq!(split_content_id("tmdb:603"), ("tmdb:603", ""));
+        assert_eq!(tmdb_content_number("tmdb:603"), Some(603));
+        assert_eq!(tmdb_content_number("tt603"), None);
+    }
+
+    /// The reported crash: a genre with spaces/`&`/`%`/non-ASCII (or a numeric tag id) must answer
+    /// a page, never take the shim down. This exercises the same handler the app calls.
+    #[test]
+    fn a_genre_with_spaces_and_specials_answers_a_page() {
+        let shim = Arc::new(Shim::new(Arc::new(GenreBackend), Config::default()));
+        for genre in ["Sci-Fi & Fantasy", "100%", "Café", &tag_id("Science Fiction").to_string(), "Science Fiction"] {
+            let response = shim.handle(&get("/library/sections/1/all", &[("genre", genre), ("catalog", "genre/movie/all")]));
+            assert_eq!(response.status, 200, "genre {genre:?} crashed the shim");
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            assert!(body["MediaContainer"]["Metadata"].is_array(), "genre {genre:?} answered no listing");
+        }
+        // A TMDB baseline genre and its numeric tag id both reach the one matching row.
+        for genre in ["Science Fiction", &tag_id("Science Fiction").to_string()] {
+            let response = shim.handle(&get("/library/sections/1/all", &[("genre", genre), ("catalog", "genre/movie/all")]));
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["MediaContainer"]["Metadata"][0]["title"], "Alpha", "{genre:?}");
+        }
+    }
+
+    #[test]
+    fn the_genre_directory_offers_the_tmdb_baseline() {
+        let shim = Arc::new(Shim::new(Arc::new(GenreBackend), Config::default()));
+        let response = shim.handle(&get("/library/sections/1/genre", &[("catalog", "genre/movie/all")]));
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        let names: Vec<&str> = body["MediaContainer"]["Directory"].as_array().unwrap()
+            .iter().filter_map(|row| row["title"].as_str()).collect();
+        assert!(names.contains(&"Science Fiction"), "{names:?}");
+        assert!(names.contains(&"Drama"), "{names:?}");
+    }
+
+    #[test]
+    fn an_addon_id_is_only_rewritten_when_it_is_a_tmdb_content_id() {
+        // No TMDB key in the unit environment: the id is passed through, never dropped.
+        let shim = Arc::new(Shim::new(Arc::new(GenreBackend), Config::default()));
+        assert_eq!(shim.addon_id_for("movie", "tt0133093"), "tt0133093");
+        assert_eq!(shim.addon_id_for("movie", "kitsu:42"), "kitsu:42");
+        // With a TMDB key the same id becomes an IMDb id; the episode tail survives either way.
+        let episode = shim.addon_id_for("series", "tmdb:1396:1:2");
+        assert!(episode == "tmdb:1396:1:2"
+            || (episode.starts_with("tt") && episode.ends_with(":1:2")), "{episode}");
+    }
 }
