@@ -721,21 +721,17 @@ pub(crate) fn start_p2p_service() {
         // closure written lexically inside one inherits its unsafe context, which makes the
         // `unsafe` blocks around the two libc calls redundant (`unused_unsafe`).
         let arm_pdeathsig = move || -> std::io::Result<()> {
-            if libc::getppid() != expected_ppid {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "parent died before PR_SET_PDEATHSIG was installed",
-                ));
+            // SAFETY: getppid is safe here
+            if unsafe { libc::getppid() } != expected_ppid {
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, "parent died"));
             }
-            let rc = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            if rc != 0 {
+            // SAFETY: prctl is safe here
+            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
         };
-        // SAFETY: the hook runs between fork and exec in the child, so it must be
-        // async-signal-safe: it only makes two libc calls, allocates nothing and logs
-        // nothing.
+        // SAFETY: pre_exec is unsafe
         unsafe {
             command.pre_exec(arm_pdeathsig);
         }
