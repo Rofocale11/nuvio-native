@@ -194,8 +194,9 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   (`nuvio: P2P server started with …`) or the exact spawn error. The spawn does not block the
   first frame.
 - **Stop.** `app::run::shutdown` calls `app::boot::stop_p2p_service`, which kills and reaps the
-  child before the process exits. Backgrounding does not reach `shutdown`; a hard crash can orphan
-  the child, because no `PR_SET_PDEATHSIG` is set.
+  child before the process exits. Backgrounding does not reach `shutdown`; a hard crash no longer
+  orphans the child, because `start_p2p_service` arms `PR_SET_PDEATHSIG(SIGTERM)` (with a
+  `getppid()` race guard) so the kernel delivers SIGTERM to `node` when this process dies.
 - **Address and switch.** The session preference `p2p_server_url` defaults to
   `http://127.0.0.1:11470` (`plx_plex::plex::session::DEFAULT_P2P_SERVER_URL`); an explicit value
   overrides it. The shim is told the address and the switch at boot and after every save. The

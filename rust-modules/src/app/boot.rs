@@ -710,6 +710,28 @@ pub(crate) fn start_p2p_service() {
         };
         let mut command = std::process::Command::new(node);
         command.arg(&server).current_dir(&js_dir);
+        // Bind the child's lifetime to ours: if this process dies (including a hard
+        // crash), the kernel delivers SIGTERM to node so it cannot orphan and hold
+        // the TV's RAM. The getppid() check closes the fork/exec race where the
+        // parent dies before prctl is installed -- in that case spawn() fails
+        // instead of arming the wrong (reaper) parent.
+        let expected_ppid: libc::pid_t = std::process::id() as libc::pid_t;
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(move || {
+                if unsafe { libc::getppid() } != expected_ppid {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "parent died before PR_SET_PDEATHSIG was installed",
+                    ));
+                }
+                let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let open_log =
             || std::fs::OpenOptions::new().create(true).append(true).open("/tmp/nuvio-p2p.log");
         match (open_log(), open_log()) {
