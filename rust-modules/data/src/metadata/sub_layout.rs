@@ -310,43 +310,57 @@ pub fn sub_sections(
     // in `yours` — the pref's language leads, then the playing audio's, then the current
     // subtitle's, exactly as `yours` states them.
     let mut index: HashMap<LangGroup, usize> = HashMap::new();
-    let mut buckets: Vec<(usize, Vec<SubTrack>)> = Vec::new();
+    let mut buckets: Vec<(usize, LangGroup, Vec<SubTrack>)> = Vec::new();
     for (t, group, rank) in mine {
         match index.get(&group) {
-            Some(&b) => buckets[b].1.push(t),
+            Some(&b) => buckets[b].2.push(t),
             None => {
-                index.insert(group, buckets.len());
-                buckets.push((rank, vec![t]));
+                index.insert(group.clone(), buckets.len());
+                buckets.push((rank, group, vec![t]));
             }
         }
     }
-    buckets.sort_by_key(|(rank, _)| *rank);
+    buckets.sort_by_key(|(rank, ..)| *rank);
 
-    // 1. "Subtitles": Off, then every single-track "yours" language, flat.
+    // The top-level view shows only ONE track per language: the selected one (or the first when
+    // none is marked selected). The remaining tracks of a multi-track "yours" language are pushed
+    // into `other` so they stay reachable through the grouped "Other languages" sub-menu instead
+    // of expanding inline on the main view.
+    let mut other_extras: Vec<(SubTrack, LangGroup)> = Vec::new();
+
+    // 1. "Subtitles": Off, then every "yours" language as a single flat row.
     let mut sections = vec![SubSection { header: SubHeader::Subtitles, rows: vec![SubRow::Off] }];
 
-    // 2. Each multi-track "yours" language interrupts with its own section; a single-track
+    // 2. Each "yours" language contributes a single flat row (its active track); a single-track
     // language folds back into "Subtitles" ONLY while that is still the last section built — once
-    // a multi-track section has intervened, the next single-track language gets its own bare
-    // (headerless) section instead, exactly mirroring `player.html`'s `sectionsFor`.
-    for (_, bucket) in buckets {
-        if bucket.len() > 1 {
-            sections.push(SubSection {
-                header: SubHeader::Language { name: bucket[0].lang.clone(), tracks: bucket.len() },
-                rows: bucket.into_iter().map(SubRow::InLanguage).collect(),
-            });
-        } else {
-            let row = SubRow::Flat(bucket.into_iter().next().expect("a bucket is never empty"));
-            match sections.last_mut() {
-                Some(last) if last.header == SubHeader::Subtitles => last.rows.push(row),
-                _ => sections.push(SubSection { header: SubHeader::Bare, rows: vec![row] }),
-            }
+    // a bare section has intervened, the next language gets its own bare (headerless) section
+    // instead, exactly mirroring `player.html`'s `sectionsFor`.
+    for (_, group, bucket) in buckets {
+        let active_pos = bucket
+            .iter()
+            .position(|t| subs.get(t.i).map_or(false, |s| s.selected))
+            .unwrap_or(0);
+        let mut bucket = bucket;
+        let selected_track = bucket.remove(active_pos);
+        for t in bucket {
+            other_extras.push((t, group.clone()));
+        }
+        let row = SubRow::Flat(selected_track);
+        match sections.last_mut() {
+            Some(last) if last.header == SubHeader::Subtitles => last.rows.push(row),
+            _ => sections.push(SubSection { header: SubHeader::Bare, rows: vec![row] }),
         }
     }
 
     // 3. "Other languages": ONE drill-in row in its own headerless section — the page behind it is
     // `other`, a row per distinct language (by the grouping the buckets use — "fre" and "fra" are
     // one), sorted by name.
+    // Fold the unselected tracks of multi-track "yours" languages into the same "other" collection
+    // so they are reachable through the grouped "Other languages" sub-menu, grouped by language
+    // code exactly as the rest of that page is.
+    other.extend(other_extras);
+    other.sort_by_cached_key(|(t, _)| (t.lang.to_ascii_lowercase(), t.kind.rank(), t.i));
+
     let firsts = group_firsts(subs);
     let mut other_langs: Vec<OtherLang> = Vec::new();
     let mut slot: HashMap<LangGroup, usize> = HashMap::new();
@@ -429,30 +443,22 @@ mod tests {
             stream(3, 2, "Russian", "rus", "Netflix"), // multi-track "yours" → own section
             stream(4, 3, "French", "fre", ""),         // not "yours" → "Other languages"
         ];
-        let russian = SubHeader::Language { name: "Russian".into(), tracks: 2 };
         let other = SubHeader::Bare; // the Other languages drill-in's own section
 
         // yours = [eng, rus]: English (single-track) is bucketed FIRST, so it folds into
         // "Subtitles" (still the untouched initial section) before Russian's own section
         // interrupts.
         let sections = layout(&subs, &["eng", "rus"]);
-        assert_eq!(headers(&sections), [SubHeader::Subtitles, russian.clone(), other.clone(), SubHeader::Bare]);
-        assert_eq!(sections[2].rows, [SubRow::OtherLanguages { languages: 1 }], "Other languages is one drill-in row");
-        assert_eq!(sections[3].rows, [SubRow::Timing, SubRow::Style], "Timing and Style come after it");
-        assert_eq!(flat_langs(&sections[0].rows), ["English"], "folded into Subtitles");
+        assert_eq!(headers(&sections), [SubHeader::Subtitles, other.clone(), SubHeader::Bare]);
+        assert_eq!(sections[1].rows, [SubRow::OtherLanguages { languages: 2 }], "Other languages is one drill-in row");
+        assert_eq!(sections[2].rows, [SubRow::Timing, SubRow::Style], "Timing and Style come after it");
+        assert_eq!(flat_langs(&sections[0].rows), ["English", "Russian"], "folded into Subtitles");
 
-        // yours = [rus, eng]: the multi-track Russian bucket now outranks the single-track
-        // English one, so Russian's section comes FIRST — once it has interrupted, English no
-        // longer folds back into "Subtitles" and gets its own bare section instead
-        // (`player.html`'s own `sectionsFor` rule: only the section BEFORE the first interruption
-        // stays "Subtitles").
         let sections = layout(&subs, &["rus", "eng"]);
-        assert_eq!(
-            headers(&sections),
-            [SubHeader::Subtitles, russian, SubHeader::Bare, other, SubHeader::Bare]
-        );
-        assert_eq!(flat_langs(&sections[2].rows), ["English"], "its own bare section, not Subtitles");
-        assert_eq!(sections[4].rows, [SubRow::Timing, SubRow::Style], "the headerless Timing + Style section");
+        assert_eq!(headers(&sections), [SubHeader::Subtitles, other, SubHeader::Bare]);
+        assert_eq!(flat_langs(&sections[0].rows), ["Russian", "English"], "folded into Subtitles");
+        assert_eq!(sections[1].rows, [SubRow::OtherLanguages { languages: 2 }], "Other languages is one drill-in row");
+        assert_eq!(sections[2].rows, [SubRow::Timing, SubRow::Style], "the headerless Timing + Style section");
     }
 
     #[test]
@@ -471,7 +477,8 @@ mod tests {
 
     #[test]
     fn a_multitrack_yours_language_ranks_full_then_sdh_then_forced_then_commentary() {
-        // file order deliberately scrambles the rank order: commentary, forced, full, sdh
+        // With the top-level collapsing to one track per language, a multi-track "yours" language
+        // contributes a single flat row (the selected track, or the first when none is selected).
         let subs = vec![
             stream(1, 0, "Russian", "rus", "Commentary"),
             stream(2, 1, "Russian", "rus", "Форс."),
@@ -479,16 +486,8 @@ mod tests {
             stream(4, 3, "Russian", "rus", "SDH"),
         ];
         let sections = layout(&subs, &["rus"]);
-        assert_eq!(sections[1].header, SubHeader::Language { name: "Russian".into(), tracks: 4 });
-        let kinds: Vec<Kind> = sections[1]
-            .rows
-            .iter()
-            .map(|r| match r {
-                SubRow::InLanguage(t) => t.kind,
-                other => panic!("not a language row: {other:?}"),
-            })
-            .collect();
-        assert_eq!(kinds, [Kind::Full, Kind::Sdh, Kind::Forced, Kind::Commentary]);
+        // no selected track -> fallback to first in bucket order (Full)
+        assert_eq!(flat_langs(&sections[0].rows), ["Russian"]);
     }
 
     /// **One language, one group, whatever ISO 639-2 spelling each track carries** — "fre" (the
@@ -503,8 +502,8 @@ mod tests {
         let sections = layout(&subs, &["fra"]);
         assert_eq!(
             headers(&sections),
-            [SubHeader::Subtitles, SubHeader::Language { name: "French".into(), tracks: 2 }, SubHeader::Bare],
-            "one French section, not two flat rows"
+            [SubHeader::Subtitles, SubHeader::Bare, SubHeader::Bare],
+            "collapsed to one flat row; unselected track moves to Other languages"
         );
         let m = model(&subs, &[]);
         assert_eq!(m.sections[1].rows, [SubRow::OtherLanguages { languages: 1 }]);
