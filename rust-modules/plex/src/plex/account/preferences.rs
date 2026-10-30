@@ -205,8 +205,7 @@ fn accepted(response: plx_net::net::Resp) -> Result<plx_net::net::Resp, Preferen
 
 /// Read the shim's on-disk `preferences` object. Returns None on any miss.
 /// The shim writes this file on PUT; cold-boot GET used to hit real plex.tv and 401.
-fn read_prefs_from_file() -> Option<AudioPreferences> {
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+fn read_prefs_from_file() -> Option<AudioPreferences> {    let mut paths: Vec<std::path::PathBuf> = Vec::new();
     if let Some(p) = plx_base::local_server::session_file() {
         paths.push(p.to_path_buf());
     }
@@ -238,6 +237,14 @@ fn read_prefs_from_file() -> Option<AudioPreferences> {
         }
     }
     None
+}
+
+/// **The local account surface's preferences, with no HTTP and no cache.** This is what a Nuvio
+/// profile reads: the shim's `nuvio-session.json` is the source of truth, the Settings screen is
+/// its editor, and the playback route must not depend on the shim's `/api/v2/user` (which carries
+/// no `profile` block). One small file read, on the path that decides a play.
+pub fn local_preferences() -> Option<AudioPreferences> {
+    read_prefs_from_file()
 }
 
 fn finish<C: Fn() -> bool>(cache: &AudioPreferencesCache, flight: AudioPreferencesFlight,

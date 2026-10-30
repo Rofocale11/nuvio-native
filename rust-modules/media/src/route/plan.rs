@@ -1598,6 +1598,29 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
                     }
                 }
             }
+            None if user.uuid.starts_with("nuvio-profile-") => {
+                // A Nuvio profile has no plex.tv credential, and the shim's `/api/v2/user` carries
+                // no `profile` block, so the HTTP account read would answer defaults. Its
+                // preferences ARE the shim's file: read that directly, off the playback path's
+                // network, and let the same value the Settings screen edits decide the pick.
+                match plx_plex::plex::account::local_preferences() {
+                    Some(prefs) => {
+                        account_subtitles = Some((
+                            prefs.subtitle_language.clone(),
+                            prefs.subtitle_mode,
+                            prefs.subtitle_forced,
+                        ));
+                        match prefs.language {
+                            Some(language) => AccountAudioLanguage::Set(language),
+                            None => AccountAudioLanguage::NotSet {
+                                auto_select_audio: prefs.auto_select_audio,
+                                stated_language: prefs.stated_language,
+                            },
+                        }
+                    }
+                    None => AccountAudioLanguage::NoCredential,
+                }
+            }
             None => AccountAudioLanguage::NoCredential,
         },
         None => AccountAudioLanguage::NoCredential,

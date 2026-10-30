@@ -30,7 +30,7 @@ use super::models::{de_bool, de_i64, de_str, de_vec};
 
 mod preferences;
 #[allow(unused_imports)]
-pub use preferences::{PreferenceError, PreferenceRequest, PreferenceSnapshot, PreferenceUpdate};
+pub use preferences::{local_preferences, PreferenceError, PreferenceRequest, PreferenceSnapshot, PreferenceUpdate};
 
 const PLEX_TV: &str = "https://plex.tv";
 
