@@ -207,7 +207,7 @@ fn accepted(response: plx_net::net::Resp) -> Result<plx_net::net::Resp, Preferen
 /// The shim writes this file on PUT; cold-boot GET used to hit real plex.tv and 401.
 fn read_prefs_from_file() -> Option<AudioPreferences> {    let mut paths: Vec<std::path::PathBuf> = Vec::new();
     if let Some(p) = plx_base::local_server::session_file() {
-        paths.push(p.to_path_buf());
+        paths.push(p);
     }
 
     for path in paths {

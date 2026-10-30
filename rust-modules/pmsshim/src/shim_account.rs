@@ -96,8 +96,9 @@ impl Account {
         }
     }
 
-    /// Path to this account's on-disk session file, if any. Used by the app to
-    /// register the path with `plx_base::local_server` after `Account::new`.
+    /// Path to this account's on-disk session file, if any. The app registers it with
+    /// `plx_base::local_server` *before* starting the shim, so the route and the Settings screen
+    /// can read preferences from the first frame.
     pub fn session_file(&self) -> Option<&std::path::Path> {
         self.file.as_deref()
     }
