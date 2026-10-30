@@ -376,9 +376,12 @@ impl Account {
                     }
                 }
                 let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let (Some(s), Some(file)) = (session.as_ref(), &self.file) {
+                // Persist the preference change even when no Nuvio session is signed in:
+                // local/unauthenticated installs still need their audio/subtitle language to
+                // survive a reboot. Mirrors set_addon_enabled, which writes regardless of session.
+                if let Some(file) = &self.file {
                     let profile = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone();
-                    save_session_file(file, Some(s), profile.as_deref(), &prefs);
+                    save_session_file(file, session.as_ref(), profile.as_deref(), &prefs);
                 }
                 Response::json(&json!({}))
             }
@@ -489,6 +492,28 @@ mod tests {
     fn qr_is_a_png() {
         let png = super::qr_png("https://example.invalid/tv?code=ABCD").unwrap();
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    #[test]
+    fn user_profile_put_persists_prefs_without_session() {
+        let dir = std::env::temp_dir().join(format!("nuvio-prefs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let account = super::Account::new(Some(&dir), "tok");
+        let req = crate::shim_http::Request {
+            method: "PUT".into(),
+            path: "/api/v2/user/profile".into(),
+            query: [("defaultAudioLanguage".to_string(), "fr".to_string())].into_iter().collect(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        };
+        // segs passed via handle path; call user_profile directly through handle dispatch.
+        let _ = account.handle(&req, &["user", "profile"]);
+        let file = dir.join("nuvio-session.json");
+        let bytes = std::fs::read(&file).expect("session file should be written");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["preferences"]["defaultAudioLanguage"], "fr");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

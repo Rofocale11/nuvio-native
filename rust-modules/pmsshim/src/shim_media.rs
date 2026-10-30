@@ -122,10 +122,15 @@ pub struct SubRef {
 /// to their 639-1 form (`ger`→`de`, `fre`→`fr`, …). Every other track is cleared, so a preference
 /// changed between plays cannot leave two selected.
 pub fn mark_preferred_subtitle(subs: &mut [SubRef], pref: Option<&str>) {
-    let want = lang_key(pref.unwrap_or("en"));
-    let hit = subs
-        .iter()
-        .position(|s| !want.is_empty() && lang_key(&s.lang) == want);
+    let hit = if let Some(p) = pref {
+        let want = lang_key(p);
+        subs.iter().position(|s| !want.is_empty() && lang_key(&s.lang) == want)
+    } else if !subs.is_empty() {
+        // No account language: grab the first sidecar and force it selected.
+        Some(0)
+    } else {
+        None
+    };
     for (i, s) in subs.iter_mut().enumerate() {
         s.selected = hit == Some(i);
     }
@@ -143,6 +148,10 @@ fn lang_key(lang: &str) -> String {
     ];
     let s = lang.trim().to_ascii_lowercase();
     let code = s.split(['-', '_', ' ']).next().unwrap_or("");
+    // Indonesian: addons label it "id", "ind" or "Indonesian"; fold all to "id".
+    if code == "ind" || code == "indonesian" {
+        return "id".to_string();
+    }
     match ALIAS.iter().find(|(from, _)| *from == code) {
         Some((_, to)) => (*to).to_string(),
         None => code.chars().take(2).collect(),
@@ -305,9 +314,9 @@ mod tests {
         ];
         mark_preferred_subtitle(&mut subs, Some("de"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, true]);
-        // No preference at all: English, as before the preference existed.
+        // No preference at all: the first sidecar is forced on.
         mark_preferred_subtitle(&mut subs, None);
-        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true, false]);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false, false]);
         // No match: nothing is claimed, so the file's own order stands.
         mark_preferred_subtitle(&mut subs, Some("pt-BR"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, false]);
