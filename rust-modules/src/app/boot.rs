@@ -721,16 +721,13 @@ pub(crate) fn start_p2p_service() {
         // closure written lexically inside one inherits its unsafe context, which makes the
         // `unsafe` blocks around the two libc calls redundant (`unused_unsafe`).
         let arm_pdeathsig = move || -> std::io::Result<()> {
-            // SAFETY: getppid takes no arguments, cannot fail and touches no memory.
-            if unsafe { libc::getppid() } != expected_ppid {
+            if libc::getppid() != expected_ppid {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "parent died before PR_SET_PDEATHSIG was installed",
                 ));
             }
-            // SAFETY: PR_SET_PDEATHSIG takes one unsigned long argument (the signal
-            // number); SIGTERM is valid for this process and no pointer is passed.
-            let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+            let rc = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
             if rc != 0 {
                 return Err(std::io::Error::last_os_error());
             }
