@@ -19,7 +19,7 @@ use crate::shim_http::{Request, Response};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Receives a profile's addon set when the user picks it in the who's-watching picker. The app
@@ -39,6 +39,8 @@ pub struct Account {
     /// The selected profile and library cache share a lock: profile switches cannot race a write.
     library: Arc<Mutex<LibraryContext>>,
     prefs: Arc<Mutex<serde_json::Map<String, Value>>>,
+    /// Serializes every write of `nuvio-session.json` (see [`Account::write_prefs`]).
+    write_lock: Arc<Mutex<()>>,
     next_pin: AtomicI64,
     sink: Mutex<Option<AddonSink>>,
     watch_sink: Mutex<Option<WatchSink>>,
@@ -85,6 +87,7 @@ impl Account {
             pins: Mutex::new(HashMap::new()),
             library: Arc::new(Mutex::new(LibraryContext { profile, ..Default::default() })),
             prefs: Arc::new(Mutex::new(prefs)),
+            write_lock: Arc::new(Mutex::new(())),
             next_pin: AtomicI64::new(1_000_001),
             sink: Mutex::new(None),
             watch_sink: Mutex::new(None),
@@ -97,6 +100,19 @@ impl Account {
     /// register the path with `plx_base::local_server` after `Account::new`.
     pub fn session_file(&self) -> Option<&std::path::Path> {
         self.file.as_deref()
+    }
+
+    /// **The only path that writes `nuvio-session.json`.** One lock, one fresh snapshot, one
+    /// rename: serializing here is what stops a boot-time `load_profile` from overwriting a
+    /// preference saved a moment later, and stops two writers sharing (and interleaving) one
+    /// temp file. A failed write is returned, never swallowed.
+    fn write_prefs(&self) -> std::io::Result<()> {
+        let Some(file) = &self.file else { return Ok(()) };
+        let _writing = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let profile = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone();
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        save_session_file(file, session.as_ref(), profile.as_deref(), &prefs)
     }
 
     pub fn set_sink(&self, sink: AddonSink) {
@@ -138,29 +154,26 @@ impl Account {
 
     /// Persist a local enable/disable override for an addon into `nuvio-session.json`.
     pub fn set_addon_enabled(&self, key: &str, enabled: bool) {
-        let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let profile = if session.is_some() {
-            self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone()
-        } else {
-            None
-        };
-        let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
-        let map = prefs.entry("addonEnabled".to_string()).or_insert_with(|| Value::Object(serde_json::Map::new()));
-        if let Value::Object(m) = map {
-            m.insert(key.to_string(), Value::Bool(enabled));
+        {
+            let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+            let map = prefs.entry("addonEnabled".to_string()).or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(m) = map {
+                m.insert(key.to_string(), Value::Bool(enabled));
+            }
         }
-        let prefs_clone = prefs.clone();
-        drop(prefs);
-        if let Some(f) = &self.file {
-            save_session_file(f, session.as_ref(), profile.as_deref(), &prefs_clone);
+        if let Err(e) = self.write_prefs() {
+            log_prefs_error(&e);
         }
     }
 
     fn save(&self, s: Option<&plx_stremio::nuvio::Session>) {
-        let Some(f) = &self.file else { return };
+        let Some(file) = &self.file else { return };
+        let _writing = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let profile = if s.is_some() { self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() } else { None };
         let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        save_session_file(f, s, profile.as_deref(), &prefs);
+        if let Err(e) = save_session_file(file, s, profile.as_deref(), &prefs) {
+            log_prefs_error(&e);
+        }
     }
 
     /// The stored session, refreshed when it is near expiry.
@@ -179,13 +192,20 @@ impl Account {
     }
 
     pub fn sign_out(&self) {
-        let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
-        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if let Some(file) = &self.file { save_session_file(file, None, None, &serde_json::Map::new()); }
-        *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
-        context.generation = context.generation.wrapping_add(1);
-        context.profile = None;
-        context.cached = None;
+        {
+            let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
+            *self.session.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+            context.generation = context.generation.wrapping_add(1);
+            context.profile = None;
+            context.cached = None;
+        }
+        // Signing out WIPES the install's preferences with the session: the next sign-in pulls the
+        // account's own settings, and local leftovers would only disagree with them. With no
+        // session and no preferences the write removes the file.
+        if let Err(e) = self.write_prefs() {
+            log_prefs_error(&e);
+        }
     }
 
     /// Read the active account's saved library; failures remain failures, never an empty success.
@@ -362,28 +382,28 @@ impl Account {
                 }))
             }
             "PUT" => {
-                let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
-                for (k, v) in req.query.iter() {
-                    match k.as_str() {
-                        "autoSelectAudio" => { prefs.insert(k.clone(), Value::Bool(v.as_str() == "true")); }
-                        "autoSelectSubtitle" | "defaultSubtitleForced" => {
-                            if let Ok(n) = v.parse::<i64>() { prefs.insert(k.clone(), json!(n)); }
+                {
+                    let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                    for (k, v) in req.query.iter() {
+                        match k.as_str() {
+                            "autoSelectAudio" => { prefs.insert(k.clone(), Value::Bool(v.as_str() == "true")); }
+                            "autoSelectSubtitle" | "defaultSubtitleForced" => {
+                                if let Ok(n) = v.parse::<i64>() { prefs.insert(k.clone(), json!(n)); }
+                            }
+                            "defaultAudioLanguage" | "defaultSubtitleLanguage" => {
+                                prefs.insert(k.clone(), Value::String(v.trim().to_string()));
+                            }
+                            _ => {}
                         }
-                        "defaultAudioLanguage" | "defaultSubtitleLanguage" => {
-                            prefs.insert(k.clone(), Value::String(v.clone()));
-                        }
-                        _ => {}
                     }
                 }
-                let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                // Persist the preference change even when no Nuvio session is signed in:
-                // local/unauthenticated installs still need their audio/subtitle language to
-                // survive a reboot. Mirrors set_addon_enabled, which writes regardless of session.
-                if let Some(file) = &self.file {
-                    let profile = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone();
-                    save_session_file(file, session.as_ref(), profile.as_deref(), &prefs);
+                match self.write_prefs() {
+                    Ok(()) => Response::json(&json!({})),
+                    Err(e) => {
+                        log_prefs_error(&e);
+                        Response::json_status(500, &json!({"error": "preferences not saved"}))
+                    }
                 }
-                Response::json(&json!({}))
             }
             _ => Response::json_status(405, &json!({"error": "method not allowed"})),
         }
@@ -423,6 +443,7 @@ impl Account {
         let library = self.library.clone();
         let file = self.file.clone();
         let prefs = self.prefs.clone();
+        let write_lock = Arc::clone(&self.write_lock);
         // Mark unresolved immediately, so no request can retain the previous profile's library.
         let generation = {
             let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
@@ -436,7 +457,15 @@ impl Account {
             let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
             if context.generation != generation { return; }
             context.profile = Some(pid.clone());
-            if let Some(file) = file { let p = prefs.lock().unwrap_or_else(|e| e.into_inner()).clone(); save_session_file(&file, Some(&session), Some(&pid), &p); }
+            if let Some(file) = file {
+                // Same write lock as `write_prefs`: a preference saved while the profile resolves
+                // must not be overwritten by a snapshot taken before it.
+                let _writing = write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let p = prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Err(e) = save_session_file(&file, Some(&session), Some(&pid), &p) {
+                    log_prefs_error(&e);
+                }
+            }
             // The sink's merge path pulls the account's resume points, which wants `library`:
             // drop the guard first or the two deadlock.
             drop(context);
@@ -488,17 +517,33 @@ pub fn qr_png(text: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A directory of this test's own: the process id alone is shared by every test in the
+    /// binary, so two preference tests would write the same `nuvio-session.json`.
+    fn temp_dir() -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "nuvio-prefs-test-{}-{nanos}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        dir
+    }
+
     #[test]
     fn qr_is_a_png() {
-        let png = super::qr_png("https://example.invalid/tv?code=ABCD").unwrap();
-        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+        assert!(super::qr_png("https://example.invalid/tv?code=ABCD").unwrap().starts_with(&[0x89, b'P', b'N', b'G']));
     }
 
     #[test]
     fn user_profile_put_persists_prefs_without_session() {
-        let dir = std::env::temp_dir().join(format!("nuvio-prefs-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir();
         let account = super::Account::new(Some(&dir), "tok");
         let req = crate::shim_http::Request {
             method: "PUT".into(),
@@ -515,6 +560,22 @@ mod tests {
         assert_eq!(v["preferences"]["defaultAudioLanguage"], "fr");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Signing out WIPES the install's preferences with the session: the next sign-in pulls the
+    /// account's settings, and a leftover local language would only disagree with them.
+    #[test]
+    fn signing_out_removes_the_session_file_and_its_preferences() {
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        account.set_addon_enabled("https://addon.example/manifest.json", false);
+        assert!(dir.join("nuvio-session.json").exists(), "the write must land first");
+        account.sign_out();
+        assert!(
+            !dir.join("nuvio-session.json").exists(),
+            "a signed-out install keeps no preferences"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
@@ -529,28 +590,51 @@ fn save_session_file(
     session: Option<&plx_stremio::nuvio::Session>,
     profile: Option<&str>,
     prefs: &serde_json::Map<String, Value>,
-) {
+) -> std::io::Result<()> {
     match session {
         Some(session) => {
             let mut value = session_to_json(session);
-            value["profile_id"] = json!(profile);
+            // A preferences PUT can land before `load_profile` resolved the active profile.
+            // Never write `null` over the id already on disk: the next boot would reset the
+            // account to profile 1 after nothing but a language change.
+            let stored_profile = profile.map(str::to_string).or_else(|| {
+                std::fs::read(file).ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                    .and_then(|v| v.get("profile_id").and_then(Value::as_str).map(str::to_string))
+            });
+            value["profile_id"] = json!(stored_profile);
             value["preferences"] = Value::Object(prefs.clone());
-            let tmp = file.with_extension("json.tmp");
-            if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() {
-                let _ = std::fs::rename(&tmp, file);
-            }
+            write_atomic(file, &value)
         }
+        None if prefs.is_empty() => match std::fs::remove_file(file) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        },
         None => {
-            if prefs.is_empty() {
-                let _ = std::fs::remove_file(file);
-            } else {
-                let mut value = serde_json::Map::new();
-                value.insert("preferences".to_string(), Value::Object(prefs.clone()));
-                let tmp = file.with_extension("json.tmp");
-                if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() {
-                    let _ = std::fs::rename(&tmp, file);
-                }
-            }
+            let mut value = serde_json::Map::new();
+            value.insert("preferences".to_string(), Value::Object(prefs.clone()));
+            write_atomic(file, &Value::Object(value))
         }
     }
+}
+
+/// Write `value` to a process-unique sibling and rename it into place: readers see the old file or
+/// the new one, never a half-written one, and two writers cannot share (and interleave) a temp path.
+fn write_atomic(file: &std::path::Path, value: &Value) -> std::io::Result<()> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = file.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".tmp.{}.{n}", std::process::id()));
+    let tmp = file.with_file_name(name);
+    std::fs::write(&tmp, serde_json::to_vec(value).unwrap_or_default())?;
+    if let Err(e) = std::fs::rename(&tmp, file) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn log_prefs_error(e: &std::io::Error) {
+    plx_stremio::nuvio::log_account_event(&format!("nuvio account: preferences not persisted: {e}"));
 }
