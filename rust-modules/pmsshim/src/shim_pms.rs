@@ -167,14 +167,11 @@ fn genre_matches(candidate: &str, wanted: &str) -> bool {
 }
 
 fn catalog_rating_of(meta: &MetaPreview) -> Option<f64> {
+    let parse = |v: &str| v.trim().parse::<f64>().ok().filter(|n| n.is_finite());
     meta.imdb_rating
         .as_deref()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .or_else(|| {
-            meta.rotten_tomatoes_rating
-                .as_deref()
-                .and_then(|v| v.trim().parse::<f64>().ok())
-        })
+        .and_then(parse)
+        .or_else(|| meta.rotten_tomatoes_rating.as_deref().and_then(parse))
 }
 
 fn catalog_year_of(meta: &MetaPreview) -> Option<i32> {
@@ -189,7 +186,7 @@ fn compare_catalog(a: &MetaPreview, b: &MetaPreview, sort: CatalogSort) -> CmpOr
         CatalogSort::Popularity => CmpOrdering::Equal,
         CatalogSort::Title => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         CatalogSort::Rating => match (catalog_rating_of(a), catalog_rating_of(b)) {
-            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(CmpOrdering::Equal),
+            (Some(x), Some(y)) => x.total_cmp(&y),
             (Some(_), None) => CmpOrdering::Less,
             (None, Some(_)) => CmpOrdering::Greater,
             (None, None) => CmpOrdering::Equal,
@@ -206,6 +203,9 @@ fn compare_catalog(a: &MetaPreview, b: &MetaPreview, sort: CatalogSort) -> CmpOr
 /// The comparable release date (`YYYY-MM-DD`, else the year) as a string; missing dates sort last.
 fn catalog_date_of(meta: &MetaPreview) -> Option<String> {
     let text = meta.release_info.as_deref()?.trim();
+    if text.is_empty() {
+        return None;
+    }
     if let Some(date) = text.get(..10) {
         if date.as_bytes().get(4) == Some(&b'-') && date.as_bytes().get(7) == Some(&b'-') {
             return Some(date.to_string());
@@ -1577,8 +1577,15 @@ impl Shim {
         }
         let mut ordered: Vec<&MetaPreview> = c.rows.iter().collect();
         if let Some((sort, desc)) = sort.filter(|(kind, _)| *kind != CatalogSort::Popularity) {
-            ordered.sort_by(|a, b| compare_catalog(a, b, sort));
-            if desc {
+            // Sorting must never take the shim down: a non-total comparator (bad data) is
+            // caught here and the catalog keeps its original order instead.
+            let sort_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ordered.sort_by(|a, b| compare_catalog(a, b, sort));
+            }));
+            if sort_result.is_err() {
+                ordered = c.rows.iter().collect();
+            }
+            if desc && sort_result.is_ok() {
                 ordered.reverse();
             }
         }
