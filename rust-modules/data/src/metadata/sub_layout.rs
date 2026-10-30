@@ -289,6 +289,7 @@ pub fn sub_sections(
     names: &super::track_names::TrackNames,
     yours: &[String],
     show_timing: bool,
+    active_sub: Option<usize>,
 ) -> SubModel {
     // Each "yours" entry's canonical language, once: a track is "yours" when its own key is one
     // of these, and a "yours" language ranks by the first position that names it.
@@ -336,9 +337,9 @@ pub fn sub_sections(
     // a bare section has intervened, the next language gets its own bare (headerless) section
     // instead, exactly mirroring `player.html`'s `sectionsFor`.
     for (_, group, bucket) in buckets {
-        let active_pos = bucket
-            .iter()
-            .position(|t| subs.get(t.i).map_or(false, |s| s.selected))
+        let active_pos = active_sub
+            .and_then(|a| bucket.iter().position(|t| t.i == a))
+            .or_else(|| bucket.iter().position(|t| subs.get(t.i).map_or(false, |s| s.selected)))
             .unwrap_or(0);
         let mut bucket = bucket;
         let selected_track = bucket.remove(active_pos);
@@ -415,7 +416,7 @@ mod tests {
 
     fn model(subs: &[Stream], codes: &[&str]) -> SubModel {
         let offered: Vec<usize> = (0..subs.len()).collect();
-        sub_sections(subs, &offered, &TrackNames::new(), &yours(codes), true)
+        sub_sections(subs, &offered, &TrackNames::new(), &yours(codes), true, None)
     }
 
     fn layout(subs: &[Stream], codes: &[&str]) -> Vec<SubSection> {
@@ -549,8 +550,8 @@ mod tests {
             stream(3, 2, "French", "fra", "SDH"),
         ];
         let names = TrackNames::new();
-        let all = sub_sections(&subs, &[0, 1, 2], &names, &[], true);
-        let part = sub_sections(&subs, &[1, 2], &names, &[], true);
+        let all = sub_sections(&subs, &[0, 1, 2], &names, &[], true, None);
+        let part = sub_sections(&subs, &[1, 2], &names, &[], true, None);
         assert_eq!(all.other.iter().find(|o| o.name == "French").unwrap().id.stream, 1);
         let french = part.other.iter().find(|o| o.name == "French").unwrap();
         assert_eq!((french.id.stream, french.tracks.len()), (1, 1), "the member that gave the key is not offered");

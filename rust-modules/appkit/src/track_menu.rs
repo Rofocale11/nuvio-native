@@ -1761,7 +1761,7 @@ impl TrackMenuState {
         let subs: &[metadata::Stream] = tracks(meta).map(|t| t.subs.as_slice()).unwrap_or(&[]);
         let offered = visible_subs(ps, meta);
         let names = plx_media::player::SHARED.track_names.lock().unwrap();
-        sub_layout::sub_sections(subs, &offered, &names, &self.yours, show_timing)
+        sub_layout::sub_sections(subs, &offered, &names, &self.yours, show_timing, if self.active_sub >= 0 { Some(self.active_sub as usize) } else { None })
     }
 
     /// The [`TrackRow::Boost`]/[`TrackRow::Loudness`] pair's three inputs, read fresh
@@ -2391,7 +2391,7 @@ mod tests {
         offset_ms: i64,
     ) -> (Vec<Section>, Vec<Option<TrackRow>>) {
         let yours: Vec<String> = yours.iter().map(|y| y.to_string()).collect();
-        let model = sub_layout::sub_sections(subs, offered, names, &yours, show_timing);
+        let model = sub_layout::sub_sections(subs, offered, names, &yours, show_timing, (active_sub >= 0).then(|| active_sub as usize));
         let mut built = FormTable::new(plx_ui::table_screen::BAND_BASE);
         built.set(table_form(&model, active_sub, offset_ms, None), None);
         let ids = (0..built.table.n_rows() as usize).map(|i| built.id_at(i).copied()).collect();
