@@ -46,7 +46,12 @@ design detail.
   a webOS service (node child spawned from `js-service/`).
 - Buffer tuning for low-RAM TVs (50 MB video / 4 MB audio; later 15/2), skip disk cache when
   caching disabled.
-- Subtitle language preference respected; audio/subtitle preferences persist across cold boot.
+- Subtitle and audio preferences: `defaultAudioLanguage`, `defaultSubtitleLanguage`,
+  `autoSelectSubtitle` and `defaultSubtitleForced` are written to `nuvio-session.json` whether or
+  not a Nuvio session is signed in, through one atomic writer; they survive a cold boot and are
+  wiped on sign-out. Playback reads that same file — for a Nuvio profile it is the only account
+  surface — so the first launch of the day starts on the saved language without a network round
+  trip.
 
 ## TMDB enrichment & discovery
 

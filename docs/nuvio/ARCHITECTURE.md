@@ -107,6 +107,15 @@ see "The P2P streaming server" below.
   URL) is stored under `preferences.addonEnabled` in `nuvio-session.json` and applied on top of the
   account's own `enabled` flag whenever a profile's addons are loaded; the running `AddonBackend`
   is swapped and its caches cleared so disabled addons disappear immediately.
+- **Account preferences live in one file, with one writer.** `defaultAudioLanguage`,
+  `defaultSubtitleLanguage`, `autoSelectSubtitle` and `defaultSubtitleForced` sit under
+  `preferences` in `nuvio-session.json`. `GET/PUT /api/v2/user/profile` on the shim is the editor
+  and `Account::write_prefs` is the only writer (one lock, one snapshot, one atomic rename, a
+  returned error the PUT turns into a 500). Playback reads the file through
+  `account::local_preferences()`, not the account endpoint: a Nuvio profile has no plex.tv
+  credential, and the shim's `/api/v2/user` carries no `profile` block. There is no Nuvio cloud
+  preference API (`plx_stremio::nuvio` has profiles, addons, library and watch progress only), so
+  the file is the source of truth; signing out wipes it with the session.
 - Torrents (`infoHash`): played through the headless Node server the app spawns from its own
   `js-service/` directory, as `<server>/<infoHash>/<fileIdx>`, with
   `http://127.0.0.1:11470` as the default address. See "The P2P streaming server" below.
