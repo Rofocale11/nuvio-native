@@ -3655,9 +3655,39 @@ impl Shim {
                 let (start, size) = page_params(req);
                 let genre = req.q("genre").filter(|g| !g.is_empty());
                 let sort = parse_catalog_sort(req.q("sort"));
-                // The catalog selector: `?catalog=<key>` picks one catalog; absent falls back to
-                // the section's first catalog exactly as before.
-                let cat = self.section_catalog(req, k);
+                // Cinemeta does not honour `?sort=`; instead it exposes dedicated catalogs for
+                // each ordering ("top" = Popular, "imdbRating" = Top Rated). Map the Sort dropdown
+                // to those catalogs so the addon's own ranking is used, and never forward `sort`
+                // to the addon URL (catalog_page does not send it). "Release Date" has no clean
+                // catalog mapping without a concrete year, so it keeps the "top" catalog and is
+                // sorted in memory by the panic-free comparator above.
+                let (cat, sort) = if let Some((kind, _)) = sort {
+                    let target_id = match kind {
+                        CatalogSort::Popularity => Some("top"),
+                        CatalogSort::Rating => Some("imdbRating"),
+                        _ => None,
+                    };
+                    if let Some(id) = target_id {
+                        if let Some(c) = self
+                            .section_catalogs(k)
+                            .into_iter()
+                            .find(|c| c.key.split('/').last() == Some(id))
+                        {
+                            (Some(c), None)
+                        } else {
+                            (self.section_catalog(req, k), Some((kind, true)))
+                        }
+                    } else {
+                        (self.section_catalog(req, k), sort)
+                    }
+                } else {
+                    (self.section_catalog(req, k), sort)
+                };
+                // Preserve the original requested direction when we fell back to in-memory sorting.
+                let sort = match (sort, parse_catalog_sort(req.q("sort"))) {
+                    (Some((k, _)), Some((_, desc))) => Some((k, desc)),
+                    (other, _) => other,
+                };
                 let mut resp = self.catalog_listing(cat.clone(), genre, sort, start, size.unwrap_or(60));
                 if req.q("includeMeta") == Some("1") {
                     if let Ok(mut v) = serde_json::from_slice::<Value>(&resp.body) {
