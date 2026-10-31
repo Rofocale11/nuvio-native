@@ -32,9 +32,11 @@
 ///    detail hero, 54.5 MB whole-process; Home's grid 35.8 MB, the profile picker 11.7 MB). A
 ///    ceiling under that would assert on a healthy screen the moment `tex::resident_bytes()`
 ///    joins the sum, which is the failure mode a tighter number buys.
-/// 5. **`ui::tex::TEX_RESIDENT_BYTES_MAX` (44 MiB) is the pool's OWN ceiling under this one** —
-///    it is what actually bounds `tex::resident_bytes()`, the term this constant's derivation
-///    leaves room for above; that module's doc has its own arithmetic against this constant.
+/// 5. **`ui::tex::TEX_RESIDENT_BYTES_MAX` is the pool's OWN ceiling under this one** — it is what
+///    actually bounds `tex::resident_bytes()`, the term this constant's derivation leaves room for
+///    above; that module's doc has its own arithmetic against this constant. The derivation lands
+///    on 44 MiB; this fork ships 24 (FORK (RichiL10), measured on the dev set's OOM — see that
+///    constant's doc), which is well UNDER this ceiling and so cannot breach it.
 ///
 /// **What is not settled.** Every figure above is whole-PROCESS: nothing has yet measured what
 /// this set's own sum reads per screen, because until phase 11 it could not be non-zero.

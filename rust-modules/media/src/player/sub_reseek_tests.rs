@@ -1,7 +1,7 @@
 //! FORK (RichiL10): the Off -> image-track re-read (`sub_reseek`, `player::reseek_for_image_subtitle`).
 //!
 //! An image subtitle picked from Off in direct play must not wait for the demux read-ahead (the
-//! fork's 96 MiB video queue) to play out: the pick re-reads once from the playhead. Every other
+//! fork's 50 MiB video queue) to play out: the pick re-reads once from the playhead. Every other
 //! pick (text, image -> image, the cold start, a remux, a short read-ahead, the knob off) leaves
 //! the demuxer alone. Integer arithmetic only (the libm gate in `ci/check-deps.sh`).
 

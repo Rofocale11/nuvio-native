@@ -370,3 +370,63 @@ fn an_unsized_body_whose_cut_the_drain_saw_is_not_reopened() {
     });
     assert_eq!(srv.heads().len(), 1, "no reopen: {:?}", srv.heads());
 }
+
+/// **The facts a short body leaves behind, graded directly.** `off` against the declared length is
+/// the primary evidence; a position at or past that length is a position, not a cut. An unsized
+/// body (a progressive transcode) has no length to be short of.
+#[test]
+fn a_body_is_short_only_inside_the_length_it_declared() {
+    let _serial = plx_base::testlock::serial();
+    let srv = ShortBody::start_with(SHORT_HEAD, false, Reopen::Honest);
+    with_sized_source(srv.port, 8, |op| {
+        let s = unsafe { &mut *(op as *mut AvioState) };
+        s.off = 0;
+        assert!(s.body_short_of_resource(), "0 of 8 bytes");
+        s.off = 7;
+        assert!(s.body_short_of_resource(), "one byte still owed");
+        s.off = 8;
+        assert!(!s.body_short_of_resource(), "the declared end is the end");
+        s.off = 9;
+        assert!(!s.body_short_of_resource(), "past it is not a cut either");
+        s.size = -1;
+        s.off = 0;
+        assert!(!s.body_short_of_resource(), "a body with no declared length");
+    });
+}
+
+/// The duration second opinion: a body that ends with the picture AT the container's end is the
+/// end of the film, however much the server over-declared; one that ends minutes early is a cut.
+#[test]
+fn the_duration_second_opinion_separates_a_cut_from_a_finish() {
+    const MIN: i64 = 60_000_000_000;
+    // the measured failure: 2337 s of a 6443 s film
+    assert!(timeline_short(6443 * MIN / 60 * 60, 2337 * MIN / 60 * 60));
+    assert!(timeline_short(107 * MIN, 39 * MIN));
+    // a normal finish, with the AU queue's read-ahead still behind the demuxer
+    assert!(!timeline_short(107 * MIN, 107 * MIN));
+    assert!(!timeline_short(107 * MIN, 106 * MIN + 50 * 1_000_000_000), "inside the queue's lag");
+    // a minute and more short is a cut
+    assert!(timeline_short(107 * MIN, 106 * MIN));
+    assert!(timeline_short(107 * MIN, 80 * MIN));
+    // nothing known: not evidence either way
+    assert!(timeline_short(0, 39 * MIN));
+    assert!(timeline_short(107 * MIN, -1));
+}
+
+/// The reopen budget: immediate at first (a mid-film cut wants the byte back now), then backing
+/// off, bounded, and restarted by a new byte from a read that got through.
+#[test]
+fn the_heal_budget_backs_off_and_stops() {
+    let mut budget = HealBudget::default();
+    let mut waits = Vec::new();
+    for _ in 0..BODY_HEAL_ATTEMPTS {
+        assert!(budget.take(4_096), "an attempt is due");
+        waits.push(budget.wait_ms());
+    }
+    assert!(!budget.take(4_096), "the budget is spent at one byte");
+    assert_eq!(waits[0], 0, "the first reopen waits for nothing: {waits:?}");
+    assert!(waits.windows(2).all(|w| w[0] <= w[1]), "the schedule backs off: {waits:?}");
+    // a byte a read got through starts the next cut over
+    assert!(budget.take(8_192));
+    assert_eq!(budget.wait_ms(), 0);
+}

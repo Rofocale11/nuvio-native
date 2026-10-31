@@ -1823,8 +1823,8 @@ pub fn request_subtitle(idx: i32) {
 // FORK (RichiL10): image subtitles turned on mid-play show at once (`sub_reseek`).
 //
 // While subtitles are Off the demuxer skips every image packet (`ff_subs::SubTracks::decode`), and
-// the fork's 96 MiB video queue (`engine::AQ_VIDEO_BYTES`) holds far more read-ahead than the
-// ~2 s upstream sized for: about 12 s at 66 Mbit/s, minutes at low rates. The demuxer never re-reads
+// the fork's 50 MiB video queue (`engine::AQ_VIDEO_BYTES`) holds far more read-ahead than the
+// ~2 s upstream sized for: about 6 s at 66 Mbit/s, minutes at low rates. The demuxer never re-reads
 // what it has read, so an image track picked from Off showed its first cue only once that buffered
 // stretch had played out (measured on the TV: about 30 s on a 66 Mbit/s PGS film). An Off -> image
 // pick in direct play therefore re-reads once from the playhead, through the ordinary direct-play
@@ -2153,6 +2153,14 @@ pub fn reclamp_subtitle_offset() {
 /// 40 MiB is 25% of the 160 MB `requiredMemory` the app declares — raised from the 24 MiB this
 /// store held at the old 30 s ceiling, which no longer covers a 4K PGS track's indexed worst case
 /// above now that the sync-offset ceiling itself is 60 s (`SUBTITLE_OFFSET_LATEST_MS`).
+///
+/// **FORK (RichiL10): 40 MiB, deliberately NOT cut with the queues.** The dev set's playback OOM
+/// is answered in `engine::AQ_VIDEO_BYTES` (96 → 50 MiB), `AQ_AUDIO_BYTES` (8 → 4) and the poster
+/// pool (`ui::tex::TEX_RESIDENT_BYTES_MAX`, 32 → 16 MiB) — caches, every byte of which is
+/// recoverable. This store is different: its size is the delayed-caption window itself, the
+/// arithmetic above is a measured worst case at 4K, and holding 24 of 37 sets instead would drop
+/// cues a viewer at a +60 s delay is waiting for. It is only ever populated by a PGS/VobSub track,
+/// so it costs nothing on the streams that do not carry one.
 ///
 /// The floor keeps the window at offset 0 too, where the 60 s of history is only insurance for a
 /// delay the viewer has not asked for yet. Under pressure the eviction order drops a set the

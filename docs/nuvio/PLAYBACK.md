@@ -59,6 +59,69 @@ transfer. Two things are tuned for that reality:
 A seek that never lands still ends: two retries, then a full reload, then the failure read-out.
 The added latency (1.2 s → 3 s per attempt) is paid only by a seek that was already broken.
 
+## A body that ends early is a cut, not the end of the film
+
+A direct-play source is one HTTP body per connection, and **any** party can end it early: a debrid
+CDN that closes a range response, the P2P server while its engine is still finding peers, a
+Matroska element cut in half by the last byte received. libavformat has no way to tell that from a
+finished file — an AVIO `0` is EOF, and a parser error at a truncated element stops the demuxer
+just as quietly. The measured shape on the set was `ff: demux ended` after 2337 s of a 6443 s film,
+`timeline stopped … ok=1`, and a manual retry that played through from the same second.
+
+So the demux asks its own facts before it believes an end:
+
+| fact | from | meaning |
+|---|---|---|
+| `off < size` | `AvioState` (`off`, and `Content-Length` / `Content-Range` total at the open) | fewer bytes arrived than the resource declared |
+| `hls_video_tail_ns + 15 s < duration_ns` | the last video PTS this demux fed, the container's duration | the demux is short of the film, not merely of its last byte; the 15 s lets a finish whose tail carries no video (credits) still read as a finish |
+
+Both, and the read is a cut. The recovery has two arms, and both end in **the same reopen a manual
+retry performs**: `seek_cb(at)` with `Range: bytes=<at>-` through `curlio` (TLS) or the plaintext
+socket. `curlio` refuses an answer served from byte 0, so a source that cannot honour the range is
+a failure rather than silently spliced corruption.
+
+- **Inside `read_cb`**, when the transport itself reports an end or a failure: a clean `0` before
+  the declared length reopens at the byte reached, and a failed transfer whose curl rc is a cut
+  (18/55/56/92) does the same.
+- **In the demux loop**, when `av_read_frame` returns for any reason while the two facts above
+  hold: `avio_seek` clears libavformat's `eof_reached`, the next read reopens and playback
+  continues in place. This is the arm that covers a *parser* error at a truncated element, which
+  never reaches `read_cb` at all.
+
+Both arms are bounded by `BODY_HEAL_ATTEMPTS` **5** reopens at one byte, spent from one budget
+(`AvioState::heal`, refilled by any read that gets through), and the wait before each is
+`HealBudget::wait_ms`: immediate, then 250/500/1000/2000 ms. The immediacy matters for a mid-film
+cut; the backoff is what a **cold** source needs, because the retry that succeeds is often seconds
+later — the very GET that stopped is what created the P2P engine, and the swarm cannot serve until
+the engine has metadata. ~3.75 s of patience sits behind the buffering spinner, not a spinning
+demux thread, and every slice of it re-checks the abort flag so teardown is never held by it.
+
+A budget that runs out is **not** a silent end: the demux logs
+`ff: body stopped short at <off> of <size> bytes with the picture at <t>s of <dur>s; no reopen
+crossed it — transport failure, not EOF` and raises `demux_io_failed`, so the failure read-out
+offers a retry instead of the player sitting at a frozen second.
+
+## Memory: what playback is allowed to hold
+
+The set is a 32-bit ARM box and `pkg/appinfo.json` declares `requiredMemory: 280` MB. Peak RSS — not
+average — is what dies during playback, and the queues are only ever spent when the link outruns
+the decoder, so they are the first thing to size honestly:
+
+| term | where | now | note |
+|---|---|---|---|
+| video AU queue | `player::engine::AQ_VIDEO_BYTES` | **50 MiB** | ~4.4 s at 90 Mbit/s, ~10 s at 40 — past the 1.6 s feed lead |
+| audio AU queue | `AQ_AUDIO_BYTES` | **4 MiB** | same ratio, so a 3.6 Mbit/s DTS-HD MA track never fills first |
+| pre-audio video grant | `ff::PRE_AUDIO_VIDEO_HEADROOM` | 24 MiB | only for a file whose audio starts late; walked back as it drains |
+| audio-ahead grant | `ff::AUDIO_AHEAD_HEADROOM` | 16 MiB | only for a file that stores more audio than video ahead of it |
+| poster pool | `ui::tex::TEX_RESIDENT_BYTES_MAX` | **24 MiB** | ~58 grid posters or three 1280×720 heroes; the rest re-upload from the disk cache (16 MiB measured as constant re-arming, 183 refusals in a 60 s Home session) |
+| image-subtitle store | `player::SUB_BITMAP_BUDGET` | 40 MiB | **not** a cache: this IS the delayed-caption window, measured at 31.1 MB worst case for 4K PGS |
+| Starfish source buffers | `PAYLOAD_AV.bufferingCtrInfo` | 8 MiB video / 1 MiB audio | the pipeline's own, not ours |
+
+The two queues were 96/8 MiB until 2026-11-01 (an LG B4 sizing, 2026-09-22) and the poster pool 32
+MiB; on this set that peak ran the process out of memory mid-playback. That is ~50 MB of queue and
+8 MB of texture back, which is where the peak was. `abr/sim.rs` carries the
+queue numbers by value and a test fails if the two models disagree.
+
 ## Real metadata: `plx_media::ff::probe::probe_url`
 
 The route, the Load payload (`"video":"H265"`, `"audio":"AC3 PLUS"`), the audio-track pick and

@@ -111,7 +111,7 @@ design detail.
 - In-app AC3 encode lane for FLAC/PCM above 2ch and TrueHD (always direct play); DTS routed
   through AC3 encode lane; native Opus, DTS-HD core above ceiling, lossless PCM lane.
 - Runtime playback knobs from `/media/developer/plxnative-fork.conf` (`dts_core` auto|never, etc.).
-- Direct-play Dolby Vision profiles 5/8; 96 MiB video / 8 MiB audio AU queues for high-bitrate
+- Direct-play Dolby Vision profiles 5/8; 50 MiB video / 4 MiB audio AU queues for high-bitrate
   direct play.
 - Full native video sink counts as a primed decoder.
 

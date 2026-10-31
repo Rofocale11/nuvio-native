@@ -370,6 +370,10 @@ plx_base::dynlib! {
     ) -> c_int;
     fn av_read_frame(s: *mut AVFormatContext, pkt: *mut AVPacket) -> c_int;
     fn av_seek_frame(s: *mut AVFormatContext, stream_index: c_int, ts: i64, flags: c_int) -> c_int;
+    /// Positional reset of our custom AVIO — and the only public way to clear `eof_reached` on a
+    /// context whose demuxer has already taken the cut for the end of the file. Used by
+    /// [`recover_short_body`], never to move the transport (that is `seek_cb`'s job).
+    fn avio_seek(s: *mut AVIOContext, offset: i64, whence: c_int) -> i64;
     fn avformat_close_input(s: *mut *mut AVFormatContext);
     fn avio_alloc_context(
         buffer: *mut u8,
@@ -2203,6 +2207,24 @@ impl HealBudget {
         self.spent += 1;
         true
     }
+
+    /// **How long to wait before this attempt.** A cut in the middle of a film leaves bytes
+    /// already in hand and wants the reopen at once; a body that ended early because the source is
+    /// still WARMING UP (a P2P engine created by the very GET that just stopped, a debrid link
+    /// the CDN is still opening) wants time, and the retry that succeeds is seconds later. So the
+    /// schedule is: immediate, then 250/500/1000/2000 ms — ~3.75 s of patience behind the
+    /// buffering spinner, never a spinning demux thread.
+    fn wait_ms(&self) -> u64 {
+        // A host test must not spend seconds proving a budget it already asserts by count.
+        #[cfg(test)]
+        const BASE_MS: u64 = 5;
+        #[cfg(not(test))]
+        const BASE_MS: u64 = 250;
+        if self.spent <= 1 {
+            return 0;
+        }
+        1u64.checked_shl(u32::from(self.spent) - 2).unwrap_or(16).saturating_mul(BASE_MS).min(3_000)
+    }
 }
 
 // TEST ONLY: a deterministic stand-in for the two `Instant::elapsed()` calls that measure
@@ -2335,6 +2357,31 @@ impl AvioState {
             && self.off >= 0
             && self.off < self.size
             && matches!(self.src, Src::Socket { .. })
+    }
+
+    /// **Fewer bytes of the resource than the open declared are in hand, and the delivery has
+    /// genuinely stopped.** The one fact a short body leaves behind: `off` (what the transport
+    /// gave us) against `size` (`Content-Length`, or the `Content-Range` total of a ranged
+    /// answer). A direct-play stream whose AVIO ends with `off < size` has NOT reached the end of
+    /// the film, whatever libavformat concluded from the bytes it was given.
+    ///
+    /// Not applied to an HLS segment (`acquisition`): a segment's declared length is its own, and
+    /// a failed segment is the ladder's to answer.
+    fn body_short_of_resource(&self) -> bool {
+        self.acquisition.is_none() && self.size > 0 && self.off >= 0 && self.off < self.size
+    }
+
+    /// **The second opinion: the picture is short of the container's own duration.** A server that
+    /// over-declares its length would otherwise make every clean end look like a cut, and a
+    /// reopen there buys nothing. `hls_video_tail_ns` is the last video PTS the demux FED (where
+    /// the demux got to, not where the viewer is), and `duration_ns` is the container's; the slack
+    /// in [`timeline_short`] keeps a finish whose last seconds carry no video from reading as a
+    /// cut. An unknown either way is not evidence, so it passes.
+    fn timeline_short_of_duration(&self) -> bool {
+        timeline_short(
+            SHARED.duration_ns.load(Ordering::Relaxed),
+            SHARED.hls_video_tail_ns.load(Ordering::Acquire),
+        )
     }
 
     /// Drain the live media socket into [`Self::bounce`] without blocking. Called from
@@ -2493,8 +2540,10 @@ fn avio_stopped(s: &mut AvioState) -> c_int {
 }
 
 /// Reopens [`read_cb`] tries at one byte, after the transfer is cut mid-body, before the cut is a
-/// transport failure.
-const BODY_HEAL_ATTEMPTS: u8 = 3;
+/// transport failure. Five, not three, because the retry that succeeds is often seconds later:
+/// the P2P engine a first GET just created has no metadata yet, and a debrid link can still be
+/// opening. With [`HealBudget::wait_ms`]'s backoff that is ~3.75 s of patience.
+const BODY_HEAL_ATTEMPTS: u8 = 5;
 
 /// How long a direct-play socket read waits for a byte before the transfer counts as cut.
 #[cfg(not(test))]
@@ -2502,11 +2551,86 @@ const BODY_SILENCE: std::time::Duration = std::time::Duration::from_secs(15);
 #[cfg(test)]
 const BODY_SILENCE: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// Reopen the source at the byte reached, through the same path a seek takes.
+/// Sleep a heal's backoff without holding a teardown hostage: the join waits for this thread, so
+/// every slice re-checks the lane's abort flag instead of sleeping the whole wait at once.
+fn heal_pause(ms: u64, aq: *mut crate::aq::AuQueue) -> bool {
+    let mut left = ms;
+    while left > 0 {
+        if unsafe { crate::aq::aq_is_aborted(aq) } {
+            return false;
+        }
+        let step = left.min(25);
+        std::thread::sleep(std::time::Duration::from_millis(step));
+        left -= step;
+    }
+    !unsafe { crate::aq::aq_is_aborted(aq) }
+}
+
+/// Reopen the source at the byte reached, through the same path a seek takes. The caller has
+/// already charged the attempt to [`AvioState::heal`]; the wait before it comes from that budget.
 fn heal_at_offset(s: &mut AvioState) -> bool {
     let at = s.off;
-    crate::player::log(&format!("ff: body ended early at byte {at} of {}, reopening there", s.size));
+    let wait = s.heal.wait_ms();
+    crate::player::log(&format!(
+        "ff: body ended early at byte {at} of {} (attempt {}/{BODY_HEAL_ATTEMPTS}, {} ms), reopening there",
+        s.size,
+        s.heal.spent,
+        wait
+    ));
+    if !heal_pause(wait, s.aq) {
+        return false;
+    }
     seek_cb(s as *mut AvioState as *mut c_void, at, SEEK_SET) == at
+}
+
+/// The duration second opinion, pure: is the demux short of the container's own duration?
+/// `reached_ns` is the last video PTS the demux FED — where the DEMUX got to, which is what a
+/// finished file reaches. The slack keeps a normal finish whose last seconds carry no video
+/// (credits, a black tail) from reading as a cut. An unknown either way is not evidence, so it
+/// passes.
+fn timeline_short(duration_ns: i64, reached_ns: i64) -> bool {
+    /// How far behind the container's duration the fed picture may sit at a GENUINE end.
+    const END_SLACK_NS: i64 = 15_000_000_000;
+    if duration_ns <= 0 {
+        return true;
+    }
+    reached_ns < 0 || reached_ns + END_SLACK_NS < duration_ns
+}
+
+/// **A demuxer that ran out of bytes is not a film that ended.** libavformat takes an AVIO `0` for
+/// the end of the file and stops asking; a *parser* error in the middle of a cut element stops it
+/// the same way, without ever reaching [`read_cb`]'s own heal. Either way `av_read_frame` returns
+/// and the demux loop would push EOS at whatever second it reached — measured on the dev set at
+/// 2337 s of a 6443 s film, a first attempt that "just stopped" and played through on a manual
+/// retry.
+///
+/// So the read loop asks the facts instead: fewer bytes than the open declared, and a picture
+/// short of the container's duration, is a cut. Clear libavformat's end-of-file state with a
+/// positional reset ([`avio_seek`] does not move the transport) and let the read below reopen and
+/// continue. The `heal` budget bounds this at [`BODY_HEAL_ATTEMPTS`] per byte, so a source that
+/// really has nothing more still ends the session.
+fn recover_short_body(s: &mut AvioState, avio: *mut AVIOContext) -> bool {
+    if avio.is_null() || !s.body_short_of_resource() || !s.timeline_short_of_duration() {
+        return false;
+    }
+    let at = s.off;
+    if !s.heal.take(at) {
+        return false;
+    }
+    let wait = s.heal.wait_ms();
+    crate::player::log(&format!(
+        "ff: demux stopped {at} of {} bytes in ({}s of {}s decoded) — body ended short, reopening there (attempt {}/{BODY_HEAL_ATTEMPTS}, {wait} ms)",
+        s.size,
+        SHARED.hls_video_tail_ns.load(Ordering::Relaxed) / 1_000_000_000,
+        SHARED.duration_ns.load(Ordering::Relaxed) / 1_000_000_000,
+        s.heal.spent,
+    ));
+    if !heal_pause(wait, s.aq) {
+        return false;
+    }
+    // A positional reset: the same byte the demuxer had reached, so the next read asks the
+    // transport again instead of the buffer's cached end-of-file.
+    unsafe { avio_seek(avio, at, SEEK_SET) == at }
 }
 
 extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
@@ -2675,10 +2799,12 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
                         .body_failure()
                         .is_some_and(|f| matches!(f.rc, 18 | 55 | 56 | 92));
                     let inside = s.off >= 0 && (s.size < 0 || s.off < s.size);
-                    if direct_play && cut && inside && s.heal.take(s.off) {
-                        if cs.seek(s.off) {
-                            continue;
-                        }
+                    if direct_play && cut && inside && s.heal.take(s.off) && heal_at_offset(s) {
+                        // The reopen is the SAME one a seek takes, so it gets the same log line
+                        // and the same backoff — a body the source cut while it was still
+                        // warming up (a P2P engine, a debrid link) is exactly the case that
+                        // needs the second attempt rather than an error read-out.
+                        continue;
                     }
                 }
                 // Teardown was handled above through the AU flag and remains EOF. A negative
@@ -8239,10 +8365,10 @@ fn open_input_failure_note(r: c_int, lane_aborted: bool) -> String {
 ///
 /// So from the first video push that WOULD PARK at the base cap while no audio AU has been pushed in
 /// this open or seek, the video lane's cap is its base cap PLUS this much: **10 MiB + 24 MiB =
-/// 34 MiB (~35.6 MB) in total** upstream. FORK (RichiL10): the fork's base cap is 96 MiB
+/// 34 MiB (~35.6 MB) in total** upstream. FORK (RichiL10): the fork's base cap is 50 MiB
 /// (`player::engine::AQ_VIDEO_BYTES`), which alone holds the reported film's 11 s pre-audio stretch
-/// at up to ~73 Mbit/s, so the grant only matters for a UHD remux whose audio starts late, and the
-/// lane can reach 120 MiB for that stretch. The grant is lazy on purpose: an ordinary file (video a few
+/// at up to ~38 Mbit/s, so the grant only matters for a UHD remux whose audio starts late, and the
+/// lane can reach 74 MiB for that stretch. The grant is lazy on purpose: an ordinary file (video a few
 /// packets ahead of the first audio, B-frames, a muxer that leads with video) never fills the base
 /// cap before its first audio packet, so it never sees the grant and keeps the memory behaviour it
 /// always had; on a 60-100 Mbit/s UHD stream an eager grant would have cost 18-30 MiB of extra
@@ -8500,13 +8626,14 @@ mod pre_audio_headroom_tests {
     #[test]
     fn the_audio_ceiling_holds_the_reported_film_and_not_everything() {
         let cap = crate::player::aq_caps().1 + AUDIO_AHEAD_HEADROOM as i64;
-        // FORK (RichiL10): the fork's 8 MiB audio base (upstream 1 MiB, so 17 MiB in total there).
-        assert_eq!(cap, (8 + 16) * 1024 * 1024);
+        // FORK (RichiL10): the fork's 4 MiB audio base, plus the same 16 MiB grant.
+        assert_eq!(cap, (4 + 16) * 1024 * 1024);
         let bytes = |kbit: f64, secs: f64| (kbit * 1e3 / 8.0 * secs) as i64;
         assert!(bytes(768.0, 48.0) < cap, "issue #600's 48 s lead");
-        // FORK (RichiL10): the fork's base cap alone already holds it; upstream's 1 MiB could not.
-        assert!(bytes(768.0, 48.0) < crate::player::aq_caps().1, "the fork's base cap holds the 48 s lead");
-        assert!(bytes(768.0, 48.0) > 1024 * 1024, "upstream's 1 MiB base cap could not");
+        // The base alone no longer holds the 48 s lead (4.6 MB against a 4 MiB cap), so this is
+        // one of the files the grant exists for. Upstream's 1 MiB base could not have held it at
+        // any grant size; the ceiling below is what bounds the two together.
+        assert!(bytes(768.0, 48.0) > crate::player::aq_caps().1, "the lead needs the grant");
         assert!(bytes(768.0, 180.0) > AUDIO_AHEAD_HEADROOM as i64 && bytes(768.0, 170.0) < AUDIO_AHEAD_HEADROOM as i64, "16 MiB is ~2.9 min of 768 kbit/s");
         assert!(bytes(6_000.0, 60.0) > cap, "a bound, not a promise");
     }
@@ -8658,8 +8785,8 @@ mod pre_audio_headroom_tests {
     fn the_bound_holds_the_measured_cases_and_not_everything() {
         let base = crate::player::aq_caps().0;
         let cap = base + PRE_AUDIO_VIDEO_HEADROOM as i64;
-        // FORK (RichiL10): the fork's 96 MiB base (upstream 10 MiB, so 34 MiB in total there).
-        assert_eq!(cap, (96 + 24) * 1024 * 1024);
+        // FORK (RichiL10): the fork's 50 MiB base (upstream 10 MiB, so 34 MiB in total there).
+        assert_eq!(cap, (50 + 24) * 1024 * 1024);
         let bytes = |mbit: f64, secs: f64| (mbit * 1e6 / 8.0 * secs) as i64;
         // the reported film: 11.008 s of ~9.5 Mbit/s video. Upstream's 10 MiB cap could not hold
         // it; the fork's base cap does, so the grant is not even reached for it.
@@ -8670,8 +8797,8 @@ mod pre_audio_headroom_tests {
         let lead_s = (crate::player::engine::AUDIO_LEAD_IN_NS + LEAD_IN_MARGIN_NS) as f64 / 1e9;
         assert!(bytes(12.0, 11.008 + lead_s) < cap, "headroom spans the pre-audio stretch AND the lead-in");
         // a UHD remux the base cap alone cannot carry through the same delay, which the grant can
-        assert!(bytes(80.0, 11.008) > base && bytes(80.0, 11.008) < cap);
-        assert!(bytes(100.0, 11.008) > cap, "a bound, not a promise");
+        assert!(bytes(50.0, 11.008) > base && bytes(50.0, 11.008) < cap);
+        assert!(bytes(60.0, 11.008) > cap, "a bound, not a promise");
     }
 }
 
@@ -9394,6 +9521,36 @@ pub fn demux(
                         // Genuine end of stream, teardown, or an unrecovered I/O error published by
                         // `frame_read_failed`. NOT an app seek — that is serviced at the top of this
                         // loop and never surfaces as a read error.
+                        //
+                        // **A body that stopped SHORT of its declared length is neither.** A cold
+                        // P2P engine, a debrid body the CDN closed, a cut that left libavformat
+                        // mid-element: all reach here as an ordinary return, because nothing in the
+                        // transport called it a failure. The facts say otherwise (bytes delivered
+                        // against the declared length, and the picture against the container's
+                        // duration), so clear the AVIO's end-of-file and read on — the same reopen
+                        // a manual retry performs, without the viewer noticing.
+                        if !crate::aq::aq_is_aborted(aq_p) && recover_short_body(&mut state, avio)
+                        {
+                            continue;
+                        }
+                        if !state.io_failed
+                            && !crate::aq::aq_is_aborted(aq_p)
+                            && state.body_short_of_resource()
+                            && state.timeline_short_of_duration()
+                        {
+                            // The budget is spent and the source still has not crossed it. Say it
+                            // with the numbers, and make it the transport failure it is rather
+                            // than a silent end at the second the picture reached.
+                            crate::player::log(&format!(
+                                "ff: body stopped short at {} of {} bytes with the picture at {}s of {}s; no reopen crossed it — transport failure, not EOF",
+                                state.off,
+                                state.size,
+                                SHARED.hls_video_tail_ns.load(Ordering::Relaxed) / 1_000_000_000,
+                                SHARED.duration_ns.load(Ordering::Relaxed) / 1_000_000_000,
+                            ));
+                            state.io_failed = true;
+                            SHARED.demux_io_failed.store(true, Ordering::Release);
+                        }
                         break;
                     }
                     let si = (*pkt).stream_index;

@@ -418,6 +418,33 @@ same profile: `dca` named twice in the direct-play audio list, and the lane's `a
 
 `plx_platform` 290/290, `plx_media` 1754/1754, `plx_plex` 726/726, `plx_pmsshim` 53/53 after the fix.
 
+### 2026-11-01 — the second television report: first-try failures and the memory ceiling
+
+The audio lanes were confirmed on the set ("now both works"). Two reports followed, and both are
+pre-existing rather than merge damage (`curlio`'s counters are byte-identical at `ac0443bc`):
+
+**A debrid/P2P stream sometimes fails on the first try and plays on the second, and a source switch
+mid-playback does the same.** The device log's shape: `ff: open https status=200 clen=73292868747`,
+then 39 minutes later `ff: demux ended` with `timeline stopped … ok=1` — no transport error, no
+`seek_cb` heal, and a manual retry that plays from the same second. Two mechanisms, one gap: the
+transport already heals a cut it *notices* (curl rc 18/55/56/92, or a clean `0` before the declared
+length), but nothing compared what arrived against what was declared when libavformat ended on its
+own terms, and the reopen budget was 3 attempts with **no wait** — which is exactly wrong for a cold
+P2P engine, where the very GET that stopped is what created the engine and the swarm needs seconds
+before it can serve. Both are addressed in `docs/nuvio/PLAYBACK.md` ("A body that ends early is a
+cut, not the end of the film"): a demux-level recovery on `off < size` plus the container duration
+as a second opinion, and immediate-then-backing-off reopens (5 attempts, ~3.75 s) that never hold
+teardown hostage. A budget that runs out now raises the transport failure it is instead of a silent
+EOS.
+
+**Playback runs the process out of memory mid-film.** The fork had raised the AU queues to
+96 MiB / 8 MiB on an LG B4 measurement (2026-09-22) and the poster pool to 32 MiB; on this set that
+peak is what dies. Back to the fork's own first sizing — **50 MiB / 4 MiB** — and the poster pool to
+**24 MiB** (16 measured as constant re-arming on the simulator: 183 refused arrivals against 0 at
+32 MiB in the same 60 s Home session); `abr/sim.rs`'s carried-by-value constants moved with them. The image-subtitle store stays
+at 40 MiB on purpose: it is not a cache but the delayed-caption window, with a measured 31.1 MB
+worst case at 4K (see `docs/nuvio/PLAYBACK.md`, "Memory: what playback is allowed to hold").
+
 ### The exact next action
 
 `make check` on the committed tree (start it in the background and poll its log; the

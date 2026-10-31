@@ -951,12 +951,16 @@ fn a_reset_mid_body_is_reopened_and_every_byte_arrives() {
 /// A server that cuts every connection before sending a byte: the read reopens exactly
 /// `BODY_HEAL_ATTEMPTS` times and then fails with `AVERROR_IO`, rather than looping.
 #[test]
-fn a_server_that_always_cuts_fails_after_three_reopens() {
+fn a_server_that_always_cuts_fails_after_the_heal_budget() {
     let Some(_gate) = curl_gate() else { return };
     let (port, _, seen) = cutting_server(300_000, usize::MAX, 0, false);
     let (got, terminal, io_failed, _) = read_all_through_read_cb(port);
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 4, "the open and exactly three reopens");
+    assert_eq!(
+        seen.len(),
+        BODY_HEAL_ATTEMPTS as usize + 1,
+        "the open and exactly one reopen per attempt"
+    );
     assert_eq!(terminal, AVERROR_IO);
     assert!(io_failed && got.is_empty());
 }

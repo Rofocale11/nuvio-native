@@ -133,11 +133,14 @@ pub const fn feed_leads_ms() -> (i64, i64) {
 // frames are tiny) yet large enough to cushion the single demux thread briefly blocking on a full
 // video lane.
 //
-// AQ_VIDEO_BYTES = 50 MiB, AQ_AUDIO_BYTES = 4 MiB (commit acc2ad19). Sized so a UHD remux over
-// Wi-Fi does not stall on every hiccup longer than the feed lead: at 90 Mbit/s the old 10 MiB cap
-// held ~0.9 s, while 50 MiB holds ~4.4 s. The audio lane is kept in the same ratio so a DTS-HD
-// MA track (3.6 Mbit/s) never fills first and blocks the single demux thread while the video lane
-// still has room. Memory is only spent when the link outruns the decoder.
+// **FORK (RichiL10): 50 MiB / 4 MiB — the caps the plant was first sized at (commit acc2ad19).**
+// They were raised to 96 MiB / 8 MiB on 2026-09-22 on an LG B4 / webOS 10.3.1, where a UHD remux
+// over Wi-Fi wanted ~9 s of reserve. On the dev set that reservation is what runs the process out
+// of memory during playback (the set declares 280 MB and the queue is only spent when the link
+// outruns the decoder, so the peak — not the average — is what dies). 50 MiB still holds ~4.4 s
+// at 90 Mbit/s (10 s at 40), which is more than the 1.6 s feed lead needs, and the audio lane is
+// kept in the same ratio so a DTS-HD MA track (3.6 Mbit/s) never fills first and blocks the single
+// demux thread while the video lane still has room.
 //
 // **What the 2 MiB buys, and why it is not a guess.** The reserve the adaptive controller can ever
 // see is `B_max = feed_lead + queue_bytes*8 / R_elementary` — a queue term that falls as `1/R`
@@ -147,17 +150,14 @@ pub const fn feed_leads_ms() -> (i64, i64) {
 // guard demands. `tools/abr-plant-sweep.py` prices this at +555 ms of climbable ceiling WITH the
 // graded-reject feed and **+17 ms without it** — inside a measured 167 ms noise floor — so the two
 // levers are one decision and neither is worth landing alone.
-// `docs/measurements/p0-plant-sizing.md` is the record; `requiredMemory` is 160 MB, so +2 MiB RSS
-// on a 32-bit set is inside the budget already declared.
-const AQ_VIDEO_BYTES: c_long = 96 * 1024 * 1024;
-const AQ_AUDIO_BYTES: c_long = 8 * 1024 * 1024;
-// FORK (RichiL10): **96 MiB / 8 MiB, up from 10 MiB / 1 MiB (measured 2026-09-22 on an LG B4 / webOS
-// 10.3.1).** Sized for a UHD remux over Wi-Fi: at 90 Mbit/s the old video cap held 0.9 s, so with
-// the 1.6 s feed lead the whole reserve was ~2.5 s and every Wi-Fi hiccup longer than that
-// stalled. 96 MiB is ~9 s at 90 Mbit/s (20 s at 40), and the audio lane is kept in the same ratio
-// so a DTS-HD MA track (3.6 Mbit/s) never fills first and blocks the single demux thread while
-// the video lane still has room. The memory is only spent when the link outruns the decoder;
-// `requiredMemory` in pkg/appinfo.json moved with it (160 -> 280 MB).
+// `docs/measurements/p0-plant-sizing.md` is the record.
+const AQ_VIDEO_BYTES: c_long = 50 * 1024 * 1024;
+const AQ_AUDIO_BYTES: c_long = 4 * 1024 * 1024;
+// FORK (RichiL10): the same numbers the fork's own sizing chose, and the reason they came back
+// down: with 96 MiB / 8 MiB the dev set ran out of memory mid-playback (peak RSS, not average — the
+// queue is only spent when the link outruns the decoder). 50 MiB holds ~4.4 s at 90 Mbit/s and
+// ~10 s at 40, comfortably past the 1.6 s feed lead, so the Wi-Fi-hiccup case the enlargement was
+// for still plays.
 
 pub struct SampleBuf {
     pub data: Vec<u8>,

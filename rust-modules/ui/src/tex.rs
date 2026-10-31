@@ -179,7 +179,17 @@ const CACHE_CAP: usize = 96;
 /// rounding `RENDER_BYTES_MAX` itself uses (68.8 MiB rounded to 64, ≈7% margin) and for the same
 /// reason: a number that is wrong should be wrong SMALL, on the side that asserts early rather
 /// than the side that ships a breach.
-pub const TEX_RESIDENT_BYTES_MAX: usize = 32 << 20;
+///
+/// **FORK (RichiL10): 24 MiB.** The derivation above sizes the pool against a 160 MB declaration;
+/// this fork declares 280 MB and still ran out of memory mid-playback on the dev set (see
+/// `engine::AQ_VIDEO_BYTES`), and the poster pool is the one large term that is pure cache. The
+/// cut was measured on the simulator rather than guessed: the same 60 s Home session holds
+/// `refused=0, rearmed=17` at 32 MiB, `refused=37, rearmed=51` at 24, and `refused=183,
+/// rearmed=199` at 16 — so 16 is a pool that cannot hold one screen and re-arms every tile it
+/// loses, while 24 (58 posters, or three 1280×720 heroes) holds a full grid with the hero and
+/// pays a few re-uploads. Every tile the pool does not keep is recoverable from the on-disk image
+/// cache; the memory would not be.
+pub const TEX_RESIDENT_BYTES_MAX: usize = 24 << 20;
 
 /// How many texels one authored pixel costs: 1 on a television, `n²` under the simulator's
 /// supersampled rendering (`surface::render_scale`), whose images are requested at `n`x per axis.
