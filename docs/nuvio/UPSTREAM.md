@@ -116,6 +116,51 @@ A commit whose files never appear in `contested` is a cheap pick. One near the t
 is where the work is, and deserves "do we even run this code path?" before it deserves a conflict
 resolution.
 
+## Forward-port log
+
+### 2026-10-31 — the direction is set: a tiered forward-port, not a merge and not a PR
+
+The goal is Richi's HQ features **inside this fork**, keeping this fork's own line. Two
+consequences that are decisions, not suggestions:
+
+- **The DTS delta stays local.** Its author does not want it sent upstream to Richi, so do not
+  propose it, and do not treat "upstream would take this" as a reason to drop or reshape it.
+- **Not one heroic merge.** A single `git merge upstream/feature/v0.9-hq` into the trunk hits
+  **247 conflicting files** (201 content, 45 add/add, 1 modify/delete), measured with
+  `git merge-tree --write-tree nuvio-native upstream/feature/v0.9-hq` on 2026-10-31:
+
+  | area | conflicts |
+  |---|---|
+  | `rust-modules/screens` | 49 |
+  | `rust-modules/ui` | 26 |
+  | `rust-modules/media` | 25 |
+  | `rust-modules/data` | 25 |
+  | `rust-modules/src` | 16 |
+  | `tests/fixtures` | 10 |
+  | `rust-modules/plex` | 6 |
+
+  The conflicts that carry this fork's reason for existing are the smallest group: about ten
+  files under `media/src/route/` plus `media/src/ff_enc.rs`. The largest group is the UI.
+
+### The tiers
+
+Work happens on a scratch branch cut from `nuvio-native`, one merge per tier, and a tier is not
+"done" until it is verified at the tier that can actually see it (`which-tier`).
+
+- **A — audio, Dolby Vision, routing.** `media/src/route/*`, `media/src/ff.rs`, `ff_enc.rs` and the
+  handful of `src`/`plex` files that route through them. The DTS delta is reapplied on top: Richi's
+  `ff_enc.rs` still has no `dts`/`dca` handling, even though his routing learned `dca` direct-play
+  in `d156a858`, so both behaviours have to coexist afterwards. Verify: host tests, then playback
+  on the television.
+- **B — the player/pipeline remainder.** `media/src/player/*`. Television only; a host result says
+  nothing about the ACB/Starfish path.
+- **C — `screens`, `ui`, `data`, and the replay fixtures.** Largest and lowest conceptual value
+  first: it is Richi's UI redesign meeting this fork's shim rewiring. Fixture conflicts are data;
+  take upstream's recording when the screen did not change, and re-record when it did.
+
+**Status: not started.** Nothing has been merged from `feature/v0.9-hq`; the trunk's only
+relationship to it today is the computed base above.
+
 ## Branches
 
 | branch | what it is |
