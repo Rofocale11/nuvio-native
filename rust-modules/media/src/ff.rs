@@ -8413,15 +8413,27 @@ pub fn demux(
                 // Profile 8.1 while feeding.  PMS's Matroska remux can preserve the HEVC RPU NALs
                 // yet omit the DOVI configuration record, so retain the route's frozen source
                 // decision as a narrow fallback for that observed server shape.
-                let container_p7 = dovi_conf(vcp).is_some_and(|d| {
-                    d.dv_profile == 7
-                        && d.el_present_flag != 0
-                        && d.dv_bl_signal_compatibility_id != 0
-                });
+                // A TV that cannot display Dolby Vision has no use for a P7 -> P8.1 conversion:
+                // the RPU rewrite and EL drop only matter if the panel will actually present DV.
+                // Gate on the booted capability so non-DV sets never pay that per-frame CPU cost.
+                let dv_capable = plx_platform::devcaps::dv::capability()
+                    == plx_platform::devcaps::dv::DvCapability::Supported;
+                // `remux_dv=off` disables the conversion in BOTH cases, not just the route-fallback
+                // one: the knob's intent is "do not convert P7 to P8.1", and leaving the
+                // container-native arm enabled made `remux_dv=off` only half-effective.
+                let remux_dv_on = plx_base::forkknobs::is("remux_dv", "on", "on");
+                let container_p7 = remux_dv_on
+                    && dv_capable
+                    && dovi_conf(vcp).is_some_and(|d| {
+                        d.dv_profile == 7
+                            && d.el_present_flag != 0
+                            && d.dv_bl_signal_compatibility_id != 0
+                    });
                 // FORK (RichiL10): a video-copy remux has the source bitstream even when its
                 // Matroska codec parameters lost the DOVI record.
                 let route_p7 = dovi_conf(vcp).is_none()
-                    && plx_base::forkknobs::is("remux_dv", "on", "on")
+                    && remux_dv_on
+                    && dv_capable
                     && crate::route::frozen_route_dovi().converts_to_p81();
                 let dv_p7 = is_hevc && (container_p7 || route_p7);
                 if dv_p7 {
