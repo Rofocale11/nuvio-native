@@ -20,6 +20,9 @@ elif [ "$1" == "panic" ]; then
 elif [ "$1" == "raw" ]; then
     LINES=${2:-100}
     $SSH_CMD "tail -n $LINES /tmp/plxnative-events.log" 2>/dev/null
+elif [ "$1" == "mem" ]; then
+    # Read-only snapshot of the app process's memory from /proc (VmRSS, peak, swap).
+    $SSH_CMD 'PID=$(pgrep -f "com.nuvionative.app" | head -n 1); if [ -z "$PID" ]; then echo "App process not found (is the app running?)"; exit 1; fi; echo "PID=$PID"; grep -E "^(VmRSS|VmHWM|VmSwap):" /proc/$PID/status' 2>/dev/null
 else
     LINES=${1:-100}
     $SSH_CMD "tail -n $LINES /tmp/plxnative-events.log | grep -v 'key type='" 2>/dev/null

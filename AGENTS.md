@@ -138,6 +138,16 @@ fails the build on a forbidden edge.
   Never launch `make check` in the foreground with a short tool timeout.
 - To run host unit tests, ALWAYS use `./tools/ai-check.sh`. It runs in the background to avoid terminal timeouts.
 - After starting the check, poll `./tools/ai-check-status.sh` every 30-60 seconds until it prints the test results.
+- **Inner Loop (Fast):** Whenever you make a code change and need to verify it, ALWAYS run
+  `./tools/ai-test.sh`. It uses `cargo nextest` and `git diff` to test only the crates you
+  modified. It is nearly instant. Do NOT run `make check` while iterating.
+- **Outer Loop (Gate):** `make check` takes ~150 seconds and is ONLY for final verification
+  before pushing to GitHub. Run it via `./tools/ai-check.sh` (polled with
+  `./tools/ai-check-status.sh`) once, at the end.
+- `./tools/ai-test.sh` maps changed paths under `rust-modules/` to crate names
+  (e.g. `rust-modules/media/src/lib.rs` → `plx_media`, `rust-modules/src` →
+  `plxnative-modules`) and runs `cargo nextest run -p <crate>`. This is a loop, not a gate —
+  still run `./tools/ai-check.sh` before pushing.
 - Do NOT try to run `make check` directly in the foreground.
 - While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and
   runs only that crate's lib tests. It is a loop, not a gate.
@@ -174,6 +184,31 @@ fails the build on a forbidden edge.
   `fw-compat-reviewer` custom agent (or equivalent manual review) before push.
 - After behavior changes, use the `doc-claim-auditor` custom agent (or perform the same
   audit) to find prose that the change made false.
+- Always update the docs after you finish
+## 🔍 Offline Debugging Tools
+
+These run entirely on the host (x86_64) with no TV, simulator, or ARM toolchain.
+
+- **Module layers:** `./tools/ai-layers.sh` — runs `python3 ci/check-module-layers.py` and prints
+  "Layer check PASSED" or the forbidden edges. Run after touching module references.
+- **Addon prober:** `python3 tools/probe-addon.py ...` — queries Stremio addons and TMDB directly:
+  - `manifest <url>` — fetches the manifest, prints catalogs/resources/types.
+  - `meta <url> <type> <id>` — prints title, year, genres, cast (e.g. Cinemeta).
+  - `streams <url> <type> <id>` — lists stream names, qualities, and sizes (e.g. Torrentio).
+  - `tmdb <type> <id>` — fetches TMDB using `TMDB_API_KEY` from `.env` or the environment,
+    printing title, genres, and overview. Set the key in `.env` (repo root) or export it.
+- **Memory snapshot (on device):** `./tools/ai-tv-log.sh mem` — reads `VmRSS`/`VmHWM`/`VmSwap`
+  for the app process (read-only, requires TV lock for device access).
+- **Change-scoped tests:** `./tools/ai-test.sh` — runs `cargo nextest` only for crates touched
+  by uncommitted changes (inner loop). `./tools/ai-check.sh` is the outer-loop gate.
+- **Hostsim tests:** `./tools/ai-test-hostsim.sh [filter]` — runs the `cfg(hostsim)` lib tests
+  with the documented environment (`CARGO_INCREMENTAL=1`, `CARGO_TARGET_DIR=/tmp/ai-hostsim-target`,
+  `PLXNATIVE_RUNTIME_DIR` fresh temp dir). Target dir stays outside the checkout.
+- **Perf summary:** `./tools/ai-perf-summary.sh` — pulls TV perf logs and prints a one-paragraph
+  summary (min FPS, carried/dropped frames, highest vgap, worst route).
+- **Simulator:** `./tools/ai-sim.sh` — builds (`make -j10 sim-linux`) and launches the x86_64
+  Linux simulator with the standard env vars (`PLXNATIVE_APP_DIR`, `PLXNATIVE_RUNTIME_DIR`).
+  The one local path that exercises real rendering without the TV or ARM toolchain.
 
 ## Television and release safety
 
@@ -221,14 +256,19 @@ following rules are absolute and override any other instruction in this file.
    `plxnative-crash.log` and `plxnative-stderr.log`. ALWAYS run this immediately if
    the app closes unexpectedly or freezes.
 
-5. **Search All:** `./tools/ai-tv-log.sh grep "pattern"` — Searches the main events
+5. **Memory Snapshot:** `./tools/ai-tv-log.sh mem` — Finds the app's PID via
+   `pgrep -f "com.nuvionative.app"` and prints only `VmRSS`, `VmHWM` (peak), and
+   `VmSwap` from `/proc/<PID>/status`. Read-only; use it to verify RAM usage and
+   the measured peak (155,292 KiB) on the device.
+
+6. **Search All:** `./tools/ai-tv-log.sh grep "pattern"` — Searches the main events
    log, the P2P log, AND the stderr log simultaneously for specific patterns.
 
-6. **Raw (Unfiltered):** `./tools/ai-tv-log.sh raw 200` — Shows EVERYTHING in the
+7. **Raw (Unfiltered):** `./tools/ai-tv-log.sh raw 200` — Shows EVERYTHING in the
    Rust log, including key presses. Use this only if you suspect a crash right
    after a button press.
 
-7. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
+8. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
    NEVER run commands that write to the TV, install packages, or modify system
    files. You are restricted to the `ai-tv-log.sh` script only.
 
