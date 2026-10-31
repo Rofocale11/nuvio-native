@@ -326,6 +326,14 @@ before the gates could run at all:
 says the seams line up; it says nothing about the ACB/Starfish path, the GL composer, or the video
 plane. The `which-tier` skill picks the tier; `profile-tv` is what diagnoses a dropped frame.
 
+**The `.ipk` is not built on this workstation**: it holds the ARM webOS NDK toolchain, not a full
+ARM target system, so `make ipk` is not the local path. The artifact comes from GitHub Actions —
+`.github/workflows/build-ipk.yml` runs on `ubuntu-24.04-arm`, on a `v*` tag or by
+`workflow_dispatch` (which takes the branch, so a pushed branch is enough). The build therefore
+needs the branch on the remote before there is anything to install; install on the set, then read
+the device with `./tools/ai-tv-log.sh` (`perf`, `panic`, `mem`, `grep`) while it plays — never a raw
+`ssh` command.
+
 ### Then tier C — and it is a PORT, not a merge
 
 Because tier C was resolved *ours*, `feature/v0.9-hq` is already an ancestor of this branch. Merging
