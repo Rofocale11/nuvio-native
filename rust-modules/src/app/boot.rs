@@ -639,7 +639,13 @@ static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mut
 pub(crate) fn start_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
-        use std::os::unix::fs::MetadataExt;
+        std::thread::spawn(start_p2p_service_inner);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+fn start_p2p_service_inner() {
+    use std::os::unix::fs::MetadataExt;
 
         let app_dir = plx_base::paths::app_dir();
         let cleanup = |path: &std::path::Path, what: &str| match std::fs::remove_dir_all(path) {
@@ -699,6 +705,42 @@ pub(crate) fn start_p2p_service() {
         // Already running (Ok(None) is the live case); a reaped or failed child is replaced.
         if slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) {
             return;
+        }
+
+        // A previous launch may have left a stale `node server.js` holding port 11470
+        // (EADDRINUSE): the P2P child is only tracked in-process, so a crash or a
+        // relaunch without a clean stop leaves an orphan that makes the new server
+        // fall back to 11471, which the Rust side never reads (it is hardcoded to
+        // 11470). Reap any such orphan before spawning, and wait for the port to
+        // actually free up, so the new server binds 11470 on the first try.
+        {
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if !name.bytes().all(|b| b.is_ascii_digit()) { continue; }
+                    let pid: i32 = match name.parse() { Ok(p) => p, Err(_) => continue };
+                    if pid == std::process::id() as i32 { continue; }
+                    let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
+                        .unwrap_or_default()
+                        .replace('\0', " ");
+                    if cmdline.contains("server.js") {
+                        plx_base::eventlog::log(&format!(
+                            "nuvio: reaping stale P2P process {} ({})",
+                            pid, cmdline.trim()
+                        ));
+                        unsafe { libc::kill(pid, libc::SIGTERM); }
+                    }
+                }
+            }
+            for _ in 0..20 {
+                use std::net::TcpStream;
+                let addr: std::net::SocketAddr = "127.0.0.1:11470".parse().unwrap();
+                match TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(50)) {
+                    Ok(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Err(_) => break,
+                }
+            }
         }
         // The absolute path first: the jail's PATH is not root's PATH, and `node` may be absent
         // from it even though /usr/bin/node exists and is world-executable. A firmware that keeps
@@ -764,7 +806,6 @@ pub(crate) fn start_p2p_service() {
                 node.display()
             )),
         }
-    }
 }
 
 /// Kill the spawned P2P server and reap it, so closing the app does not leave `node` holding the

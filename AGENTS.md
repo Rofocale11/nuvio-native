@@ -203,22 +203,33 @@ fails the build on a forbidden edge.
 The user's TV is rooted and must never be put at risk by automated actions. The
 following rules are absolute and override any other instruction in this file.
 
-1. **Default (Filtered):** `./tools/ai-tv-log.sh 200` — Shows the last 100 lines,
-   but hides the massive `key type=hex` spam. Use this for general debugging.
+1. **Default (Rust App):** `./tools/ai-tv-log.sh 200` — Shows the last 200 lines
+   of the main app log, hiding the `key type=hex` spam. Use this for general
+   debugging and layout issues.
 
-2. **Performance:** `./tools/ai-tv-log.sh perf` — Shows only frame rates, image
-   cache, and layout routes. Use this to debug FPS drops or UI lag.
+2. **P2P Server (Node.js):** `./tools/ai-tv-log.sh p2p 200` — Shows the last 200
+   lines of the Node P2P server log. Use this to debug torrent playback, Torrentio
+   failures, or stream timeouts.
 
-3. **Raw (Unfiltered):** `./tools/ai-tv-log.sh raw 200` — Shows EVERYTHING,
-   including key presses. Use this only if you suspect a crash is happening
-   directly after a button press.
+3. **Performance:** `./tools/ai-tv-log.sh perf` — Shows only frame rates, image
+   cache, and layout routes. Use this to debug FPS drops.
 
-4. **Search:** `./tools/ai-tv-log.sh grep "panic|error"` — Searches the entire
-   log for specific patterns.
+4. **Search Both:** `./tools/ai-tv-log.sh grep "panic|error"` — Searches BOTH the
+   Rust log and the P2P log for specific patterns.
 
-5. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
+5. **Raw (Unfiltered):** `./tools/ai-tv-log.sh raw 200` — Shows EVERYTHING in the
+   Rust log, including key presses. Use this only if you suspect a crash right
+   after a button press.
+
+6. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
    NEVER run commands that write to the TV, install packages, or modify system
    files. You are restricted to the `ai-tv-log.sh` script only.
+
+## 🚫 NO WORKSPACE-WIDE FORMATTING
+
+Do NOT run `cargo fmt` or `cargo fix` across the entire workspace. It creates massive,
+noisy git diffs that ruin history. If you need to format, only format the specific
+files you are actively editing (e.g. `cargo fmt -- path/to/file.rs`).
 
 ## Harness-specific files
 
