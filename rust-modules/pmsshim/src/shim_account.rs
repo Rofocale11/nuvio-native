@@ -422,10 +422,15 @@ impl Account {
         }]))
     }
 
+    /// `{"users": [...]}`, not a bare array: the client parses this answer into
+    /// `plex::account::HomeUsers`, whose one field is `users`. A bare array arrived as "HTTP 200 but
+    /// the body did not parse" (simulator, 2026-11-01), the roster came back empty, and the app
+    /// silently signed in as the single default profile instead of offering the who's-watching
+    /// screen.
     fn home_users(&self) -> Response {
-        Response::json(&json!([
+        Response::json(&json!({"users": [
             {"id": 1, "uuid": "nuvio", "title": "Nuvio Native", "name": "Nuvio Native", "thumb": "", "admin": true, "guest": false, "restricted": false, "authToken": self.token, "plex_tv_token": self.token}
-        ]))
+        ]}))
     }
 
     fn switch(&self, uuid: &str) -> Response {
@@ -535,6 +540,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("test dir");
         dir
+    }
+
+    /// The answer shape the CLIENT parses (`plex::account::HomeUsers` has one field, `users`). A
+    /// bare array made the roster empty on the simulator, so the who's-watching screen never
+    /// appeared and the app used the single default profile.
+    #[test]
+    fn home_users_answers_the_wrapper_object_the_client_parses() {
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        let req = crate::shim_http::Request {
+            method: "GET".into(),
+            path: "/api/v2/home/users".into(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        };
+        let response = account.handle(&req, &["home", "users"]);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("JSON");
+        assert!(body.is_object(), "a bare array is not parseable by the client: {body}");
+        let users = body["users"].as_array().expect("users");
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["uuid"], "nuvio");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
