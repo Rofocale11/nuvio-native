@@ -41,6 +41,10 @@ take, and how). Read the relevant one before changing that area. Upstream PlxNat
   is `docs/ui-restructure-spec-v4.md`, which `rust-modules/ui/src/lib.rs` cites by section
   number.
 - Before account/watch-progress work, read `docs/nuvio/WATCH-PROGRESS.md`.
+- Before taking any upstream PlxNative work — cherry-picking a fix, absorbing a Richi branch, or
+  reasoning about how far this fork has drifted — read `docs/nuvio/UPSTREAM.md` and run
+  `tools/upstream-seam.sh`. The reference branch is `upstream/feature/v0.9-hq`, which is a
+  superset of `upstream/main`, and the measured merge cost is in that file.
 - Repository skills live in `.agents/skills/`. Use the matching skill whenever its
   description fits the task; the TV, simulator, FFI, release, and verification workflows
   have non-obvious constraints that generic commands miss.
