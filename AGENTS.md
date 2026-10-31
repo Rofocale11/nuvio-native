@@ -141,19 +141,17 @@ fails the build on a forbidden edge.
 - **A gate result is evidence about the exact tree it ran on.** Gates run on the COMMITTED
   tree: commit, confirm `git status --short` is empty, run the gates, confirm it is empty
   again, then push. Report the `test result:` line itself rather than a summary.
-- `make check` runs the fast host unit suite and lint gate. Use it for ordinary Rust
-  changes. It is bounded machine-wide to TWO concurrent runs via `tools/check-lock.py`.
-- **Inner Loop (Fast):** to see a change behave, build and run the simulator:
-  `make -j10 sim-linux` (it needs the host libav*/libass staged under `pkg/`). It exercises
-  real rendering and linking, which is what a widget, layout or player change needs. For pure
-  logic use the cheapest loop that reaches the code: `make test-crate C=<crate> [T=filter]`
-  for one crate, `./tools/ai-test.sh` for the crates your diff touches.
-- **Outer Loop (Gate):** `make check` is the pre-push gate — the host unit suite (16 test
-  binaries), lint, and the `ci/` python/shell gates. It takes ~5 minutes and is bounded
-  machine-wide to two runs, so start it in the background (`nohup ... &` or the agent's own
-  background execution) and poll its log; do not hold a short foreground timeout over it.
-  Nothing else runs that suite, and a push to a feature branch starts no CI job either, so a
-  change that never runs it is a change nobody checked.
+- **The loop is the simulator, not the suite.** `./tools/ai-sim.sh` builds (`make -j10
+  sim-linux`, which needs the host libass staged under `pkg/`) and launches the app with the
+  standard env; `make -j10 sim-linux` alone builds and links it. That is what a widget, layout,
+  player or FFI change needs — it compiles and renders the real thing. For logic, use the
+  cheapest loop that reaches the code: `make test-crate C=<crate> [T=filter]` for one crate,
+  `./tools/ai-test.sh` for the crates a diff touches.
+- `make check` still exists — the 16-binary host unit suite, lint and the `ci/` python/shell
+  gates, ~5 minutes, bounded machine-wide to two runs. It is NOT part of the loop and NOT a
+  required step before a push: run it deliberately when a change needs the whole suite, in the
+  background, and do not sit on it. Packaging (`make ipk`, and so `ci/check-package.py`) is the
+  one place the full set runs on every artifact.
 - While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and
   runs only that crate's lib tests. It is a loop, not a gate.
 - `make test-crate` does NOT enable `hostsim`. Those tests run through
