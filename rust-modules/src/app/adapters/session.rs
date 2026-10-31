@@ -1312,7 +1312,14 @@ mod tests {
         let plan = CommitPlan { authority: plx_plex::plex::session::SaveAuthority::FreshReauthentication,
             ..queued_plan(&plx_plex::plex::session::load()) };
         enqueue_test_commit(&mut adapter, plan);
-        assert!(adapter.take_committed().is_none(), "admitted, not yet run");
+        // "Admitted, not yet run" describes the queue, so it must not depend on which thread the
+        // scheduler picked first: the commit writes under the session's IO lock, so holding that
+        // lock here keeps the worker blocked until this check has read the empty ticket. Without
+        // it the assertion was a race — the worker could finish a fast write between the submit
+        // inside `take_committed` and its `try_recv`, which is exactly how it failed under load.
+        plx_plex::plex::session::with_io_for_test(|| {
+            assert!(adapter.take_committed().is_none(), "admitted, not yet run");
+        });
         plx_base::storage_worker::drain_for_test();
         let completed = adapter.take_committed().expect("the new sign-in's commit runs");
         assert!(matches!(completed.disk, Ok(Some(_))), "the new credential is written");

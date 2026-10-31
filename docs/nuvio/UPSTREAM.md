@@ -240,12 +240,16 @@ from port 1; this sandbox holds low ports instead of answering RST (a raw socket
 2, and refuses in 8 ms on 45678), and both fail identically on `nuvio-native`. The television has
 not seen any of this yet.
 
-A third red appeared once, under `make check`'s parallel load, and not since:
+A third red appeared once, under `make check`'s parallel load:
 `app::adapters::session::tests::a_signin_after_signout_behind_a_read_only_mount_is_written`
-panicked at its `"admitted, not yet run"` assertion. It passes alone (`T=` filter) and passes in a
-full `make test-crate C=app` re-run (670 passed, only the loopback case above red), so it is a
-load/ordering race in the erase-then-commit queue, not a regression from this port — but it is a
-race, and the next session should reproduce it under load before calling the suite trustworthy.
+panicked at its `"admitted, not yet run"` assertion. **The test was the defect, not the queue.**
+`take_committed` admits the commit to the storage worker and then probes its ticket in the same
+breath, so "not yet run" only holds if the scheduler does not run the worker in between — it is a
+statement about timing dressed up as a statement about the queue, and 20 ms of load is enough to
+make it false. Widening the window with a temporary sleep in `take_committed` fails the old
+assertion deterministically and passes the fixed one, which holds the session IO lock across the
+probe (the commit's write needs that lock, so the worker is still blocked when the empty ticket is
+read). Production code is untouched; the test now grades admission, which is what it claims.
 
 ### What running the suites found
 
