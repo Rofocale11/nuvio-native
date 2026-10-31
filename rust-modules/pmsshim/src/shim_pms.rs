@@ -1230,14 +1230,23 @@ mod tmdb_metadata_tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(
-            backend.streams.lock().unwrap().as_slice(),
-            [("movie".to_string(), "tmdb:603".to_string())]
+        // WHICH spelling reaches the addon is a build fact, not this test's subject: `addon_id_for`
+        // turns `tmdb:603` into its IMDb id when a TMDB key is compiled in AND the lookup answers (an
+        // addon indexes better by `tt`), and passes `tmdb:603` through otherwise — so a checkout built
+        // with `nuvio.local.env` asks for `tt0133093` and a CI build without the secret asks for
+        // `tmdb:603`. Both name the Matrix, and a failed lookup falls back to the tmdb id, so this
+        // holds offline too. What the route promises, and what this pins, is that a synthetic
+        // ratingKey reaches the addon as THAT title — not as the key's decimal digits.
+        let asked = backend.streams.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].0, "movie");
+        assert!(
+            matches!(asked[0].1.as_str(), "tmdb:603" | "tt0133093"),
+            "the addon was asked for {:?}, which is not the Matrix",
+            asked[0].1
         );
-        assert_eq!(
-            backend.subtitles.lock().unwrap().as_slice(),
-            [("movie".to_string(), "tmdb:603".to_string())]
-        );
+        let subtitle_ids = backend.subtitles.lock().unwrap().clone();
+        assert_eq!(subtitle_ids, asked, "streams and subtitles ask for the same title id");
         // A movie has no streams from this backend, but the list is finished: the picker must stop
         // asking rather than poll to its retry limit.
         assert_eq!(body(&shim.handle(&get()))["complete"], true);

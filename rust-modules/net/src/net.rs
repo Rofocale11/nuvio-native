@@ -595,6 +595,10 @@ struct BodySink {
     overflowed: bool,
     /// The `ETag` of the response being read (see [`header_cb`]); the last hop's, never a redirect's.
     etag: Option<String>,
+    /// The `Location:` of the answer being read, if it is a redirect. Only reachable with redirects
+    /// OFF, which is how a caller that must decide what to carry to the next hop reads it — see
+    /// `plx_stremio`'s `addon_http`, the transport that follows them itself.
+    location: Option<String>,
 }
 
 impl BodySink {
@@ -604,6 +608,7 @@ impl BodySink {
             max,
             overflowed: false,
             etag: None,
+            location: None,
         }
     }
 
@@ -671,20 +676,28 @@ extern "C" fn header_cb(
 }
 
 impl BodySink {
-    /// One raw header line: a status line clears the validator, an `ETag:` line sets it.
+    /// One raw header line: a status line clears both the validator and the redirect target, an
+    /// `ETag:` or `Location:` line sets its own.
     fn note_header(&mut self, line: &[u8]) {
         if line.starts_with(b"HTTP/") {
             self.etag = None;
+            self.location = None;
             return;
         }
         let Some(colon) = line.iter().position(|&b| b == b':') else { return };
-        if !line[..colon].eq_ignore_ascii_case(b"etag") {
+        let is_etag = line[..colon].eq_ignore_ascii_case(b"etag");
+        let is_location = !is_etag && line[..colon].eq_ignore_ascii_case(b"location");
+        if !is_etag && !is_location {
             return;
         }
         if let Ok(value) = std::str::from_utf8(&line[colon + 1..]) {
             let value = value.trim();
             if !value.is_empty() {
-                self.etag = Some(value.to_owned());
+                if is_etag {
+                    self.etag = Some(value.to_owned());
+                } else {
+                    self.location = Some(value.to_owned());
+                }
             }
         }
     }
@@ -725,6 +738,12 @@ pub struct Resp {
     /// prefix and quotes), or `None` when it sent none. A 304 normally repeats the validator.
     /// Present on every buffered request; the caller's own `If-None-Match` goes in `headers`.
     pub etag: Option<String>,
+    /// The answer's `Location:` header, trimmed, or `None`. Only a caller that asked for NO
+    /// redirects can see it (`follow_redirects = false`); with redirects on, libcurl has already
+    /// gone to that target and the final answer normally carries no `Location`. It exists so a
+    /// transport can follow a redirect ITSELF and decide, per hop, which headers may travel —
+    /// which is what the guard above [`request_tls_sink`] requires of anything carrying a token.
+    pub location: Option<String>,
 }
 impl Resp {
     pub fn ok(&self) -> bool {
@@ -808,7 +827,7 @@ fn finish_response(
             verify,
         });
     }
-    Ok(Resp { status: status.unwrap(), body: sink.body, peer_pin: None, etag: sink.etag })
+    Ok(Resp { status: status.unwrap(), body: sink.body, peer_pin: None, etag: sink.etag, location: sink.location })
 }
 
 /// **How long one call may take.** The values are a PER-CALL argument rather than constants
@@ -2123,8 +2142,10 @@ fn request_tls_sink(
     // re-sends custom headers to a redirect's target (it strips only `Authorization` and `Cookie`
     // when the host changes, and the television's 7.53.1 predates even that), so a `X-Plex-Token:`
     // line on a request that follows `Location:` would reach whatever host the answer names. The
-    // one caller that follows redirects (`https_get_public`, the QR fetch) sends none; this is what
-    // keeps it so for the next one.
+    // one caller that lets LIBCURL follow (`https_get_public`, the QR fetch) sends none; this is what
+    // keeps it so for the next one. A transport that must follow a redirect WITH headers does it
+    // itself, one hop at a time, so it can decide what travels: `plx_stremio::addon_http` reads
+    // `Resp::location` and never sets `follow_redirects`.
     if follow_redirects && !headers.is_empty() {
         plx_base::eventlog::log("net: request refused: a request that follows redirects carries no caller headers");
         return Err(RequestError::Transport.into());

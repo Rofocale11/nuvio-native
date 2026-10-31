@@ -892,13 +892,13 @@ mod evidence_tests {
     #[test]
     fn complete_response_policy_and_provider_decoding_are_unchanged() {
         let _serial = plx_base::testlock::serial();
-        let malformed = Ok(Resp { status: 200, body: b"not json".to_vec(), peer_pin: None, etag: None });
+        let malformed = Ok(Resp { status: 200, body: b"not json".to_vec(), peer_pin: None, etag: None, location: None });
         note_response_contact(SWITCH, &malformed);
         assert!(plex_tv_recently_reachable());
         assert!(matches!(switch_response(SWITCH, malformed), Ok(SwitchOutcome::Unreachable)));
-        assert!(matches!(switch_response(SWITCH, Ok(Resp { status: 200, body: br#"{"authToken":"synthetic-token"}"#.to_vec(), peer_pin: None, etag: None })), Ok(SwitchOutcome::Switched(_))));
-        assert!(matches!(poll_response(SWITCH, Ok(Resp { status: 200, body: br#"{"authToken":null}"#.to_vec(), peer_pin: None, etag: None })), Ok(PinPoll::Pending)));
-        assert!(matches!(poll_response(SWITCH, Ok(Resp { status: 200, body: br#"{"authToken":"synthetic-token"}"#.to_vec(), peer_pin: None, etag: None })), Ok(PinPoll::Authorized(_))));
+        assert!(matches!(switch_response(SWITCH, Ok(Resp { status: 200, body: br#"{"authToken":"synthetic-token"}"#.to_vec(), peer_pin: None, etag: None, location: None })), Ok(SwitchOutcome::Switched(_))));
+        assert!(matches!(poll_response(SWITCH, Ok(Resp { status: 200, body: br#"{"authToken":null}"#.to_vec(), peer_pin: None, etag: None, location: None })), Ok(PinPoll::Pending)));
+        assert!(matches!(poll_response(SWITCH, Ok(Resp { status: 200, body: br#"{"authToken":"synthetic-token"}"#.to_vec(), peer_pin: None, etag: None, location: None })), Ok(PinPoll::Authorized(_))));
         assert!(plx_net::net::global_init());
         for body in [br#"[{"provides":"server","connections":null}]"#.as_slice(), br#"{"users":[]}"#.as_slice()] {
             let mut reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();

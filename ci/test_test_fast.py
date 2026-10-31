@@ -140,6 +140,11 @@ class OtherTargetsAreUnaffected(unittest.TestCase):
         self.assertIn("CARGO_INCREMENTAL=0", out)
 
 
+def suite_size():
+    """How many test binaries the default suite has, read from the Makefile's UNIT_SUITE."""
+    text = (ROOT / "Makefile").read_text()
+    return len(re.search(r"^UNIT_SUITE\s*=\s*(.+)$", text, flags=re.M).group(1).split())
+
 class TestFastRuns(unittest.TestCase):
     def test_incremental_in_its_own_target_dir_and_forwards_the_filter(self):
         with FakeCargoHome() as fake:
@@ -155,18 +160,18 @@ class TestFastRuns(unittest.TestCase):
             self.assertEqual(call["target_dir"], TDIR)
             self.assertTrue(call["cwd"].endswith("rust-modules"), call["cwd"])
             self.assertEqual(call["runtime_dir_set"], "yes")
-            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens --no-run --message-format=json-render-diagnostics$")
+            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens -p plx_stremio -p plx_pmsshim --no-run --message-format=json-render-diagnostics$")
             # The filter goes to each test binary (the runner builds first, then runs), not to cargo.
-            self.assertEqual(len(fake.bin_calls()), 14)
+            self.assertEqual(len(fake.bin_calls()), suite_size())
             self.assertTrue(all(line.endswith("args=route::") for line in fake.bin_calls()), fake.bin_calls())
 
     def test_no_filter_runs_the_whole_default_feature_suite(self):
         with FakeCargoHome() as fake:
             self.assertEqual(fake.run("test-fast").returncode, 0)
             (call,) = fake.calls()
-            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens --no-run --message-format=json-render-diagnostics$")
+            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens -p plx_stremio -p plx_pmsshim --no-run --message-format=json-render-diagnostics$")
             self.assertNotIn("--features", call["args"])
-            self.assertEqual(len(fake.bin_calls()), 14)
+            self.assertEqual(len(fake.bin_calls()), suite_size())
             self.assertTrue(all(line.endswith("args=") for line in fake.bin_calls()), fake.bin_calls())
 
     def test_own_dir_is_neither_of_the_dirs_other_builds_use(self):

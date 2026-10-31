@@ -199,8 +199,15 @@ class MakeWiring(unittest.TestCase):
     def test_the_suite_variable_is_the_recipes_package_list(self):
         text = (ROOT / "Makefile").read_text()
         suite = re.search(r"^UNIT_SUITE\s*=\s*(.+)$", text, flags=re.M).group(1).split()
-        flags = " ".join(f"-p {p}" for p in suite)
-        for target in ("check-cargo-unit-default", "check-cargo-unit-hostsim", "test-fast"):
+        # The hostsim configuration compiles a `hostsim` feature into every crate it names, and two
+        # crates do not define it — declared in the Makefile rather than inferred here, so dropping
+        # one from either side fails.
+        declared = re.search(r"^UNIT_SUITE_NO_HOSTSIM\s*=\s*(.+)$", text, flags=re.M)
+        no_hostsim = declared.group(1).split() if declared else []
+        self.assertTrue(set(no_hostsim) <= set(suite), f"{no_hostsim} not in UNIT_SUITE")
+        for target, named in (("check-cargo-unit-default", suite), ("test-fast", suite),
+                              ("check-cargo-unit-hostsim", [c for c in suite if c not in no_hostsim])):
+            flags = " ".join(f"-p {p}" for p in named)
             start = text.index(f"\n{target}:")
             recipe = text[start:start + 6000].split("\n\n")[0]
             self.assertIn(f"test --lib {flags}", recipe, target)

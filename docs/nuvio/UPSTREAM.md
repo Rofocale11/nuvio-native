@@ -349,6 +349,41 @@ half stays with `check-package.py`, since it grades a translated string. The les
 slice is in `git diff upstream/feature/v0.9-hq -- Makefile`-shaped reading, not in a new gate: a
 merge that keeps a whole line must keep both sides' edits to it.
 
+### What the first television boot found
+
+The stable `.ipk` from this branch installed and booted (home, 12 Continue Watching rows, the video
+plane exported, P2P up). Then sign-in failed, and the log said why:
+
+```
+nuvio account: start failed category=network status=0
+account: POST 127.0.0.1:32420/api/v2/pins -> HTTP 503
+net: request refused: a request that follows redirects carries no caller headers   (52 times)
+```
+
+Upstream's `net` refuses a request that asks libcurl to follow a redirect while carrying ANY caller
+header — on this firmware libcurl replays custom headers to whatever host a `Location:` names, so an
+`Authorization:` on such a request would travel to a stranger. The guard is right. The fork's
+`plx_stremio::addon_http` predates it and always passed `follow_redirects = true` with headers (an
+`Accept`, plus `Authorization`/`apikey` for the Nuvio backend), so **every addon and Nuvio-account
+request was refused before it reached the wire** — no shelves, no sign-in. The host suite could not
+see it: nothing there asserts that a request with headers is allowed to exist.
+
+The fix keeps the guard and moves the decision into the transport: `net::Resp` now carries the
+answer's `Location`, and `addon_http` follows redirects itself, one hop at a time, with the policy
+spelled out as a value (`step`): credentials are dropped when the origin changes, `https` may not
+downgrade to `http`, a 303 (and a 301/302 answering a POST) becomes a bodiless GET, only `http(s)`
+targets are followed, and five hops bound the chain. A chain that ends in a redirect is returned as
+that 3xx answer, never as a success. Tested on the wire against loopback servers (same origin keeps
+the headers, another origin does not, a 303 changes the method and drops the body) plus unit tests
+for the policy value.
+
+**A second hole, found while wiring that test:** `plx_stremio` (56 lib tests) and `plx_pmsshim` (51)
+had no recipe anywhere that ran them — `make check`, the hostsim pass and CI all named the other
+fourteen crates — so the addon backend and the shim were the least-gated code in the tree, which is
+exactly where a regression like the above could live for a whole merge. Both are in
+`check-cargo-unit-default` and `test-fast` now (`UNIT_SUITE`, with `UNIT_SUITE_NO_HOSTSIM` declaring
+why the hostsim pass still names fourteen: those two crates do not define that feature).
+
 ### The exact next action
 
 `make check` on the committed tree (`./tools/ai-check.sh`, polled with
