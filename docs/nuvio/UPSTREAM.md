@@ -293,5 +293,8 @@ Revisit deliberately, in this file, if:
 ```
 
 `--ref` measures against another branch (try `upstream/main` to see why it is the wrong one).
+`check` is a **trunk** command: on `forward-port/v0.9-hq` it reports base drift by construction,
+because that branch's merge-base with the reference IS the reference tip (`d12e8659`). Reading that
+as drift on the forward-port branch is a mistake; reading it as drift on `nuvio-native` is not.
 `check` is deliberately **not** wired into `make check` or CI: a moved base is usually something a
 human just did, and it is a question to ask before a pick, not a gate.
