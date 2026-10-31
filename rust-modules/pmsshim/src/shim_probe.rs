@@ -40,6 +40,11 @@ pub struct Audio {
     pub codec: String,
     pub profile: i32,
     pub channels: i32,
+    /// The file's own sample rate in Hz (`ProbedAudio::sample_rate`), 0 when the probe could not
+    /// say. Published as PMS `samplingRate`, which is what the player's fork lanes read: the AC3
+    /// encode lane declares at 48 kHz only and the PCM lane states the exact rate in its
+    /// `pcmInfo`, so without this field every track off this shim arrived with "rate not told".
+    pub sample_rate: i32,
     pub language: String,
     pub title: String,
     pub default: bool,
@@ -231,7 +236,8 @@ pub fn apply(media: &mut Value, p: &ProbeInfo) {
         let lang = if a.language.is_empty() { "und".to_string() } else { a.language.clone() };
         streams.push(json!({
             "id": part_id * 10 + 2 + n as i64 * 1000, "streamType": 2, "codec": a.codec, "index": index,
-            "channels": a.channels, "language": lang, "languageCode": lang,
+            "channels": a.channels, "samplingRate": a.sample_rate,
+            "language": lang, "languageCode": lang,
             "title": if a.title.is_empty() { name.clone() } else { a.title.clone() },
             "displayTitle": format!("{} ({} {}ch)", lang, name, a.channels),
             "selected": n == pick, "default": a.default,
@@ -288,6 +294,23 @@ mod tests {
         let s = &m["Part"][0]["Stream"];
         assert_eq!(s[1]["selected"], false);
         assert_eq!(s[2]["selected"], true);
+    }
+
+    /// The player's fork lanes read the track's own rate off the Media: the AC3 encode lane
+    /// declares at 48 kHz only, and the PCM lane states the exact rate in its `pcmInfo`. The probe
+    /// already knows it, so the shim must say it — without `samplingRate` every track arrived with
+    /// "rate not told" and the TrueHD Load was refused outright (TV log 2026-11-01).
+    #[test]
+    fn audio_streams_publish_the_probed_sampling_rate() {
+        let mut p = p7(6);
+        p.audio[0].channels = 8;
+        p.audio[0].sample_rate = 48_000;
+        let mut m = json!({"Part": [{"id": 5}]});
+        apply(&mut m, &p);
+        let audio = &m["Part"][0]["Stream"][1];
+        assert_eq!(audio["streamType"], 2);
+        assert_eq!(audio["samplingRate"], 48_000);
+        assert_eq!(audio["channels"], 8);
     }
 
     fn p7(bl_compat: u8) -> ProbeInfo {

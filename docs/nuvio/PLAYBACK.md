@@ -83,7 +83,7 @@ for an item (or when a stream is picked), caches it per stream URL, and emits th
 | `Media.videoCodec`, `width`, `height`, `videoFrameRate` | `p.video` |
 | `Stream(type 1).codec/bitDepth/colorTrc/colorPrimaries/colorSpace/frameRate` | `p.video` (`colorTrc`: 16 → `smpte2084`, 18 → `arib-std-b67`; primaries/space 9 → `bt2020`/`bt2020nc`) |
 | `Stream(type 1).DOVIPresent/DOVIProfile/DOVILevel/DOVIBLCompatID/DOVIRPUPresent/DOVIELPresent/DOVIBLPresent` | `p.video.dovi` (send all, together) |
-| `Stream(type 2)` per audio track, in order: `codec`, `channels`, `languageCode`, `title`, `default`/`selected` | `p.audio` (`profile` 60 → `DTS-HD MA`, 30 on eac3/truehd → Atmos `title`/`displayTitle`) |
+| `Stream(type 2)` per audio track, in order: `codec`, `channels`, `samplingRate`, `languageCode`, `title`, `default`/`selected` | `p.audio` (`profile` 60 → `DTS-HD MA`, 30 on eac3/truehd → Atmos `title`/`displayTitle`) |
 | `Stream(type 3)` per embedded sub, in order: `codec`, `languageCode`, `title`, `forced`, `default` | `p.subtitles` |
 | `Part.size`, `Part.duration`, `Media.duration` | `p.size`, `p.duration_ms` |
 
@@ -134,14 +134,21 @@ folds it to 5.1(side) by channel role in Q15 integer arithmetic, and encodes AC3
 48 kHz. The Load then declares it exactly as a native AC3 5.1 track (`AudioLaneInfo::Ac3Encode`),
 so the television's hardware sees a format it already decodes. No resampler exists in the build
 (`--disable-swresample`), so the lane takes 48 kHz sources only; the route leaves any other rate
-with the server.
+with the server. A rate the Media does not state takes the lane anyway and the lane's own open
+refuses it if the stream reports anything else — the shim publishes the probed `samplingRate`
+(`shim_probe::Audio::sample_rate`), and before that every track arrived with the rate unstated,
+which refused the TrueHD Load outright (2026-11-01).
 
 **DTS is deliberately the one unconditional arm.** The two sets this fork runs on have opposite
 DTS problems and the lane is the only answer both accept:
 
 - a set *with* a `dts` row plays the core only — `ff::dts_core_packet` drops the DTS-HD
   extension, so a 7.1 MA arrives as 5.1 core at 1.5 Mbps, and anything above the row's channel
-  ceiling is refused outright;
+  ceiling is refused outright. **The dev set is this case, and on it a native DTS Load does not
+  play** (measured 2026-11-01): the pipeline accepts it, reports `smp_cb type=8 audio/x-dts`, then
+  never emits the `type=7` out-channels callback, no `FRAMEREADY` tick reaches the app, and with
+  `audioSync` the video sink slaves to that dead audio clock — black screen, audio queue filling
+  to ~2 s and stalling. That is why DTS is unconditional rather than table-gated;
 - a set *without* one (a 2020 CX) has no DTS decoder at all, so the same core reaches the
   pipeline as **silence**.
 

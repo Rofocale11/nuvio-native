@@ -402,6 +402,9 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                     codec: a.codec.clone(),
                     profile: a.profile,
                     channels: a.channels,
+                    // The fork lanes read `samplingRate` (AC3 encode lane: 48 kHz only; PCM lane:
+                    // the declared rate). Without it every track off the shim had no rate at all.
+                    sample_rate: a.sample_rate,
                     language: a.language.clone(),
                     title: a.title.clone(),
                     default: a.default,

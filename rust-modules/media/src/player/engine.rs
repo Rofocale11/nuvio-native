@@ -1181,7 +1181,15 @@ impl AudioLaneInfo {
         pcm_hi: Option<&str>,
     ) -> Option<AudioLaneInfo> {
         if caps.enc_lane_candidate(acodec, channels, encode) {
-            return (rate == plx_platform::devcaps::ENC_LANE_RATE)
+            // FORK (RichiL10): an UNKNOWN rate (0) takes the lane: our own shim publishes no
+            // `samplingRate` on its Media streams, so every track off it arrives with rate 0, and
+            // requiring exactly 48 kHz refused the Load outright ("unsupported audio codec
+            // "truehd"; refusing incorrect Load declaration" — black screen, TV log 2026-11-01).
+            // A wrong rate is still caught where it can be known: `ff_enc`'s open refuses a
+            // decoder that reports anything but 48 kHz (a 96 kHz TrueHD track fails the encoder
+            // and once OOM'd the set), so the strictness lives in the one place that sees the
+            // truth. This matches `Caps::audio_lane`, which has always accepted rate 0.
+            return (rate == 0 || rate == plx_platform::devcaps::ENC_LANE_RATE)
                 .then(|| AudioLaneInfo::Ac3Encode(crate::ff::EncSpec { channels: channels.max(0) as u32 }));
         }
         match plx_platform::devcaps::dp_audio_key(acodec) {
@@ -6580,7 +6588,8 @@ mod sink_envelope_tests {
             audio_info_node(opus),
             format!(r#","opusInfo":{{"channels":2,"sampleRate":48.0,"streamHeader":"{}"}}"#, plx_base::b64::encode(&opus_head(2)))
         );
-        assert_eq!(AudioLaneInfo::for_track("dca", 48_000, 6, 24, None), None);
+        // the codecs the pipeline decodes itself take no lane node
+        assert_eq!(AudioLaneInfo::for_track("ac3", 48_000, 6, 24, None), None);
         assert_eq!(AudioLaneInfo::for_track("flac", 0, 2, 24, None), None);
         // spliced inside `contents`, once, and only beside the matching codec string
         let p = PAYLOAD_AV.replace(r#""audio":"AC3""#, r#""audio":"PCM""#);
@@ -6603,7 +6612,7 @@ mod sink_envelope_tests {
         let lane = |codec: &str, rate: i64, ch: i64, encode: bool| {
             AudioLaneInfo::for_track_with(&b4, encode, codec, rate, ch, 24, None)
         };
-        for (codec, ch) in [("flac", 8), ("flac", 6), ("pcm", 8), ("truehd", 8), ("truehd", 6), ("mlp", 2)] {
+        for (codec, ch) in [("flac", 8), ("flac", 6), ("pcm", 8), ("truehd", 8), ("truehd", 6), ("mlp", 2), ("dts", 6), ("dca-ma", 8)] {
             let info = lane(codec, 48_000, ch, true);
             assert_eq!(info, Some(AudioLaneInfo::Ac3Encode(crate::ff::EncSpec { channels: ch as u32 })), "{codec} {ch}ch");
             assert_eq!(load_audio_codec(codec, info), Some(("AC3", 1)), "{codec} {ch}ch");
@@ -6614,6 +6623,13 @@ mod sink_envelope_tests {
             assert_eq!(audio_info_node(info.unwrap()), "");
             // any other rate, or the knob off: no encode-lane declaration
             assert_eq!(lane(codec, 96_000, ch, true), None, "{codec} {ch}ch 96 kHz");
+            // an UNKNOWN rate takes the lane: our shim publishes no samplingRate, and refusing
+            // these was the 2026-11-01 black screen on every TrueHD title
+            assert_eq!(
+                lane(codec, 0, ch, true),
+                Some(AudioLaneInfo::Ac3Encode(crate::ff::EncSpec { channels: ch as u32 })),
+                "{codec} {ch}ch unknown rate"
+            );
             assert_ne!(lane(codec, 48_000, ch, false).map(AudioLaneInfo::payload_codec), Some("AC3"));
         }
         // with the knob off a TrueHD track has no declaration at all (the Load is refused)

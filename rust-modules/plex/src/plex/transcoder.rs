@@ -280,15 +280,19 @@ fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: Trans
             caps.vp9_bit_depth
         ));
     }
-    // FORK (RichiL10): plus the codecs only the in-app AC3 encode lane decodes (TrueHD, MLP).
+    // FORK (RichiL10): plus the codecs only the in-app AC3 encode lane decodes (TrueHD, MLP) and
+    // DTS, which the lane takes whether or not the table lists it. DTS is usually in `caps.audio`
+    // as well, so the two lists are merged without duplicates — PMS reads this as a set, but a
+    // profile that names `dca` twice is a profile nobody can diff against another set's.
     let enc_only = caps.enc_lane_profile_codecs(encode);
-    let dp_audio = caps
-        .audio
-        .split(',')
-        .chain(enc_only.iter().copied())
-        .map(profile_codec_name)
-        .collect::<Vec<_>>()
-        .join(",");
+    let mut dp_audio: Vec<&str> = Vec::new();
+    for c in caps.audio.split(',').chain(enc_only.iter().copied()) {
+        let name = profile_codec_name(c);
+        if !dp_audio.contains(&name) {
+            dp_audio.push(name);
+        }
+    }
+    let dp_audio = dp_audio.join(",");
     // ac3 first — the preferred ENCODE target — then the rest of the caps subset as copy lanes.
     let target_audio = ["ac3", "eac3", "aac", "dts"]
         .into_iter()
@@ -298,23 +302,37 @@ fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: Trans
         .join(",");
     // PMS scopes audio carried by a video profile as videoAudioCodec (Plex-for-Kodi's
     // plexplayer.py uses this scope for audio.channels too); audioCodec is not a valid scope.
-    let audio_limits = caps.audio_channels.iter()
+    //
+    // One limitation per codec: the device rows and the encode lane's codecs overlap (DTS is in
+    // both), and a profile that states the same bound twice for `dca` is a profile nobody can diff
+    // against another set's. Names go through `profile_codec_name`, so PMS reads `dca`, not `dts`.
+    let mut audio_limits = String::new();
+    let mut stated: Vec<&str> = Vec::new();
+    for (codec, channels) in caps.audio_channels.iter()
         .filter(|(codec, _)| caps.audio_has(codec))
-        // FORK (RichiL10): the stated bound, which for DTS admits the 6.1/7.1 tracks whose core
-        // the demuxer feeds, and for FLAC/PCM the 8 channels the encode lane converts
-        // (`Caps::profile_channel_limit_with`). Named in PMS's spelling (`profile_codec_name`).
+        // FORK (RichiL10): the stated bound, which for DTS admits the 6.1/7.1 tracks the encode
+        // lane takes, and for FLAC/PCM the 8 channels it converts
+        // (`Caps::profile_channel_limit_with`).
         .map(|(codec, raw)| (profile_codec_name(codec), caps.profile_channel_limit_with(codec, encode).unwrap_or(*raw)))
-        .chain(enc_only.iter().map(|c| (*c, caps.profile_channel_limit_with(c, encode).unwrap_or(8))))
-        .map(|(codec, channels)| format!(
+        .chain(enc_only.iter().map(|c| (profile_codec_name(c), caps.profile_channel_limit_with(c, encode).unwrap_or(8))))
+    {
+        if stated.contains(&codec) {
+            continue;
+        }
+        stated.push(codec);
+        audio_limits.push_str(&format!(
             "+add-limitation(scope=videoAudioCodec&scopeName={codec}&type=upperBound&name=audio.channels&value={channels}&replace=true)"
-        ))
-        // FORK (RichiL10): TrueHD/MLP always go through the encode lane, which has no resampler,
-        // so PMS converts any of them above 48 kHz itself.
-        .chain(enc_only.iter().map(|codec| format!(
-            "+add-limitation(scope=videoAudioCodec&scopeName={codec}&type=upperBound&name=audio.samplingRate&value={}&replace=true)",
+        ));
+    }
+    // FORK (RichiL10): the encode lane has no resampler, so PMS converts these above 48 kHz
+    // itself (TrueHD/MLP always take the lane; DTS does too).
+    for codec in enc_only {
+        audio_limits.push_str(&format!(
+            "+add-limitation(scope=videoAudioCodec&scopeName={}&type=upperBound&name=audio.samplingRate&value={}&replace=true)",
+            profile_codec_name(codec),
             plx_platform::devcaps::ENC_LANE_RATE
-        )))
-        .collect::<String>();
+        ));
+    }
     let target = match delivery {
         TranscodeDelivery::ProgressiveMkv => format!(
             "add-transcode-target(type=videoProfile&context=streaming&protocol=http\
@@ -1487,6 +1505,9 @@ mod tests {
         assert!(on.contains("scopeName=opus&type=upperBound&name=audio.channels&value=6&replace=true"));
         assert!(on.contains("scopeName=truehd&type=upperBound&name=audio.samplingRate&value=48000&replace=true"));
         assert!(on.contains("scopeName=mlp&type=upperBound&name=audio.samplingRate&value=48000&replace=true"));
+        // FORK: DTS is encoded in-app too (no resampler), and it is named once, not twice
+        assert!(on.contains("scopeName=dca&type=upperBound&name=audio.samplingRate&value=48000&replace=true"));
+        assert_eq!(on.matches("scopeName=dca&type=upperBound&name=audio.channels&value=8").count(), 1);
         // the PCM lane takes any rate, so FLAC/PCM carry no rate bound
         assert!(!on.contains("scopeName=flac&type=upperBound&name=audio.samplingRate"));
         // the server only ever encodes INTO what the television decodes

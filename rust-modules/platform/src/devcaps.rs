@@ -274,15 +274,26 @@ impl Caps {
     /// | FLAC/PCM inside the PCM lane's admitted channel counts | PCM lane (lossless) |
     /// | FLAC/PCM with 3 to 8 channels the PCM lane does not admit | encode lane |
     /// | TrueHD/MLP, any channel count | encode lane |
+    /// | DTS, any channel count | encode lane |
     ///
     /// FLAC/PCM follow their own admission (`flac=off` hands them back to the server too); TrueHD
     /// and MLP are not in any television's table and need only the AC3 sink.
+    ///
+    /// **DTS is the fork's oldest lane tenant and the merge dropped it** (2026-11-01): upstream's
+    /// newer policy direct-plays the DTS core and encodes nothing, which is the right answer on
+    /// the set it was measured on. On the dev set (webOS 10, LG's table lists a `dts` row) a
+    /// native DTS Load is accepted and then never configures the audio sink — `smp_cb type=8
+    /// audio/x-dts` arrives, no `type=7` out-channels ever does, no `FRAMEREADY` tick is produced,
+    /// and with `audioSync` the video sink slaves to that dead audio clock: black screen, audio
+    /// queue filling and then stalled at ~2 s. That is exactly the failure this lane exists to
+    /// avoid, so DTS comes back to the lane.
     pub fn enc_lane_candidate(&self, codec: &str, channels: i64, encode: bool) -> bool {
         if !encode || !self.enc_sink_ok() {
             return false;
         }
         match dp_audio_key(codec) {
             "truehd" | "mlp" => channels >= 0,
+            "dts" => true,
             c @ ("flac" | "pcm") => {
                 self.audio_has(c) && (3..=8).contains(&channels) && !self.pcm_lane_admits(c, channels)
             }
@@ -301,10 +312,12 @@ impl Caps {
     }
 
     /// FORK (RichiL10): the codecs the encode lane adds to the PMS direct-play profile beyond
-    /// [`Caps::audio`] (TrueHD and MLP, which no television table lists). Empty when it is off.
+    /// [`Caps::audio`]. TrueHD/MLP are in no television table, and DTS is admitted whether or not
+    /// the set lists a `dts` row — the lane is the only path this fork has verified for it. Empty
+    /// when the lane is off.
     pub fn enc_lane_profile_codecs(&self, encode: bool) -> &'static [&'static str] {
         if encode && self.enc_sink_ok() {
-            &["truehd", "mlp"]
+            &["truehd", "mlp", "dts"]
         } else {
             &[]
         }
@@ -319,12 +332,12 @@ impl Caps {
     }
 
     /// [`Caps::profile_channel_limit`] with the `encode` knob passed in: while the encode lane is
-    /// on, FLAC and PCM (when admitted at all) and TrueHD/MLP are stated up to 8 channels, so
+    /// on, FLAC and PCM (when admitted at all) and TrueHD/MLP/DTS are stated up to 8 channels, so
     /// MDE answers direct play for the tracks the app now converts itself.
     pub fn profile_channel_limit_with(&self, codec: &str, encode: bool) -> Option<u32> {
         let codec = dp_audio_key(codec);
         if encode && self.enc_sink_ok() {
-            if matches!(codec, "truehd" | "mlp") || (matches!(codec, "flac" | "pcm") && self.audio_has(codec)) {
+            if matches!(codec, "truehd" | "mlp" | "dts") || (matches!(codec, "flac" | "pcm") && self.audio_has(codec)) {
                 return Some(8);
             }
         }
@@ -850,7 +863,8 @@ mod tests {
         // default plays the DTS core of a 7.1 DTS-HD track (`dts_over_ceiling_for`).
         assert!(!caps.audio_supports_with("dca", 8, false));
         assert!(caps.audio_supports_with("dca", 8, true));
-        assert!(!caps.audio_supports("dca", 0));
+        assert!(caps.audio_supports("dca", 0), "FORK: the AC3 lane needs no channel count");
+        assert!(!caps.audio_supports_lanes("dca", 0, 0, true, false), "lane off: the row needs one");
         assert!(caps.audio_supports("DCA", 6), "case folds too");
         assert!(caps.audio_supports("ec-3", 8), "ec-3 is eac3");
         assert!(!Caps::assumed().audio_has("dca"));
@@ -904,7 +918,15 @@ mod tests {
                 "{codec}: with dts_core=never the device's 6-channel bound holds"
             );
             assert!(caps.audio_supports_with(codec, 8, true), "{codec}: FORK: above it, the core plays");
-            assert!(!caps.audio_supports(codec, 0), "{codec}: DTS needs a known channel count");
+            assert!(
+                caps.audio_supports(codec, 0),
+                "{codec}: FORK: the AC3 lane folds whatever channels the decoder returns, so a \
+                 track whose channel count the server did not state still plays"
+            );
+            assert!(
+                !caps.audio_supports_lanes(codec, 0, 0, true, false),
+                "{codec}: with the lane off the device row needs a known channel count"
+            );
         }
         assert!(!Caps::assumed().audio_has("dca"), "no DTS row, no DTS under any spelling");
     }
@@ -915,7 +937,9 @@ mod tests {
         assert!(caps.audio_supports("dts", 6));
         assert!(!caps.audio_supports_with("dts", 8, false));
         assert!(caps.audio_supports_with("dts", 8, true));
-        assert!(!caps.audio_supports("dts", 0));
+        // FORK: the encode lane needs no channel count; the device row (lane off) does
+        assert!(caps.audio_supports("dts", 0));
+        assert!(!caps.audio_supports_lanes("dts", 0, 0, true, false));
         assert!(caps.audio_supports("aac", 2));
         assert!(caps.audio_supports("aac", 6));
         assert!(!caps.audio_supports("aac", 8));
@@ -1201,13 +1225,18 @@ mod tests {
         let c = parse(B4).unwrap();
         let on = |codec: &str, ch: i64, rate: i64| c.audio_supports_lanes(codec, ch, rate, true, true);
         let off = |codec: &str, ch: i64, rate: i64| c.audio_supports_lanes(codec, ch, rate, true, false);
-        for (codec, ch) in [("flac", 8), ("flac", 6), ("flac", 3), ("pcm", 8), ("pcm", 6), ("truehd", 8), ("truehd", 6), ("mlp", 2)] {
+        for (codec, ch) in [("flac", 8), ("flac", 6), ("flac", 3), ("pcm", 8), ("pcm", 6), ("truehd", 8), ("truehd", 6), ("mlp", 2), ("dts", 6), ("dts", 8), ("dca-ma", 8)] {
             assert!(on(codec, ch, 48_000), "{codec} {ch}ch at 48 kHz: encode lane");
             assert!(on(codec, ch, 0), "{codec} {ch}ch, rate not said: admitted, the Load decides");
             assert!(!on(codec, ch, 96_000), "{codec} {ch}ch at 96 kHz stays with the server");
             assert!(!on(codec, ch, 44_100), "{codec} {ch}ch at 44.1 kHz: no resampler");
-            assert!(!off(codec, ch, 48_000), "{codec} {ch}ch with encode=off: the server, as in build 3");
+            if dp_audio_key(codec) != "dts" {
+                // DTS is the one lane tenant the device row also admits on its own, so `off`
+                // leaves it playable (natively, which is what this fork stopped doing).
+                assert!(!off(codec, ch, 48_000), "{codec} {ch}ch with encode=off: the server, as in build 3");
+            }
         }
+        assert!(off("dts", 6, 48_000), "encode=off: the device row still admits DTS natively");
         // inside the PCM lane nothing changes, whatever the rate
         assert!(on("flac", 2, 96_000) && on("flac", 1, 44_100) && on("pcm", 2, 48_000));
         assert_eq!(c.audio_lane("flac", 2, 96_000, true), Some(AudioLane::Pcm));
@@ -1216,16 +1245,18 @@ mod tests {
         assert_eq!(c.audio_lane("truehd", 8, 96_000, true), None);
         assert_eq!(c.audio_lane("flac", 8, 48_000, false), None);
         assert_eq!(c.audio_lane("ac3", 6, 48_000, true), None);
-        assert_eq!(c.audio_lane("dca-ma", 8, 48_000, true), None, "DTS-HD keeps its core lane");
+        assert_eq!(c.audio_lane("dca-ma", 8, 48_000, true), Some(AudioLane::Ac3Encode),
+            "DTS goes through the AC3 lane: a native DTS Load never configures this set's audio sink");
+        assert_eq!(c.audio_lane("dts", 6, 0, true), Some(AudioLane::Ac3Encode), "rate not said: the Load decides");
         // more than 8 channels is no lane at all; neither is a codec the TV decodes itself
         assert!(!on("flac", 9, 48_000) && !on("vorbis", 6, 48_000));
         assert!(on("eac3", 8, 48_000) && on("ac3", 6, 48_000));
         // the profile states 8 for the lane's codecs while it is on, the old rows when it is off
-        for codec in ["flac", "pcm", "truehd", "mlp"] {
+        for codec in ["flac", "pcm", "truehd", "mlp", "dts"] {
             assert_eq!(c.profile_channel_limit_with(codec, true), Some(8), "{codec}");
         }
         assert_eq!(c.profile_channel_limit_with("opus", true), Some(6));
-        assert_eq!(c.enc_lane_profile_codecs(true), ["truehd", "mlp"]);
+        assert_eq!(c.enc_lane_profile_codecs(true), ["truehd", "mlp", "dts"]);
         assert!(c.enc_lane_profile_codecs(false).is_empty());
         // flac=off hands FLAC back to the server in both lanes
         let no_flac = with_fork_knobs(c.clone(), Some("off"), None);

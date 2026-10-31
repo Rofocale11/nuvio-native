@@ -384,6 +384,40 @@ exactly where a regression like the above could live for a whole merge. Both are
 `check-cargo-unit-default` and `test-fast` now (`UNIT_SUITE`, with `UNIT_SUITE_NO_HOSTSIM` declaring
 why the hostsim pass still names fourteen: those two crates do not define that feature).
 
+### What the first playback test found: the merge had removed the fork's audio lanes
+
+The next stable build installed and signed in. Then a TrueHD title did not start at all and a DTS
+title loaded to a black screen. The device log named both causes:
+
+```
+playing item: rk=10069 audio=5 ...
+start_bufferfeed: unsupported audio codec "truehd"; refusing incorrect Load declaration
+
+load: v=H264 a="DTS" ...
+smp_cb type=8 ... audio/x-dts ...        <- the ES was parsed
+                                          (no `type=7` out-channels, no FRAMEREADY ever)
+feed a#200 ... fed=2130000000            <- audio accepted, then the queue stopped draining
+```
+
+Both are deltas this fork wrote and the merge overwrote, and neither is a bug in upstream's code —
+upstream changed policy on the set it measures on:
+
+| where | what the merge did | why it matters here |
+|---|---|---|
+| `platform/devcaps.rs` `enc_lane_candidate` | dropped the fork's `"dts" => true` arm, so DTS stopped taking the AC3 encode lane and went out as a native DTS Load | this set accepts the Load and then never configures its audio sink; with `audioSync` the video sink slaves to that dead clock — black screen, ~2 s of audio then nothing |
+| `platform/devcaps.rs` `enc_lane_profile_codecs` / `profile_channel_limit_with` | dropped `dts` from the lane's profile codecs and the 8-channel statement | PMS/MDE would have answered "convert with the server" for the tracks the app converts itself |
+| `media/player/engine.rs` `AudioLaneInfo::for_track_with` | an unknown sample rate stopped taking the lane (`rate == ENC_LANE_RATE` only; the fork had `rate == 0 \|\|`) | the shim published no `samplingRate`, so **every** track arrived rate-less and TrueHD had no declaration at all. `ff_enc`'s open already refuses a non-48 kHz stream with a named log line, which is where the truth is known |
+| `pmsshim/shim_probe.rs` | the probe carried `ProbedAudio::sample_rate` but the shim never published it | the fork lanes read PMS `samplingRate`; without it the AC3 lane cannot decide and the PCM lane cannot state its `pcmInfo` |
+
+Restored: DTS is a lane tenant again (unconditionally, as `docs/nuvio/PLAYBACK.md` has documented
+all along — the doc and the code had stopped agreeing), the unknown-rate door is back, and the shim
+publishes the probed `samplingRate`. `plex/transcoder.rs` also had two cosmetic merge wounds in the
+same profile: `dca` named twice in the direct-play audio list, and the lane's `audio.channels` /
+`audio.samplingRate` limitations scoped `scopeName=dts`, which is not a name PMS knows (it spells DTS
+`dca`) — both fixed, with the limitation list deduplicated per codec.
+
+`plx_platform` 290/290, `plx_media` 1754/1754, `plx_plex` 726/726, `plx_pmsshim` 53/53 after the fix.
+
 ### The exact next action
 
 `make check` on the committed tree (start it in the background and poll its log; the
