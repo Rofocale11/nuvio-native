@@ -384,7 +384,7 @@ class Interrupted(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pidfile = os.path.join(tmp, "pids")
             script = LONG_BRANCH.replace("sys.argv[1]", repr(pidfile))
-            # A suite launched in the BACKGROUND (this repo's `tools/ai-check.sh` does exactly that)
+            # A suite launched in the BACKGROUND (a gate started with `nohup ... &` does exactly that)
             # has SIGINT and SIGQUIT set to SIG_IGN by the shell that started it, and CPython keeps
             # an ignored SIGINT ignored — so the runner under test would never see the signal and
             # this test would grade the launcher instead of the tool. Restore the defaults in the

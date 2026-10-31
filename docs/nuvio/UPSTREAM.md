@@ -386,8 +386,8 @@ why the hostsim pass still names fourteen: those two crates do not define that f
 
 ### The exact next action
 
-`make check` on the committed tree (`./tools/ai-check.sh`, polled with
-`./tools/ai-check-status.sh`), then playback on the television under the TV lock. The host suite
+`make check` on the committed tree (start it in the background and poll its log; the
+`ai-check` wrappers are gone), then playback on the television under the TV lock. The host suite
 says the seams line up; it says nothing about the ACB/Starfish path, the GL composer, or the video
 plane. The `which-tier` skill picks the tier; `profile-tv` is what diagnoses a dropped frame.
 

@@ -143,20 +143,17 @@ fails the build on a forbidden edge.
   again, then push. Report the `test result:` line itself rather than a summary.
 - `make check` runs the fast host unit suite and lint gate. Use it for ordinary Rust
   changes. It is bounded machine-wide to TWO concurrent runs via `tools/check-lock.py`.
-  Never launch `make check` in the foreground with a short tool timeout.
-- To run host unit tests, ALWAYS use `./tools/ai-check.sh`. It runs in the background to avoid terminal timeouts.
-- After starting the check, poll `./tools/ai-check-status.sh` every 30-60 seconds until it prints the test results.
-- **Inner Loop (Fast):** Whenever you make a code change and need to verify it, ALWAYS run
-  `./tools/ai-test.sh`. It uses `cargo nextest` and `git diff` to test only the crates you
-  modified. It is nearly instant. Do NOT run `make check` while iterating.
-- **Outer Loop (Gate):** `make check` takes ~150 seconds and is ONLY for final verification
-  before pushing to GitHub. Run it via `./tools/ai-check.sh` (polled with
-  `./tools/ai-check-status.sh`) once, at the end.
-- `./tools/ai-test.sh` maps changed paths under `rust-modules/` to crate names
-  (e.g. `rust-modules/media/src/lib.rs` → `plx_media`, `rust-modules/src` →
-  `plxnative-modules`) and runs `cargo nextest run -p <crate>`. This is a loop, not a gate —
-  still run `./tools/ai-check.sh` before pushing.
-- Do NOT try to run `make check` directly in the foreground.
+- **Inner Loop (Fast):** to see a change behave, build and run the simulator:
+  `make -j10 sim-linux` (it needs the host libav*/libass staged under `pkg/`). It exercises
+  real rendering and linking, which is what a widget, layout or player change needs. For pure
+  logic use the cheapest loop that reaches the code: `make test-crate C=<crate> [T=filter]`
+  for one crate, `./tools/ai-test.sh` for the crates your diff touches.
+- **Outer Loop (Gate):** `make check` is the pre-push gate — the host unit suite (16 test
+  binaries), lint, and the `ci/` python/shell gates. It takes ~5 minutes and is bounded
+  machine-wide to two runs, so start it in the background (`nohup ... &` or the agent's own
+  background execution) and poll its log; do not hold a short foreground timeout over it.
+  Nothing else runs that suite, and a push to a feature branch starts no CI job either, so a
+  change that never runs it is a change nobody checked.
 - While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and
   runs only that crate's lib tests. It is a loop, not a gate.
 - `make test-crate` does NOT enable `hostsim`. Those tests run through
@@ -211,7 +208,7 @@ These run entirely on the host (x86_64) with no TV, simulator, or ARM toolchain.
 - **Memory snapshot (on device):** `./tools/ai-tv-log.sh mem` — reads `VmRSS`/`VmHWM`/`VmSwap`
   for the app process (read-only, requires TV lock for device access).
 - **Change-scoped tests:** `./tools/ai-test.sh` — runs `cargo nextest` only for crates touched
-  by uncommitted changes (inner loop). `./tools/ai-check.sh` is the outer-loop gate.
+  by uncommitted changes (inner loop); `make check` is the outer-loop gate.
 - **Hostsim tests:** `./tools/ai-test-hostsim.sh [filter]` wraps `make test-hostsim` (same
   `C=`/`T=` spelling, same in-checkout `rust-modules/target-hostsim`): the `cfg(hostsim)` lib
   tests, with a fresh `PLXNATIVE_RUNTIME_DIR` per run.
