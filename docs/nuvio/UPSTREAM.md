@@ -186,28 +186,69 @@ Work happens on a scratch branch cut from `nuvio-native`, one merge per tier, an
   first: it is Richi's UI redesign meeting this fork's shim rewiring. Fixture conflicts are data;
   take upstream's recording when the screen did not change, and re-record when it did.
 
-**Status: not started.** Nothing has been merged from `feature/v0.9-hq`; the trunk's only
-relationship to it today is the computed base above.
+### Status: A+B merged on `forward-port/v0.9-hq` (`656e0cb2`), unverified
+
+Target `d12e8659` — the tip of `feature/v0.9-hq` ("Package 11"), the newest commit in Richi's
+repository. Merged into the branch on 2026-10-31: **247 conflicts**, resolved in tier order.
+
+**A merge cannot be committed half-resolved.** The tiers are an *order of resolution*, not separate
+commits: A and B are one commit because git does not let you close a merge with files still
+conflicted. The checkpoint that matters is "the merge is in and the workspace compiles".
+
+What landed, and how each was decided:
+
+- **A+B from upstream**: `media` (`route/*`, `ff.rs`, `ff_enc.rs`, `player/*`), `plex`, `platform`,
+  `machine`, `base`, `telemetry`. The DTS delta survives — `ff_enc::takes` still accepts `"dts"`
+  inside an otherwise identical 977-line file.
+- **C stays ours**: `data`, `screens`, `ui`, `appkit`, `gfx` are the trunk's own files again.
+  Resolving only the *conflicted* files ours left those crates half-upstream and uncompilable
+  (83 errors). A deferred tier must be entirely ours, or it is neither.
+- **`src` is ours**, adapted to the new A/B APIs.
+
+The seam is real: upstream's `media` calls `data` and `plex` APIs the fork does not have, so a few
+compatibility additions were unavoidable, and each is a dependency rather than a patch:
+
+| where | what, and why |
+|---|---|
+| `plex` | `rating_source` / `p2p_enabled` / `p2p_server_url` and `RatingSource` moved into upstream's new `Preferences`; accessors read `self.prefs` |
+| `plex` | `Retained::with_language` / `language()` — `clear_for_erase` takes `Option<Retained>` now, and a sign-out retry must carry its language |
+| `plex` | `MAX_SERVERS` reinstated as a stated constant: the registry is dynamic now, but the fixed arrays below still index by it |
+| `data` | `dv_video_codec`, `sub_layout::{SubTraits, sub_traits}`, `viewstate::StopRecord`, `PlayingItem::{kind, hdr}` |
+| `media` | `SEEK_STUCK_MS` stays **3000**, not upstream's 1200: a public-internet reopen is two round trips, which is this fork's whole use case |
+| `appkit`/`screens` | the HUD's own text-cue draw is retired — upstream moved every text cue into libass, so there is no `active_subtitle` and no `SHARED.sub_cues`; the player screen already paints libass |
+| `system`/`port` | the frame-probe prepare hooks exist and do nothing: upstream's prepare-cost span is a dev-trigger diagnostic nothing here reads |
+
+**Known gaps, not hidden:** the test suites have not run; the television has not seen this; and
+upstream-only files that the reverted crates no longer reference (test modules, mostly) still sit
+in `data/`, `screens/`, `ui/` and `appkit/` as unreferenced leftovers.
 
 ### The exact next action
 
-Target `d12e8659` — the tip of `feature/v0.9-hq` ("Package 11"), and the newest commit in Richi's
-repository. Nothing newer exists: the `p7dts-v0.9.0-N` tags stop at `-9` (`baef645f`, 2026-10-18),
-and the `v1.0.x` tags in this repository are **this fork's own** releases, not his. There is no
-tagged Richi release to merge instead of the branch tip.
-
 ```sh
-git switch nuvio-native && git switch -c forward-port/v0.9-hq
-git merge upstream/feature/v0.9-hq          # one pass; expect ~247 conflicts
+git switch forward-port/v0.9-hq && git status --short   # must be empty
+./tools/ai-check.sh                                     # then poll ./tools/ai-check-status.sh
 ```
 
-Resolve in tier order A → B → C. **Stop after A and B**, build on the host, and verify playback on
-the television before C is touched — a tier-C resolution cannot break tier A, but a tier-C
-regression absolutely can hide one. Do not push the branch until A and B have been verified.
+`make check` compiles the tests, which is where the leftover test modules and the remaining
+API mismatches will surface first. Only after that, verify playback on the television under the TV
+lock — host results say nothing about the ACB/Starfish path.
 
-If the merge turns into a swamp rather than a job of work, abandon the branch: it is disposable,
-and the fallback is to cherry-pick the audio/DV/routing commits directly. The candidates, in
-`upstream/feature/v0.9-hq`:
+### Then tier C — and it is a PORT, not a merge
+
+Because tier C was resolved *ours*, `feature/v0.9-hq` is already an ancestor of this branch. Merging
+it again is a no-op, so tier C cannot be "merge and resolve": it is an explicit take,
+
+```sh
+git checkout upstream/feature/v0.9-hq -- rust-modules/{screens,ui,appkit,gfx,data}
+```
+
+followed by re-applying the fork's own deltas there, with `docs/nuvio/ARCHITECTURE.md` as the
+authority on what the shim needs. Expect the same shape as A/B: take theirs wholesale, then add
+back the pieces our layers provide.
+
+If a **future** forward-port turns into a swamp rather than a job of work, abandon that branch —
+it is disposable — and cherry-pick the audio/DV/routing commits instead. The candidates, in
+`feature/v0.9-hq`:
 
 `134d1244` DV on every video-copy remux / no re-encode for audio / AC3 for optical · `2b4a9177` an
 unreported output gets AC3 · `5d446cbe` a direct-play audio pick releases the fork remux ·
@@ -228,6 +269,7 @@ already has as `1bcf30b2`. Taking it would replace working code with its twin.
 | `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the trunk so an experiment cannot break it. May lag the trunk. |
 | `main` | **not this project.** It holds upstream-side history and none of the fork's 168 commits. Never cut work from it; never build or ship it. |
 | `upstream/feature/v0.9-hq` | Richi's HQ line — the reference for upstream work. Read-only. |
+| `forward-port/v0.9-hq` | the A+B merge of it (`656e0cb2`). Parity work in progress; not shipped, not pushed. |
 
 Merge commits into `nuvio-native` are normal here. `AGENTS.md`'s inherited "`main` takes SQUASH
 merges only" is the origin project's policy, not this repository's.
