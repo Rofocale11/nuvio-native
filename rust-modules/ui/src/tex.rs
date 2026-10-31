@@ -179,7 +179,7 @@ const CACHE_CAP: usize = 96;
 /// rounding `RENDER_BYTES_MAX` itself uses (68.8 MiB rounded to 64, ≈7% margin) and for the same
 /// reason: a number that is wrong should be wrong SMALL, on the side that asserts early rather
 /// than the side that ships a breach.
-pub const TEX_RESIDENT_BYTES_MAX: usize = 44 << 20;
+pub const TEX_RESIDENT_BYTES_MAX: usize = 32 << 20;
 
 /// How many texels one authored pixel costs: 1 on a television, `n²` under the simulator's
 /// supersampled rendering (`surface::render_scale`), whose images are requested at `n`x per axis.
