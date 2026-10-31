@@ -93,26 +93,26 @@
   "widgets.tracks.channels": "{count} can",
   "widgets.tracks.depth": "{depth} bit",
   "widgets.tracks.count": {
-    "one": "{count} track",
-    "many": "{count} tracks",
-    "other": "{count} tracks"
+    "one": "{count} traccia",
+    "many": "{count} tracce",
+    "other": "{count} tracce"
   },
   "widgets.tracks.count_detail": {
-    "one": "{description} · {count} track",
-    "many": "{description} · {count} tracks",
-    "other": "{description} · {count} tracks"
+    "one": "{description} · {count} traccia",
+    "many": "{description} · {count} tracce",
+    "other": "{description} · {count} tracce"
   },
   "widgets.tracks.count_heading": {
-    "one": "{heading} · {count} TRACK",
-    "many": "{heading} · {count} TRACKS",
-    "other": "{heading} · {count} TRACKS"
+    "one": "{heading} · {count} TRACCIA",
+    "many": "{heading} · {count} TRACCE",
+    "other": "{heading} · {count} TRACCE"
   },
   "widgets.reason.jail_help": "Servono root e Homebrew Channel. Aiuto: plxnative.com/troubleshooting/#playback-reports-jail_missing_rtkmem.",
   "widgets.tracks.empty": "Nessuna traccia",
   "widgets.tracks.bytes": {
     "one": "{count} byte",
-    "many": "{count} bytes",
-    "other": "{count} bytes"
+    "many": "{count} byte",
+    "other": "{count} byte"
   },
   "widgets.tracks.fps": "{rate} fps",
   "widgets.tracks.mbps": "{rate} Mbps",
@@ -242,35 +242,19 @@
   "widgets.failure.play_auto": "Passa ad Automatico e riproduci",
   "widgets.menu.source": "Streams",
   "widgets.failure.change_source": "Change Source",
-  "widgets.diagnostics.uploading": "Uploading diagnostics…",
-  "widgets.diagnostics.uploaded": "Diagnostics uploaded",
-  "widgets.diagnostics.failed": "Diagnostics upload failed",
   "widgets.card.season_episode": "S{season} • E{episode}",
   "widgets.card.episode": "E{episode}",
-  "widgets.panel.jail": "this install's sandbox blocks access to /dev/rtkmem; PlxNative can offer a confirmed repair through rooted Homebrew Channel access",
-  "widgets.panel.refused": "the server refused the item at /decision — it can neither direct play nor convert it",
-  "widgets.panel.audio_only_no_pass": "server sent audio only — it found no usable video transcode target (server has no Plex Pass)",
-  "widgets.panel.audio_only": "server sent audio only — it found no usable video transcode target",
-  "widgets.panel.no_video": "the stream carries no video track",
-  "widgets.panel.open": "the media stream could not be opened or read",
-  "widgets.panel.stopped": "the media producer stopped before playback completed",
-  "widgets.panel.tv_rejected": "the television media pipeline rejected the stream",
-  "widgets.panel.unknown": "the player stopped without a reported cause",
-  "widgets.panel.load_timeout": "the television media pipeline did not finish starting the stream in time",
-  "widgets.panel.forced_playback": "Force Direct Play could not use the original stream; automatic fallback is disabled",
-  "widgets.tracks.enh_note_dv_off": "Dolby Vision turns off while this is on. The video still plays in HDR.",
-  "widgets.runtime.main_thread": "MAIN THREAD {kind} {milliseconds}ms · {label}",
   "widgets.ass.too_many_fonts": "This styled subtitle track contains too many fonts",
   "widgets.ass.invalid_fonts": "This styled subtitle track contains invalid fonts",
-  "widgets.menu.quality_converted": "Converted",
-  "widgets.menu.quality_converted_note": "Your Plex server is converting this video.",
-  "widgets.tracks.forced_only": "Forced only",
-  "widgets.source.shared_with_you": "Shared with you",
-  "widgets.tracks.enh_reason_converting": "Not available while your Plex server converts this video.",
-  "widgets.tracks.enh_reason_forced": "Not available while Force Direct Play is on. Set Direct Play to Auto in Settings to use it.",
-  "widgets.tracks.enh_reason_not_copyable": "Your Plex server can't add this to this video right now.",
-  "widgets.tracks.sub_remembered_note": "The subtitles you chose for this show can’t be shown with this video.",
-  "widgets.verdict.forced_audio_codec": "Force Direct Play is on, and {codec} audio can’t play without conversion.",
-  "widgets.verdict.forced_audio_conversion_codec": "Force Direct Play is on, and this {codec} audio track needs conversion.",
-  "widgets.failure.change_quality": "Change quality"
+  "widgets.menu.quality_converted": "Convertito",
+  "widgets.menu.quality_converted_note": "Il server Plex sta convertendo il video.",
+  "widgets.tracks.forced_only": "Solo forzati",
+  "widgets.source.shared_with_you": "Condivise con te",
+  "widgets.tracks.enh_reason_converting": "Non disponibile mentre il tuo server Plex converte questo video.",
+  "widgets.tracks.enh_reason_forced": "Non disponibile mentre Direct Play forzato è attivo. Imposta Direct Play su Automatico nelle Impostazioni per usarlo.",
+  "widgets.tracks.enh_reason_not_copyable": "Il tuo server Plex non può aggiungerlo a questo video in questo momento.",
+  "widgets.tracks.sub_remembered_note": "I sottotitoli scelti per questa serie non sono visualizzabili con questo video.",
+  "widgets.verdict.forced_audio_codec": "Direct Play forzato è attivo, ma l’audio {codec} richiede una conversione.",
+  "widgets.verdict.forced_audio_conversion_codec": "Direct Play forzato è attivo, ma questa traccia audio {codec} richiede una conversione.",
+  "widgets.failure.change_quality": "Cambia qualità"
 }

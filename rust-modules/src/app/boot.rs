@@ -913,6 +913,39 @@ pub(super) fn apply_deferred_capture(rec: &mut super::recorder::Recplay,
     Ok(())
 }
 
+/// **Boot's restore of the live player cells**: the profile mirrors from `session`, then every cell
+/// for the seat the process starts with, `Unseated` — the legacy install-wide key each live row
+/// falls back to, then its default. This is the one restore both the boot and the seat trigger
+/// (`bridge::SeatWatch`) run: boot does `Unseated` itself because no profile is published yet, and
+/// the trigger does each later seat.
+///
+/// Restored before any route can resolve a stream. A legacy file with no quality resolves to
+/// Original; a new file can choose Auto only through route's explicit readiness gate
+/// (`session::load` records that decision once). The dev quality override is honoured unless the
+/// harness is `controlled`.
+///
+/// Split out of [`construct`] so the cells it sets can be graded without an SDL window.
+pub(super) fn restore_player_preferences(session: &plx_plex::plex::session::Session, controlled: bool) {
+    plx_media::route::restore_install_rows(session);
+    plx_media::route::restore_profile_rows(session, &plx_plex::plex::session::Seat::Unseated,
+        plx_media::route::Overrides {
+            quality: if controlled { None } else { crate::dev::playback_quality_override() },
+        });
+}
+
+/// **The stored session resumed, as boot does it**: `ResumeStored` makes the owner seat the stored
+/// profile (`release_held_handoff` publishes it, which is what the seat trigger sees) and emit
+/// `Ready`; the handoff is returned for the caller to install. The same function the stored boot
+/// runs, so a host test grades the boot and not a copy of it.
+pub(super) fn resume_stored(pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge, tap: &mut dyn plx_ui::dispatch::Tap<super::bridge::AppHost>)
+    -> Option<plx_session::auth::ReadyCreds> {
+    super::bridge::execute_session_command(pages, plx_session::auth::SessionCmd::ResumeStored);
+    pages.frame_with(bridge, plx_machine::machine::Tick::default(), Vec::new(), Vec::new(),
+        tap, false);
+    bridge.take_session_ready()
+}
+
 pub(crate) unsafe fn construct(
     pms_host: *const c_char, pms_port: c_int, mt: plx_base::task::MainThread,
     preflight: super::bootstrap::Preflight, initial: Option<super::bootstrap::Initial>,
@@ -1276,30 +1309,19 @@ pub(crate) unsafe fn construct(
     let mut pages = plx_ui::dispatch::Dispatcher::with_transition(Box::new(
         plx_ui::containers::transition::PageDip::new(),
     ));
-    // Install-wide playback preference, restored before any route can resolve a stream.
-    // A legacy file with no value resolves to Original; a new file can choose Auto only
-    // through route's explicit readiness gate (session::load records that decision once).
-    plx_media::route::restore_quality(
-        if controlled { session.playback_quality() }
-        else { crate::dev::playback_quality_override().unwrap_or_else(|| session.playback_quality()) },
-    );
-    plx_media::route::restore_direct_play_mode(session.direct_play_mode());
-    plx_media::route::restore_subtitle_size(session.subtitle_size());
-    plx_media::route::restore_subtitle_position(session.subtitle_position());
-    plx_media::route::restore_next_episode_mode(session.next_episode_mode());
-    plx_media::route::restore_skip_interval(session.skip_interval());
-    plx_media::route::restore_deck_press(session.deck_press());
+    // The live player preferences, restored before any route can resolve a stream: the profile
+    // mirrors, then every cell for the first seat (`Unseated`, since no profile is published yet).
+    restore_player_preferences(&session, controlled);
     // P2P streaming is a shim policy, not a route one: the shim decides what the Source Picker
     // may list, so it is told the same moment every other install-wide preference is restored.
     super::nuvio::restore_p2p(session.p2p_enabled(), session.p2p_server_url().map(str::to_owned));
-    // The subtitle tone rides the same file and the same moment: a preference, restored once.
-    plx_media::player::restore_subtitle_tone(session.subtitle_tone());
-    plx_media::player::restore_audio_enhancements(session.audio_enhancements());
     // dev: /tmp/plxnative-audioenh=off|boost|loudness — force the PERSISTED enhancement
     // preference right after it was restored from whatever the install actually has saved, so a
     // harness case's starting preference never depends on what an earlier run's pick left behind.
-    // Unlike every other boot override on this page, this one calls the real persisting setter —
-    // see `dev::scenarios::arm_audio_enhancements`'s own doc for why.
+    // Nobody is seated yet, so this sets the live cell only; `SeatWatch` runs it once more at the
+    // first seating, where the pick reaches the seated profile's record. It is the one boot
+    // override that calls the real persisting setter — see
+    // `dev::scenarios::arm_audio_enhancements`'s own doc for why.
     if !controlled { crate::dev::scenarios::arm_audio_enhancements(); }
     let primary_binding = initial.as_ref().map(|initial| initial.primary_client);
     let activate_session = |bridge: &mut super::bridge::Bridge,
@@ -1368,10 +1390,7 @@ pub(crate) unsafe fn construct(
             // install_pms can read any per-profile stores. Stored boot does not re-save its
             // credentials. This is the normal bounded dispatcher drain over the same owner
             // and queue later moved into App, not a recursive bootstrap reducer.
-            super::bridge::execute_session_command(pages, plx_session::auth::SessionCmd::ResumeStored);
-            pages.frame_with(bridge, plx_machine::machine::Tick::default(), Vec::new(), Vec::new(),
-                rec, false);
-            if let Some(ready) = bridge.take_session_ready() {
+            if let Some(ready) = resume_stored(pages, bridge, rec) {
                 let endpoints = install_pms_owned(bridge, &ready.origin, &ready.address,
                     &ready.token, ready.tier, ready.pin.as_ref(), &ready.install);
                 super::bridge::execute_endpoint_outcomes(pages, endpoints);

@@ -1037,12 +1037,16 @@ mod tests {
 
     #[test]
     fn exact_ids_and_key_names() {
-        assert_eq!(Flavor::Stable.object_id().as_bytes(), b"plxstate.stable");
-        assert_eq!(Flavor::Debug.object_id().as_bytes(), b"plxstate.debug");
-        assert_eq!(Flavor::Nightly.object_id().as_bytes(), b"plxstate.night");
-        assert_eq!(Flavor::Stable.object_id().len(), 15);
-        assert_eq!(Flavor::Debug.object_id().len(), 14);
-        assert_eq!(Flavor::Nightly.object_id().len(), 14);
+        // FORK (Nuvio Native): the ids are generated from THIS packaging manifest
+        // (`ci/install-identities.json`), whose app id is `com.nuvionative.app`, so the
+        // abbreviated keys are `plxstate.nuvio/dbg/ngt`. They are pinned here for the same
+        // reason upstream pins its own: they are live DB8 keys and must never change.
+        assert_eq!(Flavor::Stable.object_id().as_bytes(), b"plxstate.nuvio");
+        assert_eq!(Flavor::Debug.object_id().as_bytes(), b"plxstate.dbg");
+        assert_eq!(Flavor::Nightly.object_id().as_bytes(), b"plxstate.ngt");
+        assert_eq!(Flavor::Stable.object_id().len(), 14);
+        assert_eq!(Flavor::Debug.object_id().len(), 12);
+        assert_eq!(Flavor::Nightly.object_id().len(), 12);
         assert_eq!(Generation([0; 16]).key_name(), "a.AAAAAAAAAAAAAAAAAAAAAA");
         assert_eq!(Generation([255; 16]).key_name(), "a._____________________w");
     }

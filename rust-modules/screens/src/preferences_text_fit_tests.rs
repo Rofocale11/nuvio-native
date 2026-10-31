@@ -198,7 +198,13 @@ fn the_subtitle_mode_readouts_are_pinned_in_every_language() {
         let want = match language.tag() {
             "en" => "When audio isn't in the subtitle language",
             "es" => "Audio fuera del idioma de subtítulos",
-            _ => "Калі гук не на мове субцітраў",
+            "be" => "Калі гук не на мове субцітраў",
+            "de" => "Ton nicht in Untertitelsprache",
+            "fr" => "Audio hors langue des sous-titres",
+            "hu" => "Ha a hang nem a felirat nyelvén szól",
+            "it" => "Se audio e sottotitoli hanno lingue diverse",
+            "pt" => "Áudio fora do idioma das legendas",
+            other => panic!("{other}: pin its subtitle-mode read-out here"),
         };
         assert_eq!(readouts[1], want, "{}", language.tag());
     }

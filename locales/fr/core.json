@@ -40,11 +40,11 @@
   "core.duration_short_minutes": "{minutes}m",
   "core.duration_long_hours": "{hours} hr {minutes} min",
   "core.duration_long_minutes": "{minutes} min",
-  "core.duration_hours": "{hours}h {minutes}m",
-  "core.duration_minutes": "{minutes}m",
-  "core.preview_domain_pipeline_error": "TV firmware error number (0 = none recorded)",
-  "core.preview_domain_attempt_started": "picture shown in this attempt",
-  "core.preview_domain_attempt_origin": "why this attempt was made",
-  "core.preview_domain_attempt_ordinal": "which attempt of this playback (1 to 9, then 9+)",
-  "core.preview_domain_http_status": "HTTP status number (0 = none)"
+  "core.duration_hours": "{hours} h {minutes} min",
+  "core.duration_minutes": "{minutes} min",
+  "core.preview_domain_pipeline_error": "numéro d’erreur du firmware du téléviseur (0 = aucune enregistrée)",
+  "core.preview_domain_attempt_started": "image affichée lors de cette tentative",
+  "core.preview_domain_attempt_origin": "raison de cette tentative",
+  "core.preview_domain_attempt_ordinal": "numéro de tentative de cette lecture (de 1 à 9, puis 9+)",
+  "core.preview_domain_http_status": "numéro de statut HTTP (0 = aucun)"
 }

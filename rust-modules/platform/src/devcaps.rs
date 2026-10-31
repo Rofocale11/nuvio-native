@@ -904,6 +904,7 @@ mod tests {
                 "{codec}: with dts_core=never the device's 6-channel bound holds"
             );
             assert!(caps.audio_supports_with(codec, 8, true), "{codec}: FORK: above it, the core plays");
+            assert!(!caps.audio_supports(codec, 0), "{codec}: DTS needs a known channel count");
         }
         assert!(!Caps::assumed().audio_has("dca"), "no DTS row, no DTS under any spelling");
     }
@@ -924,32 +925,6 @@ mod tests {
         let unbounded = parse(&REAL.replace("\"channels\" : 6", "\"channels\" : 0")).unwrap();
         assert!(!unbounded.audio_has("dts"));
         assert!(!Caps::assumed().audio_supports("truehd", 6));
-    }
-
-    /// FORK (RichiL10): PMS names every DTS track `dca` (`dca-ma` on DTS-HD MA). The gate must
-    /// give it exactly the answer it gives `dts`, channel bound included, or a real server's DTS
-    /// is never direct-played.
-    #[test]
-    fn pms_spells_dts_dca_and_the_gate_folds_it() {
-        assert_eq!(dp_audio_key("dca"), "dts");
-        assert_eq!(dp_audio_key("dca-ma"), "dts");
-        assert_eq!(dp_audio_key("DCA"), "dts");
-        assert_eq!(dp_audio_key("dts"), "dts");
-        for other in ["ac3", "eac3", "aac", "truehd", "dcafoo", ""] {
-            assert_eq!(dp_audio_key(other), other);
-        }
-        let caps = parse(REAL).unwrap();
-        for codec in ["dca", "dca-ma"] {
-            assert!(caps.audio_has(codec), "{codec}");
-            assert!(caps.audio_supports(codec, 6), "{codec}");
-            assert!(
-                !caps.audio_supports_with(codec, 8, false),
-                "{codec}: with dts_core=never the device's 6-channel bound holds"
-            );
-            assert!(caps.audio_supports_with(codec, 8, true), "{codec}: FORK: above it, the core plays");
-            assert!(!caps.audio_supports(codec, 0), "{codec}: DTS needs a known channel count");
-        }
-        assert!(!Caps::assumed().audio_has("dca"), "no DTS row, no DTS under any spelling");
     }
 
     /// The merge is per-AXIS min, not a pick of the smaller row: a table whose duplicate rows

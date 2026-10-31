@@ -139,7 +139,6 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
     rig.refresh_browse_directory();
     rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
     rig.stores.browse.borrow_mut().seed_items_for_test(120);
-    rig.stores.browse.borrow_mut().seed_shelves_for_test(0, &[], 4);
     frame(&mut d, &mut rig, AppArg::Home, tick(0), vec![]);
     d.nav.tabs.stack.transition = Box::new(plx_ui::containers::transition::Immediate);
     frame(&mut d, &mut rig, AppArg::Library, tick(1), vec![]);
@@ -216,9 +215,7 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
     );
     d.request(MachineId::Nav, NavOp::Dismiss(menu_entry));
     rig.stores.browse.borrow_mut().seed_items_for_test(120);
-    // B's shelves answer too (none): a section reveal, and a bookmark's re-entry seat, wait on
-    // them rather than on the listing alone.
-    rig.stores.browse.borrow_mut().seed_shelves_for_test(2, &[], 4);
+    // The grid-only Library has no shelves to wait on: B's listing is its whole document.
     frame(&mut d, &mut rig, AppArg::Library, tick(120), vec![]);
     Bridge::library_command(
         &mut d,
@@ -263,8 +260,28 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
         (returned_b.sid, returned_b.rk.as_str()),
         (b_item.sid, b_item.rk.as_str())
     );
+    // Choosing another library is a header action: UP walks the grid back to the
+    // Type/Sort/Filter row (the grid-only page's head) before the section switch. With focus
+    // still on a poster the engine reconciles that poster's row to the incoming section's grid
+    // before the saved cursor can be seeded; from the header the bookmark is the page's seat.
+    let region = |d: &Dispatcher<AppHost>| {
+        let page = d.top_screen().unwrap().as_any().unwrap()
+            .downcast_ref::<plx_screens::library::LibraryScreen>().unwrap();
+        page.probe_viewport(d.focus()).0
+    };
+    let mut at = 290;
+    for _ in 0..8 {
+        if region(&d) == "toolbar" { break; }
+        frame(&mut d, &mut rig, AppArg::Library, tick(at), script_key(Key::Up, tick(at)));
+        at += 1;
+    }
+    assert_eq!(
+        region(&d),
+        "toolbar",
+        "premise: the reader reaches the header before choosing another library"
+    );
     select(&mut d, &rig, 0);
-    for i in 290..370 {
+    for i in at..380 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
     assert_eq!(rig.directory.view().current(), Some(0));

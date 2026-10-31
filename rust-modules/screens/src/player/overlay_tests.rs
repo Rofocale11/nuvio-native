@@ -1039,8 +1039,9 @@ fn the_player_panels_dim_through_the_container_from_the_playing_items_corners() 
     let corners = [[0.1, 0.5, 0.2], [0.2, 0.4, 0.1], [0.6, 0.2, 0.1], [0.1, 0.1, 0.4]];
     let mut store = plx_data::stores::metadata::MetadataStore::default();
     assert!(store.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(plx_data::metadata::PlayingItem {
-        sid: plx_plex::plex::ServerId::from_raw(0), rk: "rk".into(), show_rk: String::new(), audio: Vec::new(), subs: Vec::new(),
-        video_fps: 0.0, width: 0, height: 0, bitrate: 0, dovi: Default::default(),
+        sid: plx_plex::plex::ServerId::from_raw(0), rk: "rk".into(), show_rk: String::new(), kind: String::new(),
+        audio: Vec::new(), subs: Vec::new(),
+        video_fps: 0.0, width: 0, height: 0, bitrate: 0, dovi: Default::default(), hdr: false,
         markers: Vec::new(), chapters: Vec::new(), blur: Some(corners),
     }))));
     for (kind, alpha) in [
@@ -1095,7 +1096,7 @@ fn a_pointer_click_activates_the_row_it_hit_by_key() {
 
     let Panel::Tracks(menu) = page.panel() else { panic!("Tracks panel") };
     let mut keys = menu.keys();
-    assert!(keys.contains(&TrackRow::Sub(1).key().0), "premise: both tracks are rows");
+    assert!(keys.contains(&TrackRow::Sub(0).key().0), "premise: the English track is a row");
     let mut stop_keys: Vec<u32> = stops.iter().map(|s| s.key.elem).collect();
     keys.sort_unstable();
     stop_keys.sort_unstable();
@@ -1107,16 +1108,18 @@ fn a_pointer_click_activates_the_row_it_hit_by_key() {
         assert_eq!((placed.rect.x, placed.rect.y), (stop.rect.x, stop.rect.y), "place and stop agree");
     }
 
-    // click the second English track (subs index 1) while the cursor still sits on Off
-    let second = TrackRow::Sub(1).key().0;
-    let (_, reqs, dismissed) = activate(&mut page, second);
+    // click the English track while the cursor still sits on Off. The root shows ONE row per
+    // language (the rest live behind "Other languages"), so with both tracks English there is a
+    // single track row here — which is exactly what this test needs: a row the cursor is NOT on.
+    let clicked = TrackRow::Sub(0).key().0;
+    let (_, reqs, dismissed) = activate(&mut page, clicked);
     assert!(dismissed, "a track pick closes the panel");
     assert!(reqs.iter().any(|r| matches!(r, PlayerReq::CommitTrack(plx_appkit::track_menu::TrackCommit::Subtitle { .. }))));
     // (the harness host's metadata view is empty, so the commit carries no stream id; the id the
     // panel resolved the key to is what it records as the checked track)
     let Panel::Tracks(menu) = page.panel() else { panic!("Tracks panel") };
-    assert_eq!(menu.active_sub(), 1, "the click picked the second English track (subs index 1), not the row under the cursor");
-    assert_eq!(menu.selected_id(), Some(TrackRow::Sub(1)));
+    assert_eq!(menu.active_sub(), 0, "the click picked the English track, not the row under the cursor");
+    assert_eq!(menu.selected_id(), Some(TrackRow::Sub(0)));
 }
 
 /// **Issue #162's census, for the four panels over the player**: every row a panel's `Focusable`

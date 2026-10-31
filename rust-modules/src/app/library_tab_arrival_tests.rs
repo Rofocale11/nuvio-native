@@ -1,11 +1,14 @@
-//! A Library page reached from a strip pill: how its first focused tile arrives.
+//! A Library page reached from a strip pill: where its first selection plays.
 //!
-//! The pill press mounts the page's fade at 0 and reveals it once its shelves land. The head
-//! tile is seated while the page is still dark, so a pop that starts with the seat plays out
-//! under the dissolve: the tile is most of the way up by the time anything is opaque and the
-//! viewer sees a tile that was simply there. The selection has to play out where it can be seen.
+//! The pill press mounts the page's fade at 0 and reveals it once its listing lands. The
+//! grid-only Library (since `6b05b404`) no longer has hub shelves: its document head is the
+//! Type/Sort/Filter control row, so that row is the pill arrival's seat and no poster is
+//! focused while the page is dark. The first poster is reached with DOWN after the page is
+//! opaque, and it lifts from rest there — the selection has to play out where it can be seen,
+//! not under the dissolve.
 
 use super::*;
+use plx_ui::screen::Focusable;
 #[allow(unused_imports)]
 use super::test_support::*;
 use super::test_support::{frame};
@@ -34,30 +37,63 @@ fn a_pill_arrival_pops_its_head_tile_after_the_page_is_opaque_not_under_the_diss
     rig.stores.browse.borrow_mut().seed_items_for_test(12);
     // What `nav_tab` queues for a Movies press, before the page exists.
     rig.enter_library(plx_data::browse::SecKind::Movie);
-    let arrival = |d: &Dispatcher<AppHost>| {
-        d.top_screen().unwrap().as_any().unwrap()
+    fn page(d: &Dispatcher<AppHost>) -> &plx_screens::library::LibraryScreen {
+        let entry = d.nav.top_page().unwrap();
+        entry.inst.as_ref().unwrap().screen.as_any().unwrap()
             .downcast_ref::<plx_screens::library::LibraryScreen>().unwrap()
-            .probe_arrival(d.focus())
-    };
-    // The shelves are a separate fetch: the page waits dark for them, as it does on the set.
-    let mut timeline = Vec::new();
-    for i in 0..90 {
-        if i == 20 {
-            rig.stores.browse.borrow_mut()
-                .seed_shelves_for_test(0, &["movie.inprogress.1", "tv.recentlyreleased.1"], 3);
-        }
-        frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
-        if let (alpha, Some(pop)) = arrival(&d) { timeline.push((i, alpha, pop)); }
     }
-    assert!(!timeline.is_empty(), "the head tile never took focus");
-    let seen_growing = timeline.iter().filter(|(_, alpha, pop)| *alpha < 1.0 && *pop > 1.0).count();
-    assert_eq!(seen_growing, 0,
-        "the tile grew while the page was still dissolving in, so the selection played under the fade: {timeline:?}");
-    let opaque = timeline.iter().position(|(_, alpha, _)| *alpha >= 1.0).expect("the page never became opaque");
-    let after = &timeline[opaque..];
-    assert!(after[0].2 < 1.01, "the tile was already up when the page turned opaque: {:?}", after[0]);
-    assert!(after.iter().any(|(_, _, pop)| *pop > 1.05),
-        "the tile never grew after the page turned opaque: {after:?}");
-    let ramp: Vec<f32> = after.iter().map(|(_, _, pop)| *pop).collect();
-    assert!(ramp.windows(2).all(|w| w[1] >= w[0] - 1.0e-4), "the pop must grow monotonically: {ramp:?}");
+    // The first selection of the page: `(frame, page alpha, region the focus is in)`.
+    let mut arrival = Vec::new();
+    for i in 0..20 {
+        frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
+        let (alpha, _, _, _, _) = page(&d).probe_content();
+        arrival.push((i, alpha, page(&d).probe_viewport(d.focus()).0));
+    }
+    assert!(!arrival.is_empty(), "the page never recorded an arrival");
+    let first_dark = arrival.iter().position(|(_, alpha, _)| *alpha < 1.0).expect("the page never dissolved in");
+    let opaque = arrival[first_dark..].iter().position(|(_, alpha, _)| *alpha >= 1.0)
+        .map(|at| at + first_dark).expect("the page never became opaque");
+    assert!(opaque > first_dark, "the fixture must include the dissolve: {arrival:?}");
+    assert!(
+        arrival[first_dark..opaque].iter().all(|(_, _, region)| *region != "grid"),
+        "a poster took focus under the dissolve: {arrival:?}"
+    );
+    assert_eq!(
+        arrival[opaque].2, "toolbar",
+        "the grid-only Library's head seat is its Type/Sort/Filter row: {:?}",
+        arrival[opaque]
+    );
+    // DOWN enters the grid after the page is opaque. The first card's drawn pop (normalised so
+    // 1.0 is rest and `focus_scale` is fully lifted) must rise from rest, not be adopted whole.
+    let scale = plx_ui::cards::RowStyle::HOME.focus_scale;
+    assert_eq!(page(&d).probe_viewport(d.focus()).0, "toolbar", "premise: the head row is seated");
+    frame(&mut d, &mut rig, AppArg::Library, tick(20), script_key(Key::Down, tick(20)));
+    let mut lift = Vec::new();
+    for i in 21..90 {
+        frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
+        let page = page(&d);
+        let Some(key) = d.focus().filter(|_| page.probe_viewport(d.focus()).0 == "grid") else { continue };
+        let parts = CxParts {
+            tick: tick(i),
+            press: Default::default(),
+            focus: d.input.engine.read(InputOwner::Entry(key.entry)),
+            owner: InputOwner::Entry(key.entry),
+        };
+        let cx = parts.cx::<AppHost>(
+            rig.views_with(plx_media::route::idle_session_for_test()),
+            &rig.measure,
+        );
+        if let Some(placed) = page.place(&key.elem, &cx, At::Drawn) {
+            lift.push(placed.rect.w / placed.rest_rect.w * scale);
+        }
+    }
+    assert!(!lift.is_empty(), "the head tile never took focus");
+    let full = *lift.last().unwrap();
+    assert!(full > 1.02, "premise: the seated tile ends lifted: {full}");
+    assert!(
+        lift[0] < 1.0 + (full - 1.0) * 0.5,
+        "the lift is adopted whole on the frame the grid is entered: {} of {full}: {lift:?}",
+        lift[0]
+    );
+    assert!(lift.windows(2).all(|pair| pair[1] >= pair[0] - 1.0e-4), "the lift is not a monotone rise: {lift:?}");
 }

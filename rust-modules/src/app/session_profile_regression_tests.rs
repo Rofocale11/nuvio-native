@@ -90,6 +90,7 @@ mod tests {
 
     #[test]
     fn r2a_offline_worker_completion_waits_for_main_application() {
+        let _serial = plx_base::testlock::serial();
         let mut rig = profile_rig(false);
         let mut d = Dispatcher::<AppHost>::new();
         let before = resources(&mut rig);
@@ -169,6 +170,7 @@ mod tests {
 
     #[test]
     fn a_late_profile_observation_cannot_replace_a_newer_flow() {
+        let _serial = plx_base::testlock::serial();
         let mut rig = profile_rig(true);
         let mut d = Dispatcher::<AppHost>::new();
         inject(&mut rig, RefusedIo);
@@ -254,6 +256,7 @@ mod tests {
 
     #[test]
     fn successful_profile_stream_preserves_handoff_preferences_and_erase_order() {
+        let _serial = plx_base::testlock::serial();
         // Separate legal request histories: a stream permits one terminal roster, not the several
         // terminal ProfileRoster values the legacy mailbox test manufactured on one epoch.
         for roster_before_take in [true, false] {
@@ -290,13 +293,13 @@ mod tests {
                     user: "synthetic-kid".into(), terms: vec!["newer preference".into()],
                     extensions: Default::default(),
                 });
-                disk.playback_quality = Some(plx_plex::plex::session::PlaybackQuality::Original);
+                disk.prefs.playback_quality = Some(plx_plex::plex::session::PlaybackQuality::Original);
                 assert!(!disk.sources.iter().any(|source| source.machine_id == "synthetic-share" && source.dialable()));
                 frame(&mut rig, &mut d, vec![roster]);
                 drain_carried(&mut rig, &mut d);
                 let disk = &rig.session_adapter.fixture_resources().disk;
                 assert_eq!(disk.recent_searches[0].terms, ["newer preference"]);
-                assert_eq!(disk.playback_quality, Some(plx_plex::plex::session::PlaybackQuality::Original));
+                assert_eq!(disk.playback_quality(), plx_plex::plex::session::PlaybackQuality::Original);
             }
             assert!(rig.take_session_ready().is_some());
             assert!(rig.take_session_ready().is_none());
@@ -371,6 +374,7 @@ mod tests {
 
     #[test]
     fn real_profile_worker_injection_reaches_owner_and_handoff_without_global_state() {
+        let _serial = plx_base::testlock::serial();
         let mut init = plx_session::auth::SessionInit::captured(cached_fixture());
         init.phase = plx_session::auth::Phase::Profiles;
         init.users = vec![plx_session::auth::UserTile { uuid: "synthetic-kid".into(), title: "Kid".into(),

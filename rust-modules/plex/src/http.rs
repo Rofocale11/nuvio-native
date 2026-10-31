@@ -1502,12 +1502,17 @@ mod tests {
 
     /// A store build never puts a token on a plaintext socket, and a stream is no exception: the
     /// refusal happens before a connection is attempted.
+    ///
+    /// The origin is a NAME, not the literal loopback address the fork admits for its in-process
+    /// shim (`grant::is_loopback`): a name can be re-pointed by a resolver, so the store gate must
+    /// still refuse it. The listener stays reachable through that name, so a gate that dialled
+    /// instead of refusing would be caught by the `accept` below.
     #[test]
     fn credential_gate_refuses_stream() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let origin = Origin::http("127.0.0.1", port as i32);
+        let origin = Origin::http("localhost", port as i32);
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let end = stream_under(
             CredentialPolicy::HttpsOnly, &origin, "/s", &["X-Plex-Token: not-a-real-token"], None,

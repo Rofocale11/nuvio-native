@@ -3260,22 +3260,39 @@ mod tests {
     /// Row keys are right-aligned into a [`FIELD_KEY_W`] gutter at the dense diagnostic size, so a
     /// translation that grows past about a dozen characters runs into the panel's edge. Every
     /// locale's keys are held to the English budget: "Conservative" and "Dolby Vision".
+    ///
+    /// **The panel is English-only** (`translate: false` on every `browse.diagnostics.*` message):
+    /// its row keys and read-outs are engineering vocabulary, so a translated catalogue that
+    /// carried one of these keys would fail the catalogue build, not merely read oddly. The width
+    /// rule is therefore checked on the English catalogue, and the other two shipped catalogues are
+    /// checked for ABSENCE — a locale that grew these keys again would be the regression.
     #[test]
     fn every_locale_keeps_its_row_keys_inside_the_gutter() {
-        for lang in ["en", "es", "be"] {
+        let catalog_of = |lang: &str| {
             let path = format!("{}/../locales/{lang}/browse.json", env!("CARGO_MANIFEST_DIR"));
             let text = std::fs::read_to_string(&path).expect("catalog");
-            let catalog: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).expect("catalog JSON");
-            let mut keys = 0;
-            for (key, value) in &catalog {
-                if !key.starts_with("browse.diagnostics.field.") {
-                    continue;
-                }
-                let words = value.get("value").unwrap_or(value).as_str().expect("a plain string");
-                assert!(words.chars().count() <= 12, "{lang} {key} = {words:?} is too wide for the key gutter");
-                keys += 1;
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).expect("catalog JSON")
+        };
+        let english = catalog_of("en");
+        let mut keys = 0;
+        for (key, value) in &english {
+            if !key.starts_with("browse.diagnostics.field.") {
+                continue;
             }
-            assert!(keys >= 27, "{lang}: every row key is in the catalog ({keys})");
+            let words = value.get("value").unwrap_or(value).as_str().expect("a plain string");
+            assert!(words.chars().count() <= 12, "en {key} = {words:?} is too wide for the key gutter");
+            keys += 1;
+        }
+        assert!(keys >= 27, "every row key is in the English catalog ({keys})");
+        for lang in ["es", "be"] {
+            let catalog = catalog_of(lang);
+            let english_only: Vec<&String> = english.iter()
+                .filter(|(_, v)| v.get("translate").and_then(|t| t.as_bool()) == Some(false))
+                .map(|(k, _)| k)
+                .filter(|k| catalog.contains_key(*k))
+                .collect();
+            assert!(english_only.is_empty(),
+                "{lang}: an English-only message (`translate: false`) must not be translated: {english_only:?}");
         }
     }
 

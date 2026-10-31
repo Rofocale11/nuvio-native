@@ -6905,10 +6905,6 @@ class FpsMock(unittest.TestCase):
         import mock_fps
         cls.mf = mock_fps
 
-    PAGING_SURFACES = tuple(f"{b}-paging-held-{l}" for b in ("library-grid", "library-shelf", "search-row",
-                                                              "related-row", "collection", "long-season")
-                            for l in ("3g", "remote-wan"))
-
     # --- scene selection --------------------------------------------------------------
     def test_under_mock_only_scenes_with_a_mock_block_run(self):
         # the #665 scene's generated fixtures live outside the repo (present on a dev host, absent
@@ -6917,11 +6913,12 @@ class FpsMock(unittest.TestCase):
             runnable, skipped = self.mf.partition_mock(list(self.scenes.values()), True)
         names = {s["name"] for s in runnable}
         self.assertEqual(names, {"home-grid", "home-grid-deep", "home-recent-paging", "home-hint",
-                                 "library-shelves-deep", "library-burst", "library-hold",
+                                 "library-burst", "library-hold",
                                  "hero-pong", "grid-pong", "home-idle", "item-menu", "library-scroll",
                                  "library-idle", "collection-page", "person-page", "search-type",
                                  "show-detail", "home-hold", "collection-hold", "home-tap",
-                                 "collection-tap"})
+                                 "collection-tap", "fixed-480p-reencode-declaration",
+                                 "boost-remux-declares-source-rate"})
         self.assertEqual(len(runnable) + len(skipped), len(self.scenes))
         for _, why in skipped:
             self.assertIn("real library content", why)
@@ -6929,11 +6926,12 @@ class FpsMock(unittest.TestCase):
     def test_without_mock_a_mock_only_scene_is_skipped_and_the_rest_unchanged(self):
         runnable, skipped = self.mf.partition_mock(list(self.scenes.values()), False)
         self.assertEqual([n for n, _ in skipped], ["home-grid-deep", "home-recent-paging",
-                                                   "library-shelves-deep", "library-burst",
-                                                   "library-hold"])
+                                                   "library-burst", "library-hold",
+                                                   "fixed-480p-reencode-declaration",
+                                                   "boost-remux-declares-source-rate"])
         self.assertIn("--mock", skipped[0][1])
         self.assertIn("home-grid", {s["name"] for s in runnable})
-        self.assertEqual(len(runnable), len(self.scenes) - 5)
+        self.assertEqual(len(runnable), len(self.scenes) - 6)
 
     def test_a_mock_scene_naming_a_library_item_carries_its_own_rating_key(self):
         # the overlay's ratingKey is the real server's; under --mock the scene opens `mock.rk`
@@ -7067,8 +7065,6 @@ class FpsMock(unittest.TestCase):
         self.assertEqual(self.mf.mock_server_args(self.scenes["home-grid"]), [])
         self.assertEqual(self.mf.mock_server_args(self.scenes["home-grid-deep"]),
                          ["--home-hubs", "170"])
-        self.assertEqual(self.mf.mock_server_args(self.scenes["library-shelves-deep"]),
-                         ["--section-hubs", "170", "--section-hubs-linked", "40"])
         self.assertEqual(self.mf.mock_server_args({"mock": {"section_hubs": 9}}),
                          ["--section-hubs", "9"])
         with self.assertRaises(ValueError):
@@ -7380,23 +7376,6 @@ class FpsMock(unittest.TestCase):
                          self.mf.LAUNCH_WAIT_S + 5 + 15 + 3 + 20 + 4 + 5)
         self.assertGreaterEqual(self.mf.LAUNCH_WAIT_S, 10)
 
-    def test_library_deep_scene_walks_the_section_shelves_and_the_grid(self):
-        deep = self.scenes["library-shelves-deep"]
-        self.assertEqual(deep["route"], "library")
-        self.assertTrue(deep["mock"]["only"])
-        self.assertEqual((deep["mock"]["section_hubs"], deep["mock"]["section_hubs_linked"]), (170, 40))
-        self.assertEqual(deep["walk"]["landed"], "library")
-        # the Recommended page seats its first shelf on arrival and has no toolbar to cross
-        self.assertEqual(deep["walk"]["extra_rows"], 0)
-        self.assertEqual(deep["walk"]["fingerprint_region"], "shelf")
-        for t in ("plxnative-library", "plxnative-framedrop", "plxnative-focus"):
-            self.assertIn(t, deep["triggers"])
-        self.assertNotIn("plxnative-libosc", deep["triggers"])  # the walk is the stimulus
-        self.assertEqual(deep["walk"]["min_landed"], 150)  # the cap is gone: 12 is a failure now
-        # room for every shelf at its worst: all of them, a second stop per linked one, the extras
-        self.assertGreaterEqual(deep["walk"]["max_rows"], 170 + 40 + deep["walk"]["extra_rows"])
-        self.assertEqual((deep["loop_floor"], deep["fps_floor"]), (50, 30))
-
     # Words a page's `probe_viewport` prints that are not somewhere a walk goes: no focus at all
     # (`none`), focus on something the page does not classify (`library`) and the retry button of a
     # listing that failed (`status`). A scene that waits for one of them waits for the page to be
@@ -7414,17 +7393,17 @@ class FpsMock(unittest.TestCase):
 
     def test_a_scene_grades_a_fingerprint_region_its_page_actually_prints(self):
         """A scene's `walk.fingerprint_region` / `walk.reach.region` is a promise that the page prints
-        that `focus route=... region=...` word. #843 gave `library-shelves-deep` the Recommended
-        page (`plxnative-libtype: recommended`) and left it waiting for the Library page's
-        `region=grid`, which that page never printed (its probe line was empty), so the scene
-        failed on every run and nothing said why. Both pages answer one fingerprint grammar, so the
-        words each can print are read from the page's own `probe_viewport`."""
+        that `focus route=... region=...` word. One page printing a different word from the one its
+        scene waits for made a walk fail on every run with nothing saying why, so the words a page
+        can print are read from its own `probe_viewport`. This fork's Library page mounts its shelves
+        and its grid on the same page and classifies both (`region=shelf` on a card in a shelf,
+        `region=grid` in the grid); the Recommended page classifies only shelves."""
         library = self._regions_printed_by("rust-modules", "screens", "src", "library", "mod.rs")
         recommended = self._regions_printed_by("rust-modules", "screens", "src", "library", "recommended.rs")
         self.assertIn("grid", library)
+        self.assertIn("shelf", library, "the Library page mounts shelves")
         self.assertIn("shelf", recommended)
         self.assertNotIn("grid", recommended, "the Recommended page mounts no grid")
-        self.assertNotIn("shelf", library, "the Library page mounts no shelves")
         checked = 0
         for name, scene in sorted(self.scenes.items()):
             walk = scene.get("walk") or {}
@@ -7441,25 +7420,21 @@ class FpsMock(unittest.TestCase):
                                   f"{name} waits for `region={word}`, which its "
                                   f"{'Recommended' if recommended_page else 'Library'} page never prints")
                 checked += 1
-        self.assertGreaterEqual(checked, 7, "the scenes that declare a region were not found")
+        self.assertGreaterEqual(checked, 2, "the scenes that declare a region were not found")
 
     # --- the expected key count --------------------------------------------------------
     def test_walk_downs_for_home_is_one_per_landed_row(self):
         deep = self.scenes["home-grid-deep"]
         self.assertEqual(self.mf.walk_downs(deep, 21), 21)
 
-    def test_walk_downs_for_a_library_counts_extra_rows_and_linked_shelves_twice(self):
-        deep = self.scenes["library-shelves-deep"]
-        # a 12-shelf landing (CW + Recently Added + 10 padding hubs): 10 * 40 // 168 = 2 linked
-        self.assertEqual(self.mf.linked_landed(deep, 12), 2)
-        self.assertEqual(self.mf.walk_downs(deep, 12), 12 + 2)
-        # a fully landed 170 carries every linked shelf: 170 + 40
-        self.assertEqual(self.mf.linked_landed(deep, 170), 40)
-        self.assertEqual(self.mf.walk_downs(deep, 170), 170 + 40)
-        self.assertEqual(self.mf.linked_landed(deep, 500), 40)
-        self.assertEqual(self.mf.linked_landed(deep, 1), 0)
-        plain = {"walk": {"landed": "library", "extra_rows": 2}, "mock": {"section_hubs": 50}}
-        self.assertEqual(self.mf.walk_downs(plain, 7), 9)
+    def test_walk_downs_for_a_reach_surface_is_one_row_plus_extra_rows(self):
+        # the Library page logs no `libhubs` landing, so `walk.reach` makes the walk ONE fixed
+        # "row" (it is up once the first `focus route=library` fingerprint appears) plus the
+        # `extra_rows` Downs that cross the page header into the grid
+        b = self.scenes["library-burst"]
+        self.assertEqual(b["walk"]["reach"]["region"], "grid")
+        self.assertEqual(b["walk"]["extra_rows"], 2)
+        self.assertEqual(self.mf.walk_downs(b, 1), 1 + b["walk"]["extra_rows"])
 
     # --- the burst walk (library-burst) -------------------------------------------------
     def test_burst_scene_is_an_ungraded_instrument_on_the_library_grid(self):
@@ -7477,7 +7452,7 @@ class FpsMock(unittest.TestCase):
             self.assertNotIn(k, b, k)
         self.assertEqual(b["walk"]["fingerprint_region"], "grid")
         self.assertTrue(self.mf.is_burst(b))
-        self.assertFalse(self.mf.is_burst(self.scenes["library-shelves-deep"]))
+        self.assertFalse(self.mf.is_burst(self.scenes["home-grid-deep"]))
 
     def test_burst_plan_is_bursts_of_down_with_rests_then_the_same_of_up(self):
         w = {"burst": 3, "bursts": 2, "key_ms": 100, "rest_ms": 1500, "max_rows": 40}
@@ -7499,17 +7474,19 @@ class FpsMock(unittest.TestCase):
     def test_burst_scene_key_count_and_timing(self):
         b = self.scenes["library-burst"]
         w = b["walk"]
-        # a 7-shelf landing: 7 Downs + extra_rows into the grid, 8 bursts of 4 each way
-        self.assertEqual(self.mf.walk_downs(b, 7), 7 + w["extra_rows"])
-        steps = self.mf.walk_steps(b, 7)
-        self.assertEqual(len(steps), 7 + 6 + 2 * 8 * 4)
-        self.assertEqual(self.mf.walk_expected_keys(b, 7), len(steps))
+        # a `walk.reach` surface: ONE fixed "row" plus extra_rows Downs from the page header into
+        # the grid, then 8 bursts of 4 each way
+        self.assertEqual(self.mf.walk_downs(b, 1), 1 + w["extra_rows"])
+        steps = self.mf.walk_steps(b, 1)
+        self.assertEqual(len(steps), 1 + w["extra_rows"] + 2 * 8 * 4)
+        self.assertEqual(self.mf.walk_expected_keys(b, 1), len(steps))
         self.assertEqual(self.mf.walk_expected_keys(b, 0), 0)
         keys = [k for k, _ in steps]
-        self.assertEqual((keys.count("down"), keys.count("up")), (13 + 32, 32))
-        # first press to last press: 12 prelude gaps and its rest, then 16 bursts of three gaps
-        # and a rest, less the final rest (nothing is pressed after the last key)
-        want = 12 * 0.125 + 1.5 + 16 * (3 * 0.125 + 1.5) - 1.5
+        self.assertEqual((keys.count("down"), keys.count("up")), (3 + 32, 32))
+        # first press to last press: the prelude's two gaps and its rest, then 16 bursts of three
+        # gaps and a rest, less the final rest (nothing is pressed after the last key)
+        prelude = 1 + w["extra_rows"]
+        want = (prelude - 1) * 0.125 + 16 * (3 * 0.125 + 1.5)
         self.assertAlmostEqual(sum(d for _, d in steps[:-1]), want, places=6)
         # and the scene's run_secs covers the worst case (the generic test also holds it)
         self.assertLessEqual(self.mf.walk_secs_needed(b), b["run_secs"])
@@ -7531,23 +7508,24 @@ class FpsMock(unittest.TestCase):
 
     def test_hold_scene_key_count_and_timing(self):
         h = self.scenes["library-hold"]
-        # a 7-shelf landing: 7 Downs + extra_rows into the grid, 3 bursts of 16 each way
-        steps = self.mf.walk_steps(h, 7)
-        self.assertEqual(len(steps), 7 + 6 + 2 * 3 * 16)
-        self.assertEqual(self.mf.walk_expected_keys(h, 7), len(steps))
+        # a `walk.reach` surface: ONE fixed "row" plus extra_rows into the grid, 3 bursts of 16
+        prelude = 1 + h["walk"]["extra_rows"]
+        steps = self.mf.walk_steps(h, 1)
+        self.assertEqual(len(steps), prelude + 2 * 3 * 16)
+        self.assertEqual(self.mf.walk_expected_keys(h, 1), len(steps))
         self.assertEqual(self.mf.walk_expected_keys(h, 0), 0)
         keys = [k for k, _ in steps]
-        self.assertEqual((keys.count("down"), keys.count("up")), (13 + 48, 48))
+        self.assertEqual((keys.count("down"), keys.count("up")), (prelude + 48, 48))
         # the library is deep enough for the held scroll: 48 rows down past the prelude
         cols = 6
-        self.assertGreaterEqual(-(-h["mock"]["movies"] // cols), 13 + 48)
-        # first press to last press: 12 prelude gaps and its rest, then 6 bursts of fifteen gaps
-        # and a rest, less the final rest (nothing is pressed after the last key)
-        want = 12 * 0.125 + 2.0 + 6 * (15 * 0.125 + 2.0) - 2.0
+        self.assertGreaterEqual(-(-h["mock"]["movies"] // cols), prelude + 48)
+        # first press to last press: the prelude's gaps and its rest, then 6 bursts of fifteen
+        # gaps and a rest, less the final rest (nothing is pressed after the last key)
+        want = (prelude - 1) * 0.125 + 6 * (15 * 0.125 + 2.0)
         self.assertAlmostEqual(sum(d for _, d in steps[:-1]), want, places=6)
-        self.assertAlmostEqual(want, 24.75, places=6)
+        self.assertAlmostEqual(want, 23.5, places=6)
         # inside a burst the keys are key_ms apart; every burst ends in the 2 s rest
-        self.assertEqual([d for _, d in steps[13:13 + 16]], [0.125] * 15 + [2.0])
+        self.assertEqual([d for _, d in steps[prelude:prelude + 16]], [0.125] * 15 + [2.0])
         # and the scene's run_secs covers the worst case (the generic test also holds it)
         self.assertLessEqual(self.mf.walk_secs_needed(h), h["run_secs"])
 
@@ -7601,19 +7579,20 @@ class FpsMock(unittest.TestCase):
         self.assertIn("placeholders: n/a", quiet)
         self.assertIn("pupf/pup n/a", quiet)
 
-    def _burst_run(self, tail, sent=None, landed=7):
+    def _burst_run(self, tail, sent=None, landed=1):
         b = self.scenes["library-burst"]
         want = self.mf.walk_expected_keys(b, landed)
         w = type("W", (), {"error": None, "rows": landed, "sent": want if sent is None else sent})
-        lines = [self.SYN, f"libhubs: section 0 landed {landed} shelves, {landed * 12} items",
-                 self.KEY, self._beat()] + tail
+        # `walk.reach`: the walk is up once the page logs its first `focus route=library` line, and
+        # it makes a fixed plan (one "row") whatever the library holds
+        lines = [self.SYN, self.GRID_FP, self.KEY, self._beat()] + tail
         return b, want, lines, w
 
     def test_grade_walk_prelude_grades_only_keys_and_the_grid_fingerprint_for_a_burst_walk(self):
         b, want, lines, w = self._burst_run([self.GRID_FP, self._ph(4)])
         fail, window, detail = run.grade_walk_prelude(b, lines, w)
         self.assertIsNone(fail, fail)
-        self.assertIn("7 shelf(s) landed", detail)
+        self.assertIn("1 row(s) landed", detail)
         self.assertIn("burst: placeholders: ph=4 tile-frames", detail)
         self.assertIn("(recorded, not graded)", detail)
         self.assertIn(self._ph(4), window)
@@ -7637,85 +7616,10 @@ class FpsMock(unittest.TestCase):
     def _shelf_fp(row):
         return f"focus route=library pill=-1 card=1 menu=0 region=shelf row={row} col=0 viewport_x=0.000"
 
-    # a walk that reached the deepest shelf ON SCREEN (row 169 of 170): the Recommended page has no grid
-    DEEP_TAIL = [_shelf_fp.__func__(3), _shelf_fp.__func__(169)]
-
-    def _library_walk(self, tail, sent=None, landed=170):
-        deep = self.scenes["library-shelves-deep"]
-        want = 2 * min(self.mf.walk_downs(deep, landed), deep["walk"]["max_rows"])
-        w = type("W", (), {"error": None, "rows": landed, "sent": want if sent is None else sent})
-        lines = [self.SYN, f"libhubs: section 0 landed {landed} shelves, {landed * 12} items",
-                 self.KEY, self._beat()] + tail
-        return deep, want, lines, w
-
-    def test_grade_walk_prelude_expects_the_library_key_count(self):
-        deep, want, lines, w = self._library_walk(self.DEEP_TAIL)
-        fail, _, detail = run.grade_walk_prelude(deep, lines, w)
-        self.assertIsNone(fail, fail)
-        self.assertIn("170 shelf(s) landed", detail)
-        # the Home arithmetic (2 * 170 keys) would have called this complete
-        deep, want, lines, w = self._library_walk(self.DEEP_TAIL, sent=2 * 170)
-        fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-        self.assertIn(f"sent 340 of {want}", fail)
-
-    def test_grade_walk_prelude_fails_when_fewer_shelves_landed_than_min_landed(self):
-        # a complete, fast walk over 12 shelves is still a failed scene once the cap is gone
-        deep, _, lines, w = self._library_walk(self.DEEP_TAIL, landed=12)
-        self.assertEqual(deep["walk"]["min_landed"], 150)
-        fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-        self.assertIn("only 12 shelf(s) landed", fail)
-        self.assertIn("min_landed 150", fail)
-        self.assertIn("short or failed fetch", fail)
-        # a scene that declares no minimum is unchanged
-        plain = dict(deep, walk={k: v for k, v in deep["walk"].items() if k != "min_landed"})
-        fail, _, _ = run.grade_walk_prelude(plain, lines, w)
-        self.assertIsNone(fail, fail)
-        # and the full landing passes it
-        deep, _, lines, w = self._library_walk(self.DEEP_TAIL)
-        fail, _, detail = run.grade_walk_prelude(deep, lines, w)
-        self.assertIsNone(fail, fail)
-        self.assertIn("170 shelf(s) landed", detail)
-
-    def test_grade_walk_prelude_needs_the_deep_shelf_on_screen(self):
-        # the store published 170, but the screen only built 12 rows
-        deep, _, lines, w = self._library_walk([self._shelf_fp(11)])
-        fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-        self.assertIn("region=shelf row=11", fail)
-        self.assertIn("minimum row 149", fail)
-        self.assertIn("SCREEN", fail)
-        # no shelf fingerprint at all: the walk never carried focus onto a shelf
-        deep, _, lines, w = self._library_walk([self.GRID_FP])
-        fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-        self.assertIn("region=shelf", fail)
-        # the deepest of several counts, wherever it falls in the window
-        deep, _, lines, w = self._library_walk([self._shelf_fp(169), self._shelf_fp(4)])
-        fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-        self.assertIsNone(fail, fail)
-        # row min_landed - 1 is enough, one less is not
-        deep, _, lines, w = self._library_walk([self._shelf_fp(149)])
-        fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-        self.assertIsNone(fail, fail)
-        deep, _, lines, w = self._library_walk([self._shelf_fp(148)])
-        fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-        self.assertIn("region=shelf row=148", fail)
-        # without min_landed a library walk needs no particular shelf, only the region
-        deep, _, lines, w = self._library_walk([self._shelf_fp(4)])
-        plain = dict(deep, walk={k: v for k, v in deep["walk"].items() if k != "min_landed"})
-        fail, _, _ = run.grade_walk_prelude(plain, lines, w)
-        self.assertIsNone(fail, fail)
-
     def test_deepest_shelf_row_reads_the_library_fingerprints(self):
         self.assertIsNone(self.mf.deepest_shelf_row([self.GRID_FP, "focus route=home region=shelf row=9"], "library"))
         self.assertEqual(self.mf.deepest_shelf_row(
             [self._shelf_fp(3), self._shelf_fp(169), self._shelf_fp(40)], "library"), 169)
-
-    def test_grade_walk_prelude_needs_the_scenes_region_fingerprint(self):
-        # the Recommended page's walk is graded on its shelves; the grid (the Library page's region)
-        # and another route's shelf do not stand in for them
-        for tail in ([], [self.GRID_FP], ["focus route=home region=shelf row=9 col=0"]):
-            deep, _, lines, w = self._library_walk(tail)
-            fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-            self.assertIn("region=shelf", fail)
 
     def test_walk_plan_is_down_then_up_and_only_those_keys(self):
         plan = self.mf.walk_plan(21, {"max_rows": 170})

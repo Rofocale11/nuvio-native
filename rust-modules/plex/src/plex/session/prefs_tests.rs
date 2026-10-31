@@ -12,11 +12,11 @@ use super::prefs::{Descriptor, Fallback, ListRow, Parse, ProfileMemory, Row, Sco
 use super::prefs::{AudioEnhancementsPref, AutoSignInPref, DeckPressPref, UnderPostersPref, DirectPlayModePref, LastHeroBlurPref,
     LastLibraryRow, LibraryViewsRow, NextEpisodeModePref, PlaintextConsentRow, QualityPref, ServerKeyPinsRow,
     HdrOverlayBrightnessPref, SkipIntervalPref, SubtitleOffsetsPref, SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref,
-    HoldHintTaughtPref, TrailerAutoplayPref, UiResolutionPref};
+    HoldHintTaughtPref, P2pEnabledPref, P2pServerUrlPref, RatingSourcePref, TrailerAutoplayPref, UiResolutionPref};
 use super::{
     CanonicalSessionPreferences, DeckPress, UnderPosters, UnderPostersDetails, DirectPlayMode, LastLibrary, LibraryViews, NextEpisodeMode,
     PlaintextChoice, PlaintextConsent, PlaybackQuality, Preferences, ServerKeyPin, Session, SkipInterval,
-    HdrOverlayBrightness, HoldHintTaught, SubtitleOffsetEntry, SubtitlePosition, SubtitleSize, SubtitleTone, UiResolution,
+    HdrOverlayBrightness, HoldHintTaught, RatingSource, SubtitleOffsetEntry, SubtitlePosition, SubtitleSize, SubtitleTone, UiResolution,
 };
 use serde::de::{self, Deserializer, Visitor};
 use serde_json::{json, Value};
@@ -119,13 +119,34 @@ fn every_marker_names_its_own_field() {
     check_row::<LastHeroBlurPref>(Some([[0.5, 0.25, 0.125]; 4]));
     check_row::<UiResolutionPref>(UiResolution::Hd720);
     check_row::<HoldHintTaughtPref>(HoldHintTaught { card: true, pill: false });
-    // The table lists exactly these sixteen `Setting` rows, the four list rows below, the two
+    // FORK (Nuvio Native): the two Copy-valued shim rows. `P2pServerUrlPref` is the third shim row
+    // and is `Row` only (`Option<String>` is not `Copy`), so it has no `check_row` here.
+    check_row::<RatingSourcePref>(RatingSource::RottenTomatoes);
+    check_row::<P2pEnabledPref>(true);
+    // The table lists exactly these eighteen `Setting` rows, the four list rows below, the two
     // memory-door rows (`TrackMemoryPref`, whose field check is
     // `track_memory_tests::the_list_row_names_its_own_field`, and `SubtitleOffsetsPref`, checked by
-    // `the_subtitle_offsets_row_names_its_own_field`) and the per-profile record list
-    // (`ProfilePrefsPref`, `profile_prefs_tests::nothing_picked_serializes_to_no_key`): a row needs
-    // its line in one of the four places.
-    assert_eq!(DESCRIPTORS.len(), 16 + 4 + 2 + 1);
+    // `the_subtitle_offsets_row_names_its_own_field`), the per-profile record list
+    // (`ProfilePrefsPref`, `profile_prefs_tests::nothing_picked_serializes_to_no_key`) and the one
+    // scalar `Row` without `Setting` (`P2pServerUrlPref`): a row needs its line in one of the five
+    // places.
+    assert_eq!(DESCRIPTORS.len(), 18 + 4 + 2 + 1 + 1);
+}
+
+/// `P2pServerUrlPref` is the one scalar row without `Setting` (its `Option<String>` is not `Copy`),
+/// so it gets the field/round-trip proof by hand: its key is the field's wire key, a saved URL
+/// reads back, and an empty one means "not saved" rather than an engine at the empty address.
+#[test]
+fn the_p2p_server_row_names_its_own_field() {
+    assert_eq!(P2pServerUrlPref::KEY, "p2p_server_url");
+    let mut p = Preferences::default();
+    p.p2p_server_url = Some("http://127.0.0.1:11470".into());
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["p2p_server_url"], "http://127.0.0.1:11470");
+    let back: Preferences = serde_json::from_value(json).unwrap();
+    assert_eq!(back.p2p_server_url.as_deref(), Some("http://127.0.0.1:11470"));
+    let blank: Preferences = serde_json::from_value(json!({"p2p_server_url": "  "})).unwrap();
+    assert_eq!(blank.p2p_server_url, None);
 }
 
 /// The list rows do what `check_row` proves for the `Copy` ones: the marker names its own field
@@ -250,6 +271,10 @@ fn the_a5_rows_declare_the_scope_and_binding_main_has() {
         ("server_key_pins", Scope::Account, true, Parse::SoftVec),
         ("last_library", Scope::Profile, true, Parse::SoftVec),
         ("library_sorts", Scope::Profile, true, Parse::SoftVec),
+        // FORK (Nuvio Native): the shim's install-wide settings.
+        ("rating_source", Scope::Install, false, Parse::Soft),
+        ("p2p_enabled", Scope::Install, false, Parse::BoolOff),
+        ("p2p_server_url", Scope::Install, false, Parse::OptionalSoft),
     ] {
         let d = row(key);
         assert_eq!((d.scope, d.account_bound, d.parse), (scope, bound, parse), "{key}");
@@ -332,6 +357,10 @@ fn garbage_fixtures() -> Vec<(&'static str, Vec<Value>)> {
         ("skip_interval", generic()),
         ("deck_press", generic()),
         ("under_posters", generic()),
+        // FORK (Nuvio Native): a non-empty string is a valid engine URL, so it is not garbage.
+        ("p2p_server_url", vec![Value::Null, json!(17), json!(true), json!([1, "x"]), json!({"unexpected": 1})]),
+        ("rating_source", generic()),
+        ("p2p_enabled", not_a_bool()),
         ("audio_enhancements", generic()),
         // A5. A switch's garbage excludes the booleans, which are VALID values for it.
         ("auto_sign_in", not_a_bool()),

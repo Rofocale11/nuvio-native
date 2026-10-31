@@ -1,14 +1,17 @@
 {
   "widgets.diagnostics.uploading": {
     "value": "Uploading diagnostics…",
+    "translate": false,
     "description": "Status toast after the viewer requests a diagnostic upload."
   },
   "widgets.diagnostics.uploaded": {
     "value": "Diagnostics uploaded",
+    "translate": false,
     "description": "Status toast after the viewer requests a diagnostic upload."
   },
   "widgets.diagnostics.failed": {
     "value": "Diagnostics upload failed",
+    "translate": false,
     "description": "Status toast after the viewer requests a diagnostic upload."
   },
   "widgets.menu.options": {
@@ -508,38 +511,47 @@
   },
   "widgets.panel.jail": {
     "value": "this install's sandbox blocks access to /dev/rtkmem; PlxNative can offer a confirmed repair through rooted Homebrew Channel access",
+    "translate": false,
     "description": "panel jail"
   },
   "widgets.panel.refused": {
     "value": "the server refused the item at /decision — it can neither direct play nor convert it",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.audio_only_no_pass": {
     "value": "server sent audio only — it found no usable video transcode target (server has no Plex Pass)",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.audio_only": {
     "value": "server sent audio only — it found no usable video transcode target",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.no_video": {
     "value": "the stream carries no video track",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.open": {
     "value": "the media stream could not be opened or read",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.stopped": {
     "value": "the media producer stopped before playback completed",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.tv_rejected": {
     "value": "the television media pipeline rejected the stream",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.unknown": {
     "value": "the player stopped without a reported cause",
+    "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.failure.load_timeout": {
@@ -548,6 +560,7 @@
   },
   "widgets.panel.load_timeout": {
     "value": "the television media pipeline did not finish starting the stream in time",
+    "translate": false,
     "description": "panel load_timeout"
   },
   "widgets.reason.load_timeout": {
@@ -560,6 +573,7 @@
   },
   "widgets.panel.forced_playback": {
     "value": "Force Direct Play could not use the original stream; automatic fallback is disabled",
+    "translate": false,
     "description": "panel forced_playback"
   },
   "widgets.reason.forced_playback": {
@@ -650,10 +664,6 @@
     "value": "Subtitles stay on. Your Plex server will rework the video to keep them, so the picture may look a little softer.",
     "description": "Issue #266/M7. One-line note under the ENABLED Boost dialog / Normalize loudness rows when the subtitle on screen is embedded in the file — turning the toggle on makes the server re-encode the video to keep it in view. No jargon: never say burn/re-encode/transcode."
   },
-  "widgets.tracks.enh_note_dv_off": {
-    "value": "Dolby Vision turns off while this is on. The video still plays in HDR.",
-    "description": "Issue #266/M7. One-line note under the ENABLED Boost dialog / Normalize loudness rows for a Dolby Vision source whose base layer is usable — turning the toggle on plays the HDR10 base picture without the Dolby Vision declaration."
-  },
   "widgets.tracks.enh_reason_not_analyzed": {
     "value": "Not ready for this video yet. Your Plex server needs to scan its sound first.",
     "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows when the carried audio track has no canNormalizeLoudness fact yet."
@@ -736,6 +746,7 @@
   },
   "widgets.runtime.main_thread": {
     "value": "MAIN THREAD {kind} {milliseconds}ms · {label}",
+    "translate": false,
     "description": "Developer warning; kind and label are technical diagnostic identifiers",
     "args": {
       "kind": "str",

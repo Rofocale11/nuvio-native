@@ -1462,11 +1462,13 @@ fn preview_tick_does_not_read_the_session_file_every_frame() {
     // A readable session, so `preview::enabled()`'s `peek()` call has real Ready bytes behind it,
     // rather than the trivially-cheap Missing/default path.
     let _session = plx_plex::plex::session::TempSession::new("detail-preview-fps");
-    plx_plex::plex::session::save(&plx_plex::plex::session::Session {
-        client_id: "cid-detail-preview-fps".into(),
-        trailer_autoplay: true,
-        ..Default::default()
-    });
+    plx_plex::plex::session::save(
+        &plx_plex::plex::session::Session {
+            client_id: "cid-detail-preview-fps".into(),
+            ..Default::default()
+        }
+        .with_trailer_autoplay(true),
+    );
 
     let mut effects = Vec::new();
     let mut present = plx_machine::present::Present::new();

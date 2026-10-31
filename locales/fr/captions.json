@@ -1,7 +1,7 @@
 {
   "captions.new_episodes": {
-    "one": "{count} new episode",
-    "many": "{count} new episodes",
-    "other": "{count} new episodes"
+    "one": "{count} nouvel épisode",
+    "many": "{count} nouveaux épisodes",
+    "other": "{count} nouveaux épisodes"
   }
 }

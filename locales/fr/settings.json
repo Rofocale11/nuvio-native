@@ -38,9 +38,9 @@
   "settings.onboard.failed_reason": "Vérifiez la connexion, puis réessayez.",
   "settings.onboard.copy": "Choisissez les bibliothèques que ce téléviseur affiche. Vos bibliothèques favorites apparaissent sur l’accueil et dans les onglets de la bibliothèque ; les Paramètres les listent toutes.",
   "settings.onboard.shared": {
-    "one": "{names} has shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
-    "many": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
-    "other": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like."
+    "one": "{names} a partagé des bibliothèques avec vous. Choisissez vos favorites : ce sont elles qu’affichent l’Accueil et la Bibliothèque, et vous pouvez les modifier dans les Paramètres quand vous le souhaitez.",
+    "many": "{names} ont partagé des bibliothèques avec vous. Choisissez vos favorites : ce sont elles qu’affichent l’Accueil et la Bibliothèque, et vous pouvez les modifier dans les Paramètres quand vous le souhaitez.",
+    "other": "{names} ont partagé des bibliothèques avec vous. Choisissez vos favorites : ce sont elles qu’affichent l’Accueil et la Bibliothèque, et vous pouvez les modifier dans les Paramètres quand vous le souhaitez."
   },
   "settings.onboard.names": "{names} et {last}",
   "settings.language.title": "Langue",
@@ -174,9 +174,9 @@
   "settings.playback.deck_press.play": "Lire",
   "settings.playback.skip_interval": "Durée du saut",
   "settings.playback.skip_interval.seconds": {
-    "one": "{count} second",
-    "many": "{count} seconds",
-    "other": "{count} seconds"
+    "one": "{count} seconde",
+    "many": "{count} secondes",
+    "other": "{count} secondes"
   },
   "settings.audio.language": "Langue audio préférée",
   "settings.audio.subtitles": "Sous-titres",
@@ -307,19 +307,17 @@
   "settings.addons.title": "Addons",
   "settings.addons.detail": "Enable or disable installed addons for this session",
   "settings.playback.copy": "Playback defaults for this television. Changes here apply to the next playback.",
-  "settings.login.unknown_device": "unknown set",
-  "settings.login.your_servers": "your servers",
-  "settings.resolution.title": "Interface resolution",
-  "settings.resolution.detail": "Lower is smoother. Applies after restarting.",
-  "settings.resolution.auto": "Automatic",
-  "settings.playback.subtitle_size.huge": "Huge",
-  "settings.playback.hdr_overlay": "HDR overlay brightness",
-  "settings.playback.hdr_overlay.full": "100%",
-  "settings.playback.hdr_overlay.three_quarters": "75%",
-  "settings.playback.hdr_overlay.half": "50%",
-  "settings.playback.copy_profile": "Playback settings for {profile}. Changes here apply to the next playback.",
-  "settings.playback.copy_profile_forced": "Playback settings for {profile}.",
-  "settings.playback.unseated": "Choose a profile to change this",
-  "settings.playback.hdr_overlay.copy": "How bright the player's controls and subtitles are during HDR and Dolby Vision, when the TV draws them much brighter. Lower it if they dazzle. 100% leaves them as they are.",
-  "settings.consent.placeholder.library": "library file name"
+  "settings.resolution.title": "Résolution de l’interface",
+  "settings.resolution.detail": "Plus basse, plus fluide. Après redémarrage.",
+  "settings.resolution.auto": "Automatique",
+  "settings.playback.subtitle_size.huge": "Énorme",
+  "settings.playback.hdr_overlay": "Luminosité de l’interface en HDR",
+  "settings.playback.hdr_overlay.full": "100 %",
+  "settings.playback.hdr_overlay.three_quarters": "75 %",
+  "settings.playback.hdr_overlay.half": "50 %",
+  "settings.playback.copy_profile": "Réglages de lecture du profil {profile}. Les changements s’appliquent à la prochaine lecture.",
+  "settings.playback.copy_profile_forced": "Réglages de lecture du profil {profile}.",
+  "settings.playback.unseated": "Choisissez un profil pour modifier ceci",
+  "settings.playback.hdr_overlay.copy": "La luminosité des commandes et des sous-titres du lecteur en HDR et Dolby Vision, quand le téléviseur les affiche bien plus fort. Baissez-la s’ils éblouissent. 100 % ne change rien.",
+  "settings.consent.placeholder.library": "nom du fichier de la bibliothèque"
 }

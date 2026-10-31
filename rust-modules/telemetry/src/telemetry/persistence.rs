@@ -1305,7 +1305,13 @@ mod upgrade_tests {
                     let rev = self.record.as_ref().and_then(|r| r["_rev"].as_u64()).unwrap_or(0) + 1;
                     next["_rev"] = serde_json::json!(rev);
                     self.record = Some(next);
-                    Ok(serde_json::json!({"returnValue":true,"results":[{"id":"plxstate.stable","rev":rev}]}))
+                    // A real DB8 answers with the id it was asked to store. The fixture is this
+                    // fork's packaged object (`ci/install-identities.json`), so the reply -- and
+                    // the kind below -- must name the fork's identity, not upstream's.
+                    Ok(serde_json::json!({"returnValue":true,"results":[{
+                        "id": plx_platform::storage::state::Flavor::Stable.object_id(),
+                        "rev": rev,
+                    }]}))
                 }
                 other => panic!("unexpected DB8/Keymanager call {other}"),
             }
@@ -1319,7 +1325,9 @@ mod upgrade_tests {
                 ..Default::default()
             },
             plx_platform::storage::state::Flavor::Stable,
-            "com.beb.plxnative.storage".into(),
+            // The owning service is the packaged helper's app id plus `.storage`
+            // (`storage::client::service_name`), which is `com.nuvionative.app.storage` here.
+            format!("{}.storage", plx_base::paths::app_id()),
         )
     }
 

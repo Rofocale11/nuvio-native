@@ -207,15 +207,7 @@ fn library_sweep_visits_the_whole_document_and_reverses_at_its_ends() {
         (2, true),
     ]));
     rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
-    {
-        let mut browse = rig.stores.browse.borrow_mut();
-        browse.seed_items_for_test(120);
-        browse.seed_shelves_for_test(
-            0,
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"],
-            4,
-        );
-    }
+    rig.stores.browse.borrow_mut().seed_items_for_test(120);
     for i in 0..80 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
@@ -233,7 +225,6 @@ fn library_sweep_visits_the_whole_document_and_reverses_at_its_ends() {
     );
     frame(&mut d, &mut rig, AppArg::Library, tick(80), vec![]);
     let mut visited = std::collections::BTreeSet::new();
-    let mut shelves = std::collections::BTreeSet::new();
     let mut grid_rows = std::collections::BTreeSet::new();
     let mut returned = false;
     let mut path = Vec::new();
@@ -248,9 +239,6 @@ fn library_sweep_visits_the_whole_document_and_reverses_at_its_ends() {
         let (region, row, _, _, _) = page.probe_viewport(d.focus());
         path.push((region, row));
         visited.insert(region);
-        if region == "shelf" {
-            shelves.insert(row);
-        }
         if region == "grid" {
             grid_rows.insert(row);
         }
@@ -261,14 +249,15 @@ fn library_sweep_visits_the_whole_document_and_reverses_at_its_ends() {
         Bridge::library_command(&mut d, plx_screens::registry::LibraryCmd::Sweep);
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
+    // The grid-only document is the library row (two pinned favourites), the Type/Sort/Filter
+    // row and the 20-row poster grid. There is no shelf run between the head and the grid.
     assert_eq!(
         visited,
-        ["library", "shelf", "toolbar", "grid"]
+        ["library", "toolbar", "grid"]
             .into_iter()
             .collect(),
         "{path:?}"
     );
-    assert_eq!(shelves, (0..12).collect());
     assert_eq!(grid_rows, (0..20).collect());
     assert!(
         returned,

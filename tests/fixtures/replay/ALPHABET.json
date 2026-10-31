@@ -17,7 +17,8 @@
     "subtitle_preferences": "rust-modules/plex/src/plex/session.rs: SubtitleTone::White serializes as white and is the captured default in every synthetic session.",
     "session_persistence": "rust-modules/plex/src/plex/session.rs: SaveAuthority::Routine (also PublicOnly, FreshReauthentication — already covered/unused in controlled recordings); rust-modules/plex/src/plex/session/async_persistence.rs: PersistencePurpose::Background; rust-modules/src/auth/owner.rs: CommitAdmission::RegistryOnly. These serialize into every controlled session commit/plan once a store owns its own persistence (cleanup/ownership), so a synthetic recording now always carries them.",
     "nuvio_stream_picker": "locales/en/browse.json browse.detail.alt_sources supplies the Streams button measured on a detail page.",
-    "hold_hint": "ui/src/hold_hint.rs measures the three runs of Home's \"Hold OK for options\" capsule when a recorded Home rests on a shelf tile: locales/en/widgets.json widgets.hint.hold_options (pre and post words, split at the key placeholder) and KEY (the OK cap)."
+    "hold_hint": "ui/src/hold_hint.rs measures the three runs of Home's \"Hold OK for options\" capsule when a recorded Home rests on a shelf tile: locales/en/widgets.json widgets.hint.hold_options (pre and post words, split at the key placeholder) and KEY (the OK cap).",
+    "continue_watching": "locales/en/browse.json browse.home.continue supplies the Home Continue-Watching row's Continue pill, measured at CAPTION size. plx_ui::fmt::duration_long (core.duration_long_hours/core.duration_long_minutes, Detail's About run time) and plx_ui::fmt::time_left (core.time_left_hours/core.time_left_minutes, the Continue-Watching card's remaining text) spell the durations out as \"2 hr 24 min\" and \"s00000000 · 32 min left\" in locales/en/core.json."
   },
   "patterns": [
     "/library/metadata/people/[0-9]+/thumb/1",
@@ -30,6 +31,8 @@
     "s[0-9a-f]{8}( s[0-9a-f]{8}){1,23}(…)?",
     "s[0-9a-f]{8}, s[0-9a-f]{8}(, s[0-9a-f]{8})*,?",
     "S[0-9]+ · E[0-9]+ · [0-9]+m left",
+    "s[0-9a-f]{8} · ([0-9]+ hr )?[0-9]+ min left",
+    "([0-9]+ hr )?[0-9]+ min",
     "[0-9]{4} · ([0-9]+h )?[0-9]+m",
     "Character [0-9]+ · s[0-9a-f]{8}",
     "(Actor|Appeared|Director|Producer|Composer|Cinematographer|Writer|Other) · [0-9]+",
@@ -58,6 +61,7 @@
   ],
   "literals": [
     "Streams",
+    "Continue",
     "Hold",
     "for options",
     "OK",

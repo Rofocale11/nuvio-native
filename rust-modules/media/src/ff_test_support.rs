@@ -19,13 +19,6 @@ pub(super) fn to_annexb(buf: &[u8], is_hevc: bool, param: &[u8]) -> (bool, Vec<u
     (key, out)
 }
 
-/// [`to_annexb`] with the Dolby Vision Profile 7 -> 8.1 conversion armed (HEVC).
-pub(super) fn to_annexb_p7(buf: &[u8], param: &[u8]) -> (bool, Vec<u8>) {
-    let mut out = Vec::new();
-    let key = unsafe { packet_to_annexb(buf.as_ptr(), buf.len(), 4, true, true, param, &mut out) };
-    (key, out)
-}
-
 /// [`to_annexb`] for an HEVC stream with the Dolby Vision Profile 7 -> 8.1 conversion armed.
 pub(super) fn to_annexb_p7(buf: &[u8], param: &[u8]) -> (bool, Vec<u8>) {
     let mut out = Vec::new();

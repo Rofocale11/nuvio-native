@@ -174,13 +174,14 @@ that tells the shim this ahead of time (rank such streams last / mark them in th
 ### Dolby Vision on the CX
 
 With the probe's `dovi` record in the PMS fields, `Dovi::presentation` behaves as on a Plex server:
-P8.x and P5 single-layer **declare** (when configd confirms DV) and direct play; **P7 (UHD BluRay
-remux, `el=true`) is refused** ("dual-layer") — the buffer feed carries one elementary stream.
-**Decision (lead/playback): the player keeps upstream's rule; the shim does this:** to play a P7
-remux as HDR10 instead, the shim must **omit `DOVIELPresent`/all DOVI keys for a
-P7 stream whose `bl_compat` is 6 or 1 (HDR10 base)** — the route then direct-plays it as plain
-HEVC; the decoder ignores the EL NAL units (layer id > 0) and shows the HDR10 base layer. This is
-unverified on the CX; see the TV checklist.
+P8.x and P5 single-layer **declare** (when configd confirms DV) and direct play. A **P7 (UHD BluRay
+remux, `el=true`) whose base layer is cross-compatible (`bl_compat != 0`) also direct plays**: the
+feed path (`ff::packet_to_annexb`, the `to_annexb_p7` conversion) drops the enhancement-layer NALs
+and rewrites each RPU to Profile 8.1, and the Load declares that single-layer 8.1 — the HDR10 base
+plus the dynamic metadata is what reaches the decoder. A P7 whose base layer is **not**
+cross-compatible (`bl_compat == 0`) is still refused ("dual-layer"): the buffer feed carries one
+elementary stream and there is no displayable base to fall back to. Details and evidence:
+`docs/dolby-vision.md` §1.
 
 ### Subtitles
 

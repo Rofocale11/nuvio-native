@@ -18,9 +18,9 @@
   "settings.about.detail": "Versión, derechos de autor e información del proyecto.",
   "settings.root.copy": "Gestiona este televisor y tu perfil de Plex. Los idiomas de audio y subtítulos se sincronizan con tu cuenta de Plex; los valores de reproducción y el idioma de la app se aplican a este televisor.",
   "settings.libraries.count": {
-    "one": "{count} favorite",
-    "many": "{count} favorites",
-    "other": "{count} favorites"
+    "one": "{count} favorita",
+    "many": "{count} favoritas",
+    "other": "{count} favoritas"
   },
   "settings.account.title": "Cuenta",
   "settings.account.change_profile": "Cambiar perfil",
@@ -38,9 +38,9 @@
   "settings.onboard.failed_reason": "Comprueba la conexión e inténtalo de nuevo.",
   "settings.onboard.copy": "Elige las bibliotecas que muestra este televisor. Tus favoritas aparecen en Inicio y en las pestañas de Biblioteca; Ajustes muestra todas.",
   "settings.onboard.shared": {
-    "one": "{names} has shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
-    "many": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
-    "other": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like."
+    "one": "{names} ha compartido bibliotecas contigo. Elige tus favoritas: aparecen en Inicio y Biblioteca y puedes cambiarlas en Ajustes cuando quieras.",
+    "many": "{names} han compartido bibliotecas contigo. Elige tus favoritas: aparecen en Inicio y Biblioteca y puedes cambiarlas en Ajustes cuando quieras.",
+    "other": "{names} han compartido bibliotecas contigo. Elige tus favoritas: aparecen en Inicio y Biblioteca y puedes cambiarlas en Ajustes cuando quieras."
   },
   "settings.onboard.names": "{names} y {last}",
   "settings.language.title": "Idioma",
@@ -174,9 +174,9 @@
   "settings.playback.deck_press.play": "Reproducir",
   "settings.playback.skip_interval": "Intervalo de salto",
   "settings.playback.skip_interval.seconds": {
-    "one": "{count} second",
-    "many": "{count} seconds",
-    "other": "{count} seconds"
+    "one": "{count} segundo",
+    "many": "{count} segundos",
+    "other": "{count} segundos"
   },
   "settings.audio.language": "Idioma de audio preferido",
   "settings.playback.p2p": "Streaming P2P",
@@ -253,8 +253,6 @@
   "settings.login.report_failed": "No se pudo enviar el informe.",
   "settings.login.save_failed_title": "No se pudo guardar tu inicio de sesión",
   "settings.login.save_failed_body": "No se pudo guardar tu inicio de sesión en este televisor. Puedes continuar, pero la próxima vez tendrás que volver a iniciar sesión.",
-  "settings.login.unknown_device": "televisor desconocido",
-  "settings.login.your_servers": "tus servidores",
   "settings.language.saving": "Guardando idioma…",
   "settings.audio.error_retry": "{reason} Selecciona Reintentar.",
   "settings.login.report_id": "ID del informe: {id}",
@@ -309,17 +307,17 @@
   "settings.addons.section": "Addons",
   "settings.addons.title": "Addons",
   "settings.addons.detail": "Enable or disable installed addons for this session",
-  "settings.resolution.title": "Interface resolution",
-  "settings.resolution.detail": "Lower is smoother. Applies after restarting.",
-  "settings.resolution.auto": "Automatic",
-  "settings.playback.subtitle_size.huge": "Huge",
-  "settings.playback.hdr_overlay": "HDR overlay brightness",
-  "settings.playback.hdr_overlay.full": "100%",
-  "settings.playback.hdr_overlay.three_quarters": "75%",
-  "settings.playback.hdr_overlay.half": "50%",
-  "settings.playback.copy_profile": "Playback settings for {profile}. Changes here apply to the next playback.",
-  "settings.playback.copy_profile_forced": "Playback settings for {profile}.",
-  "settings.playback.unseated": "Choose a profile to change this",
-  "settings.playback.hdr_overlay.copy": "How bright the player's controls and subtitles are during HDR and Dolby Vision, when the TV draws them much brighter. Lower it if they dazzle. 100% leaves them as they are.",
-  "settings.consent.placeholder.library": "library file name"
+  "settings.resolution.title": "Resolución de la interfaz",
+  "settings.resolution.detail": "Más baja, más fluida. Se aplica al reiniciar.",
+  "settings.resolution.auto": "Automática",
+  "settings.playback.subtitle_size.huge": "Enorme",
+  "settings.playback.hdr_overlay": "Brillo de la interfaz en HDR",
+  "settings.playback.hdr_overlay.full": "100 %",
+  "settings.playback.hdr_overlay.three_quarters": "75 %",
+  "settings.playback.hdr_overlay.half": "50 %",
+  "settings.playback.copy_profile": "Ajustes de reproducción del perfil {profile}. Los cambios aquí se aplican a la siguiente reproducción.",
+  "settings.playback.copy_profile_forced": "Ajustes de reproducción del perfil {profile}.",
+  "settings.playback.unseated": "Elige un perfil para cambiar esto",
+  "settings.playback.hdr_overlay.copy": "Qué brillo tienen los controles y los subtítulos del reproductor con HDR y Dolby Vision, cuando el televisor los muestra mucho más brillantes. Bájalo si deslumbran. 100 % los deja como están.",
+  "settings.consent.placeholder.library": "nombre del archivo de la biblioteca"
 }

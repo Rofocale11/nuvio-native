@@ -133,6 +133,12 @@ const CURLOPT_NOSIGNAL: c_int = 99;
 /// `curl/curl.h`; both have existed since libcurl 7.7. Set only by [`keypin::apply`].
 const CURLOPT_FRESH_CONNECT: c_int = 74;
 const CURLOPT_FORBID_REUSE: c_int = 75;
+/// `CURLOPT_SSL_SESSIONID_CACHE` (LONG + 150): whether this transfer may resume a cached TLS
+/// session. Off in key mode, so a fresh connection performs a FULL handshake and presents its
+/// certificate — a resumed session sends none, leaving `CERTINFO` empty and [`keypin::confirm`]
+/// unable to prove the key. libcurl 7.16.0+, long before the 7.53.1 floor. Set only by
+/// [`keypin::apply`].
+const CURLOPT_SSL_SESSIONID_CACHE: c_int = 150;
 const CURLOPT_CONNECTTIMEOUT: c_int = 78;
 const CURLOPT_TIMEOUT: c_int = 13;
 const CURLOPT_TIMEOUT_MS: c_int = 155;
@@ -3060,8 +3066,8 @@ pub mod keypin {
     use super::{
         c_int, c_long, curl_easy_setopt_long, curl_easy_setopt_ptr, peer_leaf_pin, tls_verify_why,
         wall_clock_year, CURL, CURLOPT_CAINFO, CURLOPT_CERTINFO, CURLOPT_FORBID_REUSE,
-        CURLOPT_FRESH_CONNECT, CURLOPT_PINNEDPUBLICKEY, CURLOPT_SSL_VERIFYHOST,
-        CURLOPT_SSL_VERIFYPEER,
+        CURLOPT_FRESH_CONNECT, CURLOPT_PINNEDPUBLICKEY, CURLOPT_SSL_SESSIONID_CACHE,
+        CURLOPT_SSL_VERIFYHOST, CURLOPT_SSL_VERIFYPEER,
     };
     use std::collections::HashMap;
     use std::ffi::{c_void, CStr};
@@ -3798,8 +3804,13 @@ pub mod keypin {
     ///
     /// **Every key-mode handle does its own handshake.** `CURLOPT_FRESH_CONNECT` and
     /// `CURLOPT_FORBID_REUSE` are set before `VERIFYPEER` goes to 0, so the handle never takes a
-    /// cached connection and leaves none behind. A reused connection performs no handshake: there
-    /// would be no certificate for [`confirm`] to read (the open would be refused as a pin
+    /// cached connection and leaves none behind. `CURLOPT_SSL_SESSIONID_CACHE` is then turned off
+    /// too: connection reuse is not the only way a transfer skips the handshake — the multi's TLS
+    /// session cache lets a NEW connection resume the earlier session and receive no certificate
+    /// at all, which leaves `CERTINFO` empty and [`confirm`] without a key to prove (measured on
+    /// host libcurl 8.23/OpenSSL: a seek after a key-mode open saw the pin confirm pass on the
+    /// first handshake and return `None` on the next). A resumed connection performs no handshake:
+    /// there would be no certificate for [`confirm`] to read (the open would be refused as a pin
     /// mismatch), and the pin and the name would not have been checked for this request at all. It
     /// also covers libcurl 7.53.1, where the pinned key is not part of the connection-reuse match,
     /// so a key-mode handle could otherwise ride a connection set up under different rules. The cost
@@ -3819,6 +3830,7 @@ pub mod keypin {
             (CURLOPT_CERTINFO, 1),
             (CURLOPT_FRESH_CONNECT, 1),
             (CURLOPT_FORBID_REUSE, 1),
+            (CURLOPT_SSL_SESSIONID_CACHE, 0),
             (CURLOPT_SSL_VERIFYHOST, 2),
             (CURLOPT_SSL_VERIFYPEER, 0),
         ] {

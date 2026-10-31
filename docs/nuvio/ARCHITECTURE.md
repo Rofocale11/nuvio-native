@@ -138,6 +138,14 @@ see "The P2P streaming server" below.
   credential, and the shim's `/api/v2/user` carries no `profile` block. There is no Nuvio cloud
   preference API (`plx_stremio::nuvio` has profiles, addons, library and watch progress only), so
   the file is the source of truth; signing out wipes it with the session.
+- **Player preferences are per-profile; one restore trigger.** The live audio-DSP pair, subtitle
+  tone/size/position, quality ceiling, Direct Play, next-episode, skip interval, deck press, under
+  posters, HDR overlay and trailer autoplay all live in one file, as the seated profile's own values
+  under `Preferences`. `route::choose` (media) is the only write door and `player::set_audio_enhancements`
+  & co. are its thin wrappers; boot restores the process-start seat, `Unseated`, with
+  `route::restore_profile_rows`, and `bridge::SeatWatch` restores at every later seat change — never
+  a republication of the same seat, so a pick in flight is not clobbered. A pick never writes the
+  install-wide top-level key; that key is only the frozen fallback for a seat with no value of its own.
 - Torrents (`infoHash`): played through the headless Node server the app spawns from its own
   `js-service/` directory, as `<server>/<infoHash>/<fileIdx>`, with
   `http://127.0.0.1:11470` as the default address. See "The P2P streaming server" below.

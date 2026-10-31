@@ -366,6 +366,10 @@ pub(crate) fn arm_noidle() {
 /// the manifest instead of of history — the same argument `run_case`'s per-case viewOffset reset
 /// already makes for resume position.
 ///
+/// Boot runs this before anybody is seated, so the call only sets the LIVE cell there; the seat
+/// trigger (`bridge::SeatWatch`) runs it once more at the first seating, where the pick reaches the
+/// seated profile's record. A dev-token boot never seats, so the boot call is the only one there.
+///
 /// `off` clears both flags; `boost`/`loudness` sets exactly one (never both — no case here needs
 /// both at once, and a value this test-only can grow a second name later without breaking the
 /// existing ones). An unrecognised value is ignored rather than guessed at.

@@ -34,12 +34,14 @@ Scene fields (tests/manifest.json, `fps_scenes`):
   "walk": {"key_gap_s": 0.33, "max_rows": 170, ...}
                                 after the Home shelves land, press Down once per landed row at
                                 that pace and then Up back, and grade the heartbeats of THAT window
-  "walk": {"landed": "library", "extra_rows": 0, "fingerprint_region": "shelf", ...}
-                                the same walk over the Library's Recommended page (the Library page
-                                mounts no shelves): sized from the seated section's
-                                `libhubs: section N landed M shelves` line, a second Down per
-                                linked shelf, `extra_rows` more to reach the grid, and a
-                                `focus route=... region=grid` fingerprint required in the window
+  "walk": {"reach": {"route": "library", "region": "grid"}, "extra_rows": 2, ...}
+                                a walk over a surface that logs no landing line of its own (the
+                                Library page): it starts once the page's first
+                                `focus route=<route>` fingerprint is logged and makes a FIXED plan —
+                                its one "row" plus `extra_rows` Downs from the page header into the
+                                content — instead of following a landed count. `reach.region` is the
+                                region the scene waits for (a harness test reads it as a promise
+                                that the page prints that word).
   "walk": {"row_down": 1, "cards": 96, "key_gap_s": 0.33, ...}
                                 a ROW walk (#567, `home-recent-paging`): after Home lands, press Down
                                 `row_down` times to reach a named row (the `plxnative-grid` trigger
@@ -132,6 +134,42 @@ def mock_server_args(scene):
     if block.get("transcode_fixture") is not None:
         args += ["--transcode-fixture", fixture_path(scene, block["transcode_fixture"])]
     return args
+
+
+def fixtures_base():
+    """The directory a scene's `mock.extra_media` / `mock.transcode_fixture` names resolve against:
+    the one `make fixtures-pipeline` writes beside (`$FIXTURES_OUT`, else `~/plxnative-fixtures`),
+    i.e. the PARENT of the `pipeline/` pack. Outside the repo, like every generated medium."""
+    return os.environ.get("FIXTURES_OUT") or os.path.expanduser("~/plxnative-fixtures")
+
+
+def fixture_path(scene, rel):
+    """`rel` under [`fixtures_base`]. A tracked manifest holds only relative names: an absolute path
+    or a `..` would put one person's directory (or the repo) into a public file."""
+    parts = str(rel).replace("\\", "/").split("/")
+    if not rel or os.path.isabs(str(rel)) or ".." in parts:
+        raise ValueError(f"{scene.get('name')}: mock fixture {rel!r} must be a relative name "
+                         f"under the fixtures root, with no `..`")
+    return os.path.join(fixtures_base(), *parts)
+
+
+def mock_fixture_paths(scene):
+    """The scene's `mock.extra_media` files, resolved, in the order the mock numbers them."""
+    block = scene_mock(scene) or {}
+    return [fixture_path(scene, rel) for rel in block.get("extra_media") or []]
+
+
+def missing_mock_fixtures(scene):
+    """Why the scene cannot run here: the mock fixture files that are not built, or None."""
+    block = scene_mock(scene) or {}
+    rels = list(block.get("extra_media") or [])
+    if block.get("transcode_fixture") is not None:
+        rels.append(block["transcode_fixture"])
+    gone = [r for r in rels if not os.path.isfile(fixture_path(scene, r))]
+    if not gone:
+        return None
+    return (f"mock fixture(s) not built under {fixtures_base()}: {', '.join(gone)} "
+            f"(the scene's `comment` has the ffmpeg commands)")
 
 
 def mock_scene(scene):

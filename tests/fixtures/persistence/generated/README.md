@@ -12,7 +12,7 @@ were applied to produce them; nothing else in those trees was changed. All value
 | `v0.6.5-errors-yes-declined-extension.consent.json` | `v0.6.5` | the 0.6.0 Yes file loaded by 0.6.5, extension declined with `apply_extension`, then `record` |
 | `v0.6.5-both-yes.consent.json` | `v0.6.5` | fresh `apply(true, true)` then `record` |
 | `v0.6.6-json-store/` | `v0.6.6` | the 0.6.0 session and the 0.6.5 decision migrated by 0.6.6's host `session::load` and `telemetry::persistence::load` |
-| `v0.6.6-db8-record.json` | `v0.6.6` | 0.6.6's storage-helper backend (ACL tier, webOS 4) committing `SessionComplete` and `ConsentComplete` for the same data; the DB8 object it put |
+| `v0.6.6-db8-record.json` | `v0.6.6` | 0.6.6's storage-helper backend (ACL tier, webOS 4) committing `SessionComplete` and `ConsentComplete` for the same data; the DB8 object it put. Its `_id`/`_kind` are rewritten to this fork's packaging manifest (`plxstate.nuvio` / `com.nuvionative.app.storage`) because the application rebranded after 0.6.6; the stored session bytes are 0.6.6's |
 
 To produce `v0.6.6-db8-record.json` the generator mounts 0.6.6's `storage_service/backend.rs` into
 the library test build, which needs one import path changed (`crate::state` to `super::state`) as

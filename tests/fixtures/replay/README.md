@@ -389,3 +389,29 @@ checked against the closed alphabet, and replayed before import. Targets and Res
 report SAME for all three, with every difference counter zero. `tools/plxnative-rec
 rerecord` preserved their anchor flags. The alphabet gains only the localized Streams
 button from `locales/en/browse.json`.
+
+The forward-port merge moved the recorded state shape from `16921795122013909805` to
+`14134545847820828830` (the screen-shape inventory pin `SCREEN_SHAPES_PIN` is
+`0xadfe5d7f11fc67f5` on this tree, and `app::recorder::state_fp` folds the app, content,
+resolution, capture-readiness, measurement and screen shapes into that value). The
+committed anchors were observed being refused by the loader
+(`replay: REFUSED — invalid or incompatible recording`, all three, both modes), so no
+replay could run and no divergence record could exist; the host preflight failed at
+`Recording::parse` with `StateShape { theirs: 16921795122013909805, ours:
+14134545847820828830 }`. All three were recorded afresh with
+`tests/focusfp.sh --rec --only 1,6,12`, each new recording passed `tools/plxnative-rec
+check`, and `tools/plxnative-rec rerecord` installed it as
+`(3, 16921795122013909805)` -> `(3, 14134545847820828830)`, keeping `anchor: true`.
+Every fresh recording replayed SAME in Targets and Resolve with every difference counter
+zero.
+
+The pacing matters: this Linux host has both a Wayland session and Xwayland.
+`SDL_VIDEODRIVER=wayland` does not vsync-cap the simulator, so the recorder runs far
+ahead of the app and Flow 1 hit the 64 MiB decoded budget (the recording is refused and
+cannot be installed). `SDL_VIDEODRIVER=x11` rides Xwayland's vsync instead and produced
+564 / 1287 / 889 frames, the same scale as the committed ledger.
+
+The closed alphabet gains the Home Continue-Watching row's `Continue` pill
+(`locales/en/browse.json` `browse.home.continue`) and the two spelled-out duration
+shapes `plx_ui::fmt::duration_long` and `plx_ui::fmt::time_left` measure from
+`locales/en/core.json`: `s[0-9a-f]{8} · 32 min left` and `2 hr 24 min`.

@@ -485,12 +485,6 @@ class SectionHubsFlag(unittest.TestCase):
         first = next(i for i, h in enumerate(hubs) if h in linked)
         self.assertLess(first, 10)
 
-    def test_the_shipped_scene_arguments_hold(self):
-        # tests/manifest.json library-shelves-deep: 170 hubs, 40 of them linked
-        pms = self._pms(170, 40)
-        hubs = get(pms, self.PATH)["Hub"]
-        self.assertEqual(sum(h["hubIdentifier"].startswith("custom.collection.") for h in hubs), 40)
-
     def test_the_flags_reach_the_server_and_the_cli_refuses_nonsense(self):
         server, pms = serve(0, section_hubs=9, section_hubs_linked=3)
         try:

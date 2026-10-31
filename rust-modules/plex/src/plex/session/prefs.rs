@@ -406,7 +406,7 @@ pub enum Parse {
     BoolOn,
     /// A switch whose product default is off: garbage reads as `false` (`de_soft_bool`).
     BoolOff,
-    /// Garbage reads as `None` (quality, the hero blur).
+    /// Garbage reads as `None` (quality, the hero blur, the P2P server URL).
     OptionalSoft,
 }
 
@@ -517,6 +517,28 @@ setting!(DeckPressPref: DeckPress = deck_press, "deck_press", Profile fallback L
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
 setting!(UnderPostersPref: UnderPosters = under_posters, "under_posters", Profile fallback LegacyInstallKey,
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
+// FORK (Nuvio Native): the shim's own settings. All three are install-wide (the P2P engine and the
+// score provider say something about this television, not about who is watching), none is applied
+// by a media cell, and none has a `choose` door: Settings writes them through the storage worker
+// (`PreferenceCmd::{RatingSource,P2pEnabled,P2pServer}`), which owns the verified write.
+setting!(RatingSourcePref: RatingSource = rating_source, "rating_source", Install,
+    account false, live false, settings None, parse Soft);
+setting!(P2pEnabledPref: bool = p2p_enabled, "p2p_enabled", Install,
+    account false, live false, settings None, parse BoolOff);
+
+/// **FORK (Nuvio Native): the P2P engine's base URL.** The one scalar row whose stored type is not
+/// `Copy` (`Option<String>`), so it is a [`Row`] but not a [`Setting`]: `None` means "not saved",
+/// which [`Session::p2p_server_url`] resolves to the built-in loopback address. Written through
+/// `PreferenceCmd::P2pServer`, exactly like the two fork rows above.
+pub struct P2pServerUrlPref;
+impl Row for P2pServerUrlPref {
+    const KEY: &'static str = "p2p_server_url";
+    const SCOPE: Scope = Scope::Install;
+    const ACCOUNT_BOUND: bool = false;
+    const LIVE: bool = false;
+    const SETTINGS: Option<SettingsWrite> = None;
+    const PARSE: Parse = Parse::OptionalSoft;
+}
 setting!(SubtitleSizePref: SubtitleSize = subtitle_size, "subtitle_size", Profile fallback LegacyInstallKey,
     account false, live true, settings Some(SettingsWrite::Optimistic), parse Soft);
 setting!(SubtitlePositionPref: SubtitlePosition = subtitle_position, "subtitle_position", Profile fallback LegacyInstallKey,
@@ -626,6 +648,10 @@ pub const DESCRIPTORS: &[Descriptor] = &[
     Descriptor::of::<SkipIntervalPref>(),
     Descriptor::of::<DeckPressPref>(),
     Descriptor::of::<UnderPostersPref>(),
+    // FORK (Nuvio Native): the shim's install-wide settings.
+    Descriptor::of::<RatingSourcePref>(),
+    Descriptor::of::<P2pEnabledPref>(),
+    Descriptor::of::<P2pServerUrlPref>(),
     Descriptor::of::<AudioEnhancementsPref>(),
     // A5: the remaining keys.
     Descriptor::of::<AutoSignInPref>(),

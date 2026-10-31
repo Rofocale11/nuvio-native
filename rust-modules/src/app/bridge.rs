@@ -299,8 +299,54 @@ impl ConsentMachine {
     fn current(&self) -> &plx_telemetry::telemetry::consent::Consent { &self.current }
 }
 
+/// **The one trigger of the per-profile player cells**: the seat they were last restored for.
+///
+/// A seat changes only by a profile publication, so the [`SessionFx::PublishProfile`] arm shows every
+/// new seat to [`SeatWatch::arrive`], which restores the live cells (`route::restore_profile_rows`)
+/// when the seat is not the one already restored. That covers every path — a stored boot, the boot
+/// picker's pick, a change of profile, a fresh sign-in, a sign-out — and puts the restore before the
+/// `Ready` of the same step, which is why `follow_auth_landing` only reseeds the mirrors. A
+/// republication of the SAME seat (a roster refresh) restores nothing, so a pick in flight is not
+/// clobbered.
+///
+/// Process start is the first seat, `Unseated`: boot restores the cells for it itself
+/// (`boot::restore_player_preferences`), so a watch starts there too.
+///
+/// It also carries the dev audio-enhancement arm: boot runs it once before anybody is seated (the
+/// live cell only), and it runs again right after the first `Unseated` → `Seated` change, so it
+/// forces the SEATED profile's record. A harness boot that injects a token (`--guest` included: both
+/// `tools/tv-session.sh` and `tests/run.py` write `plxnative-token`) is a dev-token boot, which never
+/// seats, so the arm at boot is the only one there.
+struct SeatWatch {
+    restored: plx_plex::plex::session::Seat,
+    arm_pending: bool,
+}
+
+impl SeatWatch {
+    fn new() -> Self {
+        Self { restored: plx_plex::plex::session::Seat::Unseated, arm_pending: true }
+    }
+
+    /// The process now occupies `seat`. Restore for it if that is a change; say whether it was.
+    fn arrive(&mut self, seat: plx_plex::plex::session::Seat) -> bool {
+        if self.restored == seat {
+            return false;
+        }
+        plx_media::route::restore_profile_rows(&plx_plex::plex::session::peek(), &seat,
+            plx_media::route::Overrides { quality: crate::dev::playback_quality_override() });
+        let seated = seat.user().is_some();
+        self.restored = seat;
+        if seated && std::mem::take(&mut self.arm_pending) {
+            crate::dev::scenarios::arm_audio_enhancements();
+        }
+        true
+    }
+}
+
 /// What the bridge lends the dispatcher, and what it collects for the loop.
 pub(crate) struct Bridge {
+    /// The seat the live player cells hold — see [`SeatWatch`].
+    seat_watch: SeatWatch,
     session_cache_generation: u64,
     home_io: Option<super::bootstrap::HomeIo>,
     recorded_clients: std::collections::BTreeMap<u32, &'static plx_plex::plex::Client>,
@@ -530,6 +576,7 @@ impl Bridge {
         consent_adapter: super::adapters::consent::ConsentAdapter,
         reads: StorePublications, stores: plx_data::stores::Stores) -> Self {
         Self {
+            seat_watch: SeatWatch::new(),
             session_cache_generation: plx_plex::plex::session::visible_generation(),
             home_io: None,
             recorded_clients: std::collections::BTreeMap::new(),
@@ -1688,7 +1735,15 @@ impl Bridge {
             }
             SessionFx::PublishProfile(publication) => {
                 if self.session.publication_is_current(&publication) {
+                    // The seat the publication installs, read from the publication itself rather
+                    // than the process global, so a fixture publisher that keeps the publication to
+                    // itself still drives the restore.
+                    let seat = plx_plex::plex::session::Seat::of(
+                        publication.profile.as_ref(), &publication.stamp);
                     self.session_adapter.publish_profile(publication);
+                    // The one place a seat changes: restore the per-profile player cells for the
+                    // seat the publication just installed, before this step's `Ready` is consumed.
+                    self.seat_watch.arrive(seat);
                     if let Some(io) = &mut self.home_io {
                         io.profile = self.session_adapter.profile_resource_view().expect("controlled publisher");
                     }
@@ -2667,21 +2722,13 @@ pub(crate) fn nav_root_if_unsettled(d: &mut Dispatcher<AppHost>, arg: AppArg) {
 pub(crate) fn follow_auth_landing(pages: &mut Dispatcher<AppHost>, bridge: &mut Bridge) {
     if let Some(c) = bridge.take_session_ready() {
         // A sign-out followed by a fresh sign-in can replace the session without restarting the
-        // process. Re-read only at this one credentials handoff so the old account's in-memory
-        // preference cannot leak into the new session.
+        // process. Reseed the profile mirrors from the record at this one credentials handoff so the
+        // old account's queued or remembered values cannot leak into the new session. The CELLS
+        // were already restored by the seat trigger (`SeatWatch`), which saw the new seat's
+        // publication before this same step's `Ready` was delivered.
         let saved = plx_plex::plex::session::peek();
-        plx_media::route::restore_quality(
-            crate::dev::playback_quality_override().unwrap_or_else(|| saved.playback_quality()),
-        );
-        plx_media::route::restore_direct_play_mode(saved.direct_play_mode());
-        plx_media::route::restore_subtitle_size(saved.subtitle_size());
-        plx_media::route::restore_subtitle_position(saved.subtitle_position());
-        plx_media::route::restore_next_episode_mode(saved.next_episode_mode());
-        plx_media::route::restore_skip_interval(saved.skip_interval());
-        plx_media::route::restore_deck_press(saved.deck_press());
+        plx_media::route::restore_install_rows(&saved);
         super::nuvio::restore_p2p(saved.p2p_enabled(), saved.p2p_server_url().map(str::to_owned));
-        plx_media::player::restore_subtitle_tone(saved.subtitle_tone());
-        plx_media::player::restore_audio_enhancements(saved.audio_enhancements());
         let endpoints = super::boot::install_pms_owned(bridge, &c.origin,
             &c.address, &c.token, c.tier, c.pin.as_ref(), &c.install);
         execute_endpoint_outcomes(pages, endpoints);

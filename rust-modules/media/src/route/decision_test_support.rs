@@ -431,6 +431,7 @@ pub(super) fn fourk_item_with_subs(
         markers: Vec::new(),
         chapters: Vec::new(),
         hdr: false,
+        blur: None,
     }
 }
 

@@ -18,9 +18,9 @@
   "settings.about.detail": "Versão, direitos de autor e informação do projeto.",
   "settings.root.copy": "Gira este televisor e o seu perfil Plex. As preferências de idioma de áudio e legendas são sincronizadas com a sua conta Plex; as definições de reprodução pertencem a cada perfil e o idioma da app aplica-se a este televisor.",
   "settings.libraries.count": {
-    "one": "{count} favorite",
-    "many": "{count} favorites",
-    "other": "{count} favorites"
+    "one": "{count} favorita",
+    "many": "{count} de favoritas",
+    "other": "{count} favoritas"
   },
   "settings.account.title": "Conta",
   "settings.account.change_profile": "Mudar de perfil",
@@ -38,9 +38,9 @@
   "settings.onboard.failed_reason": "Verifique a ligação e tente novamente.",
   "settings.onboard.copy": "Escolha as bibliotecas que este televisor mostra. As suas favoritas preenchem as prateleiras do Início e os separadores da Biblioteca; as Definições listam todas as que tem.",
   "settings.onboard.shared": {
-    "one": "{names} has shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
-    "many": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
-    "other": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like."
+    "one": "{names} partilhou bibliotecas consigo. Escolha as suas favoritas — são as que o Início e a Biblioteca mostram, e pode alterá-las nas Definições sempre que quiser.",
+    "many": "{names} partilharam bibliotecas consigo. Escolha as suas favoritas — são as que o Início e a Biblioteca mostram, e pode alterá-las nas Definições sempre que quiser.",
+    "other": "{names} partilharam bibliotecas consigo. Escolha as suas favoritas — são as que o Início e a Biblioteca mostram, e pode alterá-las nas Definições sempre que quiser."
   },
   "settings.onboard.names": "{names} e {last}",
   "settings.language.title": "Idioma",
@@ -174,9 +174,9 @@
   "settings.playback.deck_press.play": "Reproduzir",
   "settings.playback.skip_interval": "Intervalo de salto",
   "settings.playback.skip_interval.seconds": {
-    "one": "{count} second",
-    "many": "{count} seconds",
-    "other": "{count} seconds"
+    "one": "{count} segundo",
+    "many": "{count} de segundos",
+    "other": "{count} segundos"
   },
   "settings.audio.language": "Idioma de áudio preferido",
   "settings.audio.subtitles": "Legendas",
@@ -307,19 +307,17 @@
   "settings.addons.title": "Addons",
   "settings.addons.detail": "Enable or disable installed addons for this session",
   "settings.playback.copy": "Playback defaults for this television. Changes here apply to the next playback.",
-  "settings.login.unknown_device": "unknown set",
-  "settings.login.your_servers": "your servers",
-  "settings.resolution.title": "Interface resolution",
-  "settings.resolution.detail": "Lower is smoother. Applies after restarting.",
-  "settings.resolution.auto": "Automatic",
-  "settings.playback.subtitle_size.huge": "Huge",
-  "settings.playback.hdr_overlay": "HDR overlay brightness",
+  "settings.resolution.title": "Resolução da interface",
+  "settings.resolution.detail": "Mais baixa, mais fluida. Aplica-se após reiniciar.",
+  "settings.resolution.auto": "Automática",
+  "settings.playback.subtitle_size.huge": "Enorme",
+  "settings.playback.hdr_overlay": "Brilho da interface em HDR",
   "settings.playback.hdr_overlay.full": "100%",
   "settings.playback.hdr_overlay.three_quarters": "75%",
   "settings.playback.hdr_overlay.half": "50%",
-  "settings.playback.copy_profile": "Playback settings for {profile}. Changes here apply to the next playback.",
-  "settings.playback.copy_profile_forced": "Playback settings for {profile}.",
-  "settings.playback.unseated": "Choose a profile to change this",
-  "settings.playback.hdr_overlay.copy": "How bright the player's controls and subtitles are during HDR and Dolby Vision, when the TV draws them much brighter. Lower it if they dazzle. 100% leaves them as they are.",
-  "settings.consent.placeholder.library": "library file name"
+  "settings.playback.copy_profile": "Definições de reprodução do perfil {profile}. As alterações aplicam-se à próxima reprodução.",
+  "settings.playback.copy_profile_forced": "Definições de reprodução do perfil {profile}.",
+  "settings.playback.unseated": "Escolha um perfil para alterar isto",
+  "settings.playback.hdr_overlay.copy": "Quão brilhantes são os controlos e as legendas do leitor em HDR e Dolby Vision, quando o televisor os mostra muito mais brilhantes. Reduza se encandearem. 100% deixa-os como estão.",
+  "settings.consent.placeholder.library": "nome do ficheiro da biblioteca"
 }

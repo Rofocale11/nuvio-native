@@ -192,6 +192,36 @@ impl Reason {
             Reason::DetailBackdrop => "detail-backdrop",
         }
     }
+
+    /// Is this a PAGE's loading state rather than art that is on its way? A read-out, a spinner, a
+    /// skeleton line or a stale episode strip waits on the store that owns the page; a card tile,
+    /// a backdrop or a logo waits on the poster source instead, and a page-sized spinner of
+    /// onboarding, sign-in or the profile picker waits on the session — none of those is a store's
+    /// loading state. The dump driver excuses these, and only these, while its landing lag is
+    /// deliberately holding a store's answer out (`dev::framedump`, "The landing lag"), so a slow
+    /// page is filmed with the loading frames its user would see.
+    pub fn is_loading_state(self) -> bool {
+        // Exhaustive on purpose: a new `Reason` must be classified here, not fall into a default.
+        match self {
+            Reason::SkeletonBar
+            | Reason::SkeletonSheet
+            | Reason::DetailSpinner
+            | Reason::SeasonSpinner
+            | Reason::LibrarySpinner
+            | Reason::WorkingReadout
+            | Reason::DetailTitle
+            | Reason::StaleEpisodes => true,
+            Reason::CardSkeleton
+            | Reason::CardGround
+            | Reason::InfoPanelStill
+            | Reason::ProfileChip
+            | Reason::PageSpinner
+            | Reason::HeroLogoText
+            | Reason::HeroLogoAbsent
+            | Reason::HomeBackdrop
+            | Reason::DetailBackdrop => false,
+        }
+    }
 }
 
 /// One counted placeholder draw.
@@ -201,6 +231,19 @@ pub struct Entry {
     /// What it stood in for: an image path, a ratingKey, a caption — whatever the site has. Empty
     /// when the site has nothing better (a `None` tile, a spinner).
     pub key: String,
+}
+
+impl Entry {
+    /// Is this draw a page's loading state: its [`Reason`] is ([`Reason::is_loading_state`]), or it
+    /// is a card tile with an EMPTY key (`Art::Poster(None)`, the Collection header's thumb before
+    /// the collection lands). No poster fetch can answer an empty key, so the tile is waiting for
+    /// the store that will supply the key, not for the poster source; when the store has answered
+    /// and the key is still empty, the tile is a card that never resolves and the dump driver fails
+    /// on it.
+    pub fn is_loading_state(&self) -> bool {
+        self.reason.is_loading_state()
+            || (matches!(self.reason, Reason::CardSkeleton | Reason::CardGround) && self.key.is_empty())
+    }
 }
 
 /// What one frame drew.
@@ -220,6 +263,14 @@ impl Frame {
     /// How many of this frame's placeholders were drawn for `reason`.
     pub fn of(&self, reason: Reason) -> usize {
         self.entries.iter().filter(|e| e.reason == reason).count()
+    }
+
+    /// How many of this frame's placeholders are a page's loading state
+    /// ([`Entry::is_loading_state`]). Counted from the kept entries, which are a prefix of the
+    /// draws: a draw past [`ENTRY_CAP`] has no known reason and is never counted here, so
+    /// `count - loading_state()` can only over-state what is left over.
+    pub fn loading_state(&self) -> u32 {
+        self.entries.iter().filter(|e| e.is_loading_state()).count() as u32
     }
 }
 

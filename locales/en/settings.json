@@ -1019,10 +1019,12 @@
   },
   "settings.login.unknown_device": {
     "value": "unknown set",
+    "translate": false,
     "description": "Settings, consent or sign-in UI: settings.login.unknown_device"
   },
   "settings.login.your_servers": {
     "value": "your servers",
+    "translate": false,
     "description": "Settings, consent or sign-in UI: settings.login.your_servers"
   },
   "settings.language.saving": {

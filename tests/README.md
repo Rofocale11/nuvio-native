@@ -497,40 +497,13 @@ the peak `fps=` (which shows a 60 versus 50 Hz panel state) are printed in the r
 graded. `run_secs` must cover `2 * max_rows * key_gap_s` plus the waits, the walk's own 10 s launch
 wait included (a harness test holds every `walk` scene to that).
 
-`library-shelves-deep` is the Library counterpart (#412): the mock is started with
-`--section-hubs 170 --section-hubs-linked 40`, so `/hubs/sections/<id>` answers exactly 170 hubs
-(`mock.section.<key>.shelf.<i>`, each listing the recent items of its kind; the default 48-movie
-library is unchanged), 40 of them promoted collections (`custom.collection.<section>.<rk>.<n>`
-keyed `/library/collections/<rk>/children`, which the mock resolves) whose headings the app links.
-Without the flags `/hubs/sections/<id>` is byte-for-byte what it was. The shelves live on the
-Library's **Recommended page** (the Library page itself mounts none), so the scene arms
-`plxnative-library` (the preferred Movies library), `plxnative-libtype` = `recommended` (presses
-the header's Recommended control), `plxnative-framedrop` and `plxnative-focus`, and the walk
-(`"landed": "library"`) is sized from the **seated section's**
-`libhubs: section N landed S shelves` line (index 0 for Movies; `plxnative-library` content `1`
-seats Shows, index 1 — the last landing of that section, not the last such line in the log):
-**Down once per shelf, a second time for each linked shelf** (its heading is a stop of its own,
-then its row), and `extra_rows` more (0: the Recommended page seats its first shelf on arrival and
-has no toolbar to cross), then **Up** back. It
-grades keys sent against that count, a `focus route=library … region=shelf` fingerprint inside the
-walk window (`fingerprint_region` `shelf`; the Recommended page prints the Library's fingerprint
-grammar, `region=shelf row=R col=C` on a card and `heading`/`crumb`/`strip` elsewhere, and a harness
-test holds every scene's `fingerprint_region` / `reach.region` to a word its page prints),
-`loop_floor` 50 and `fps_floor` 30; frame drops are
-reported, not graded. This is the instrument for #412: the section has no shelf cap, so all 170
-land, and `walk.min_landed` (150) fails the scene when fewer do (a build that bounds each section at
-twelve shelves would land 12 and the walk, which follows what landed, would otherwise pass on those 12).
-The landed count is the data layer's, so a library walk with `min_landed` also requires a
-`focus route=library … region=shelf row=R` fingerprint in the walk window with `R >= min_landed - 1`
-(row 169 on a passing run): the screen must show the deep shelves the store published, or a screen
-that capped its rows again (store 170, page 12) would still pass.
-The linked-shelf count is derived from the mock's own arguments, not read from the app.
-
 `library-burst` is an **instrument, not a gate**: how many loading (placeholder) poster tiles a
 viewer sees scrolling the Library grid in short bursts with rests between them (`library-scroll`
 never rests, so it cannot show a strategy that warms upcoming rows while the grid is at rest).
-`--mock` serves a 1000-movie library; the walk (`walk.burst`, the same `KeyWalk`) presses Down once
-per landed shelf plus `extra_rows` into the grid, rests, then `bursts` (8) bursts of `burst` (4)
+`--mock` serves a 1000-movie library; the walk (`walk.burst` on a `walk.reach` surface, the same
+`KeyWalk`) starts once the page logs its first `focus route=library` fingerprint and makes a fixed
+plan, pressing `extra_rows` (2) Downs from the page header into the grid, resting, then
+`bursts` (8) bursts of `burst` (4)
 Downs `key_ms` (125) apart, each followed by `rest_ms` (1500), then the same bursts of Up. The
 count is the `phcount: frames=F ph_frames=P draws=D ph=N` line the app writes once a second while
 `plxnative-phcount` is armed (scene-armed; `ui::card_motion_metrics`, counted at the card primitive:
@@ -553,8 +526,8 @@ tools/tv-lock.sh with --why "fps burst" -- ./tests/run.py --fps --mock --filter 
 
 `library-hold` is `library-burst`'s sibling for a long held scroll: the same mock, triggers, printing
 and grading (it is `--mock`-only too), but 3 bursts of 16 Downs `key_ms` (125) apart, each followed by
-2 s of rest, then 3 bursts of 16 Ups (13 + 96 keys on a 7-shelf landing, about 25 s from first press
-to last; 48 of the 166 grid rows). It shows how many placeholder tiles a held Down key outruns the
+2 s of rest, then 3 bursts of 16 Ups (3 + 96 keys, about 23.5 s from first press to last; 48 of the
+166 grid rows). It shows how many placeholder tiles a held Down key outruns the
 posters by, and what each rest recovers. Run it the same way, `--filter library-hold`.
 
 `home-hint` is the instrument for Home's "Hold OK for options" glass hint (`ui::hold_hint`): Home

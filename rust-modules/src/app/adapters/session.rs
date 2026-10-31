@@ -2102,7 +2102,7 @@ mod tests {
         let owner = SessionMachine::from_init(init);
         let mut a = SessionAdapter::fixture_with(disk.clone());
         let mut b = SessionAdapter::fixture_with(disk.clone());
-        a.fixture_resources().disk.playback_quality = Some(plx_plex::plex::session::PlaybackQuality::Original);
+        a.fixture_resources().disk.prefs.playback_quality = Some(plx_plex::plex::session::PlaybackQuality::Original);
         let mut next = disk.clone();
         next.account_token = "synthetic-new-token".into();
         let plan = CommitPlan { registry_client_id: disk.client_id.clone(), expected_disk: Identity::of(&disk),
@@ -2111,7 +2111,7 @@ mod tests {
             writes_durable: true, authority: plx_plex::plex::session::SaveAuthority::Routine };
         assert!(a.commit(owner.commit_permit(1, 1, 0).unwrap(), &plan).admission.accepted());
         assert_eq!(a.fixture_resources().disk.account_token, "synthetic-new-token");
-        assert_eq!(a.fixture_resources().disk.playback_quality, Some(plx_plex::plex::session::PlaybackQuality::Original));
+        assert_eq!(a.fixture_resources().disk.playback_quality(), plx_plex::plex::session::PlaybackQuality::Original);
         assert!(b.fixture_resources().disk.account_token.is_empty());
         assert!(a.fixture_resources().profile.is_none());
         assert!(a.fixture_resources().registry_writes.is_empty());
@@ -2350,7 +2350,9 @@ mod tests {
         assert!(begin.find("plx_plex::plex::session::revoke_cached_session()").unwrap() < submitted);
         let worker = source.split("fn submit_erase(").nth(1).unwrap()
             .split("pub(crate) fn take_erased(").next().unwrap();
-        assert!(worker.contains("plx_plex::plex::session::clear_for_erase(all_local, language)"));
+        assert!(worker.contains("let kept = language.map(plx_plex::plex::session::Retained::with_language);"),
+            "the retry's language reaches the clear as the one value it retains");
+        assert!(worker.contains("plx_plex::plex::session::clear_for_erase(all_local, kept)"));
     }
 
     /// The adapter half of a watched report: while it is queued or on the network nothing is

@@ -1222,6 +1222,13 @@ fn receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The DB8 id THIS packaging manifest generates for the stable flavor
+    /// (`ci/install-identities.json`: `plxstate.nuvio`) — the tests below speak the id the
+    /// client really sends, not the upstream build's. `Flavor` comes from this file's own
+    /// `super::state` import, which resolves in both crates that compile this source.
+    fn stable_id() -> &'static str { Flavor::Stable.object_id() }
+
     use std::collections::VecDeque;
     #[test]
     fn replay_authentication_uncertainty_records_its_cause() {
@@ -1616,7 +1623,7 @@ mod tests {
             b.rpc.calls[0],
             (
                 "luna://com.palm.db/get".into(),
-                json!({"ids":["plxstate.stable"]})
+                json!({"ids":[stable_id()]})
             )
         );
     }
@@ -1679,7 +1686,7 @@ mod tests {
         ));
         assert_eq!(b.rpc.calls.len(), 3);
         assert_eq!(b.rpc.calls[1].0, "luna://com.palm.db/put");
-        assert_eq!(b.rpc.calls[1].1["objects"][0]["_id"], "plxstate.stable");
+        assert_eq!(b.rpc.calls[1].1["objects"][0]["_id"], stable_id());
         assert!(b.rpc.calls[1].1["objects"][0].get("_rev").is_none());
         assert!(b.rpc.calls[1].1.get("force").is_none());
         assert_eq!(b.rpc.calls[2].0, "luna://com.palm.db/get");
@@ -1689,7 +1696,7 @@ mod tests {
         let rev = 9_007_199_254_740_993u64;
         let mut b = backend(vec![
             Ok(record(rev)),
-            Ok(json!({"returnValue":true,"results":[{"id":"plxstate.stable","rev":rev+1}]})),
+            Ok(json!({"returnValue":true,"results":[{"id":stable_id(),"rev":rev+1}]})),
             Ok(Value::Null),
         ]);
         let response = b.dispatch(commit(Expectation::Present {
@@ -1776,7 +1783,7 @@ mod tests {
     fn confirmed_clear_removes_old_key_after_db8_readback() {
         let mut b = backend(vec![
             Ok(protected_record()),
-            Ok(json!({"returnValue":true,"results":[{"id":"plxstate.stable","rev":10}]})),
+            Ok(json!({"returnValue":true,"results":[{"id":stable_id(),"rev":10}]})),
             Ok(Value::Null),
             Err(ErrorCode::Unavailable),
         ]);
@@ -1858,7 +1865,7 @@ mod tests {
                         Err(ErrorCode::Unavailable)
                     } else {
                         Ok(
-                            json!({"returnValue":true,"results":[{"id":"plxstate.stable","rev":10}]}),
+                            json!({"returnValue":true,"results":[{"id":stable_id(),"rev":10}]}),
                         )
                     }
                 }
@@ -3371,7 +3378,7 @@ mod tests {
         stored["results"][0]["migrations"]["session"]["progress"] = json!("Complete");
         b.rpc.replies = vec![
             Ok(stored),
-            Ok(json!({"returnValue":true,"results":[{"id":"plxstate.stable","rev":10}]})),
+            Ok(json!({"returnValue":true,"results":[{"id":stable_id(),"rev":10}]})),
             Ok(Value::Null),
         ]
         .into();

@@ -123,7 +123,13 @@ identifier, so copy it down first if you intend to ask for their deletion.
 The same independent choice also covers a handled playback-error report when playback reaches its
 explicit terminal error screen, or when a trailer preview behind a detail page fails. That report contains a fixed failure kind, delivery and quality
 classes, coarse raster, rate, HTTP and buffer classes, whether a first picture appeared, and at
-most 32 typed playback transitions with bucketed elapsed times. It contains no title, ratingKey,
+most 32 typed playback transitions with bucketed elapsed times. It also says which open of the
+session failed and why — the first, a Retry, a quality choice, an automatic handoff, a recovery, a
+resume, or a detail-page trailer preview — which route that attempt was opening (as against the
+route the session had installed) and whether that attempt itself put a picture on screen. Two
+bounded numbers may accompany it: the exact HTTP status the media source answered with (100-599,
+or 0 when none was recorded) and the television firmware's own pipeline error number (an integer,
+or 0 when none was recorded; never the callback's free-text message). It contains no title, ratingKey,
 URL, path, playhead, duration, exact bitrate, server identity, address, token, account or profile,
 and is not joined to the product analytics identifier or `playback_id`. It carries the same Crash
 report ID as a crash report, and the same television model, SoC, hardware revision, webOS release

@@ -2723,7 +2723,7 @@ mod tests {
         let verdict = plx_media::route::PlayVerdict::Forced(plx_media::route::ForcedFailure::Video).text().to_owned();
         let e = plx_media::player::failtest_policy_shape_for_test(&verdict);
         let r = readout_of(&e);
-        assert_eq!(r.reason(), verdict.as_str());
+        assert_eq!(r.reason(), verdict.as_ref());
         assert_eq!(r.note(), None, "the verdict already names the cause");
         assert_eq!(r.actions(), &[A::PlayAutomatically, A::ChangeSource, A::Back]);
         assert_eq!(r.footer(), "0.7.0 · webOS 4.5 · code");

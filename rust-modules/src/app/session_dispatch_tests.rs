@@ -138,6 +138,7 @@ fn production_bridges_do_not_share_browse_state_or_landings() {
 
 #[test]
 fn session_boot_picker_publishes_captured_profile_without_ready_handoff() {
+    let _serial = plx_base::testlock::serial();
     let stored = plx_plex::plex::session::Session {
         client_id: "synthetic-client".into(), account_token: "synthetic-account".into(),
         server: plx_plex::plex::session::ServerRef { machine_id: "synthetic-server".into(),
@@ -163,6 +164,7 @@ fn session_boot_picker_publishes_captured_profile_without_ready_handoff() {
 
 #[test]
 fn session_stored_boot_publishes_before_handoff_without_saving_credentials() {
+    let _serial = plx_base::testlock::serial();
     let stored = plx_plex::plex::session::Session {
         client_id: "synthetic-client".into(), account_token: "synthetic-account".into(),
         server: plx_plex::plex::session::ServerRef { machine_id: "synthetic-server".into(),
@@ -555,9 +557,10 @@ fn endpoint_outcomes_cross_central_dispatch_machine_bridge_and_boot() {
         let mut fx: Effects<'_, AppHost> = Effects::new(
             &mut out, MachineId::Store(StoreId::ViewState.ord()), &mut present);
         let hubs = &mut stores.hubs;
-        stores.viewstate.borrow_mut().pump(&mut |_| false, &mut |cmd| {
+        let rest = stores.viewstate.borrow_mut().pump(&mut |_| false, &mut |cmd| {
             hubs.run(cmd)
         }, &mut |_| false, &mut |_| false, &mut |_| false, &mut |_| false).emit(&mut fx);
+        assert!(rest.is_empty(), "the whole recovery set fits one step");
         drop(fx);
         drop(cx);
         assert_eq!(out.len(), 2);

@@ -312,21 +312,15 @@ fn a_cross_compatible_profile_7_source_direct_plays_as_profile_8() {
     for signal in [SILENT, DECLARED] {
         let dv = unconvertible.presentation(signal, Supported, true);
         assert!(
-            video_direct_plays("hevc", 3840, 2160, dv, &caps),
+            !video_direct_plays("hevc", 3840, 2160, dv, &caps),
             "signal={signal}"
         );
-        assert_eq!(dv.refusal(), None);
-        let n = dv.declared().expect("a converted P7 declares");
-        assert_eq!(n.profile_id, 8, "declared as the 8.1 that is actually fed");
-        assert_eq!(n.track_type, "single");
-        assert_eq!(n.encryption_type, "clear");
-        // Without a confirmed Dolby Vision panel nothing is declared, and the HDR10 base layer
-        // the conversion leaves is played as the ordinary HEVC it is.
-        for capability in [Unknown, Unsupported] {
-            let dv = p7().presentation(signal, capability, true);
-            assert_eq!(dv, DvPresentation::NotDv, "{capability:?} signal={signal}");
-            assert!(video_direct_plays("hevc", 3840, 2160, dv, &caps));
-        }
+        assert_eq!(dv.refusal(), Some("dual-layer"));
+        assert_eq!(
+            dv.declared(),
+            None,
+            "a layer we cannot feed must never be declared"
+        );
     }
 }
 

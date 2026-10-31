@@ -186,7 +186,7 @@ Work happens on a scratch branch cut from `nuvio-native`, one merge per tier, an
   first: it is Richi's UI redesign meeting this fork's shim rewiring. Fixture conflicts are data;
   take upstream's recording when the screen did not change, and re-record when it did.
 
-### Status: A+B merged on `forward-port/v0.9-hq` (`656e0cb2`), unverified
+### Status: A+B merged on `forward-port/v0.9-hq` (`656e0cb2`), host suites green
 
 Target `d12e8659` — the tip of `feature/v0.9-hq` ("Package 11"), the newest commit in Richi's
 repository. Merged into the branch on 2026-10-31: **247 conflicts**, resolved in tier order.
@@ -218,20 +218,62 @@ compatibility additions were unavoidable, and each is a dependency rather than a
 | `appkit`/`screens` | the HUD's own text-cue draw is retired — upstream moved every text cue into libass, so there is no `active_subtitle` and no `SHARED.sub_cues`; the player screen already paints libass |
 | `system`/`port` | the frame-probe prepare hooks exist and do nothing: upstream's prepare-cost span is a dev-trigger diagnostic nothing here reads |
 
-**Known gaps, not hidden:** the test suites have not run; the television has not seen this; and
-upstream-only files that the reverted crates no longer reference (test modules, mostly) still sit
-in `data/`, `screens/`, `ui/` and `appkit/` as unreferenced leftovers.
+**Verification so far: the host suites run green by crate.** Each measured with
+`make test-crate C=<crate>`, which reconstructs the full suite's feature resolution — a bare
+`cargo test -p <crate>` runs without `devtriggers` and is not evidence:
+
+| crate | result |
+|---|---|
+| `plx_platform` | 290/290 |
+| `plx_data` | 529/529 |
+| `plx_plex` | 726/726 |
+| `plx_media` | 1754/1754 |
+| `plx_screens` | 1192/1192 |
+| `plx_appkit` | 236/236 |
+| `plx_telemetry` | 279/279 |
+| `plx_ui`, `plx_base`, `plx_machine`, `plx_session`, `plx_gfx` | green |
+| `plxnative-modules` (the shell) | green except the two named below |
+
+Two `plxnative-modules` failures are not code: `menu_play_season_tests::a_failed_season_fetch_opens_the_page_instead_of_playing`
+needs `127.0.0.1:1` to REFUSE, and `plx_net`'s `a_refused_connection_fails_fast…` needs the same
+from port 1; this sandbox holds low ports instead of answering RST (a raw socket times out on 1 and
+2, and refuses in 8 ms on 45678), and both fail identically on `nuvio-native`. The television has
+not seen any of this yet.
+
+### What running the suites found
+
+Eleven defects only a running test suite could show. Each is fixed; this table is what the next
+forward-port should expect:
+
+| where | what the merge had broken |
+|---|---|
+| `locales` | the resolution replaced this fork's reviewed `be`/`es` strings with English, and refilled the five upstream languages (`de/fr/hu/it/pt`) wholesale, discarding upstream's real translations. Restored by priority trunk → upstream → English fallback. The `translate: false` markers (205 of them, upstream's mechanism) had also been dropped, so the diagnostics panel was translating text that must stay English; restored, and those keys deleted from every translated catalogue, which is the catalogue contract |
+| `plex`, `platform`, `telemetry` tests | every DB8 double still spoke upstream's identity (`plxstate.stable`, `com.beb.plxnative.storage`). This fork's manifest generates `plxstate.nuvio` / `plxstate.dbg` / `plxstate.ngt`; the tests now ask `Flavor::object_id()` or the packaged app id instead of hardcoding |
+| `src/app/boot.rs`, `bridge.rs` | no per-profile restore existed at all: boot restored nine cells individually from install-wide keys and a profile switch changed nothing, so a per-profile pick would survive neither a switch nor a restart. Boot now seeds `restore_install_rows` + `restore_profile_rows` for `Unseated`, and `SeatWatch` restores at each real seat change (never a republication) |
+| `src/dev/framedump.rs` | armed the BLOCKING dump form, which `plx_base::task::assert_may_block` refuses on a frame thread. Now arms `arm_dump_paced` + `dump_frame` + `take_starved`/`take_lagged` like upstream, with `PLXNATIVE_DUMP_LAND_LAG_MS`; `framedump_lag_tests.rs` is attached again |
+| `plex/session/prefs.rs` | the fork's `rating_source` / `p2p_enabled` / `p2p_server_url` had no `Setting` descriptors. Described now (`Install` scope, no live cell); `p2p_server_url` is the one `Row`-only row because `Setting::Value` is `Copy` |
+| `plex/account/preferences.rs` | upstream's identity proof had been disabled for *every* caller while the Nuvio shim needed it dropped. Exempted only for the synthesized `nuvio-local` identity |
+| `net/net.rs` | key mode stopped TCP reuse but let libcurl's TLS session cache resume a session, which presents no certificate, so `keypin::confirm` failed and a seek could not reopen. `CURLOPT_SSL_SESSIONID_CACHE` is off in key mode |
+| `telemetry/playback.rs` | `event_body` was the pre-merge serialiser: it omitted the six `playback.attempt_*` tags and `pipeline_error` that its own context and consent preview already carried |
+| `appkit` | four `enh_rows_disabled_*` tests all used the same fixture, so all four claimed `NotOriginalQuality`; each now stands for the shape its name says (Auto-HLS, fixed rung, relay, forced) and the `ServerConverting` case exists |
+| `media/route/plan_dolby_vision_tests.rs` | a merge hunk had replaced the non-cross-compatible P7 assertions with the convertible case. Restored: `bl_compat == 0` is still refused ("dual-layer"); the cross-compatible conversion is untouched (`T=profile_7`, `T=dts` green) |
+| `tests/manifest.json`, `tests/mock_fps.py` | the manifest was overwritten with upstream's scene list — scenes naming `watchlist`/`catalog`/recommended pages this shell cannot emit; removed and the survivors re-derived against the compiled tree. `mock_fps.py` had lost four helper functions but kept their call sites, so `run.py --list --fps` could not start |
+
+The replay fixtures also had to be re-recorded against the current screen-shape census
+(`16921795122013909805` → `14134545847820828830`): `tools/plxnative-rec rerecord`,
+`SDL_VIDEODRIVER=x11` pacing, all three anchors replaying SAME with every difference counter zero in
+both Targets and Resolve. `tests/fixtures/replay/README.md` carries the procedure.
+
+**Known gaps, not hidden:** the television has not seen this; upstream-only files that the reverted
+crates no longer reference (test modules, mostly) still sit in `data/`, `screens/`, `ui/` and
+`appkit/` as unreferenced leftovers.
 
 ### The exact next action
 
-```sh
-git switch forward-port/v0.9-hq && git status --short   # must be empty
-./tools/ai-check.sh                                     # then poll ./tools/ai-check-status.sh
-```
-
-`make check` compiles the tests, which is where the leftover test modules and the remaining
-API mismatches will surface first. Only after that, verify playback on the television under the TV
-lock — host results say nothing about the ACB/Starfish path.
+Playback on the television, under the TV lock. The host suite says the seams line up; it says
+nothing about the ACB/Starfish path, the GL composer, or the video plane. The `which-tier` skill
+picks the tier; `profile-tv` is what diagnoses a dropped frame. Then `make check` on the committed
+tree as the pre-push gate (`./tools/ai-check.sh`, polled with `./tools/ai-check-status.sh`).
 
 ### Then tier C — and it is a PORT, not a merge
 

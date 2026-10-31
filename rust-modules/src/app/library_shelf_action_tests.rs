@@ -1,4 +1,10 @@
-//! Library shelf physical-hold engine item capture.
+//! Library grid physical-hold engine item capture.
+//!
+//! The Library is grid-only since `6b05b404`: `LibraryScreen::sync` clears the hub shelves and
+//! never emits `PublishShelves`, so there is no continue-watching shelf left to carry the deck
+//! flag. The physical hold is still the grid's card press: it must capture the engine's item,
+//! open the bridge's rest opener over the pressed tile, and ask `ItemMenu` exactly once with
+//! `from_deck` false (the flag is structurally false for a grid tile).
 
 use super::*;
 use plx_ui::screen::Focusable;
@@ -18,6 +24,7 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
         }
     }
     let _cleanup = Cleanup;
+    // Two grid rows, the same two cards the old shelf fixture pressed: column 1 of rows 0 and 1.
     for row in 0..2 {
         plx_plex::plex::reset_servers_for_test();
         let own =
@@ -30,16 +37,7 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
         rig.stores.browse.borrow_mut().seed_registered_table_for_test([own, shared]);
         rig.refresh_browse_directory();
         rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
-        {
-            let mut browse = rig.stores.browse.borrow_mut();
-            browse.seed_items_for_test(12);
-            browse.seed_shelves_for_test(
-                0,
-                &["movie.inprogress.1", "tv.recentlyreleased.1"],
-                3,
-            );
-            browse.seed_landscape_for_test(0, "Synthetic show");
-        }
+        rig.stores.browse.borrow_mut().seed_items_for_test(12);
         for i in 0..80 {
             frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
         }
@@ -52,43 +50,25 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
                 .unwrap()
                 .probe_viewport(d.focus())
         };
-        assert_eq!(rig.section_hubs.view().shelves().len(), 2);
-        let mut i = 80;
-        while position(&d).0 != "shelf" || position(&d).1 != row {
-            assert!(
-                i < 86,
-                "directional fixture must reach shelf {row}: {:?}",
-                position(&d)
-            );
-            frame(
-                &mut d,
-                &mut rig,
-                AppArg::Library,
-                tick(i),
-                script_key(Key::Down, tick(i)),
-            );
-            i += 1;
-        }
-        frame(
+        // Seat the page's own command on the card this iteration presses.
+        Bridge::library_command(
             &mut d,
-            &mut rig,
-            AppArg::Library,
-            tick(i),
-            script_key(Key::Right, tick(i)),
+            plx_screens::registry::LibraryCmd::FocusGrid { row, col: 1 },
         );
-        i += 1;
-        for n in i..i + 80 {
-            frame(&mut d, &mut rig, AppArg::Library, tick(n), vec![]);
+        for i in 80..90 {
+            frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
         }
-        i += 80;
         assert_eq!(
             (position(&d).0, position(&d).1, position(&d).2),
-            ("shelf", row, 1)
+            ("grid", row as i32, 1),
+            "the fixture must seat the pressed grid card"
         );
+        let i = 90;
         let key = d.focus().unwrap();
         let (item, _) = rig.library_selection(&d, key.entry, Some(key)).unwrap();
-        assert_eq!(item.kind, 3);
-        assert!(item.rk.ends_with("-1"), "not the first card: {}", item.rk);
+        // Column 1 of row `row` is the second card of that row in `seed_items_for_test`'s
+        // 1-based rating keys.
+        assert_eq!(item.rk, (row * 6 + 2).to_string(), "not the intended grid card");
         let key_input = |edge, n| {
             vec![InputEvent {
                 at: tick(n),
@@ -182,7 +162,7 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
             LibraryReq::ItemMenu {
                 sid: item.sid,
                 rk: item.rk.clone(),
-                from_deck: row == 0
+                from_deck: false
             }
         );
         assert_eq!(requests[0].2.focus, Some(key));

@@ -153,11 +153,14 @@ impl PreferenceRequest {
             }
             // Fallback: the original HTTP path (first login, before prefs are written).
             let user = accepted(request("GET", "/api/v2/user", "")?)?;
-            let _dto: AccountUser = serde_json::from_slice(&user.body)
+            let dto: AccountUser = serde_json::from_slice(&user.body)
                 .map_err(|_| PreferenceError::InvalidResponse)?;
-            // FORK: Bypass the identity check. Nuvio is a single-user app with a fake server.
-            // We don't need to strictly match UUIDs. Just load the profile.
-            // dto.audio_preferences_for(&self.user).ok_or(PreferenceError::Refused)?;
+            // FORK: only the synthesized Nuvio shim identity (`capture`) is exempt from the
+            // plex.tv owner check. A REAL user must still prove the token is theirs before its
+            // /profile preferences are read; the shim identity has no plex.tv account to name.
+            if self.user.uuid != "nuvio-local" {
+                dto.audio_preferences_for(&self.user).ok_or(PreferenceError::Refused)?;
+            }
             if !current() { return Err(PreferenceError::Stale); }
             let response = accepted(request("GET", "/api/v2/user/profile", "")?)?;
             let profile: AccountAudioProfile = serde_json::from_slice(&response.body)

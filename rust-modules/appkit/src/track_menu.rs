@@ -3106,17 +3106,19 @@ mod enhancement_menu_tests {
         teardown(&ps);
     }
 
-    /// M7: a usable-base-layer Dolby Vision source no longer hides the rows — the enhanced remux
-    /// simply never declares DV (`fill_direct_plan` is the only place that ever does), so turning
-    /// the toggle on plays the HDR10 base picture instead. The note says so in plain language.
+    /// M7: a usable-base-layer Dolby Vision source is offered the plain remux, with no
+    /// Dolby-Vision-off note: whether the copied remux keeps DV is settled by its `/decision`
+    /// (`copied_video_dv`), and a copy keeps it.
     #[test]
-    fn enh_rows_offered_dv_drops_declaration() {
+    fn enh_rows_offered_dv_is_plain_remux() {
         let _g = plx_base::testlock::serial();
         let (menu, ps) = audio_tab(EnhTestFixture { dv_declared: true, ..Default::default() });
-        assert_eq!(menu.enhance_route, Some(plx_media::route::EnhancementRoute::RemuxDropsDolbyVision));
+        assert_eq!(menu.enhance_route, Some(plx_media::route::EnhancementRoute::Remux));
         assert!(menu.enhance_shown.is_some());
-        let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_note_dv_off());
+        let last = menu.form.table.sections[1].rows.last().unwrap();
+        assert_ne!(last.label, plx_platform::i18n::msg::widgets_tracks_enh_note_burn());
+        assert_ne!(last.label, plx_platform::i18n::msg::widgets_tracks_enh_note_sidecar());
+        assert_eq!(menu.form.table.sections[1].rows.len(), 2, "the two DSP toggles and no note row");
         teardown(&ps);
     }
 
@@ -3183,42 +3185,85 @@ mod enhancement_menu_tests {
         teardown(&ps);
     }
 
-    /// I5 excludes every non-Direct/Remux shape identically (HLS, a fixed rung, a relay); one
-    /// `Other`-family route stands for the group, since the predicate cannot tell them apart. M7:
-    /// visible-and-dim, not hidden — "only at Original quality" is a plain reason.
+    /// A quality that is NOT Original in force (Auto currently on HLS) is the one shape that may
+    /// say "only at Original quality": picking Original is the way in. M7: visible-and-dim, not
+    /// hidden.
     #[test]
     fn enh_rows_disabled_hls() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            remux: Some(false),
+            quality: plx_media::route::Quality::Auto,
+            ..Default::default()
+        });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
         let note = menu.form.table.sections[1].rows.last().unwrap();
         assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_quality());
         teardown(&ps);
     }
 
+    /// A fixed rung is the same story: the quality in force is a rung, so naming the quality is
+    /// the truth. No `auto_original` candidate exists for a fixed rung either.
     #[test]
     fn enh_rows_disabled_reencode_rung() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            remux: Some(false),
+            base_present: false,
+            quality: plx_media::route::Quality::P720,
+            ..Default::default()
+        });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
+        let note = menu.form.table.sections[1].rows.last().unwrap();
+        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_quality());
         teardown(&ps);
     }
 
+    /// A relay link under Original never carries an `auto_original` candidate, and the quality in
+    /// force is Original — so the quality must not be blamed. One `NotCopyable` reason names the
+    /// group the viewer cannot act on the differences of.
     #[test]
     fn enh_rows_disabled_relay() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
-        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            base_present: false,
+            declined: Some(plx_media::route::OriginalDeclined::Relay),
+            ..Default::default()
+        });
+        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotCopyable));
+        let note = menu.form.table.sections[1].rows.last().unwrap();
+        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_not_copyable());
+        assert_ne!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_quality());
         teardown(&ps);
     }
 
-    /// A forced direct play (or a fixed rung/relay/non-Original MDE) never computes an
-    /// `auto_original` candidate at all — `base_present: false` reproduces exactly that.
+    /// Force Direct Play never computes an `auto_original` candidate at all, and the note names the
+    /// setting rather than the quality (which the viewer did not choose to blame).
     #[test]
     fn enh_rows_disabled_forced() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { base_present: false, ..Default::default() });
-        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            base_present: false,
+            declined: Some(plx_media::route::OriginalDeclined::ForcedDirectPlay),
+            ..Default::default()
+        });
+        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::ForcedDirectPlay));
+        let note = menu.form.table.sections[1].rows.last().unwrap();
+        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_forced());
+        teardown(&ps);
+    }
+
+    /// Original picked and the server converting the video: the Quality row reads
+    /// "Original · Converted", so the note states the same fact instead of blaming the quality
+    /// (which is already Original).
+    #[test]
+    fn enh_rows_disabled_while_the_server_converts() {
+        let _g = plx_base::testlock::serial();
+        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
+        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::ServerConverting));
+        assert!(plx_media::route::original_is_converted(&ps), "premise: the picture is re-encoded");
+        let note = menu.form.table.sections[1].rows.last().unwrap();
+        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_converting());
         teardown(&ps);
     }
 
@@ -3839,7 +3884,6 @@ mod enhancement_menu_tests {
             for (name, value) in [
                 ("enh_note_sidecar", plx_platform::i18n::msg::widgets_tracks_enh_note_sidecar()),
                 ("enh_note_burn", plx_platform::i18n::msg::widgets_tracks_enh_note_burn()),
-                ("enh_note_dv_off", plx_platform::i18n::msg::widgets_tracks_enh_note_dv_off()),
                 ("enh_reason_not_analyzed", plx_platform::i18n::msg::widgets_tracks_enh_reason_not_analyzed()),
                 ("enh_reason_dv_unusable", plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_unusable()),
                 ("enh_reason_dv_subtitle", plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_subtitle()),
