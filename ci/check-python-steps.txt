@@ -319,3 +319,10 @@ python3 ci/test_disk_budget.py
 # taken, a live holder is waited on for a bounded time and no plan is made while it runs (a finished or stale holder is taken over); the inventory cache; a pretend emergency is never planned over real
 # trees. `make -n` and `make -s print-*` only, no cargo.
 python3 ci/test_disk_preflight.py
+# The C/Rust boundary: every `extern` function `src/*.c` declares must be defined by src/*.c or exported from
+# rust-modules by `#[no_mangle]`/`#[export_name]`. Nothing on this host links C against Rust (the simulator builds
+# src/bin/sim.rs, so the ARM `make ipk` was the only link) — a merge resolution that dropped `plx_launch_args`'s
+# export from rust-modules/src/port.rs reached CI as a build failure on 2026-11-01. Pure lexing, no cargo; the
+# self-test runs on synthetic trees in a private temp dir and fails if the gate line above it is dropped.
+python3 ci/test_check_ffi_symbols.py
+python3 ci/check-ffi-symbols.py

@@ -319,6 +319,21 @@ before the gates could run at all:
   authority, and `ci/collect-source-inputs.py` now reads it instead of scraping them), and the
   release notice names the pin.
 
+### What the ARM link found, and the gate it produced
+
+The first GitHub Actions build of this branch failed at the link: `src/main.c` calls
+`plx_launch_args`, and the merge resolution had kept `port.rs` from the trunk, dropping upstream's
+`#[no_mangle]` export of it. Nothing on this host could see that — `cargo check` never links, the
+simulator builds `src/bin/sim.rs` rather than `src/main.c`, and `make check-c-unit` compiles only
+the crash tracer and the log shim — so the ARM `make ipk` was the first and only link.
+
+`ci/check-ffi-symbols.py` closes that hole without a toolchain: every `extern` function declaration
+in `src/*.c` and `src/*.h` must be defined by one of those C files or exported from `rust-modules/`
+by `#[no_mangle]`, `#[unsafe(no_mangle)]` or `#[export_name]`, with test items dropped the way the
+other Rust gates drop them. Firmware symbols (`__asm__(…)` labels on the C++) and `extern`
+variables are not this repository's to define and are skipped. Its self-test covers each verdict,
+and the real tree is one of its cases.
+
 ### The exact next action
 
 `make check` on the committed tree (`./tools/ai-check.sh`, polled with
