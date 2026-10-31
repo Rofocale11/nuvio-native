@@ -6,28 +6,56 @@ This repository is the product of three codebases, and confusing them is the sin
 to reason wrong about it. Read this before deciding whether an upstream change can be taken.
 
 ```
-GLinnik21/plx-native          the origin project: UI, GPU render path, Starfish/ACB playback,
-        │                     the device/codec portability work
+GLinnik21/plx-native      origin: UI, GPU render path, Starfish/ACB, device portability
+        │
         ▼
-RichiL10/plx-native           "HQ" fork: the in-app AC3 encode lane (FLAC/PCM above 2 ch, TrueHD),
- feature/v0.9-hq              Dolby Vision P7 -> 8.1 in-app, routing and subtitle fixes
-        │  << this fork forked HERE (feature/v0.8-hq is an ancestor of the trunk)
-        ▼
-Rofocale11/nuvio-native       + DTS -> AC3 in the encode lane            (this fork)
-  = nuvio-native (trunk)      + a full Nuvio/Stremio backend: the loopback PMS shim,
-                              addon protocol, account, watch progress
+  release 0.8.0  acca94a4 — the merge-base of everything below
+        │
+        ├── feature/v0.8-hq ───────────────► THIS FORK (the trunk, the product)
+        │     AC3 encode lane, DV, route,       + DTS -> AC3 in the encode lane
+        │     subtitles.  tip 2026-10-12        + the Nuvio/Stremio backend:
+        │     no longer maintained                loopback PMS shim, addons,
+        │                                          account, watch progress
+        │
+        └── feature/v0.9-hq ───────────────► what this fork ABSORBS FROM
+              the same HQ work, rebuilt        contains v0.9.0 and upstream/main
+              on top of 0.9.0                  still maintained.  tip 2026-10-22
 ```
 
-Nothing in the third block exists upstream, and the second block is why this fork exists at all:
-PlxNative could not transcode DTS or TrueHD on the TV's CPU, and Richi's fork added that.
+**`v0.8-hq` and `v0.9-hq` are siblings, not parent and child.** Neither contains the other: both
+branch from `0.8.0`, and Richi rebuilt the HQ work on top of the 0.9.0 release rather than
+fast-forwarding the old branch. The AC3 encode lane therefore exists **twice**, as different
+commits: `1bcf30b2` (reachable from `v0.8-hq` and therefore from this trunk) and `8d8a443f`
+(reachable only from `v0.9-hq`). Their `ff_enc.rs` files are both 977 lines and differ by **two
+lines**, so the work is the same work, arrived at twice.
+
+Two consequences worth knowing before touching any of this:
+
+- **Absorbing `v0.9-hq` is a real merge, not a continuation.** No ref is a descendant of another,
+  which is why the merge produces hundreds of conflicts rather than a fast-forward.
+- **The `ff_enc.rs` conflict is near-noise.** It is the same 977-line file with a 2-line
+  difference, so this fork's DTS delta reapplies against essentially unchanged code. The tier-A
+  merge is cheap exactly where the fork cares most.
+
+`feature/v0.8-hq` is spent — its tip is 2026-10-12 and nothing after it exists. It is the fork
+point, not a line to follow.
+
+Everything to the right of `v0.8-hq` is this fork's own work and exists nowhere upstream. And the
+HQ branch is why this fork exists at all: PlxNative could not transcode DTS or TrueHD on the TV's
+CPU, and Richi's fork added that.
 
 ## The reference branch is `upstream/feature/v0.9-hq`
 
+"The reference branch" means **what this fork absorbs work from**, which is not the same as the
+branch it was **cut from**. The fork point is `feature/v0.8-hq`; the target is `feature/v0.9-hq`,
+because `v0.8-hq` stopped on 2026-10-12 while `v0.9-hq` is still being maintained and carries the
+0.9.0 release on top of the same HQ work.
+
 Not `upstream/main`. Richi's HQ branch **contains** it (verified: the `upstream/main` head
 `0b0b2209` is an ancestor of `feature/v0.9-hq`, as is the `v0.9.0` release), so it is a superset
-of both lineages: origin work plus the audio/DV/routing fork. Measuring
-against `upstream/main` therefore *understates* what is available — 268 commits there versus 360
-on the HQ branch — and it points at files the HQ branch has already moved past.
+of the origin project's line plus the audio/DV/routing fork. Measuring against `upstream/main`
+therefore *understates* what is available — 268 commits there versus 360 on the HQ branch — and it
+points at files the HQ branch has already moved past.
 
 `feature/v0.9-hq` and `feature/v0.9-p11` are the same commit (`d12e8659`, 2026-10-22). Use the
 `-hq` name; `-p11` is an alias at this point, not a separate line.
