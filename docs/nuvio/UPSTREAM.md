@@ -189,6 +189,36 @@ Work happens on a scratch branch cut from `nuvio-native`, one merge per tier, an
 **Status: not started.** Nothing has been merged from `feature/v0.9-hq`; the trunk's only
 relationship to it today is the computed base above.
 
+### The exact next action
+
+Target `d12e8659` — the tip of `feature/v0.9-hq` ("Package 11"), and the newest commit in Richi's
+repository. Nothing newer exists: the `p7dts-v0.9.0-N` tags stop at `-9` (`baef645f`, 2026-10-18),
+and the `v1.0.x` tags in this repository are **this fork's own** releases, not his. There is no
+tagged Richi release to merge instead of the branch tip.
+
+```sh
+git switch nuvio-native && git switch -c forward-port/v0.9-hq
+git merge upstream/feature/v0.9-hq          # one pass; expect ~247 conflicts
+```
+
+Resolve in tier order A → B → C. **Stop after A and B**, build on the host, and verify playback on
+the television before C is touched — a tier-C resolution cannot break tier A, but a tier-C
+regression absolutely can hide one. Do not push the branch until A and B have been verified.
+
+If the merge turns into a swamp rather than a job of work, abandon the branch: it is disposable,
+and the fallback is to cherry-pick the audio/DV/routing commits directly. The candidates, in
+`upstream/feature/v0.9-hq`:
+
+`134d1244` DV on every video-copy remux / no re-encode for audio / AC3 for optical · `2b4a9177` an
+unreported output gets AC3 · `5d446cbe` a direct-play audio pick releases the fork remux ·
+`b2d20b58` subtitles keep DV and direct play · `17eb48b9` DV P7 direct-play, converted 8.1 in-app ·
+`d156a858` `dca` direct-plays, Force Direct Play DTS gating · `046f3058` DV declaration kept when
+the server copies · `3ac9e03f` DV Profile 10 on AV1 · `2f2f5a51` remux declares source frame rate ·
+`5648058a` audio stored ahead of video still plays.
+
+`8d8a443f` is **not** on that list: it is the `v0.9-hq` copy of the AC3 encode lane this fork
+already has as `1bcf30b2`. Taking it would replace working code with its twin.
+
 ## Branches
 
 | branch | what it is |
