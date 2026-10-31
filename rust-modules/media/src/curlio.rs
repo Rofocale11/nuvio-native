@@ -1193,7 +1193,14 @@ impl CurlSource {
                 ),
                 "CURLOPT_PROTOCOLS"
             );
-            plx_net::net::curl_easy_setopt_long(easy, CURLOPT_CONNECTTIMEOUT, CONNECT_TIMEOUT_S);
+            // Torrent streams (127.0.0.1:11470) may need tens of seconds to fetch the
+            // requested pieces from the swarm on a resume; debrid direct links must
+            // still fail fast. Detect by host so the two policies never mix.
+            let hop = self.hop_url.to_str().unwrap_or("");
+            let is_torrent = hop.contains("127.0.0.1:11470")
+                || hop.contains("localhost:11470");
+            let connect_timeout_s: c_long = if is_torrent { 120 } else { CONNECT_TIMEOUT_S };
+            plx_net::net::curl_easy_setopt_long(easy, CURLOPT_CONNECTTIMEOUT, connect_timeout_s);
             if let Some(at) = deadline {
                 let left_ms = at
                     .saturating_duration_since(std::time::Instant::now())
@@ -1204,7 +1211,11 @@ impl CurlSource {
                 setup_timeout_ms = Some(left_ms as u64);
             }
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_LOW_SPEED_LIMIT, 1);
-            plx_net::net::curl_easy_setopt_long(easy, CURLOPT_LOW_SPEED_TIME, LOW_SPEED_TIME_S);
+            // Torrent streams may stall while waiting for swarm pieces; disable the
+            // low-speed abort (0) so a legitimate wait isn't killed. Debrid keeps
+            // the 30 s floor.
+            let low_speed_time_s: c_long = if is_torrent { 0 } else { LOW_SPEED_TIME_S };
+            plx_net::net::curl_easy_setopt_long(easy, CURLOPT_LOW_SPEED_TIME, low_speed_time_s);
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_NOPROGRESS, 1);
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_TCP_NODELAY, 1);
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_BUFFERSIZE, 65536);

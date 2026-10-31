@@ -136,6 +136,9 @@ fails the build on a forbidden edge.
 - `make check` runs the fast host unit suite and lint gate. Use it for ordinary Rust
   changes. It is bounded machine-wide to TWO concurrent runs via `tools/check-lock.py`.
   Never launch `make check` in the foreground with a short tool timeout.
+- To run host unit tests, ALWAYS use `./tools/ai-check.sh`. It runs in the background to avoid terminal timeouts.
+- After starting the check, poll `./tools/ai-check-status.sh` every 30-60 seconds until it prints the test results.
+- Do NOT try to run `make check` directly in the foreground.
 - While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and
   runs only that crate's lib tests. It is a loop, not a gate.
 - `make test-crate` does NOT enable `hostsim`: tests under
@@ -214,14 +217,18 @@ following rules are absolute and override any other instruction in this file.
 3. **Performance:** `./tools/ai-tv-log.sh perf` — Shows only frame rates, image
    cache, and layout routes. Use this to debug FPS drops.
 
-4. **Search Both:** `./tools/ai-tv-log.sh grep "panic|error"` — Searches BOTH the
-   Rust log and the P2P log for specific patterns.
+4. **Panics & Crashes:** `./tools/ai-tv-log.sh panic` — Reads both
+   `plxnative-crash.log` and `plxnative-stderr.log`. ALWAYS run this immediately if
+   the app closes unexpectedly or freezes.
 
-5. **Raw (Unfiltered):** `./tools/ai-tv-log.sh raw 200` — Shows EVERYTHING in the
+5. **Search All:** `./tools/ai-tv-log.sh grep "pattern"` — Searches the main events
+   log, the P2P log, AND the stderr log simultaneously for specific patterns.
+
+6. **Raw (Unfiltered):** `./tools/ai-tv-log.sh raw 200` — Shows EVERYTHING in the
    Rust log, including key presses. Use this only if you suspect a crash right
    after a button press.
 
-6. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
+7. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
    NEVER run commands that write to the TV, install packages, or modify system
    files. You are restricted to the `ai-tv-log.sh` script only.
 

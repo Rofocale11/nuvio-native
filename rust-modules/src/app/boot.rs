@@ -627,6 +627,8 @@ pub(crate) unsafe fn boot(
 /// at startup and teardown takes it from a different call site.
 #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
 static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+static P2P_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Start the headless P2P server as a DIRECT CHILD of this process: `node server.js` from
 /// `paths::app_dir()/js-service`. Its settings, cache and certificate live under
@@ -639,7 +641,19 @@ static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mut
 pub(crate) fn start_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
-        std::thread::spawn(start_p2p_service_inner);
+        // Spawn on a thread that lives for the whole app lifetime: PR_SET_PDEATHSIG
+        // is tied to the *creating thread*, so if the spawning thread exits the
+        // kernel sends SIGTERM to node. This thread stays parked until shutdown.
+        std::thread::spawn(|| {
+            start_p2p_service_inner();
+            // Keep this thread alive so node's parent doesn't die prematurely.
+            loop {
+                if P2P_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
     }
 }
 
@@ -733,12 +747,19 @@ fn start_p2p_service_inner() {
                     }
                 }
             }
-            for _ in 0..20 {
-                use std::net::TcpStream;
+            // Wait for the port to be actually BINDABLE (not just closed to
+            // connects): a killed process can leave the socket in TIME_WAIT,
+            // where connect() still succeeds but bind() fails with EADDRINUSE.
+            // Probe with a short-lived listener so node can bind on first try.
+            for _ in 0..40 {
                 let addr: std::net::SocketAddr = "127.0.0.1:11470".parse().unwrap();
-                match TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(50)) {
-                    Ok(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                    Err(_) => break,
+                match std::net::TcpListener::bind(addr) {
+                    Ok(l) => {
+                        // Port is free; drop the probe listener and proceed.
+                        drop(l);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
                 }
             }
         }
@@ -752,6 +773,9 @@ fn start_p2p_service_inner() {
         };
         let mut command = std::process::Command::new(node);
         command.arg(&server).current_dir(&js_dir);
+        // Strip a broken LD_PRELOAD (webOS quirk) so node's dynamic linker
+        // doesn't choke on a literal "$LD_PRELOAD" entry.
+        command.env_remove("LD_PRELOAD");
         // Bind the child's lifetime to ours: if this process dies (including a hard
         // crash), the kernel delivers SIGTERM to node so it cannot orphan and hold
         // the TV's RAM. The getppid() check closes the fork/exec race where the
@@ -777,23 +801,79 @@ fn start_p2p_service_inner() {
         unsafe {
             command.pre_exec(arm_pdeathsig);
         }
-        let open_log =
-            || std::fs::OpenOptions::new().create(true).append(true).open("/tmp/nuvio-p2p.log");
-        match (open_log(), open_log()) {
-            (Ok(out), Ok(err)) => {
-                command.stdout(std::process::Stdio::from(out));
-                command.stderr(std::process::Stdio::from(err));
-            }
-            _ => {
-                command.stdout(std::process::Stdio::null());
-                command.stderr(std::process::Stdio::null());
-                plx_base::eventlog::log(
-                    "nuvio: could not open /tmp/nuvio-p2p.log; node output discarded",
-                );
-            }
+        // Pipe node's stdio instead of handing it the file directly: node
+        // block-buffers stdout when it is not a TTY, and the pdeathsig SIGTERM
+        // that fires on a Rust crash never lets libuv flush, so a direct file
+        // redirect stays empty. A Rust-side reader flushes per line.
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+
+        let log_ok = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/nuvio-p2p.log")
+            .is_ok();
+        if !log_ok {
+            plx_base::eventlog::log(
+                "nuvio: could not open /tmp/nuvio-p2p.log; node output discarded",
+            );
         }
+
         match command.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
+                // Drain each pipe into the log file, flushing per line, so output
+                // survives node buffering and abrupt (SIGTERM) termination.
+                // stdout (ChildStdout) and stderr (ChildStderr) are distinct
+                // types, so handle them as two readers sharing one helper.
+                let spawn_reader = |pipe: Box<dyn std::io::Read + Send>| {
+                    let lf = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/nuvio-p2p.log");
+                    if let Ok(mut f) = lf {
+                        std::thread::spawn(move || {
+                            use std::io::{BufRead, Write};
+                            let r = std::io::BufReader::new(pipe);
+                            for line in r.lines() {
+                                if let Ok(l) = line {
+                                    let _ = writeln!(f, "{}", l);
+                                    let _ = f.flush();
+                                }
+                            }
+                        });
+                    }
+                };
+                if let Some(out) = child.stdout.take() {
+                    spawn_reader(Box::new(out));
+                }
+                if let Some(err) = child.stderr.take() {
+                    spawn_reader(Box::new(err));
+                }
+                // Readiness gate: wait for node to actually bind 127.0.0.1:11470
+                // before declaring success, so the player never races ahead and hits
+                // "could not connect". Bounded to ~3 s; if node never binds we log a
+                // timeout but keep the child (its output is still being captured).
+                let addr: std::net::SocketAddr = "127.0.0.1:11470".parse().unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                let mut ready = false;
+                while std::time::Instant::now() < deadline {
+                    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100)).is_ok() {
+                        ready = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                if ready {
+                    plx_base::eventlog::log(&format!(
+                        "nuvio: P2P server ready on 127.0.0.1:11470 (pid {})",
+                        child.id()
+                    ));
+                } else {
+                    plx_base::eventlog::log(&format!(
+                        "nuvio: P2P server did not bind 127.0.0.1:11470 within 3s (pid {})",
+                        child.id()
+                    ));
+                }
                 plx_base::eventlog::log(&format!(
                     "nuvio: P2P server started with {} (pid {})",
                     node.display(),
@@ -813,6 +893,7 @@ fn start_p2p_service_inner() {
 pub(crate) fn stop_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
+        P2P_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut slot = P2P_CHILD.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut child) = slot.take() {
             let _ = child.kill();

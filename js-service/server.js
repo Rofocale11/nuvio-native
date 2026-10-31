@@ -43962,7 +43962,7 @@
             return (argv.noCache || 0 == settings.cacheSize) && (defaults.buffer = 25165824,
                 defaults.circularBuffer = {
                     type: "memory",
-                    size: 33554432
+                    size: 41943040
                 }, defaults.swarmCap = {
                     minPeers: MIN_PEERS_FOR_STABLE,
                     maxBuffer: .75
