@@ -4132,7 +4132,7 @@ impl DetailScreen {
         let anchor = self
             .place(&elem, cx, At::Drawn)
             .map(|p| p.rect)
-            .unwrap_or_else(crate::item_menu::fallback_anchor);
+            .unwrap_or_else(crate::registry::fallback_anchor);
         self.open_streams(anchor, Some(rk), fx);
     }
 

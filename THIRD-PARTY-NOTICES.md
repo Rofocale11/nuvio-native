@@ -39,16 +39,24 @@ they no longer do, because the TV's version moves with the firmware (libavformat
 **These libraries are covered by the GNU Lesser General Public License, version 2.1 or later.** A
 complete copy of that licence is supplied with this package at `licenses/LGPL-2.1.txt`.
 
-**Complete corresponding source.** The exact upstream source archive these were built from is
-attached to every PlxNative release alongside the `.ipk`: either the pristine
-`ffmpeg-9.0.tar.xz` from <https://ffmpeg.org/releases/> (sha256
-`7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52`), or — when that host is
-unreachable — the official GitHub tag archive `FFmpeg-n9.0.tar.gz`
-(<https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.tar.gz>), sha256
-`d97647ace36a307f17ba2bca052d68937487bed8682e1eb9b6737076a9c442b7`, published under the
-normalized name `ffmpeg-9.0.tar.gz`. The sources are **unmodified**: no patches are applied. The
+**Complete corresponding source.** The exact upstream tarball these were built from —
+`ffmpeg-9.0.2.tar.xz`, sha256 `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e`,
+from <https://ffmpeg.org/releases/> — is attached to every PlxNative release alongside the `.ipk`.
+When that host is unreachable the build falls back to the official GitHub tag archive of the same
+release (`n9.0.2.tar.gz`, <https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.2.tar.gz>),
+published under the normalized name `ffmpeg-9.0.2.tar.gz`. That archive is a different container,
+so it carries its own separately pinned sha256 in `ci/build-ffmpeg.sh`
+(`6e374ed621e48faa40639307dff48ba6fe574a509977956d2cce9669b7cc27e9`, read from
+<https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.2.tar.gz>); an archive that does not
+match its pin is refused, never used. The sources are **unmodified**: no patches are applied. The
 complete configure invocation that produced them, including every enabled component, is
-`ci/build-ffmpeg.sh` in the PlxNative repository, which is also attached to each release.
+`ci/build-ffmpeg.sh` in the PlxNative repository, which is also attached to each release. The
+attached script takes the version, the digest and the tarball from its environment, so it needs no
+network and none of the manifest tooling: from a checkout of the release's tag (or its source
+bundle), with the attached tarball,
+`FFMPEG_VERSION=9.0.2 FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e FFMPEG_TARBALL=/path/to/ffmpeg-9.0.2.tar.xz ci/build-ffmpeg.sh`
+(the script also reads the checkout's `ci/arm-cc.py` and `ci/check-link-evidence.py`, which it
+has always done).
 
 **Configuration.** Built with `--disable-everything` plus an explicit component list, **without**
 `--enable-gpl`, `--enable-version3` or `--enable-nonfree`, so no GPL-licensed or non-free FFmpeg
@@ -302,6 +310,7 @@ stated; election does not alter your rights under the other arms.
 | gimli | 0.34.0 | MIT OR Apache-2.0 | The `gimli` authors |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | Amanieu d'Antras |
 | image | 0.25.10 | MIT OR Apache-2.0 | The image-rs Developers |
+| image-webp | 0.2.4 | MIT OR Apache-2.0 | The image-rs Developers |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | David Tolnay |
 | libc | 0.2.190 and 0.2.189 | MIT OR Apache-2.0 | The Rust Project Developers |
 | memchr | 2.8.3 and 2.8.2 | Unlicense OR MIT | 2015 Andrew Gallant |
@@ -310,6 +319,7 @@ stated; election does not alter your rights under the other arms.
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | 2014 The Rust Project Developers |
 | object | 0.39.1 | Apache-2.0 OR MIT | The `object` authors |
 | png | 0.18.1 | MIT OR Apache-2.0 | 2015 nwin |
+| quick-error | 2.0.1 | MIT/Apache-2.0 | 2015 The quick-error Developers |
 | rustc-demangle | 0.1.28 | MIT/Apache-2.0 | Alex Crichton |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers |
 | serde | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay |

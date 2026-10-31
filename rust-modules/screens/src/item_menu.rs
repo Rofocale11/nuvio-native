@@ -473,21 +473,6 @@ fn panel_at(a: Rect, content_w: f32, content_h: f32) -> Rect {
     Rect::new(x, y, width, h)
 }
 
-/// The anchor a menu with no rect to hang off falls back to — a centred card. The headless trigger
-/// and a host with nothing focused both land here.
-///
-/// Resolved by the PRESENTER, once, rather than every frame inside [`ItemMenuScreen::frame`], so
-/// the panel cannot drift if a host's rect stops resolving while the menu is up — the same
-/// argument the legacy `present` made for resolving it before it stored `OPENER`.
-pub fn fallback_anchor() -> Rect {
-    Rect::new(
-        (SCR_W - CARD_W) * 0.5 - MENU_MIN_W * 0.5,
-        (SCR_H - CARD_H) * 0.5,
-        CARD_W,
-        CARD_H,
-    )
-}
-
 pub struct ItemMenuScreen {
     entry: EntryId,
     arg: ItemMenuArg,
@@ -1529,7 +1514,7 @@ mod tests {
 
     #[test]
     fn translated_action_menus_measure_complete_verbs_and_keep_safe_anchors() {
-        use plx_platform::i18n::{LocaleContext, Preference};
+        use plx_platform::i18n::{LocaleContext, Preference, SHIPPED};
         use plx_machine::machine::Measure;
         struct MenuMeasure;
         impl Measure for MenuMeasure {
@@ -1541,7 +1526,7 @@ mod tests {
             fn line_h(&self, size: i32) -> f32 { size as f32 * 1.2 }
         }
         let measure = MenuMeasure;
-        for preference in [Preference::En, Preference::Es, Preference::Be] {
+        for preference in SHIPPED {
             let locale = LocaleContext::resolve(preference, None, None, None, None);
             let mut form: FormTable<ItemRow, Action, Infallible> = FormTable::new(crate::registry::BAND);
             form.table.compact = true;

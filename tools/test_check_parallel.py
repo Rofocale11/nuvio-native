@@ -384,9 +384,18 @@ class Interrupted(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pidfile = os.path.join(tmp, "pids")
             script = LONG_BRANCH.replace("sys.argv[1]", repr(pidfile))
+            # A suite launched in the BACKGROUND (this repo's `tools/ai-check.sh` does exactly that)
+            # has SIGINT and SIGQUIT set to SIG_IGN by the shell that started it, and CPython keeps
+            # an ignored SIGINT ignored — so the runner under test would never see the signal and
+            # this test would grade the launcher instead of the tool. Restore the defaults in the
+            # child: what is under test is the runner's own handling, not its inheritance.
+            def defaults():
+                for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGHUP, signal.SIGTERM):
+                    signal.signal(sig, signal.SIG_DFL)
             runner = subprocess.Popen(
                 [sys.executable, TOOL, branch("long", script), branch("quick", "print('quick-done')")],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                preexec_fn=defaults)
             pids = []
             try:
                 self.assertTrue(wait_for(lambda: os.path.exists(pidfile), 60), "the branch never started")

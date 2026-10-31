@@ -2368,7 +2368,7 @@ fn modal_bench_open(app: &mut App, target: bench::ModalTarget) {
             let Some(host) = app.pages.nav.top_page().map(|e| e.id) else { return };
             let rk = app.scenarios.modal_bench.as_ref().unwrap().rk.clone();
             let sid = plx_plex::plex::current_server();
-            let anchor_rect = plx_screens::item_menu::fallback_anchor();
+            let anchor_rect = plx_screens::registry::fallback_anchor();
             let arg = ItemMenuArg {
                 sid,
                 rk: rk.clone(),

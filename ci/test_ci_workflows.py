@@ -23,6 +23,7 @@ Text-level on purpose, like ci/test_ci_timeouts.py (no YAML library on a stock r
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -32,6 +33,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github/workflows"
+sys.path.insert(0, str(ROOT / "ci"))
+import ci_paths  # noqa: E402
+import deps  # noqa: E402
 
 
 def text(name):
@@ -277,7 +281,7 @@ class HostLibraryCaches(unittest.TestCase):
     LIBASS_JOBS = ("linux", "macos", "macos-host-tests")
     FFMPEG_WORK = "~/.cache/plxnative/ffmpeg"
     LIBASS_PREFIX = "vendor/libass-prefix-host"
-    LIBASS_SOURCES = "vendor/libass-sources"
+    DOWNLOADS = "vendor/downloads"
 
     def test_no_cache_stores_a_prefix_make_would_judge_by_mtime(self):
         # A restored prefix is OLDER than the checkout's script, so make re-runs the script. Cache
@@ -298,13 +302,14 @@ class HostLibraryCaches(unittest.TestCase):
         self.assertIn('CACHED_TAR="$CACHE_ROOT/ffmpeg/ffmpeg-$VERSION-', sh)
         py = (ROOT / "ci/build-libass.py").read_text()
         self.assertIn(f"ROOT / ('{self.LIBASS_PREFIX}' if host", py)
-        self.assertIn(f"sources = ROOT / '{self.LIBASS_SOURCES}'", py)
+        self.assertIn("sources = deps.cache_dir()", py)
+        self.assertEqual(deps.cache_dir(), ROOT / self.DOWNLOADS)
         self.assertIn("stamp = prefix / '.dependencies-key'", py)
         for job in self.MACOS_JOBS:
             cache_of(job, self.FFMPEG_WORK)
         for job in self.LIBASS_JOBS:
             cache_of(job, self.LIBASS_PREFIX)
-            cache_of(job, self.LIBASS_SOURCES)
+            self.assertIn("uses: ./.github/actions/deps-cache", job_body("simulators.yml", job), job)
 
     def test_the_ffmpeg_key_names_every_input_the_script_keys_on(self):
         sh = (ROOT / "ci/build-ffmpeg.sh").read_text()
@@ -313,7 +318,7 @@ class HostLibraryCaches(unittest.TestCase):
         self.assertEqual(inherited, {"ci/arm-cc.py", "ci/check-link-evidence.py"})
         for job in self.MACOS_JOBS:
             key = cache_of(job, self.FFMPEG_WORK)["key"]
-            self.assertEqual(hashed(key), {"ci/build-ffmpeg.sh", *inherited}, job)
+            self.assertEqual(hashed(key), {"ci/build-ffmpeg.sh", "ci/deps.py", "ci/dependencies.json", *inherited}, job)
             self.assertIn("runner.os", key)
             self.assertIn("runner.arch", key)
             # The compiler, SDK and build environment are inputs the script reads from the machine.
@@ -325,7 +330,12 @@ class HostLibraryCaches(unittest.TestCase):
     def test_the_libass_key_names_every_input_the_recipe_lists(self):
         py = (ROOT / "ci/build-libass.py").read_text()
         # Everything build-libass.py folds into its own `.dependencies-key`, besides the toolchain.
-        read = {"ci/build-libass.py", "ci/libass-dependencies.json",
+        # The pinned patches are folded into the key too (their bytes), by the path the pins name.
+        pins = json.loads((ROOT / "ci/dependencies.json").read_text())
+        patches = {patch["path"] for dep in pins if dep.get("group") == "libass"
+                   for patch in dep.get("patches", [])}
+        self.assertTrue(patches, "the font-face patch is pinned")
+        read = {"ci/build-libass.py", "ci/dependencies.json", "ci/deps.py", *patches,
                 *re.findall(r"ROOT / '(ci/[\w.-]+)'\)\.read_bytes", py)}
         listed = set(makefile_list("LIBASS_INPUTS"))
         self.assertTrue(read <= listed, read - listed)
@@ -335,12 +345,15 @@ class HostLibraryCaches(unittest.TestCase):
             self.assertIn("runner.os", key)
             self.assertIn("runner.arch", key)
             self.assertIn("steps.toolchain.outputs.id", key)
-            # The tarballs are pinned by checksum, so their entry is shared by every OS and moves
-            # only with the pins; a facade edit must not re-save 25 MB of sources.
-            sources = cache_of(job, self.LIBASS_SOURCES)["key"]
-            self.assertEqual(hashed(sources), {"ci/libass-dependencies.json"}, job)
-            self.assertNotIn("runner.os", sources)
         self.assertEqual(len({cache_of(j, self.LIBASS_PREFIX)["key"] for j in self.LIBASS_JOBS}), 1)
+
+    def test_the_simulator_path_filter_names_every_libass_input_but_the_cache_keys_files(self):
+        # A change to a patch or a facade source must start the workflow that rebuilds libass.
+        text = (ROOT / ".github/workflows/simulators.yml").read_text()
+        filter_ = text[:text.index("\njobs:")]
+        for path in makefile_list("LIBASS_INPUTS"):
+            if path.startswith(("src/", "include/", "ci/patches/libass-", "ci/build-libass")):
+                self.assertIn("'" + path + "'", filter_, path)
 
     def test_the_toolchain_is_identified_before_any_cache_is_restored(self):
         for job in self.LIBASS_JOBS:
@@ -504,51 +517,35 @@ class CiPathFilter(unittest.TestCase):
 
     @staticmethod
     def anchor():
-        lines = text("ci.yml").splitlines()
-        start = next(i for i, l in enumerate(lines) if l.strip() == "paths: &ci_paths")
-        patterns = []
-        for line in lines[start + 1:]:
-            stripped = line.strip()
-            if stripped.startswith("#") or not stripped:
-                continue
-            if not stripped.startswith("- "):
-                break
-            patterns.append(stripped[2:].strip().strip("'\""))
-        return patterns
+        return ci_paths.patterns(text("ci.yml"))
 
     @staticmethod
-    def regex(pattern):
-        out, i = [], 0
-        while i < len(pattern):
-            if pattern.startswith("**/", i):
-                out.append("(?:.*/)?")
-                i += 3
-            elif pattern.startswith("**", i):
-                out.append(".*")
-                i += 2
-            elif pattern[i] == "*":
-                out.append("[^/]*")
-                i += 1
-            elif pattern[i] == "?":
-                out.append("[^/]")
-                i += 1
-            else:
-                out.append(re.escape(pattern[i]))
-                i += 1
-        return re.compile("".join(out) + r"\Z")
+    def triggers(path, patterns=None):
+        return ci_paths.triggers(path, patterns if patterns is not None else CiPathFilter.anchor())
 
-    @classmethod
-    def triggers(cls, path, patterns=None):
-        included = False
-        for pattern in patterns if patterns is not None else cls.anchor():
-            negative = pattern.startswith("!")
-            if cls.regex(pattern[1:] if negative else pattern).match(path):
-                included = not negative
-        return included
-
-    def test_pull_request_uses_the_same_list_as_push(self):
-        self.assertRegex(text("ci.yml"), r"(?m)^  pull_request:\n    paths: \*ci_paths$")
+    def test_only_push_filters_by_path_and_pull_request_starts_on_every_pr(self):
+        # A PR the filter skips starts no run, so the required checks never report. The `changes` job
+        # applies the same list to the PR's files instead.
+        self.assertRegex(code("ci.yml"), r"(?m)^  pull_request:\n  workflow_dispatch:")
+        self.assertEqual(len(re.findall(r"(?m)^\s+paths:", code("ci.yml"))), 1)
         self.assertEqual(len(re.findall(r"(?m)^\s+paths: &ci_paths$", text("ci.yml"))), 1)
+        self.assertNotIn("*ci_paths", code("ci.yml"))
+        self.assertIn("paths: &ci_paths", code("ci.yml").split("  pull_request:")[0])
+
+    def test_the_changes_jobs_evaluator_is_this_evaluator(self):
+        # ci/ci_paths.py is what the job runs, on the list it reads from ci.yml: same code, same cases.
+        def run(files):
+            return subprocess.run(
+                [sys.executable, str(ROOT / "ci/ci_paths.py")], input="\n".join(files), text=True,
+                capture_output=True, check=True).stdout.strip()
+        self.assertEqual(run(list(self.MUST_NOT_TRIGGER)), "false")
+        self.assertEqual(run(["README.md", "docs/x.md", "Makefile"]), "true")
+        for path in self.MUST_TRIGGER:
+            self.assertEqual(run([path]), "true", path)
+        for path in self.MUST_NOT_TRIGGER:
+            self.assertEqual(run([path]), "false", path)
+        self.assertEqual(run(["tools/requirements-docs.txt"]), "false")
+        self.assertEqual(run([]), "true", "no files learned: fail closed")
 
     def test_the_matcher_follows_githubs_rules(self):
         t = self.triggers

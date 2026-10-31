@@ -968,6 +968,56 @@ def parse_lsof(text: str, ignore_pids: Sequence[int] = ()) -> LiveSnapshot:
     return LiveSnapshot(builders, files)
 
 
+def proc_snapshot(ignore_pids: Sequence[int] = ()) -> LiveSnapshot:
+    """The same live snapshot, read from `/proc`, for a Linux host with no `lsof` installed.
+
+    `/proc/<pid>/comm` is the command `lsof -F c` reports and `/proc/<pid>/cwd` plus the
+    `/proc/<pid>/fd/*` symlinks are the paths it reports, so the two agree on what is running.
+    Only this user's processes are read. A process that exits mid-scan, or whose fds are not
+    readable, is simply skipped: `/proc` answering at all is the evidence that the question CAN
+    be asked, which is exactly what `unknown` denies."""
+    builders: List[Tuple[str, str]] = []
+    files: List[Tuple[str, str]] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return LiveSnapshot([], [], unknown=True)
+    me = os.getuid()
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid in ignore_pids:
+            continue
+        base = os.path.join("/proc", entry)
+        try:
+            if os.stat(base).st_uid != me:
+                continue
+            with open(os.path.join(base, "comm"), encoding="utf-8", errors="replace") as fh:
+                command = fh.read().strip()
+        except OSError:
+            continue
+        try:
+            cwd = os.readlink(os.path.join(base, "cwd"))
+        except OSError:
+            cwd = ""
+        if cwd and command in BUILDER_COMMANDS:
+            builders.append((command, real(cwd)))
+        fds = os.path.join(base, "fd")
+        try:
+            names = os.listdir(fds)
+        except OSError:
+            continue
+        for name in names:
+            try:
+                target = os.readlink(os.path.join(fds, name))
+            except OSError:
+                continue
+            if target.startswith("/"):
+                files.append((command, target))
+    return LiveSnapshot(builders, files)
+
+
 def ancestor_pids() -> List[int]:
     """This process and its parents: a `make disk` running in a checkout is not a build in it.
 
@@ -1016,12 +1066,20 @@ class Probes:
         return self._tools[filename]
 
     def snapshot(self) -> LiveSnapshot:
-        try:
-            out = subprocess.run(["lsof", "-n", "-P", "-w", "+c", "0", "-u", str(os.getuid()), "-F", "pcfn"],
-                                 capture_output=True, text=True, timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            return LiveSnapshot([], [], unknown=True)
-        return interpret_lsof(out.returncode, out.stdout, ancestor_pids())
+        # `lsof` is the primary probe and its own ignorance rule (a silent or broken lsof counts as
+        # "unknown", never as "idle") is the tested contract. `/proc` is the fallback for a Linux
+        # host that has no lsof at all, where the question is nonetheless answerable; macOS has no
+        # /proc and ships lsof, so it only ever takes the first path.
+        if shutil.which("lsof"):
+            try:
+                out = subprocess.run(["lsof", "-n", "-P", "-w", "+c", "0", "-u", str(os.getuid()), "-F", "pcfn"],
+                                     capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return LiveSnapshot([], [], unknown=True)
+            return interpret_lsof(out.returncode, out.stdout, ancestor_pids())
+        if os.path.isdir("/proc/self"):
+            return proc_snapshot(ancestor_pids())
+        return LiveSnapshot([], [], unknown=True)
 
     def cargo_locked(self, tree: str) -> bool:
         """A cargo build lock under `tree` is held: cargo-seed's own probe, shared locks taken and dropped."""
@@ -1762,14 +1820,18 @@ def cmd_preflight(args, env) -> int:
     except OSError:
         return 0                 # free space unreadable: not a reason to stop a build
     try:
-        if device_of(tree) != device_of(root):
-            # The ladder's trees are on the checkout's volume: evicting them frees the wrong disk.
-            return judge(tree, need_upper, th, env, "",
-                         note="the tree is on another volume than the checkout, so nothing the ladder holds helps")
+        # The safety refusal comes BEFORE any look at the ladder: a pretend emergency over a real
+        # checkout must be answered with "not run", never with a plan. It used to sit after the
+        # volume test, so a host whose tree lived on another volume (this repo's gate machines put
+        # /tmp on its own tmpfs) reported the ENOSPC verdict instead.
         refusal = refuse_pretend_emergency(env, root)
         if refusal:
             print("disk-preflight: " + refusal, file=sys.stderr)
             return 2
+        if device_of(tree) != device_of(root):
+            # The ladder's trees are on the checkout's volume: evicting them frees the wrong disk.
+            return judge(tree, need_upper, th, env, "",
+                         note="the tree is on another volume than the checkout, so nothing the ladder holds helps")
         lock = lock_dir(env)
         got = take_lock(lock, env)
         if got == "got":

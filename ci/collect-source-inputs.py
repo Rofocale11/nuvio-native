@@ -71,13 +71,18 @@ def main():
     source_rows, deps = [], []
     for name, recipe in [('ffmpeg', 'ci/build-ffmpeg.sh'), ('sentry-native', 'ci/build-sentry-native.sh')]:
         text = (root / recipe).read_text()
-        version = re.search(r'^VERSION=([^\s]+)', text, re.M).group(1)
         if name == 'ffmpeg':
+            # The ffmpeg.org pin is declared in ci/dependencies.json and read through ci/deps.py at
+            # build time; a script may not restate it (ci/test_dependencies.py enforces that), so
+            # this is where it is read from. The GitHub fallback archive is a different container
+            # with its own digest, which only the script carries.
+            entry = next(e for e in json.loads((root / 'ci/dependencies.json').read_text())
+                         if e['id'] == 'ffmpeg')
+            version = entry['version']
             # The build prefers the ffmpeg.org release tarball and falls back to the official
             # GitHub tag archive, so publish whichever one is actually in the checkout.
             candidates = [
-                ('ffmpeg-' + version + '.tar.xz',
-                 re.search(r'^SHA256=([a-f0-9]{64})', text, re.M).group(1)),
+                ('ffmpeg-' + version + '.tar.xz', entry['sha256']),
                 ('ffmpeg-' + version + '.tar.gz',
                  re.search(r'^SHA256_GITHUB=([a-f0-9]{64})', text, re.M).group(1)),
             ]
@@ -91,6 +96,7 @@ def main():
             else:
                 fail('no pinned FFmpeg source archive found (ffmpeg.org or GitHub)')
         else:
+            version = re.search(r'^VERSION=([^\s]+)', text, re.M).group(1)
             checksum = re.search(r'^SHA256=([a-f0-9]{64})', text, re.M).group(1)
             filename = 'sentry-native-' + version + '.tar.gz'
             data, _ = read_regular(args.archive_root.resolve(), 'vendor/' + filename)

@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Hostsim test runner: runs the cfg(hostsim) lib tests with the exact environment the
-# docs require. Target dir is kept OUTSIDE the checkout. Optional filter args are
-# forwarded to cargo (e.g. ./tools/ai-test-hostsim.sh render).
-# Usage: ./tools/ai-test-hostsim.sh [filter...]
+# Hostsim test runner: a thin wrapper over `make test-hostsim`, which builds into the
+# gitignored `rust-modules/target-hostsim` (inside the checkout, so `make disk` /
+# `tools/build-gc.sh` own it) and passes `--require-match`, so a filter that matches no
+# test fails instead of reporting "0 tests" as success.
+# Usage: ./tools/ai-test-hostsim.sh [filter]   (the filter becomes make's T=...)
 set -euo pipefail
 
-export CARGO_INCREMENTAL=1
-export CARGO_TARGET_DIR=/tmp/ai-hostsim-target
-export PLXNATIVE_RUNTIME_DIR="$(mktemp -d)"
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+filter="${1:-}"
 
-cd "$(git rev-parse --show-toplevel 2>/dev/null)/rust-modules" 2>/dev/null || cd rust-modules
-
-echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
-echo "PLXNATIVE_RUNTIME_DIR=$PLXNATIVE_RUNTIME_DIR"
-echo "Running hostsim tests..."
-
-cargo +nightly test --lib -p plxnative-modules --features hostsim -- "$@"
+echo "hostsim: make test-hostsim ${filter:+T=$filter}"
+if [ -n "$filter" ]; then
+  exec make -C "$root" test-hostsim "T=$filter"
+fi
+exec make -C "$root" test-hostsim

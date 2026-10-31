@@ -60,13 +60,16 @@
 # `lib*-plx.so.*` glob cannot pick it up.
 set -eu
 
-VERSION=9.0
-# The pristine ffmpeg.org release tarball (`.tar.xz`).
-SHA256=7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52
+# The pin (version, upstream URL, sha256) is declared once, in ci/dependencies.json; nothing here
+# carries a literal copy of it. ci/deps.py is also what downloads and verifies the tarball.
+#
 # FALLBACK: GitHub's generated tag archive (`n<VERSION>.tar.gz`), used only when ffmpeg.org is
 # unreachable. It is a DIFFERENT archive (different container, one extra top-level name), so it has
-# its own pin. GitHub regenerates tag archives rarely; a deliberate regeneration is a re-pin here.
-SHA256_GITHUB=d97647ace36a307f17ba2bca052d68937487bed8682e1eb9b6737076a9c442b7
+# its own pin, and the manifest cannot carry two digests for one release: this is the one place
+# that pin lives. GitHub regenerates tag archives rarely; a deliberate regeneration is a re-pin
+# here (and the source bundle's metadata follows it, since ci/collect-source-inputs.py reads this).
+# n9.0.2, fetched and hashed 2026-10-31.
+SHA256_GITHUB=6e374ed621e48faa40639307dff48ba6fe574a509977956d2cce9669b7cc27e9
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # The pin (version, upstream URL, sha256) is declared once, in ci/dependencies.json; nothing here
 # carries a literal copy of it. ci/deps.py is also what downloads and verifies the tarball.

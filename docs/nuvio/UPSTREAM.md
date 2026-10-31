@@ -240,6 +240,13 @@ from port 1; this sandbox holds low ports instead of answering RST (a raw socket
 2, and refuses in 8 ms on 45678), and both fail identically on `nuvio-native`. The television has
 not seen any of this yet.
 
+A third red appeared once, under `make check`'s parallel load, and not since:
+`app::adapters::session::tests::a_signin_after_signout_behind_a_read_only_mount_is_written`
+panicked at its `"admitted, not yet run"` assertion. It passes alone (`T=` filter) and passes in a
+full `make test-crate C=app` re-run (670 passed, only the loopback case above red), so it is a
+load/ordering race in the erase-then-commit queue, not a regression from this port — but it is a
+race, and the next session should reproduce it under load before calling the suite trustworthy.
+
 ### What running the suites found
 
 Eleven defects only a running test suite could show. Each is fixed; this table is what the next
@@ -264,16 +271,56 @@ The replay fixtures also had to be re-recorded against the current screen-shape 
 `SDL_VIDEODRIVER=x11` pacing, all three anchors replaying SAME with every difference counter zero in
 both Targets and Resolve. `tests/fixtures/replay/README.md` carries the procedure.
 
-**Known gaps, not hidden:** the television has not seen this; upstream-only files that the reverted
-crates no longer reference (test modules, mostly) still sit in `data/`, `screens/`, `ui/` and
-`appkit/` as unreferenced leftovers.
+**Known gaps, not hidden:** the television has not seen this. Two trees had to be reconciled
+before the gates could run at all:
+
+- **The upstream-only files the reverted crates no longer reference are deleted** (`git rm`, 107 of
+  them across `data/`, `screens/`, `ui/`, `appkit/`): a module no `lib.rs`/`mod.rs` declares is not
+  compiled, so it could never be covered — but `ci/check-deps.sh` and `ci/check-statics.sh` scan the
+  tree, not the module graph, and were reading them as production code (six `thread::spawn`s, eight
+  `X-Plex-Container-` literals, an unfrosted `Glass` call). The Watchlist, Catalog, Recommended and
+  Collections pages come back with tier C, from `upstream/feature/v0.9-hq`.
+- **`ci/allow` is the fork's again, not upstream's.** The merge took upstream's entries, which
+  describe an upgraded `ui` (`thread_local!` render caches); this fork's `ui` keeps its process-wide
+  caches, so `statics.txt` names them again with their owning thread, plus the fork's own
+  `gfx/text.rs` memos, poster key memo and text-input queue. `wall.txt` names `app/boot.rs` (the P2P
+  `node` readiness gate waits on a child process starting, not on logical state). `sibling` also
+  required moving `item_menu::fallback_anchor` into `registry`, the shared vocabulary both `home`
+  and `detail` are allowed to name. Both of the last two were red on `nuvio-native` itself, and the
+  heap-statics rule is new from upstream.
+- **The CI step manifest is upstream's, and every step in it now says something true about THIS
+  tree.** `ci/check-python-steps.txt` came over with the merge (93 added lines, ~17 gates this fork
+  never ran); reverting it would have been smaller, but these gates audit the tree, not the
+  workflow, and a gate that is not run cannot be argued with later. What that meant, gate by gate:
+  the two registries were re-derived (`ci/plex-requests.ini` gained the three Nuvio shim sites —
+  they are loopback shim calls, not Plex API requests — and `ci/list-caps.ini` lost 33 sections for
+  symbols that no longer exist and gained 34 for sites that do); `ci/third-party-crates.json` now
+  classifies `image-webp` and `quick-error` (both in the ARM runtime graph, both elected MIT);
+  `THIRD-PARTY-NOTICES.md` was regenerated and §1.1's FFmpeg source rows restored; the
+  language-list gate's 16 sites became `i18n::SHIPPED` loops rather than allowlist entries.
+  Two gates looked host-dependent and were not:
+  - `test_build_gc` / `test_disk_preflight` and the planner behind them read a builder's working
+    directory with `lsof`. Linux exposes the same answer at `/proc/<pid>/cwd`, so `tools/build-gc.sh`
+    and `tools/disk-budget.py` fall back to `/proc` when `lsof` is absent (macOS has no `/proc` and
+    ships `lsof`), and the preflight's safety refusal — "a pretend emergency over a real checkout is
+    not run" — now precedes the volume test, so a host whose `/tmp` is its own tmpfs is answered
+    with exit 2 instead of an ENOSPC verdict.
+  - `test_check_elf`'s 29 failures were the merge keeping trunk's *older* self-test (no VFP lines in
+    its synthetic `objdump`, three upstream tests missing) beside upstream's unchanged gate script.
+    The upstream file is restored; nothing was relaxed.
+  Found on the way and fixed: `ci/build-ffmpeg.sh` had been bumped to FFmpeg 9.0.2 in
+  `ci/dependencies.json` while its GitHub fallback pin was still the `n9.0` tag archive, so the
+  unreachable-ffmpeg.org path could never verify; the real `n9.0.2` archive was fetched and hashed
+  (`6e374ed6…`), the stale `VERSION=`/`SHA256=` literals were removed (the manifest is the one
+  authority, and `ci/collect-source-inputs.py` now reads it instead of scraping them), and the
+  release notice names the pin.
 
 ### The exact next action
 
-Playback on the television, under the TV lock. The host suite says the seams line up; it says
-nothing about the ACB/Starfish path, the GL composer, or the video plane. The `which-tier` skill
-picks the tier; `profile-tv` is what diagnoses a dropped frame. Then `make check` on the committed
-tree as the pre-push gate (`./tools/ai-check.sh`, polled with `./tools/ai-check-status.sh`).
+`make check` on the committed tree (`./tools/ai-check.sh`, polled with
+`./tools/ai-check-status.sh`), then playback on the television under the TV lock. The host suite
+says the seams line up; it says nothing about the ACB/Starfish path, the GL composer, or the video
+plane. The `which-tier` skill picks the tier; `profile-tv` is what diagnoses a dropped frame.
 
 ### Then tier C — and it is a PORT, not a merge
 

@@ -4,5 +4,11 @@
     "boundary": "TextView::new",
     "text": "plex.tv/link",
     "reason": "Plex sign-in URL is an exact service destination; it must not be translated."
+  },
+  {
+    "path": "rust-modules/media/src/route/plan.rs",
+    "boundary": ".verdict =",
+    "text": "nuvio-profile-",
+    "reason": "The prefix of a Nuvio profile's synthesized uuid: it is matched against the shim's identity, never drawn. The account read for such a profile comes from the shim's own preferences file instead of plex.tv."
   }
 ]

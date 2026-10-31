@@ -1324,6 +1324,9 @@ deploy: pkg/plxnative pkg/plxnative-storage $(FFMPEG_STAGED) $(SENTRY_NATIVE_STA
 	@# basenames; the app respawns the child on its next launch.
 	$(SSH) 'mkdir -p $(APPDIR)/js-service'
 	$(SCP) $(JS_SERVICE_FILES) tv:$(APPDIR)/js-service/
+	@# The subtitle faces go to their own directory (see SUBS_FONT_FILES), in one more connection.
+	$(SSH) 'mkdir -p $(APPDIR)/$(SUBS_FONT_DIR)'
+	$(SCP) $(SUBS_FONT_FILES) tv:$(APPDIR)/$(SUBS_FONT_DIR)/
 	@if [ -n "$(TURBOJPEG_SO)" ]; then \
 	  $(SSH) 'test -f $(APPDIR)/libturbojpeg.so.0' || $(SCP) $(TURBOJPEG_SO) tv:$(APPDIR)/libturbojpeg.so.0; \
 	else echo "note: no libturbojpeg in the sysroot — capture JPEG mode will use the slow encoder"; fi
@@ -1351,17 +1354,19 @@ deploy: pkg/plxnative pkg/plxnative-storage $(FFMPEG_STAGED) $(SENTRY_NATIVE_STA
 # the crash handler and the FFmpeg libraries take their own path to the device above and are just
 # as capable of silently drifting, so they are verified too.
 VERIFY_FILES = pkg/plxnative $(SENTRY_HANDLER) $(FFMPEG_STAGED) $(DEPLOY_FILES) pkg/plxnative-storage \
-               $(JS_SERVICE_FILES) $(if $(LAB),pkg/lab.json,)
+               $(JS_SERVICE_FILES) $(SUBS_FONT_FILES) $(if $(LAB),pkg/lab.json,)
 verify-deploy: tv-lock-require
 	@echo "verify-deploy: comparing $(words $(VERIFY_FILES)) files against $(APPID) [$(FLAVOR)]"
 	@# The storage helper lands in $(SERVICEDIR), a different directory from everything else here —
 	@# `ci/verify-deploy.py` keys purely by basename (see its module doc), so a second `cd && md5sum`
 	@# appended to the same ssh round trip merges into one stream it already knows how to read,
 	@# rather than needing a transport of its own.
-	@# ...and the JS payload in its own subdirectory. `filter-out` keeps those two out of the
-	@# APPDIR-root md5sum; `ci/verify-deploy.py` keys every entry by basename.
-	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out pkg/plxnative-storage $(JS_SERVICE_FILES),$(VERIFY_FILES))) 2>&1; \
+	@# ...and the JS payload and the subtitle faces in their own subdirectories. `filter-out`
+	@# keeps those three out of the APPDIR-root md5sum; `ci/verify-deploy.py` keys every entry by
+	@# basename, so one merged stream is enough.
+	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out pkg/plxnative-storage $(JS_SERVICE_FILES) $(SUBS_FONT_FILES),$(VERIFY_FILES))) 2>&1; \
 	         cd $(APPDIR)/js-service && md5sum $(notdir $(JS_SERVICE_FILES)) 2>&1; \
+	         cd $(APPDIR)/$(SUBS_FONT_DIR) && md5sum $(notdir $(SUBS_FONT_FILES)) 2>&1; \
 	         cd $(SERVICEDIR) && md5sum plxnative-storage 2>&1' | \
 	  python3 ci/verify-deploy.py $(VERIFY_FILES)
 
@@ -2542,5 +2547,5 @@ fetch-profile:
 	-$(SCP) tv:$(RUNDIR)/plxnative-hwcnt.jsonl pkg/plxnative-hwcnt.jsonl
 	@ls -l pkg/plxnative-*.jsonl 2>/dev/null || echo "no profiler output in $(RUNDIR) on the TV ($(APPID))"
 
-.PHONY: libass libass-host screenshots screenshots-sim demo-library disk symbols sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile \
+.PHONY: libass libass-host screenshots screenshots-sim demo-library disk symbols symbols-libs sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile \
         release-guard lab-guard install uninstall $(QUERY_GOALS)

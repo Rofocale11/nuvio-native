@@ -74,11 +74,17 @@ def apt_update_problems(name, text):
     ]
 
 
+# `curl` only in COMMAND position: at the start of a line or after a shell separator. A package
+# list (`apt-get install -y curl tar`) names curl without running it, and flagged as a command it
+# makes the rule impossible to satisfy honestly (`build-ipk.yml` installs it that way).
+CURL_COMMAND = re.compile(r"(?:^|[;&|])\s*(?:sudo\s+)?curl\s")
+
+
 def curl_problems(name, text):
     return [
         f"{name}:{i}: `curl` has no --max-time"
         for i, l in code_lines(text)
-        if re.search(r"(^|[\s;&|(])curl\s", l) and "--max-time" not in l
+        if CURL_COMMAND.search(l) and "--max-time" not in l
     ]
 
 
@@ -133,13 +139,15 @@ class CheckersGoRed(unittest.TestCase):
         self.assertTrue(apt_update_problems("x", "        run: |\n          sudo apt-get update\n"))
 
     def test_unbounded_curl_is_caught(self):
-        # No workflow calls curl itself any more (ci/deps.py does, with its own bounds), so the
-        # checker is exercised on a synthetic step.
+        # ci/deps.py carries its own bounds; the one workflow curl today is build-ipk.yml's rustup
+        # installer, which is bounded the same way. The checker is exercised on a synthetic step.
         bounded = "        run: |\n          curl -fsSL --connect-timeout 20 --max-time 120 -o x https://example.invalid/x\n"
         self.assertEqual(curl_problems("x.yml", bounded), [])
         mutated = bounded.replace("--max-time 120 ", "")
         self.assertNotEqual(mutated, bounded)
         self.assertTrue(curl_problems("x.yml", mutated))
+        # A package NAME is not a command: installing curl must not be flagged.
+        self.assertEqual(curl_problems("x", "          sudo apt-get install -y curl tar\n"), [])
 
 
 if __name__ == "__main__":

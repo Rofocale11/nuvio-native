@@ -435,8 +435,8 @@ class Preflight(Repo):
     def test_it_does_the_same_from_a_real_make_parent(self):
         # `make` is itself a running builder in the checkout being built: build-gc must not read that as a
         # reason to evict nothing, and must not treat that checkout as evictable.
-        if not shutil.which("lsof") or not shutil.which("make"):
-            self.skipTest("needs lsof and make")
+        if not (shutil.which("lsof") or os.path.isdir("/proc/self")) or not shutil.which("make"):
+            self.skipTest("needs a way to read a builder's working directory (lsof or /proc) and make")
         mine, other, paths = self.build_fleet()
         with open(os.path.join(mine, "Makefile"), "w") as fh:
             fh.write(".PHONY: x disk-preflight\nx: | disk-preflight\n\t@echo built\n"

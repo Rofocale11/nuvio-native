@@ -159,11 +159,14 @@ fails the build on a forbidden edge.
 - Do NOT try to run `make check` directly in the foreground.
 - While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and
   runs only that crate's lib tests. It is a loop, not a gate.
-- `make test-crate` does NOT enable `hostsim`: tests under
-  `#[cfg(all(test, feature = "hostsim"))]` run as `cd rust-modules && CARGO_INCREMENTAL=1
-  CARGO_TARGET_DIR=/tmp/<dir> PLXNATIVE_RUNTIME_DIR=$(mktemp -d) cargo +nightly test --lib
-  -p plxnative-modules --features hostsim -- <filter>`. Keep that target dir OUTSIDE the
-  checkout.
+- `make test-crate` does NOT enable `hostsim`. Those tests run through
+  `make test-hostsim
+  [C=<crate>] [T=filter]`, which builds into the gitignored `rust-modules/target-hostsim`
+  (inside the checkout, so `make disk`'s sweep and `tools/build-gc.sh` own it) and gives each
+  run a fresh `PLXNATIVE_RUNTIME_DIR`. Spell the crate as for `test-crate` — `C=plx_media`,
+  `C=media`, several allowed — and pass `--require-match`: a filter that matches no test
+  fails the run instead of reporting "0 tests" as success. Do not hand-write a cargo
+  invocation with a target dir outside the checkout.
 - `make sim-macos` / `make` fail with `make: cargo: No such file` from a non-login shell:
   prefix `PATH="$HOME/.cargo/bin:$PATH"`. Test builds deny warnings, so a new `App` field
   must be read (`dead-code`) and initialised at BOTH construction sites (`app/boot.rs` and
@@ -209,9 +212,9 @@ These run entirely on the host (x86_64) with no TV, simulator, or ARM toolchain.
   for the app process (read-only, requires TV lock for device access).
 - **Change-scoped tests:** `./tools/ai-test.sh` — runs `cargo nextest` only for crates touched
   by uncommitted changes (inner loop). `./tools/ai-check.sh` is the outer-loop gate.
-- **Hostsim tests:** `./tools/ai-test-hostsim.sh [filter]` — runs the `cfg(hostsim)` lib tests
-  with the documented environment (`CARGO_INCREMENTAL=1`, `CARGO_TARGET_DIR=/tmp/ai-hostsim-target`,
-  `PLXNATIVE_RUNTIME_DIR` fresh temp dir). Target dir stays outside the checkout.
+- **Hostsim tests:** `./tools/ai-test-hostsim.sh [filter]` wraps `make test-hostsim` (same
+  `C=`/`T=` spelling, same in-checkout `rust-modules/target-hostsim`): the `cfg(hostsim)` lib
+  tests, with a fresh `PLXNATIVE_RUNTIME_DIR` per run.
 - **Perf summary:** `./tools/ai-perf-summary.sh` — pulls TV perf logs and prints a one-paragraph
   summary (min FPS, carried/dropped frames, highest vgap, worst route).
 - **Simulator:** `./tools/ai-sim.sh` — builds (`make -j10 sim-linux`) and launches the x86_64

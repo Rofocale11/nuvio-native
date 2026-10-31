@@ -3,7 +3,7 @@
   --color-cool-50: #ebf0f7;
   --color-cool-200: #cdd3dd;
   --color-cool-300: #b8bfcc;
-  --color-cool-400: #a3a8b2;
+  --color-cool-400: #9499a3;
   --color-neutral-500: #2c2c2e;
   --color-neutral-950: #08080a;
   --color-atmos-charcoal: #202022;
@@ -200,14 +200,6 @@ video::-webkit-media-controls-start-playback-button {
       scale 900ms cubic-bezier(0.19, 1, 0.22, 1) var(--reveal-delay, 0ms),
       transform 500ms cubic-bezier(0.16, 1, 0.3, 1);
   }
-  /* A screenshot frame's transform follows the scroll (site.js,
-     [data-unveil]); easing it as well would make it trail the page. */
-  .reveal [data-reveal][data-unveil].is-revealed {
-    transition:
-      opacity 600ms cubic-bezier(0.25, 0.1, 0.25, 1) var(--reveal-delay, 0ms),
-      translate 800ms cubic-bezier(0.19, 1, 0.22, 1) var(--reveal-delay, 0ms),
-      scale 900ms cubic-bezier(0.19, 1, 0.22, 1) var(--reveal-delay, 0ms);
-  }
   /* Cards fade over a little longer: a panel this size fading as fast as a
      line of text reads as popping in. */
   .reveal [data-reveal="card"].is-revealed {
@@ -302,9 +294,9 @@ video::-webkit-media-controls-start-playback-button {
   inset: 0;
   z-index: -1;
   border-radius: inherit;
-  background: color-mix(in srgb, var(--surface-app) 86%, transparent);
-  -webkit-backdrop-filter: blur(30px) saturate(1.8);
-  backdrop-filter: blur(30px) saturate(1.8);
+  background: color-mix(in srgb, var(--surface-app) 76%, transparent);
+  -webkit-backdrop-filter: blur(22px) saturate(1.8);
+  backdrop-filter: blur(22px) saturate(1.8);
   box-shadow:
     inset 0 0 0 1px var(--color-white-a10),
     inset 0 1px 0 rgba(255, 255, 255, 0.09),
@@ -539,7 +531,7 @@ video::-webkit-media-controls-start-playback-button {
 .hero {
   position: relative;
   isolation: isolate;
-  padding: clamp(88px, 10vh, 124px) 0 clamp(8px, 3vh, 40px);
+  padding: clamp(48px, 10vh, 124px) 0 clamp(8px, 3vh, 40px);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -571,6 +563,25 @@ video::-webkit-media-controls-start-playback-button {
   text-wrap: balance;
   max-width: 1100px;
 }
+/* The eyebrow names the product plainly (it is part of the h1, so search
+   engines read it as the page's heading too). */
+.hero-kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  margin: 0 auto clamp(18px, 2.6vh, 28px);
+  font-size: clamp(15px, 1.3vw, 19px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+  text-wrap: nowrap;
+}
+/* No chip, no lamp: plain text above the headline. */
+.hero-kicker::before {
+  display: none;
+}
 .hero-line {
   display: block;
 }
@@ -592,16 +603,16 @@ video::-webkit-media-controls-start-playback-button {
   letter-spacing: -0.01em;
   color: var(--text-reading);
   margin: 0 0 30px;
-  max-width: 42ch;
+  max-width: 44ch;
   text-wrap: balance;
 }
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 16px;
+  gap: 12px 24px;
   align-items: center;
   justify-content: center;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 .button {
   display: inline-flex;
@@ -623,18 +634,21 @@ video::-webkit-media-controls-start-playback-button {
   transform: translateY(-2px);
   box-shadow: inset 0 0 0 1px var(--color-white-a22), 0 10px 24px rgba(0, 0, 0, 0.35);
 }
-/* The quiet one beside it: a glass face, no fill of its own. */
-.button-secondary {
-  padding: 15px 26px;
-  background: var(--color-white-a07);
-  color: var(--text-primary);
-  font-weight: 600;
-  box-shadow: inset 0 0 0 1px var(--color-white-a22);
+.hero-gh-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 17px;
+  white-space: nowrap;
+  padding: 15px 4px;
+  text-decoration: underline;
+  text-decoration-color: var(--color-white-a22);
+  text-underline-offset: 5px;
+  text-decoration-thickness: 1px;
 }
-.button-secondary:hover {
+.hero-gh-link:hover {
   color: var(--text-primary);
-  background: var(--color-white-a10);
-  transform: translateY(-2px);
 }
 .hero-meta {
   font-size: 15px;
@@ -1128,6 +1142,41 @@ video::-webkit-media-controls-start-playback-button {
   }
 }
 
+/* ---------- Why ---------- */
+.why-section {
+  padding: clamp(72px, 11vh, 140px) 0;
+  scroll-margin-top: var(--header-h);
+}
+.why-section h2 {
+  font-size: clamp(17px, 1.5vw, 21px);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-tertiary);
+  margin: 0 0 clamp(20px, 3vh, 32px);
+}
+.why-lead {
+  font-size: clamp(28px, 4.4vw, 60px);
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  font-weight: 700;
+  margin: 0 0 clamp(28px, 4vh, 44px);
+  max-width: 1100px;
+  text-wrap: pretty;
+}
+/* site.js wraps each word; they light up in reading order as you scroll. */
+.why-lead .word {
+  transition: opacity 180ms linear;
+}
+.why-copy {
+  font-size: clamp(18px, 1.8vw, 23px);
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  color: var(--text-reading);
+  margin: 0;
+  max-width: 40ch;
+  text-wrap: pretty;
+}
+
 /* ---------- Big centred section headings (showcase / install) ---------- */
 .section-heading,
 .install-intro {
@@ -1168,6 +1217,129 @@ video::-webkit-media-controls-start-playback-button {
   max-width: 44ch;
 }
 
+/* ---------- Close-up showcase ---------- */
+.showcase-section {
+  /* A close-up's drop shadow, named so the phone's swipe row (a clip) can
+     keep room for it. */
+  --closeup-shadow-y: 20px;
+  --closeup-shadow-blur: 52px;
+  padding: clamp(56px, 8vh, 100px) 0 clamp(44px, 6vh, 68px);
+  scroll-margin-top: var(--header-h);
+}
+.closeup-figure {
+  margin: 0;
+  min-width: 0;
+  position: relative;
+}
+.closeup-figure--full {
+  margin-bottom: clamp(18px, 2.4vw, 30px);
+}
+/* A soft, blurred copy of each close-up glows behind it; site.js brings it up
+   as the close-up opens. Like the TV's glow, a tiny pre-blurred picture
+   (tools/render-site-glows.py) in a box grown by its baked soft edge: the
+   close-up's box is 10% from the top, 6% in from each side, 80% tall. */
+.closeup-glow {
+  --mx: 0.3793;
+  --my: 0.55;
+  position: absolute;
+  left: calc(6% - 88% * var(--mx));
+  top: calc(10% - 80% * var(--my));
+  width: calc(88% * (1 + 2 * var(--mx)));
+  height: calc(80% * (1 + 2 * var(--my)));
+  max-width: none;
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: 0;
+}
+.closeup-figure--full .closeup-glow {
+  --mx: 0.1833;
+  --my: 0.9167;
+}
+/* The glow comes up only once its picture is revealing (site.js's reveal
+   sets .is-revealed on the box), fading in with it and a little after, so it
+   never shows ahead of the picture as coloured fog. Hidden, it has no
+   transition, so a reset is never seen. Where nothing is revealed (no
+   IntersectionObserver), it is simply there. */
+.fx .closeup-glow {
+  opacity: 0;
+}
+.fx .closeup-figure:has(> .closeup-box.is-revealed) .closeup-glow,
+.fx:not(.reveal) .closeup-glow {
+  opacity: 0.5;
+  transition: opacity 900ms ease 200ms;
+}
+/* On its own layer while it is near the screen, so the fade is a compositing
+   change rather than a repaint. */
+.fx .closeup-figure.is-near .closeup-glow {
+  will-change: opacity;
+}
+.closeup-box {
+  position: relative;
+  z-index: 1;
+  aspect-ratio: var(--ar);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #08080a;
+  box-shadow: 0 var(--closeup-shadow-y) var(--closeup-shadow-blur) rgba(0, 0, 0, 0.5), inset 0 0 0 1px var(--card-sheen);
+}
+.closeup-box img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: cover;
+  object-position: var(--focus, 50% 50%);
+  display: block;
+}
+.closeup-box--glass {
+  --ar: 2640 / 480;
+}
+.closeup-box--tiles {
+  --ar: 2540 / 1540;
+}
+.closeup-box--player {
+  --ar: 1920 / 1164;
+}
+.closeup-figure figcaption {
+  position: relative;
+  z-index: 1;
+  margin: clamp(14px, 1.8vw, 20px) 0 0;
+}
+.closeup-figure--full figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px clamp(14px, 2vw, 26px);
+  align-items: baseline;
+}
+.closeup-figure figcaption h3 {
+  font-size: clamp(19px, 2vw, 24px);
+  font-weight: 700;
+  margin: 0 0 8px;
+  letter-spacing: -0.4px;
+}
+.closeup-figure--full figcaption h3 {
+  flex: 0 1 auto;
+  margin: 0;
+}
+.closeup-figure figcaption p {
+  font-size: clamp(16px, 1.35vw, 18px);
+  line-height: 1.5;
+  color: var(--text-reading);
+  margin: 0;
+  text-wrap: pretty;
+}
+.closeup-figure--full figcaption p {
+  flex: 1 1 300px;
+  max-width: 56ch;
+}
+.closeup-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(18px, 2.4vw, 30px);
+  align-items: start;
+}
+
 /* ---------- Pointer-lit cards ---------- */
 /* A soft light follows the pointer and the card leans toward it (site.js sets
    --mx/--my/--spot and the tilt). Mouse only; touch gets the plain card. */
@@ -1187,18 +1359,50 @@ video::-webkit-media-controls-start-playback-button {
   transition: opacity 400ms ease;
 }
 
+/* ---------- Built differently ---------- */
+.built-section {
+  padding: 0 0 clamp(56px, 8vh, 100px);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(18px, 2.4vw, 30px);
+}
+.built-card {
+  padding: clamp(28px, 3.4vw, 48px);
+  border-radius: 14px;
+  background: var(--color-white-a07);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.built-card .built-title {
+  font-size: clamp(24px, 2.6vw, 34px);
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+  margin: 0 0 16px;
+  text-wrap: balance;
+}
+.built-card p {
+  font-size: clamp(16px, 1.6vw, 17px);
+  line-height: 1.55;
+  color: var(--text-reading);
+  margin: 0;
+  max-width: 68ch;
+  text-wrap: pretty;
+}
+.built-card--offline p {
+  max-width: 62ch;
+}
+.built-card p.built-tech {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  margin: 12px 0 0;
+}
+
 /* ---------- Community quote cloud ---------- */
 .quote-section {
   padding: clamp(40px, 5.5vh, 60px) 0 clamp(44px, 6vh, 68px);
   box-shadow: inset 0 1px 0 var(--hairline);
-}
-/* The lead quote hands straight on to the features, which open with their own
-   padding: no second gap of its own under it. */
-.quote-section--lead {
-  padding-bottom: 0;
-}
-.quote-section--lead .quote-lead {
-  margin-bottom: 0;
 }
 .quote-section > .kicker,
 .press-section > .kicker {
@@ -1302,13 +1506,13 @@ video::-webkit-media-controls-start-playback-button {
 .quote-cloud > .quote-sm {
   margin-top: 12px;
 }
-.quote-cloud > .quote-sm:nth-child(4) {
+.quote-cloud > .quote-sm:nth-child(5) {
   margin-top: 30px;
   justify-self: center;
 }
 /* No sideways offset: with sources under them the short quotes are wide
    enough that pulling one into the gutter crowded its neighbour. */
-.quote-cloud > .quote-sm:nth-child(5) {
+.quote-cloud > .quote-sm:nth-child(6) {
   margin-top: 18px;
 }
 .quote-caption {
@@ -1419,8 +1623,7 @@ video::-webkit-media-controls-start-playback-button {
 
 /* ---------- Install ---------- */
 .install-section {
-  padding: clamp(64px, 10vh, 128px) 0 clamp(44px, 6vh, 68px);
-  box-shadow: inset 0 1px 0 var(--hairline);
+  padding: clamp(72px, 11vh, 140px) 0 clamp(44px, 6vh, 68px);
   scroll-margin-top: var(--header-h);
 }
 .install-grid {
@@ -1430,7 +1633,7 @@ video::-webkit-media-controls-start-playback-button {
   align-items: stretch;
 }
 .install-card {
-  border-radius: 16px;
+  border-radius: 14px;
   --spot-size: 420px;
   background: var(--color-white-a07);
   box-shadow: inset 0 0 0 1px var(--hairline);
@@ -1447,16 +1650,22 @@ video::-webkit-media-controls-start-playback-button {
   margin: 0;
 }
 .install-card h3 {
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 700;
   margin: 0;
-  letter-spacing: -0.02em;
 }
 .install-card p {
   font-size: 16px;
   line-height: 1.6;
   color: var(--text-reading);
   margin: 2px 0 0;
+  text-wrap: pretty;
+}
+.install-card .install-note {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-tertiary);
+  margin: 6px 0 0;
   text-wrap: pretty;
 }
 .install-card a {
@@ -1470,97 +1679,67 @@ video::-webkit-media-controls-start-playback-button {
   color: var(--text-primary);
   opacity: 0.75;
 }
-/* The renewal small print, in the Developer Mode card only: it does not
-   apply to a rooted TV. */
-.install-card .install-note {
-  font-size: 14px;
-  line-height: 1.55;
-  color: var(--text-tertiary);
-  margin: 0;
-}
-.install-card .install-note a {
-  display: inline;
-  min-height: 0;
-  margin: 0;
-  padding: 0;
-  font-size: inherit;
-  font-weight: 400;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  text-decoration: underline;
-  text-decoration-color: var(--color-white-a22);
-  text-underline-offset: 3px;
-}
-.install-card .install-note a:hover {
-  color: var(--text-primary);
-  opacity: 1;
-}
-/* The store review, set as large as a lede: news, not a footnote. */
-.store-note {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px 18px;
-  margin-top: clamp(20px, 3vh, 32px);
-}
-.store-pill {
-  display: inline-flex;
-  align-items: center;
-  min-height: 36px;
-  padding: 0 16px;
-  border-radius: 999px;
-  background: var(--color-white-a10);
-  box-shadow: inset 0 0 0 1px var(--color-white-a22);
+.install-footnote {
   font-size: 15px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.store-note p {
-  flex: 1 1 320px;
-  font-size: clamp(18px, 1.8vw, 22px);
-  line-height: 1.4;
-  letter-spacing: -0.01em;
-  color: var(--text-reading);
-  margin: 0;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  margin: clamp(18px, 2.4vh, 24px) 0 0;
+  max-width: 640px;
   text-wrap: pretty;
 }
-.store-note p a {
-  white-space: nowrap;
-  text-decoration: underline;
-  text-decoration-color: var(--color-white-a22);
-  text-underline-offset: 4px;
-}
-.store-note p a:hover {
-  color: var(--text-primary);
+.install-footnote span {
+  color: var(--text-secondary);
 }
 
-/* ---------- FAQ ---------- */
-.faq-section {
-  padding: clamp(40px, 5.5vh, 64px) 0;
+
+/* ---------- Notes ---------- */
+.notes-section {
+  padding: clamp(36px, 5vh, 56px) 0 clamp(40px, 5.5vh, 64px);
   box-shadow: inset 0 1px 0 var(--hairline);
-  scroll-margin-top: var(--header-h);
 }
-.faq-section > h2 {
-  font-size: clamp(22px, 2.4vw, 28px);
+.notes-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 32px;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: clamp(24px, 3.5vh, 34px);
+}
+.notes-heading h2 {
+  font-size: clamp(20px, 2.2vw, 26px);
   font-weight: 700;
-  margin: 0 0 clamp(22px, 3.2vh, 32px);
-  letter-spacing: -0.03em;
-  text-wrap: balance;
+  margin: 0;
+  letter-spacing: -0.4px;
 }
-.faq-grid {
+.notes-heading .notes-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  font-size: 15px;
+  color: var(--text-secondary);
+}
+.notes-heading .notes-links a {
+  color: var(--text-secondary);
+}
+.notes-heading .notes-links a:hover {
+  color: var(--text-primary);
+}
+.notes-heading .notes-links span {
+  color: var(--text-separator);
+}
+.notes-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
-  gap: clamp(24px, 3vw, 40px);
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: clamp(22px, 3vw, 40px);
 }
-.faq-grid h3 {
-  font-size: 17px;
-  line-height: 1.35;
+.notes-grid h3 {
+  font-size: 16px;
   font-weight: 700;
   margin: 0 0 8px;
-  text-wrap: balance;
 }
-.faq-grid p {
-  font-size: 16px;
+.notes-grid p {
+  font-size: 15px;
   line-height: 1.6;
   color: var(--text-reading);
   margin: 0;
@@ -1598,6 +1777,24 @@ video::-webkit-media-controls-start-playback-button {
 }
 .footer-links a:hover {
   color: var(--text-primary);
+}
+/* The ask: one line in the small-print voice under the links, with Ko-fi's
+   stock dark button (unmodified) beside it; on phones the button wraps
+   under the line. No box of its own, so it stays as quiet as the cup in
+   the header. */
+.footer-support {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 24px;
+  margin: clamp(28px, 3.5vh, 40px) 0 0;
+}
+.footer-support p {
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: 0;
+  text-wrap: pretty;
 }
 .footer-kofi {
   position: relative;
@@ -1989,6 +2186,10 @@ video::-webkit-media-controls-start-playback-button {
     padding: 11px 0;
     margin: -11px 0;
   }
+  .footer-support {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 
   .doc-body table {
     min-width: 420px;
@@ -2041,20 +2242,9 @@ video::-webkit-media-controls-start-playback-button {
     margin: 0;
   }
 
-  /* The two hero buttons stay side by side: stacked, each as wide as its own
-     label, they read as two unrelated widths. Type and padding scale down with
-     the window so the pair fits a 320px phone; 48px tall keeps the target. */
-  .hero-actions {
-    flex-wrap: nowrap;
-    gap: clamp(8px, 2.6vw, 12px);
+  .hero-gh-link {
+    padding: 10px 2px;
   }
-  .hero-actions .button {
-    flex: 0 1 auto;
-    min-height: 48px;
-    padding: 0 clamp(14px, 4.6vw, 22px);
-    font-size: clamp(14px, 4.2vw, 16px);
-  }
-
   /* The row does not fit a phone's column, and a break left to the browser
      ends a line with a separator. Phones get two lines, broken on purpose
      before the last item, which drops its separator. */
@@ -2081,6 +2271,96 @@ video::-webkit-media-controls-start-playback-button {
     --mx: 0.6875;
     --my: 1.1;
   }
+  .closeup-figure--full .closeup-glow {
+    --mx: 0.6471;
+    --my: 1;
+  }
+  .why-section {
+    padding-top: 40px;
+  }
+
+  /* Phones get their own taller glass crop (a <picture> source) so the bar
+     reads larger instead of shrinking the wide strip. */
+  .closeup-box--glass {
+    --ar: 1120 / 530;
+  }
+  /* The two smaller close-ups become one swipeable row, edge to edge, each
+     card the same shape; the next one peeks in from the right.
+     It scrolls sideways ONLY. `overflow-x: auto` alone makes overflow-y auto
+     too, and a card or caption still waiting to be revealed (translated
+     down, below) poked out of the row's bottom: the row became a 32px
+     vertical scroller, and a vertical swipe that started on it scrolled the
+     row instead of the page, once down and once back up. overflow-y is
+     hidden (`clip` cannot pair with `auto`), nothing inside may overflow
+     vertically, and a fling at either end stays in the row.
+     Being a clip, the row keeps room above the cards for their drop shadow
+     (it rises blur less offset above a card; below, the captions cover its
+     reach), taken back by its margin so nothing moves. That room overlaps
+     the caption above, which is positioned and so stays on top for taps.
+     Sideways the row already runs to the window's edges. */
+  .closeup-row {
+    --shadow-rise: calc(var(--closeup-shadow-blur) - var(--closeup-shadow-y));
+    display: flex;
+    gap: 14px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scroll-padding-left: var(--gutter);
+    margin: calc(-1 * var(--shadow-rise)) calc(-1 * var(--gutter)) 0;
+    padding: var(--shadow-rise) 0 8px var(--gutter);
+    align-items: start;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .closeup-row::-webkit-scrollbar {
+    display: none;
+  }
+  /* Safari ignores a scroller's end padding; a spacer keeps the last card's
+     right margin equal to the page's left one. */
+  .closeup-row::after {
+    content: "";
+    flex: 0 0 calc(var(--gutter) - 14px);
+    align-self: stretch;
+  }
+  .closeup-row .closeup-figure {
+    flex: 0 0 86%;
+    scroll-snap-align: start;
+  }
+  /* In the row, a glow keeps to its figure's own box: grown by its soft
+     edge, it would overflow the row, widening its sideways scroll and
+     giving it a vertical one (see above). */
+  .closeup-row .closeup-glow {
+    --mx: 0;
+    --my: 0;
+  }
+  /* In the row, reveals fade and settle in place rather than rising from
+     below, which would overflow the row (see above) and be cut off by it. */
+  .reveal .closeup-row [data-reveal] {
+    translate: none;
+  }
+  .closeup-box--tiles {
+    --ar: 1900 / 1540;
+    --focus: 52% 0;
+  }
+  /* The player close-up is wider than the card and its controls reach both
+     edges, so no crop keeps both buttons whole: it is shown entire, on the
+     picture's own black, and the card keeps the row's shape. */
+  .closeup-box--player {
+    --ar: 1900 / 1540;
+    background: #000;
+  }
+  .closeup-box--player img {
+    object-fit: contain;
+  }
+
+  .built-section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .built-card p.built-tech {
+    font-size: 13px;
+    text-wrap: balance;
+  }
 
   .quote-cloud {
     grid-template-columns: minmax(0, 1fr);
@@ -2091,20 +2371,16 @@ video::-webkit-media-controls-start-playback-button {
     grid-column: 1 / -1;
   }
   .quote-cloud > .quote-sm,
-  .quote-cloud > .quote-sm:nth-child(4),
-  .quote-cloud > .quote-sm:nth-child(5) {
+  .quote-cloud > .quote-sm:nth-child(5),
+  .quote-cloud > .quote-sm:nth-child(6) {
     margin-top: 0;
     justify-self: start;
   }
-  .quote-cloud > .quote-sm:nth-child(3) {
+  .quote-cloud > .quote-sm:nth-child(4) {
     margin-top: 10px;
   }
-  /* One column: every quote gets the same rule and indent, so the long and
-     short ones differ only in size and never read as two stylings. */
   .quote-sm {
     font-size: 16px;
-    padding: 2px 0 2px 16px;
-    box-shadow: inset 2px 0 0 var(--color-white-a22);
   }
   .quote-lead {
     margin-bottom: 18px;
@@ -2131,1306 +2407,5 @@ video::-webkit-media-controls-start-playback-button {
   .fx .feel-stage {
     width: min(100%, calc((100vh - 100px) * 16 / 9));
     width: min(100%, calc((100svh - 100px) * 16 / 9));
-  }
-}
-
-/* ---------- Hero version line ---------- */
-.hero-version {
-  font-size: 14px;
-  color: var(--text-tertiary);
-  margin: 10px 0 0;
-}
-.hero-version a {
-  color: var(--text-secondary);
-}
-.hero-version a:hover {
-  color: var(--text-primary);
-}
-/* On a touchscreen the small inline links get a 44px-tall target; the
-   negative margin keeps the line where it was. */
-@media (pointer: coarse) {
-  .hero-version a,
-  .install-note a {
-    display: inline-block;
-    padding-block: 13px;
-    margin-block: -13px;
-  }
-  .quote-lead-link {
-    padding-block: 13px;
-    margin-block: 1px -13px;
-  }
-  .footer-links a {
-    display: inline-block;
-    padding-block: 10px;
-  }
-}
-
-/* ---------- Features ---------- */
-.kicker {
-  font-size: 13px;
-  letter-spacing: 1.1px;
-  text-transform: uppercase;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  margin: 0;
-}
-.features-section {
-  padding: clamp(56px, 8vh, 100px) 0 clamp(44px, 6vh, 68px);
-  scroll-margin-top: var(--header-h);
-}
-.features-section .section-heading {
-  align-items: flex-start;
-  text-align: left;
-  margin-bottom: clamp(28px, 4.5vh, 52px);
-}
-/* Mixed sizes, not a uniform grid: on wide screens six columns, the cards
-   alternating two-thirds and one-third (fast + QR, libraries + codecs, player +
-   offline); between 760 and 999px two columns, the QR and libraries cards side
-   by side; on phones one column. */
-.feature-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: clamp(14px, 1.8vw, 22px);
-}
-@media (min-width: 760px) {
-  .feature-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .feature-card--fast,
-  .feature-card--wide,
-  .feature-card--half:last-child {
-    grid-column: 1 / -1;
-  }
-}
-@media (min-width: 1000px) {
-  .feature-grid {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
-  .feature-card--fast,
-  .feature-card--wide {
-    grid-column: span 4;
-  }
-  .feature-card--half,
-  .feature-card--half:last-child {
-    grid-column: span 2;
-  }
-}
-.feature-card {
-  --card-pad: clamp(22px, 2.6vw, 34px);
-  border-radius: 18px;
-  background: var(--color-white-a07);
-  box-shadow: inset 0 0 0 1px var(--hairline);
-  padding: var(--card-pad);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-}
-.feature-card h3 {
-  font-size: clamp(20px, 1.9vw, 24px);
-  line-height: 1.2;
-  font-weight: 700;
-  margin: 0;
-  letter-spacing: -0.025em;
-}
-.feature-card p {
-  font-size: 16px;
-  line-height: 1.6;
-  color: var(--text-reading);
-  margin: 0;
-  max-width: 62ch;
-  text-wrap: pretty;
-}
-.shots-kicker {
-  margin: clamp(64px, 10vh, 112px) 0 clamp(18px, 2.4vw, 26px);
-}
-/* Library and Search sit side by side, Search a little lower so the pair
-   does not read as a grid. (The player's capture is in the player card.) */
-.shot-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: clamp(34px, 5vw, 64px) clamp(18px, 2.4vw, 30px);
-  align-items: start;
-}
-@media (min-width: 760px) {
-  .shot-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .shot:nth-child(2) {
-    margin-top: clamp(40px, 6vw, 88px);
-  }
-}
-.shot {
-  margin: 0;
-  min-width: 0;
-}
-/* The frame opens from slightly smaller while its picture settles from
-   slightly larger, as it scrolls in (site.js, [data-unveil]). */
-.shot-frame {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  border-radius: 14px;
-  overflow: hidden;
-  background: var(--color-neutral-950);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45), inset 0 0 0 1px var(--card-sheen);
-}
-.shot-frame img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.shot figcaption {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: clamp(14px, 1.8vw, 20px) 0 0;
-}
-.shot h3 {
-  font-size: clamp(19px, 2vw, 24px);
-  font-weight: 700;
-  margin: 0;
-  letter-spacing: -0.025em;
-}
-.shot p {
-  font-size: 16px;
-  line-height: 1.55;
-  color: var(--text-reading);
-  margin: 0;
-  max-width: 56ch;
-  text-wrap: pretty;
-}
-
-/* ---------- Works with your Plex ---------- */
-.works-section {
-  padding: clamp(56px, 9vh, 112px) 0 clamp(48px, 7vh, 88px);
-  box-shadow: inset 0 1px 0 var(--hairline);
-  scroll-margin-top: var(--header-h);
-}
-.works-heading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 14px;
-  margin-bottom: clamp(36px, 6vh, 72px);
-}
-.works-heading h2 {
-  font-size: clamp(32px, 5vw, 64px);
-  line-height: 1.05;
-  font-weight: 700;
-  margin: 0;
-  letter-spacing: -0.04em;
-  text-wrap: balance;
-}
-.works-heading p {
-  font-size: clamp(17px, 1.6vw, 21px);
-  line-height: 1.5;
-  color: var(--text-reading);
-  margin: 0;
-  max-width: 44ch;
-  text-wrap: balance;
-}
-/* A justified block of type: each line runs the full width of the block,
-   its size set by --fit (in cqi, so the block keeps its shape from a phone to
-   a desktop). Within a line, key features are full size, bold and white,
-   everyday ones smaller and grey, the long tail smallest and dim. */
-.works-cloud {
-  container-type: inline-size;
-  max-width: 980px;
-  margin: 0 auto;
-}
-.works-row {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.3em;
-  white-space: nowrap;
-  font-size: calc(var(--fit) * 1cqi);
-  line-height: 1.12;
-}
-.works-row li {
-  font-size: 0.62em;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  color: var(--text-secondary);
-}
-.works-row li.is-key {
-  font-size: 1em;
-  font-weight: 700;
-  letter-spacing: -0.045em;
-  color: var(--text-primary);
-}
-.works-row li.is-minor {
-  font-size: 0.46em;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  color: var(--text-tertiary);
-}
-
-/* ---------- Approach ---------- */
-.approach-section {
-  padding: clamp(72px, 11vh, 140px) 0 clamp(48px, 7vh, 88px);
-  box-shadow: inset 0 1px 0 var(--hairline);
-  scroll-margin-top: var(--header-h);
-}
-/* The section's slogan, as large as the hero's headline; the first-person
-   sentence under it lights up word by word. */
-/* A chapter opener, so centred like the others (See how it feels, Works with
-   your Plex, the stack, Install), with its statement and lede under it. */
-.approach-section > h2,
-.approach-statement,
-.approach-lede {
-  text-align: center;
-}
-.approach-section > h2 {
-  font-size: clamp(44px, 7vw, 104px);
-  line-height: 1;
-  font-weight: 700;
-  margin: 0 auto clamp(28px, 4.5vh, 52px);
-  letter-spacing: -0.05em;
-  text-wrap: balance;
-}
-.approach-statement {
-  font-size: clamp(24px, 3.4vw, 46px);
-  line-height: 1.15;
-  font-weight: 700;
-  letter-spacing: -0.035em;
-  text-wrap: pretty;
-  max-width: 1100px;
-  margin: 0 auto clamp(28px, 4vh, 44px);
-}
-.approach-lede {
-  font-size: clamp(18px, 1.8vw, 23px);
-  line-height: 1.5;
-  letter-spacing: -0.01em;
-  color: var(--text-reading);
-  margin: 0 auto;
-  max-width: 46ch;
-  text-wrap: pretty;
-}
-
-/* ---------- The stack scene ---------- */
-/* One idea, one picture: a typical TV app's seven layers as isometric plates,
-   the picture on the app's plate and on the screen, glass with a fine
-   wireframe between. As the page scrolls, the three browser plates
-   (JavaScript, browser engine, compositor) slide away, the four that stay
-   close up into a tight stack, the label turns to "PlxNative", and a still
-   motion blur of the picture shows it dropping straight from the app to the
-   screen, over "60 fps". site.js drives it: --t (0..1, leaving) on each
-   browser plate, --f (its height, in plate widths) on every layer, --k (0..1,
-   the PlxNative end state) on .stack-sticky. Without it (no JS, reduced
-   motion) every value is the settled end state. Pinned for a stretch of
-   scroll, phones included: in the flow the whole scene had to play inside
-   under half a screen of scrolling, so a swipe raced through it and the frames
-   (four backdrop blurs moving with the page) were dropped on iPhone. Only
-   short landscape windows, where the stack cannot fit beside the title, play
-   in the page's flow as the stack passes up the screen.
-
-   Geometry, in --W (one plate's width): a plate is 16:9, laid flat by
-   scale(1, 0.5) rotate(-45deg) (an isometric tilt), which takes a box 1.1 W wide and 0.55 W
-   tall. The seven sit 0.22 W apart (0 to 1.32); the four that stay close up
-   under the app to 0.24 W apart (0 to 0.72), and "60 fps" takes the room below
-   them. Labels sit to the right of the plates; on a narrow phone --W shrinks
-   so they still fit. */
-.stack-scene {
-  margin: clamp(56px, 9vh, 112px) 0 0;
-  --label-w: clamp(150px, 18vw, 240px);
-  --W: min(clamp(160px, min(34vw, 30svh), 400px), calc((100vw - 2 * var(--gutter) - var(--label-w)) / 1.1));
-}
-.fx .stack-scene {
-  height: 220vh;
-  height: 220svh;
-}
-.stack-sticky {
-  --k: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: clamp(24px, 4vh, 48px);
-  text-align: center;
-}
-.fx .stack-sticky {
-  position: sticky;
-  top: var(--header-h);
-  height: calc(100vh - var(--header-h));
-  height: calc(100svh - var(--header-h));
-}
-@media (max-height: 559px) and (orientation: landscape) {
-  .fx .stack-scene {
-    height: auto;
-  }
-  .fx .stack-sticky {
-    position: static;
-    height: auto;
-  }
-}
-.stack-title {
-  margin: 0;
-  max-width: 22ch;
-  font-size: clamp(28px, 4.2vw, 56px);
-  line-height: 1.1;
-  font-weight: 700;
-  letter-spacing: -0.035em;
-  color: var(--text-tertiary);
-  text-wrap: balance;
-}
-.stack-title strong {
-  color: var(--text-primary);
-}
-.stack-stage {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: clamp(8px, 1.4vh, 16px);
-  text-align: left;
-}
-/* "A typical TV app" gives way to "PlxNative": one out, then the other in. */
-.stack-kicker,
-.layer-sub {
-  display: grid;
-  margin: 0;
-}
-.stack-kicker > span,
-.layer-sub > span {
-  grid-area: 1 / 1;
-}
-.stack-kicker {
-  font-size: 15px;
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  font-weight: 600;
-  color: var(--text-tertiary);
-}
-.stack-kicker .is-ours {
-  color: var(--text-primary);
-}
-.stack-kicker .is-typical,
-.layer-sub .is-typical {
-  opacity: max(0, 1 - var(--k) * 2);
-}
-.stack-kicker .is-ours,
-.layer-sub .is-ours {
-  opacity: max(0, var(--k) * 2 - 1);
-}
-.stack-layers {
-  position: relative;
-  width: calc(var(--W) * 1.1 + var(--label-w));
-  height: calc(var(--W) * 1.87);
-}
-.layer,
-.ghost {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: calc(var(--W) * 1.1);
-  height: calc(var(--W) * 0.55);
-  transform: translateY(calc(var(--W) * var(--f)));
-}
-.layer {
-  z-index: var(--z);
-}
-/* The browser plates leave sideways and fade. */
-.layer[data-cut] {
-  --t: 1;
-  opacity: calc(1 - var(--t));
-  transform: translate(calc(var(--W) * var(--t) * var(--cut-x, -0.45)), calc(var(--W) * var(--f)));
-}
-/* A phone has no room to the left of the stack: the plates leave by a shorter
-   way and are gone before they reach the edge. */
-@media (max-width: 759px) {
-  .layer[data-cut] {
-    --cut-x: -0.2;
-    opacity: max(0, 1 - var(--t) * 1.4);
-  }
-}
-/* Each plate is a pane of glass with an edge: a hard shadow, offset in the
-   plate's own plane, reads as its thickness once it is laid flat. The offset
-   is (-x, +x) because the tilt below turns that into straight down on screen,
-   so the edge shows under both lower sides, as a slab's would; (+x, +x) came
-   out as a band along the right. (One hard shadow: Safari softens a stack of
-   them into a halo.) A
-   soft band of light crosses every pane as the scene scrolls (--s, 0..1),
-   the way light runs over a phone turning in a product film. */
-.plate {
-  --edge: -4px 4px 0 rgba(255, 255, 255, 0.14);
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: var(--W);
-  height: calc(var(--W) * 0.5625);
-  margin: calc(var(--W) * -0.28125) 0 0 calc(var(--W) * -0.5);
-  border-radius: calc(var(--W) * 0.035);
-  overflow: hidden;
-  /* rotateX(60deg) rotateZ(-45deg) without perspective, as a flat 2D
-     transform: WebKit lets a backdrop blur on a 3D-transformed element bleed
-     past its outline as a halo, and draws the 2D one cleanly. */
-  transform: scale(1, 0.5) rotate(-45deg);
-}
-.plate::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  background: linear-gradient(115deg, transparent 38%, rgba(255, 255, 255, 0.16) 50%, transparent 62%) no-repeat;
-  background-size: 300% 100%;
-  background-position: calc(110% - var(--s, 1) * 120%) 0;
-}
-.ghost .plate::after {
-  display: none;
-}
-.plate--picture {
-  background: var(--color-neutral-950);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4), var(--edge), -18px 18px 40px rgba(0, 0, 0, 0.45);
-}
-.plate--picture picture,
-.plate--picture img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-/* While the stack is "a typical TV app" its picture is a plain wireframe of
-   a TV app, so PlxNative is never drawn on a browser; it gives way to
-   PlxNative's own picture as the label turns (an opacity, so the compositor
-   does it). Drawn here rather than shipped as an image: a nav dot and pill, a
-   title, two lines, a button and a row of posters, placed in percent of a
-   960x540 screen. */
-.plate--picture .plate-generic {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, #3a404e, #1e2129);
-  opacity: calc(1 - var(--k));
-}
-.plate-generic i {
-  position: absolute;
-  border-radius: calc(var(--W) * 0.012);
-  background: #545b6c;
-}
-.plate-generic i:nth-child(1) { left: 3.75%; top: 4.44%; width: 2.92%; height: 5.19%; border-radius: 50%; }
-.plate-generic i:nth-child(2) { left: 39.6%; top: 4.44%; width: 20.8%; height: 5.19%; border-radius: 999px; }
-.plate-generic i:nth-child(3) { left: 4.17%; top: 27.8%; width: 31.25%; height: 7.4%; background: #6c7488; }
-.plate-generic i:nth-child(4) { left: 4.17%; top: 38.1%; width: 39.6%; height: 2.2%; }
-.plate-generic i:nth-child(5) { left: 4.17%; top: 42.2%; width: 35.4%; height: 2.2%; }
-.plate-generic i:nth-child(6) { left: 4.17%; top: 48.5%; width: 11.5%; height: 5.6%; border-radius: 999px; background: #969eb0; }
-.plate-generic i:nth-child(7) {
-  left: 4.17%;
-  right: 0;
-  top: 63%;
-  height: 29.6%;
-  border-radius: 0;
-  background: linear-gradient(90deg, #464c5c 0 86.96%, transparent 0) 0 0 / 13.04% 100% repeat-x;
-}
-.plate--glass {
-  background: rgba(255, 255, 255, 0.07);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32), var(--edge), -18px 18px 40px rgba(0, 0, 0, 0.32);
-}
-/* The wireframes: fine white outlines only. */
-.plate--glass svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-.plate--glass path {
-  fill: none;
-  stroke: rgba(255, 255, 255, 0.55);
-  stroke-width: 0.7;
-  stroke-linejoin: round;
-}
-.plate--code {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 8%;
-  padding: 0 12%;
-}
-.plate--code i {
-  display: block;
-  height: 4%;
-  border-radius: 99px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
-}
-.plate--page {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: 22% 1fr;
-  gap: 9%;
-  padding: 9% 10%;
-}
-.plate--page i,
-.plate--panes i {
-  display: block;
-  border-radius: 6px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
-}
-.plate--page i:first-child {
-  grid-column: 1 / -1;
-}
-.plate--page i:last-child {
-  grid-column: span 2;
-}
-.plate--panes i {
-  position: absolute;
-  width: 46%;
-  height: 48%;
-}
-.plate--panes i:nth-child(1) { left: 10%; top: 14%; }
-.plate--panes i:nth-child(2) { left: 30%; top: 30%; }
-.plate--panes i:nth-child(3) { left: 50%; top: 44%; width: 38%; height: 40%; }
-.plate--grid {
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.22) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.22) 1px, transparent 1px);
-  background-size: 6.25% 11.1%;
-}
-/* The picture's motion blur, from the app plate down to the screen: ten
-   copies, fainter near the app, blurred together. It comes in once the stack
-   has mostly closed up. */
-.stack-trail {
-  position: absolute;
-  inset: 0;
-  z-index: 8;
-  pointer-events: none;
-  filter: blur(2px);
-  opacity: max(0, var(--k) * 2 - 1);
-}
-.ghost {
-  opacity: var(--o);
-}
-.ghost .plate {
-  box-shadow: none;
-}
-/* Quiet labels, joined to their plate by a hairline. */
-.layer-label {
-  position: absolute;
-  left: calc(100% + 6px);
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding-left: clamp(30px, 3.4vw, 46px);
-  font-size: clamp(15px, 1.6vw, 22px);
-  line-height: 1.15;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.layer-label::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.6em;
-  width: clamp(16px, 2vw, 32px);
-  height: 1px;
-  background: var(--color-white-a22);
-}
-.layer[data-cut] .layer-label {
-  color: var(--text-secondary);
-  /* The plate slides away; its label stays on the shared column and only
-     fades with it, so the labels never break ranks mid-scene. */
-  transform: translate(calc(var(--W) * var(--t, 1) * var(--cut-x, -0.45) * -1), -50%);
-}
-/* While the typical app is still one closed block (--open below 1), only the
-   app's label shows; the others come in as it opens, never on top of each
-   other. */
-.layer:not([data-y0="0"]) .layer-label {
-  opacity: max(0, var(--open, 1) * 2 - 1);
-}
-.layer-sub {
-  font-size: clamp(13px, 1.1vw, 15px);
-  font-weight: 400;
-  color: var(--text-secondary);
-}
-/* 60 fps: centred under the settled stack, in the room the browser plates
-   leave, and in with it. */
-.stack-stat {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: calc(var(--W) * 1.36);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  opacity: var(--k);
-}
-.stack-fps {
-  margin: 0;
-  font-size: clamp(56px, 7vw, 104px);
-  line-height: 0.95;
-  font-weight: 700;
-  letter-spacing: -0.055em;
-}
-/* The number counts up to 60 as the stack closes (site.js), in a warm
-   white taken from the picture; tabular figures, so it never jitters. */
-.stack-fps-n {
-  font-variant-numeric: tabular-nums;
-  background: linear-gradient(180deg, #ffffff 30%, #ffd9a6);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.stack-fps-u {
-  margin-left: 0.12em;
-  font-size: 0.38em;
-  letter-spacing: -0.01em;
-  color: var(--text-tertiary);
-}
-.stack-caption {
-  margin: 0;
-  font-size: clamp(15px, 1.4vw, 19px);
-  color: var(--text-secondary);
-  /* Only once the count has landed on 60: "21 fps on a 2019 LG TV" on the way
-     up would read as a claim. */
-  opacity: max(0, (var(--k) - 0.96) * 25);
-}
-
-/* ---------- Community: support, press glosses ---------- */
-/* Support closes the page, after the FAQ, in a lit card of its own. */
-.support-section {
-  padding-bottom: clamp(40px, 6vh, 72px);
-}
-.community-support {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px 28px;
-  margin: clamp(36px, 5vh, 56px) 0 0;
-  padding: clamp(18px, 2.4vw, 24px) clamp(20px, 2.6vw, 28px);
-  border-radius: 18px;
-  background: var(--color-white-a07);
-  box-shadow: inset 0 0 0 1px var(--hairline);
-}
-.community-support p {
-  position: relative;
-  font-size: 16px;
-  line-height: 1.55;
-  color: var(--text-reading);
-  margin: 0;
-  max-width: 46ch;
-  text-wrap: pretty;
-}
-.press-gloss {
-  display: block;
-  margin-top: 4px;
-  font-size: 14px;
-  line-height: 1.5;
-  font-weight: 400;
-  letter-spacing: 0;
-  color: var(--text-tertiary);
-}
-.press-item {
-  grid-template-areas: "meta head date" "meta gloss date";
-}
-.press-item .press-meta { grid-area: meta; }
-.press-item .press-headline { grid-area: head; }
-.press-item .press-gloss { grid-area: gloss; margin-top: 0; }
-.press-item .press-date { grid-area: date; }
-.press-stage-gloss {
-  font-size: 15px;
-  line-height: 1.5;
-  color: var(--text-tertiary);
-  margin: 0;
-}
-.press-stage-gloss[hidden] {
-  display: none;
-}
-@media (max-width: 759px) {
-  .press-item {
-    grid-template-areas: "meta date" "head head" "gloss gloss";
-  }
-}
-
-/* ---------- Install and notes links ---------- */
-.install-card a,
-.notes-split a {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-.notes-split a:hover {
-  opacity: 0.75;
-}
-/* ---------- Install: reassurance chips ---------- */
-.install-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 12px;
-  justify-content: center;
-  margin-top: 8px;
-}
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 40px;
-  padding: 0 16px;
-  border-radius: 999px;
-  background: var(--color-white-a07);
-  box-shadow: inset 0 0 0 1px var(--hairline);
-  font-size: 15px;
-}
-.chip svg {
-  flex: none;
-  display: block;
-}
-/* ---------- Compatibility and privacy (the end of Install) ---------- */
-/* Both are short and both are wanted before installing, so they close the
-   Install section under a hairline rather than taking a section each. */
-.notes-split {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
-  gap: clamp(32px, 4.5vw, 72px);
-  align-items: start;
-  margin-top: clamp(44px, 6.5vh, 80px);
-  padding-top: clamp(32px, 4.5vh, 52px);
-  box-shadow: inset 0 1px 0 var(--hairline);
-}
-.notes-split h2 {
-  font-size: clamp(22px, 2.4vw, 28px);
-  line-height: 1.1;
-  font-weight: 700;
-  margin: 0 0 clamp(18px, 2.6vh, 26px);
-  letter-spacing: -0.03em;
-  text-wrap: balance;
-}
-.notes-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-.notes-split h3 {
-  font-size: 16px;
-  font-weight: 700;
-  margin: 0 0 6px;
-}
-.notes-split p {
-  font-size: 16px;
-  line-height: 1.6;
-  color: var(--text-reading);
-  margin: 0 0 12px;
-  text-wrap: pretty;
-}
-.notes-stack p {
-  margin: 0;
-}
-.notes-split .notes-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 22px;
-  margin-top: 10px;
-}
-.privacy-card {
-  padding: clamp(22px, 2.6vw, 32px);
-  border-radius: 16px;
-  background: var(--color-white-a07);
-  box-shadow: inset 0 0 0 1px var(--hairline);
-}
-.privacy-card h2 {
-  margin-bottom: clamp(14px, 2vh, 20px);
-}
-.notes-split .privacy-lead {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-.install-card a {
-  align-self: flex-start;
-}
-
-/* ---------- Features: the look, then the cards ---------- */
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
-}
-.look-lead {
-  font-size: clamp(22px, 2.6vw, 34px);
-  line-height: 1.25;
-  letter-spacing: -0.025em;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 clamp(28px, 4.5vh, 48px);
-  max-width: 34ch;
-  text-wrap: pretty;
-}
-/* The glass close-up opens the feature grid as a card across its full
-   width. */
-.look-panel {
-  grid-column: 1 / -1;
-  margin: 0;
-  min-width: 0;
-  border-radius: 18px;
-  overflow: hidden;
-  background: var(--color-white-a07);
-  box-shadow: inset 0 0 0 1px var(--hairline);
-}
-.look-panel picture,
-.look-panel img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-.look-panel figcaption {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  padding: clamp(20px, 2.6vw, 36px);
-}
-.look-icon {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
-  background: var(--color-white-a07);
-  box-shadow: inset 0 0 0 1px var(--color-white-a22);
-  color: var(--text-primary);
-}
-.look-panel h3 {
-  font-size: clamp(20px, 2vw, 26px);
-  line-height: 1.2;
-  font-weight: 700;
-  margin: 0 0 8px;
-  letter-spacing: -0.025em;
-}
-.look-panel p {
-  font-size: clamp(16px, 1.4vw, 18px);
-  line-height: 1.55;
-  color: var(--text-reading);
-  margin: 0;
-  max-width: 40ch;
-  text-wrap: pretty;
-}
-.look-panel--glass picture {
-  background: #2f2523;
-}
-.look-panel figcaption {
-  box-shadow: inset 0 1px 0 var(--hairline);
-}
-/* On phones the glass panel shows the middle of the wide render, cropped to
-   1440:400, so the whole bar (Home, Movies, TV Shows, search) stays in view. */
-@media (max-width: 759px) {
-  .look-panel--glass picture {
-    aspect-ratio: 1440 / 400;
-    overflow: hidden;
-  }
-  .look-panel--glass img {
-    width: 152.78%;
-    max-width: none;
-    margin-left: -26.39%;
-  }
-}
-/* The fast card is the numeral itself, as large as the card allows, with its
-   title and line beside it (under it, where they do not fit). */
-.feature-card--fast {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  align-content: center;
-  /* The numeral and its copy sit together in the middle of a wide card,
-     never in its left half. */
-  justify-content: center;
-  gap: 20px clamp(32px, 5vw, 80px);
-}
-.feature-card .feature-stat {
-  position: relative;
-  margin: 0;
-  font-size: clamp(120px, 17vw, 250px);
-  line-height: 0.8;
-  font-weight: 700;
-  letter-spacing: -0.07em;
-  color: var(--text-primary);
-}
-.feature-card .feature-stat span {
-  margin-left: 0.16em;
-  font-size: 0.24em;
-  letter-spacing: -0.01em;
-  color: var(--text-tertiary);
-}
-.feature-fast-copy {
-  position: relative;
-  flex: 0 1 34ch;
-  min-width: min(260px, 100%);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.feature-card--fast h3 {
-  font-size: clamp(22px, 2.2vw, 30px);
-  line-height: 1.15;
-  letter-spacing: -0.03em;
-}
-.feature-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-/* Codec and player chips: the always-there ones filled and bold, the ones
-   that depend on the TV or the server outlined in grey. */
-.feature-chips span {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 14px;
-  border-radius: 999px;
-  background: var(--color-white-a10);
-  box-shadow: inset 0 0 0 1px var(--color-white-a22);
-  font-size: clamp(14px, 1.3vw, 16px);
-  font-weight: 700;
-  color: var(--text-primary);
-}
-.feature-chips .is-opt {
-  background: none;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-.feature-chips svg {
-  flex: none;
-  display: block;
-}
-/* Each feature card opens on a quiet stage: one neutral panel with a single
-   piece of art centred on it. When the card comes in (site.js adds
-   .is-revealed) the art makes one small move and stops. Its resting state is
-   the end of that move, so without JS or under reduced motion it just shows. */
-.feature-stage {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: clamp(196px, 48vw, 228px);
-  margin-bottom: 10px;
-  padding: 24px 16px;
-  border-radius: 14px;
-  overflow: hidden;
-  background: rgba(0, 0, 0, 0.16);
-  box-shadow: inset 0 0 0 1px var(--hairline);
-}
-
-/* Sign in: thin brackets settle around the code. */
-.feature-qr {
-  position: relative;
-  padding: 13px;
-  border-radius: 14px;
-  background: var(--color-cool-0);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
-}
-.feature-qr svg {
-  display: block;
-  width: clamp(100px, 27vw, 116px);
-  height: auto;
-}
-.qr-frame {
-  position: absolute;
-  inset: -12px;
-  pointer-events: none;
-}
-.qr-frame i {
-  position: absolute;
-  width: 18px;
-  height: 18px;
-  border: 0 solid rgba(255, 255, 255, 0.7);
-}
-.qr-frame i:nth-child(1) {
-  top: 0;
-  left: 0;
-  border-width: 2px 0 0 2px;
-  border-top-left-radius: 8px;
-}
-.qr-frame i:nth-child(2) {
-  top: 0;
-  right: 0;
-  border-width: 2px 2px 0 0;
-  border-top-right-radius: 8px;
-}
-.qr-frame i:nth-child(3) {
-  bottom: 0;
-  left: 0;
-  border-width: 0 0 2px 2px;
-  border-bottom-left-radius: 8px;
-}
-.qr-frame i:nth-child(4) {
-  bottom: 0;
-  right: 0;
-  border-width: 0 2px 2px 0;
-  border-bottom-right-radius: 8px;
-}
-
-/* Libraries: three posters from the demo library fan out. */
-.feature-fan {
-  position: relative;
-  width: 166px;
-  height: 135px;
-}
-.feature-fan i {
-  position: absolute;
-  top: 7px;
-  left: 43px;
-  width: 80px;
-  height: 121px;
-  border-radius: 12px;
-  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.2);
-}
-.feature-fan i:nth-child(1) {
-  background: #2b3452 url(media/closeup-fan-caligari.jpg) center / cover;
-  translate: -43px 6px;
-  rotate: -10deg;
-}
-.feature-fan i:nth-child(2) {
-  background: #47321f url(media/closeup-fan-cosmos.jpg) center / cover;
-  translate: 0 -7px;
-  rotate: -1deg;
-}
-.feature-fan i:nth-child(3) {
-  background: #1f3d3c url(media/closeup-fan-elephants.jpg) center / cover;
-  translate: 43px 6px;
-  rotate: 9deg;
-}
-
-/* Decoder and offline: a few line icons on matching tiles, joined by
-   hairlines that draw in. */
-.net-row {
-  display: flex;
-  align-items: flex-start;
-  width: min(100%, 300px);
-}
-.net-node {
-  /* Every node as wide as the widest label, so the icons sit evenly about the
-     middle one whatever their labels ("HEVC 10-bit" beside "4K HDR"). */
-  flex: 0 0 66px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 8px;
-  color: var(--text-primary);
-}
-.net-node svg,
-.net-cloud svg {
-  display: block;
-}
-.net-node svg {
-  box-sizing: content-box;
-  padding: 14px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.07);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
-}
-.net-node--chip svg {
-  background: rgba(255, 255, 255, 0.13);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
-}
-.net-node b,
-.net-cloud b {
-  /* One line, centred on its icon even where it is wider than the node. */
-  white-space: nowrap;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-.net-link {
-  flex: 1;
-  height: 1px;
-  margin: 26px 10px 0;
-  background: rgba(255, 255, 255, 0.4);
-}
-.feature-stage--decode .net-row {
-  width: min(100%, 320px);
-}
-.feature-stage--decode .net-link {
-  margin-inline: 8px;
-}
-.feature-stage--net {
-  gap: 14px;
-}
-/* The home network link is the one coloured line: it is the point. */
-.feature-stage--net .net-link {
-  height: 2px;
-  border-radius: 1px;
-  background: #30d158;
-  box-shadow: 0 0 10px rgba(48, 209, 88, 0.45);
-}
-.net-cloud {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  color: var(--text-tertiary);
-  opacity: 0.55;
-}
-.net-cloud b {
-  color: inherit;
-}
-.net-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-.net-label::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #30d158;
-}
-
-/* Player: the real capture of the player runs across the top of its card,
-   edge to edge like the glass close-up, at its own 16:9, with the chips and
-   the text under it. */
-.feature-stage--shot {
-  min-height: 0;
-  /* The capture's top 12% is the film's own black letterbox; the frame is cut
-     to start under it (the image sits on the bottom edge). */
-  aspect-ratio: 160 / 79;
-  margin: calc(-1 * var(--card-pad)) calc(-1 * var(--card-pad)) 14px;
-  padding: 0;
-  border-radius: 18px 18px 0 0;
-  background: #060606;
-  box-shadow: inset 0 -1px 0 var(--hairline);
-}
-.feature-stage--shot img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: 50% 100%;
-}
-/* A one-third card beside a taller card lets its stage take the extra
-   height, so the art stays centred instead of leaving a gap under the text. */
-.feature-card--half .feature-stage {
-  flex: 1 0 auto;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .reveal .feature-card .qr-frame {
-    opacity: 0;
-    scale: 1.18;
-  }
-  .reveal .feature-card .feature-fan i {
-    translate: 0 0;
-    rotate: 0deg;
-  }
-  .reveal .feature-card .net-link {
-    scale: 0 1;
-  }
-  .reveal .feature-card.is-revealed .qr-frame {
-    opacity: 1;
-    scale: none;
-    transition:
-      opacity 500ms ease-out calc(var(--reveal-delay, 0ms) + 300ms),
-      scale 900ms cubic-bezier(0.19, 1, 0.22, 1) calc(var(--reveal-delay, 0ms) + 300ms);
-  }
-  .reveal .feature-card.is-revealed .feature-fan i:nth-child(1) {
-    translate: -43px 6px;
-    rotate: -10deg;
-  }
-  .reveal .feature-card.is-revealed .feature-fan i:nth-child(2) {
-    translate: 0 -7px;
-    rotate: -1deg;
-  }
-  .reveal .feature-card.is-revealed .feature-fan i:nth-child(3) {
-    translate: 43px 6px;
-    rotate: 9deg;
-  }
-  .reveal .feature-card.is-revealed .feature-fan i {
-    transition:
-      translate 1000ms cubic-bezier(0.19, 1, 0.22, 1) calc(var(--reveal-delay, 0ms) + 250ms),
-      rotate 1000ms cubic-bezier(0.19, 1, 0.22, 1) calc(var(--reveal-delay, 0ms) + 250ms);
-  }
-  .reveal .feature-card.is-revealed .net-link {
-    scale: none;
-    transition: scale 800ms cubic-bezier(0.65, 0, 0.35, 1) calc(var(--reveal-delay, 0ms) + 300ms);
-  }
-}
-
-/* From tablets up, a two-thirds card runs its chips across the top and puts
-   the stage beside the text below them; so does the offline card on a
-   tablet, where it alone spans both columns. */
-@media (min-width: 760px) {
-  .feature-card--wide {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-rows: auto 1fr auto auto 1fr;
-    gap: 0 clamp(24px, 3vw, 40px);
-  }
-  .feature-card--wide .feature-chips {
-    grid-column: 1 / -1;
-    grid-row: 1;
-    margin-bottom: 22px;
-  }
-  .feature-card--wide .feature-stage {
-    grid-column: 2;
-    grid-row: 2 / 6;
-    min-height: 0;
-    margin: 0;
-  }
-  .feature-card--wide.feature-card--shot {
-    display: flex;
-  }
-  .feature-card--wide.feature-card--shot .feature-stage--shot {
-    margin: calc(-1 * var(--card-pad)) calc(-1 * var(--card-pad)) 14px;
-  }
-  .feature-card--wide h3 {
-    grid-column: 1;
-    grid-row: 3;
-    margin-bottom: 12px;
-  }
-  .feature-card--wide p {
-    grid-column: 1;
-    grid-row: 4;
-  }
-}
-/* Two thirds of a 1000-1199px window is too narrow for the decoder's chain
-   beside its text: the chain goes back on top, as on a phone. */
-@media (min-width: 1000px) and (max-width: 1199px) {
-  .feature-card--decode {
-    display: flex;
-  }
-  .feature-card--decode .feature-stage {
-    min-height: 168px;
-    margin-bottom: 10px;
-  }
-}
-@media (min-width: 760px) and (max-width: 999px) {
-  .feature-card--half:last-child {
-    display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
-    grid-template-rows: 1fr auto auto 1fr;
-    gap: 0 clamp(24px, 4vw, 40px);
-  }
-  .feature-card--half:last-child .feature-stage {
-    grid-row: 1 / 5;
-    margin: 0;
-  }
-  .feature-card--half:last-child h3 {
-    grid-row: 2;
-    margin-bottom: 12px;
-  }
-  .feature-card--half:last-child p {
-    grid-row: 3;
   }
 }

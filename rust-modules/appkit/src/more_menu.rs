@@ -266,6 +266,8 @@ fn source_form(streams: &[(usize, String, String, Option<u32>)]) -> MoreForm {
         });
     let mut form = Form::new().section(addons);
     if streams.is_empty() {
+        // placeholder-exempt: an inline busy NOTE on one addon page's list, not a content stand-in on
+        // a screen the storyboard reaches; the source list's own wait is counted where it draws.
         form = form.section(FormSection::new("").note(plx_platform::i18n::msg::browse_streams_loading()));
     }
     form

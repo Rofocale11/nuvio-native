@@ -1012,8 +1012,26 @@ owning_checkout() {
   [ -n "$_best" ] || return 1
   printf '%s\n' "$_best"
 }
+# A builder's working directory. `/proc/<pid>/cwd` on Linux is one symlink read and needs no
+# package installed (this repo's gate machines include hosts with no `lsof` at all, where the
+# whole liveness check used to be unavailable and every reclaim refused); macOS has no /proc
+# and ships `lsof`, so it is the fallback there. An empty answer is "could not read it", the
+# ignorance the caller still fails closed on.
+builder_cwd() {
+  if [ -d /proc/self ]; then
+    readlink "/proc/$1/cwd" 2>/dev/null
+  else
+    lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
+  fi
+}
+# Can this host answer the question at all? Only when it cannot does the reclaim fall back to
+# the old blanket refusal.
+cwd_readable() {
+  [ -d /proc/self ] && return 0
+  command -v lsof >/dev/null 2>&1
+}
 live_checkouts() {
-  command -v lsof >/dev/null 2>&1 || return 1
+  cwd_readable || return 1
   # OUR OWN ANCESTORS ARE NOT BUILDERS. The documented way to run this is `make disk`, which means
   # a `make` whose working directory IS the checkout being cleaned — so a naive cwd sweep protects
   # that checkout from the command the user typed to clean it, and the tree in front of them is the
@@ -1046,7 +1064,7 @@ live_checkouts() {
   # working directory cannot be read is exactly the ignorance this function fails closed on. An
   # empty answer alone cannot tell those apart — asking `kill -0` can.
   for p in $_pids; do
-    _c=$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p') || true
+    _c=$(builder_cwd "$p") || true
     if [ -n "$_c" ]; then
       printf '%s\n' "$_c" >> "$_cwds"
     elif kill -0 "$p" 2>/dev/null; then

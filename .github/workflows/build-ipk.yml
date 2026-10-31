@@ -25,6 +25,10 @@ jobs:
     # linux-aarch64 toolchain, so `make setup-env` works as designed.
     # Free on public repos. Private repos need a paid plan for ARM64 runners.
     runs-on: ubuntu-24.04-arm
+    # FORK: 60, the same bound as ci.yml's cross-build job, which is the closest measured
+    # ARM build+package job (upstream's release build measured up to 11.6 min before LTO and the
+    # FFmpeg rebuild); unset means GitHub's 360. The apt refresh below has its own 2-minute cap.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -32,14 +36,14 @@ jobs:
 
       - name: Install system prerequisites
         run: |
-          sudo apt-get update
+          timeout 120 sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential python3 curl tar xz-utils bzip2 \
             libssl-dev pkg-config file
 
       - name: Install Rust nightly + rust-src
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          curl --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 300 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --profile minimal
           source "$HOME/.cargo/env"
           rustup toolchain install nightly --component rust-src

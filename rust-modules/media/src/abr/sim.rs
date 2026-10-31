@@ -384,7 +384,7 @@ impl Calibration {
     /// the start of a pin, so a median over the whole run measures the ramp as much as the ceiling.
     pub(super) fn census_buf_ms(rung_request_kbps: u32) -> Option<i64> {
         Some(match rung_request_kbps {
-            320 => 88_335,
+            320 => 88_293,
             720 => 67_543,
             2_000 => 37_210,
             4_000 => 18_418,
@@ -397,7 +397,7 @@ impl Calibration {
 
     pub(super) fn point(rung_request_kbps: u32) -> Option<OperatingPoint> {
         let (ts, audio, overhead, declared, width, height) = match rung_request_kbps {
-            320 => (376u32, 98u32, 19i64, 320u32, 426u16, 240u16),
+            320 => (376u32, 98u32, 21i64, 320u32, 426u16, 240u16),
             720 => (806, 131, 24, 720, 854, 480),
             2_000 => (2_221, 159, 51, 2_000, 1_280, 720),
             4_000 => (4_386, 159, 84, 4_000, 1_280, 720),

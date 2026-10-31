@@ -6588,16 +6588,17 @@ impl PersonOwnerGateFixture {
         "blocking.txt": 2,  # frame-thread allow_blocking sites, 2026-10-06; only shrinks
         "dump.txt": 9,  # files that may name the frame-dump switch (ci/check-dump-consumers.py); a new file fails the gate
         "layers.txt": 0,
+        "language-lists.txt": 5,  # files allowed a pinned per-language table (ci/check-language-lists.py); a reviewed set, not a migration list
         "libm.txt": 6,  # widgets.rs's existing test helper moved to widgets_test_support.rs
         "mutators.txt": 0,
         "nav.txt": 0,
         "sibling-migration.txt": 0,
         "statics-migration.txt": 0,
-        "statics.txt": 5,  # the two data/search/recents.rs persistence-seam statics + the three gfx.rs GL-context heap statics (ci/check-statics-heap.py); every ui/ render cache, the elide memo, the key memo and the text-input queue are thread_local!
+        "statics.txt": 17,  # the two data/search/recents.rs persistence-seam statics, the three gfx.rs GL-context heap statics, plus THIS fork's render caches: the merge took upstream's list, whose ui had moved every render cache to thread_local!, while the fork kept its single-threaded ui render caches (8) and its text/poster/input memos (4), each named with its owning thread
         "store-seams.txt": 0,
         "threads.txt": 0,
         "ticks.txt": 2,
-        "wall.txt": 3,
+        "wall.txt": 4,  # the fork's P2P `node` readiness gate reads the wall clock; the child's startup is not logical app state
     }
 
     def test_allowlist_counts_match_the_pinned_table(self):
@@ -7395,15 +7396,11 @@ class FpsMock(unittest.TestCase):
         """A scene's `walk.fingerprint_region` / `walk.reach.region` is a promise that the page prints
         that `focus route=... region=...` word. One page printing a different word from the one its
         scene waits for made a walk fail on every run with nothing saying why, so the words a page
-        can print are read from its own `probe_viewport`. This fork's Library page mounts its shelves
-        and its grid on the same page and classifies both (`region=shelf` on a card in a shelf,
-        `region=grid` in the grid); the Recommended page classifies only shelves."""
+        can print are read from its own `probe_viewport`. This fork's Library is grid-only
+        (`6b05b404`), so `grid` is the word its walks wait on; the upstream-only Recommended page
+        came out with the tier-C leftovers, so there is no second page to grade against."""
         library = self._regions_printed_by("rust-modules", "screens", "src", "library", "mod.rs")
-        recommended = self._regions_printed_by("rust-modules", "screens", "src", "library", "recommended.rs")
-        self.assertIn("grid", library)
-        self.assertIn("shelf", library, "the Library page mounts shelves")
-        self.assertIn("shelf", recommended)
-        self.assertNotIn("grid", recommended, "the Recommended page mounts no grid")
+        self.assertIn("grid", library, "the Library grid is what its walks reach")
         checked = 0
         for name, scene in sorted(self.scenes.items()):
             walk = scene.get("walk") or {}
@@ -7413,12 +7410,9 @@ class FpsMock(unittest.TestCase):
             with self.subTest(scene=name):
                 self.assertEqual(scene["route"], "library",
                                  "teach this test which page prints the regions of the scene's route")
-                recommended_page = scene.get("triggers", {}).get("plxnative-libtype") == "recommended"
-                printed = recommended if recommended_page else library
                 for word in wanted:
-                    self.assertIn(word, printed,
-                                  f"{name} waits for `region={word}`, which its "
-                                  f"{'Recommended' if recommended_page else 'Library'} page never prints")
+                    self.assertIn(word, library,
+                                  f"{name} waits for `region={word}`, which the Library page never prints")
                 checked += 1
         self.assertGreaterEqual(checked, 2, "the scenes that declare a region were not found")
 

@@ -1611,16 +1611,19 @@ fn preference_name(preference: plx_platform::i18n::Preference) -> &'static str {
     }
 }
 
-/// The languages this build ships catalogs for (`locales/`), in the order the page lists them:
-/// System first, then the shipped tags. `LangId`'s row key is this array's position, so a new
-/// catalog is one entry here and nothing else.
-const LANGUAGES: [plx_platform::i18n::Preference; 9] = [
-    plx_platform::i18n::Preference::System, plx_platform::i18n::Preference::En,
-    plx_platform::i18n::Preference::Es, plx_platform::i18n::Preference::Be,
-    plx_platform::i18n::Preference::De, plx_platform::i18n::Preference::Fr,
-    plx_platform::i18n::Preference::Hu, plx_platform::i18n::Preference::It,
-    plx_platform::i18n::Preference::Pt,
-];
+/// The languages this build ships catalogs for, in the order the page lists them: System first,
+/// then `i18n::SHIPPED` (registry order, which is also the row order each language declares).
+/// `LangId`'s row key is this array's position, so adding a catalog is one `locales/` entry and
+/// nothing else.
+const LANGUAGES: [plx_platform::i18n::Preference; plx_platform::i18n::SHIPPED.len() + 1] = {
+    let mut list = [plx_platform::i18n::Preference::System; plx_platform::i18n::SHIPPED.len() + 1];
+    let mut i = 0;
+    while i < plx_platform::i18n::SHIPPED.len() {
+        list[i + 1] = plx_platform::i18n::SHIPPED[i];
+        i += 1;
+    }
+    list
+};
 
 /// A Language row's identity: the preference a `Choice` row saves, or the contribution guide.
 #[derive(Clone, PartialEq, Eq, Debug)]

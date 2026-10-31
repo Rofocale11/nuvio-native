@@ -2650,7 +2650,7 @@ mod tests {
     /// the 1920px canvas. The old 44px hit box also could not contain two BODY lines.
     #[test]
     fn translated_waiting_status_wraps_completely_inside_the_qr_column() {
-        use plx_platform::i18n::{LocaleContext, Preference};
+        use plx_platform::i18n::{LocaleContext, Preference, SHIPPED};
         struct UnicodeMeasure;
         impl Measure for UnicodeMeasure {
             fn width(&self, text: &CStr, size: i32, _bold: bool) -> f32 {
@@ -2668,12 +2668,10 @@ mod tests {
         let old_row_w = old_text_w + 30.0 + theme::space::SM;
         assert!(route.content.cx() + old_row_w * 0.5 > Rect::FULL.w,
             "the actual translated sentence reproduces the former off-canvas row");
-        for locale in [
-            LocaleContext::resolve(Preference::En, None, None, None, None),
-            LocaleContext::resolve(Preference::Es, None, None, None, None),
-            belarusian,
-            LocaleContext::pseudo_for_test(),
-        ] {
+        for locale in SHIPPED
+            .into_iter()
+            .map(|preference| LocaleContext::resolve(preference, None, None, None, None))
+            .chain([belarusian, LocaleContext::pseudo_for_test()]) {
             for message in [
                 plx_platform::i18n::msg::settings_login_unreachable_c_in(&locale),
                 plx_platform::i18n::msg::browse_login_stalled_c_in(&locale),

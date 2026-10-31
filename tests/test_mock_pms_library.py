@@ -16,6 +16,7 @@ import urllib.request
 from mock_pms import (
     ENHANCEMENT_AAC_51_RK, ENHANCEMENT_AC3_2CH_RK, ENHANCEMENT_DEFAULT_SRT_RK,
     ENHANCEMENT_DV_P8_RK, ENHANCEMENT_EXTERNAL_SRT_RK, EXTRA_MEDIA_RK_BASE, PLEX_DIRECT_HASH,
+    CAPTION_EDGE_RK_BASE, RESUME_ON_DECK_SHOW_RK, RESUME_PLAIN_SHOW_RK,
     CatalogLibrary, Library, MockPms, demo_cache_dir, plaintext_only_lan_resources, serve,
 )
 

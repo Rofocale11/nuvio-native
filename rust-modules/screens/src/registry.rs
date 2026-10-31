@@ -33,6 +33,24 @@ use plx_machine::machine::{
 };
 use plx_ui::screen::{Mounter, ReturnState, Screen};
 
+/// The item-menu anchor used when there is no focused rect to hang off — a centred card. The
+/// headless trigger and a host with nothing focused both land here.
+///
+/// It lives in `registry` rather than in `item_menu` because `home` and `detail` both resolve it
+/// and a screen may name this shared vocabulary but never a sibling screen (`ci/check-deps.sh`'s
+/// `sibling` rule). Resolved once by the PRESENTER rather than every frame inside the menu, so the
+/// panel cannot drift if a host's rect stops resolving while the menu is up.
+pub fn fallback_anchor() -> plx_ui::Rect {
+    use plx_ui::consts::{CARD_H, CARD_W, SCR_H, SCR_W};
+    use plx_ui::table::MENU_MIN_W;
+    plx_ui::Rect::new(
+        (SCR_W - CARD_W) * 0.5 - MENU_MIN_W * 0.5,
+        (SCR_H - CARD_H) * 0.5,
+        CARD_W,
+        CARD_H,
+    )
+}
+
 /// The one conversion from a catalog row to the plain facts `ui` draws a tile from. It lives here
 /// because a screen may name `registry` but never a sibling screen, and `ui` cannot name the row.
 pub mod tile_facts;

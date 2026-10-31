@@ -960,7 +960,12 @@ class BuildGcTests(unittest.TestCase):
         kept_patterns = {"src/config.local.h", "local.env", "tests/manifest.local.json", ".claude/worktrees/",
                          "sysroot/", "rust-poc/", ".abi-cache/", ".webos-ndk/", ".tv-mac", ".tv-host",
                          ".tv-dpad-pass", ".tv-remote-url", "pkg/diagnostics/", "pkg/auth.json", "pkg/lab.json",
-                         "pkg/telemetry.local.json", "tests/fixtures/softfloat/arm.tbl", "**/plxnative-recordings/"}
+                         "pkg/telemetry.local.json", "tests/fixtures/softfloat/arm.tbl", "**/plxnative-recordings/",
+                         # This fork's own additions. `.env` and an addon's `nuvio.local.env` are secrets
+                         # (outbound-guard.py guards them); `pkg/*.so` and `pkg/lib*` are blanket patterns
+                         # over the package staging area, which also holds `pkg/auth.json` and
+                         # `pkg/lab.json`, so they are kept as private rather than called build output.
+                         ".env", "rust-modules/stremio/nuvio.local.env", "pkg/*.so", "pkg/lib*"}
         derived, kept = {}, {rel: rel for rel in guard.PRIVATE_FILES}      # listed form -> file to create
         for line in (ROOT / ".gitignore").read_text().splitlines():
             pat = line.strip()

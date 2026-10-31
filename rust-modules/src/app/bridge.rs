@@ -2458,7 +2458,7 @@ pub(crate) fn open_content_panel(
 /// headless trigger) resolves to the panel's own centred fallback HERE, once, rather than every
 /// frame inside the screen.
 fn anchor_bits(rect: Option<plx_ui::Rect>) -> [u32; 4] {
-    let r = rect.unwrap_or_else(plx_screens::item_menu::fallback_anchor);
+    let r = rect.unwrap_or_else(plx_screens::registry::fallback_anchor);
     [r.x.to_bits(), r.y.to_bits(), r.w.to_bits(), r.h.to_bits()]
 }
 

@@ -707,7 +707,7 @@ class LifecycleSubcommand(unittest.TestCase):
     foreground app (unless the stub is told the launch is ignored) and `fuser` answers the app pid.
     """
 
-    def _run(self, call, *, fg="com.beb.plxnative.debug", launch_takes=True, pid_after="4242"):
+    def _run(self, call, *, fg="com.nuvionative.app.debug", launch_takes=True, pid_after="4242"):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "tools").mkdir()

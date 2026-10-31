@@ -1441,7 +1441,7 @@ impl HomeScreen {
                 {
                     self.streams_item = Some((item.sid, item.rk.clone()));
                     // The hero is not a card with a drawn opener, so the panel opens centred.
-                    let anchor = crate::item_menu::fallback_anchor();
+                    let anchor = crate::registry::fallback_anchor();
                     fx.push(Fx::App(AppFx::Content(ContentReq::Panel(
                         ContentPanel::AltSources {
                             anchor: [anchor.x, anchor.y, anchor.w, anchor.h].map(f32::to_bits),
