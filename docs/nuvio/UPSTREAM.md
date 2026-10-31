@@ -319,7 +319,7 @@ before the gates could run at all:
   authority, and `ci/collect-source-inputs.py` now reads it instead of scraping them), and the
   release notice names the pin.
 
-### What the ARM link found, and the gate it produced
+### What the ARM build found, and the gates it produced
 
 The first GitHub Actions build of this branch failed at the link: `src/main.c` calls
 `plx_launch_args`, and the merge resolution had kept `port.rs` from the trunk, dropping upstream's
@@ -333,6 +333,21 @@ by `#[no_mangle]`, `#[unsafe(no_mangle)]` or `#[export_name]`, with test items d
 other Rust gates drop them. Firmware symbols (`__asm__(…)` labels on the C++) and `extern`
 variables are not this repository's to define and are skipped. Its self-test covers each verdict,
 and the real tree is one of its cases.
+
+The next run got through the link and failed at PACKAGING, on two merge losses of one shape — a
+line BOTH sides edited, where the resolution kept the fork's copy and upstream's addition went
+with it:
+
+| where | what was lost | symptom |
+|---|---|---|
+| `Makefile` `APP_FILES` | `pkg/appfont-emoji.ttf` (upstream added the face; the fork had edited the same line for its brand and its own roots bundle) | `check-package.py`: "payload carries all 31 app files" — the face was staged by nothing, so an emoji in a title would have been a box |
+| `pkg/resources/hu/appinfo.json` | the fork's brand and Stremio description (upstream's new Hungarian descriptor still read `PlxNative` + "native Plex client") | `check-package.py`: "hu/appinfo.json title is the untranslated brand" and "staged title == staged top-level title" |
+
+`ci/test_deploy_manifest.py` now asserts that every `pkg/appfont*.ttf` on disk is in both
+`APP_FILES` and `DEPLOY_FILES`, which is the cheap host answer to the font half; the descriptor
+half stays with `check-package.py`, since it grades a translated string. The lesson for the next
+slice is in `git diff upstream/feature/v0.9-hq -- Makefile`-shaped reading, not in a new gate: a
+merge that keeps a whole line must keep both sides' edits to it.
 
 ### The exact next action
 

@@ -86,6 +86,21 @@ class DeployManifest(unittest.TestCase):
             with self.subTest(recipe=recipe):
                 self.assertIn(needle, makefile)
 
+    def test_every_app_font_in_the_tree_ships(self):
+        # An upstream slice added `pkg/appfont-emoji.ttf` to APP_FILES; this fork had edited the same
+        # line (the brand, and its own roots bundle), so the merge resolution kept the fork's copy and
+        # the emoji face was staged by nothing. `ci/check-package.py` saw it on the built ipk
+        # ("payload carries all 31 app files") — one CI round trip too late, and on a television the
+        # symptom would be a box where an emoji should be.
+        faces = sorted(p.name for p in (ROOT / "pkg").glob("appfont*.ttf"))
+        self.assertIn("appfont-emoji.ttf", faces)
+        app_files = {pathlib.Path(f).name for f in make_print("print-app-files")}
+        deploy_files = {pathlib.Path(f).name for f in make_print("print-deploy-files")}
+        for face in faces:
+            with self.subTest(face=face):
+                self.assertIn(face, app_files)
+                self.assertIn(face, deploy_files)
+
     def test_lab_session_file_is_never_in_the_plain_list(self):
         # It has its own ship-or-remove rule (present under LAB=1, actively deleted otherwise),
         # which a plain unconditional scp must never duplicate.
