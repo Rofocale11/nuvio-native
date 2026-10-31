@@ -297,6 +297,11 @@ You are equipped with advanced orchestration capabilities and specialized MCP se
   - Use `definition` to find where a struct or function is declared.
   - Use `references` to find all usages of a symbol before refactoring.
   - Use `hierarchy` or `implementations` to map out traits.
+- **Search discipline (STRICT):** NEVER use `grep` to search the codebase. For Rust symbols
+  (functions, structs, variables, traits) you MUST use the `rust-coder` MCP (`symbols`,
+  `definition`, `references`). For plain text search, use `rg` (ripgrep), which respects
+  `.gitignore` and skips `target/` instantly — e.g. `rg -n "playback error" rust-modules/`
+  instead of `grep -rn ...`. The `grep` tool is reserved for the rare case ripgrep cannot cover.
 - **`github` (Repo Management):** Use the `github` MCP to read PRs, check CI action logs, or look up issues. Do not use the `gh` CLI via bash.
 - **`filesystem` (File Edits):** Use the `filesystem` MCP to read and write files. Always show the diff before applying changes.
 - **`websearch`:** Use the remote `websearch` MCP when you need up-to-date crate documentation (e.g., checking if `reqwest` or `serde` changed their API recently).
