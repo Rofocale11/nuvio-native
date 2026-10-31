@@ -110,7 +110,7 @@ pub struct SubRef {
     pub id: i64,
     pub lang: String,
     /// Plex's `default`/`selected` for this track: the one the viewer's account language asks for
-    /// (see [`mark_preferred_subtitle`]). A sidecar carries no container ordinal, so this pair is
+    /// (see [`apply_subtitle_preference`]). A sidecar carries no container ordinal, so this pair is
     /// the ONLY way the app can start with it on — `metadata::server_selected_sidecar` reads it.
     pub selected: bool,
 }
@@ -123,7 +123,7 @@ pub struct SubRef {
 ///
 /// Forced tracks cannot be ranked on: Stremio subtitle objects carry no forced flag and [`SubRef`]
 /// has nowhere to keep one. `defaultSubtitleForced` is a mode, not a per-track attribute.
-pub fn mark_preferred_subtitle(subs: &mut [SubRef], pref: Option<&str>) {
+pub fn apply_subtitle_preference(subs: &mut [SubRef], pref: Option<&str>) {
     let hit = match pref.map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => subs
             .iter()
@@ -361,13 +361,13 @@ mod tests {
             SubRef { id: 2, lang: "English".into(), selected: false },
             SubRef { id: 3, lang: "ger".into(), selected: false },
         ];
-        mark_preferred_subtitle(&mut subs, Some("de"));
+        apply_subtitle_preference(&mut subs, Some("de"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, true]);
         // No preference at all: the first sidecar is forced on.
-        mark_preferred_subtitle(&mut subs, None);
+        apply_subtitle_preference(&mut subs, None);
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false, false]);
         // No match: nothing is claimed, so the file's own order stands.
-        mark_preferred_subtitle(&mut subs, Some("pt-BR"));
+        apply_subtitle_preference(&mut subs, Some("pt-BR"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, false]);
     }
 
@@ -399,9 +399,9 @@ mod tests {
             SubRef { id: 1, lang: "pt".into(), selected: false },
             SubRef { id: 2, lang: "pt-BR".into(), selected: false },
         ];
-        mark_preferred_subtitle(&mut subs, Some("pt-BR"));
+        apply_subtitle_preference(&mut subs, Some("pt-BR"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);
-        mark_preferred_subtitle(&mut subs, Some("pt"));
+        apply_subtitle_preference(&mut subs, Some("pt"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false]);
     }
 }

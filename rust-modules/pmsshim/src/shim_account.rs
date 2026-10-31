@@ -136,7 +136,7 @@ impl Account {
     /// The account's subtitle language (`defaultSubtitleLanguage`: the picker's 2-letter code, as
     /// the app writes it to `/api/v2/user/profile`), or `None` when the viewer never set one.
     /// It is what the subtitle tracks are ranked against when a part is built — see
-    /// `shim_media::mark_preferred_subtitle`.
+    /// `shim_media::apply_subtitle_preference`.
     pub fn subtitle_language(&self) -> Option<String> {
         let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
         prefs

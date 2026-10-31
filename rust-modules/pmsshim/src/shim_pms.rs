@@ -1836,7 +1836,7 @@ impl Shim {
         // The viewer's account language decides which sidecar starts ON, once per slot: the
         // tracks are cloned below for every Part, so the mark has to live on the slot's own list.
         let pref = self.account.subtitle_language();
-        shim_media::mark_preferred_subtitle(&mut st.subs, pref.as_deref());
+        shim_media::apply_subtitle_preference(&mut st.subs, pref.as_deref());
         let subs: Vec<SubRef> = st
             .subs
             .iter()
