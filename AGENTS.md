@@ -5,7 +5,9 @@
 Nuvio Native is a native LG webOS client for Stremio/Nuvio addons: it browses and plays
 content from Stremio addons (Cinemeta, Torrentio, AIOStreams, …) and the Nuvio account,
 keeping PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline. It is a fork
-of PlxNative (GPL-3.0-or-later, upstream `GLinnik21/plx-native@4e454ea`).
+of PlxNative (GPL-3.0-or-later). The recorded base, the policy for taking upstream work,
+and the measured size of the divergence are `docs/nuvio/UPSTREAM.md` — do not restate a
+base commit from memory here.
 
 Most of the application is Rust under `rust-modules/` (the application in `src/`, the
 layers in their own crates); `src/main.c` is the boot/crash shim, `src/starfish.c` is the
@@ -17,9 +19,9 @@ tests and the macOS simulator are valuable, but they cannot prove every device b
 App ids: `com.nuvionative.app.debug` and `com.nuvionative.app`, title "Nuvio Native".
 
 The fork's design authority is `docs/nuvio/`: `ARCHITECTURE.md`, `ID-MANAGEMENT.md`,
-`TMDB.md`, `PLAYBACK.md`, `WATCH-PROGRESS.md`. Read the relevant one before changing that
-area. Upstream PlxNative docs in `docs/` may describe Plex-only behavior and do not always
-apply to the addon backend.
+`TMDB.md`, `PLAYBACK.md`, `WATCH-PROGRESS.md`, and `UPSTREAM.md` (which upstream work to
+take, and how). Read the relevant one before changing that area. Upstream PlxNative docs in
+`docs/` may describe Plex-only behavior and do not always apply to the addon backend.
 
 ## Load the right context
 
@@ -99,11 +101,13 @@ fails the build on a forbidden edge.
 
 ## Working rules
 
-- **Trunk-based development, and `main` takes SQUASH merges only.** Work happens on
-  short-lived branches or worktrees cut from `main`. Commit as often as is useful on a
-  branch. When verified, it lands on `main` as ONE squash commit, never as a fast-forward
-  of a working branch's history and never as a merge commit. Push `main` only when the
-  user asked for it.
+- **Trunk-based development on `nuvio-native`.** `nuvio-native` is the trunk and the product;
+  work happens on short-lived branches or worktrees cut from it, and lands back on it. Merge
+  commits and squash commits are both acceptable there. `main` is NOT the trunk: it holds
+  upstream-side history and none of the fork's commits — never cut work from it, never build or
+  ship it. The upstream relationship (base commit, freeze-and-cherry-pick policy, what a merge
+  would cost) is `docs/nuvio/UPSTREAM.md`, and `tools/upstream-seam.sh` recomputes it.
+  Push anything only when the user asked for it.
 - **A squash onto a MOVING `main` silently reverts it.** Before pushing any squash, run
   `git diff --stat HEAD^ HEAD` and confirm every path is one the branch meant to touch.
   Prefer squashing onto the same base the picks were made on and rebasing. `git fetch -q`
