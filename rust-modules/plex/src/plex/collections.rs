@@ -4,8 +4,9 @@
 //! use the collection's `index`. The helpers here keep those identities explicit and centralize
 //! the live-observed joins between collection rows, hubs and member `Collection[]` tags.
 
-use super::client::{Client, JsonStatusOutcome, QueryBuilder};
+use super::client::{Client, JsonStatusOutcome};
 use super::models::{MediaContainer, Metadata};
+use super::paging::{paged_path, PageReq};
 use super::ServerId;
 
 /// One collection as a link names it: by `rk` (its ratingKey) when the link carries one, else by
@@ -63,7 +64,48 @@ pub enum CollectionOutcome {
     Transport,
 }
 
+/// What the type=18 count probe learned about a section's collections. Three answers the header's
+/// "Collections · N" control must keep apart: a number (including a real zero), a refusal, and "not
+/// known" (transport failure, 404, a malformed body). `screens::registry` maps these onto
+/// `Option<Result<u32, Forbidden>>`: `Unknown` = `None`, `Count(n)` = `Some(Ok(n))`,
+/// `Forbidden` = `Some(Err(Forbidden))`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionsCount {
+    Count(u32),
+    /// HTTP 401 or 403 — the account may not list this section's collections.
+    Forbidden,
+    Unknown,
+}
+
+impl CollectionsCount {
+    /// Reduce a probe's [`CollectionOutcome`]. Pure, so the mapping is testable without a server.
+    pub fn from_outcome(outcome: CollectionOutcome) -> Self {
+        match outcome {
+            CollectionOutcome::Ok(page) => {
+                Self::Count(page.total_size.clamp(0, i64::from(u32::MAX)) as u32)
+            }
+            CollectionOutcome::Denied => Self::Forbidden,
+            CollectionOutcome::Missing | CollectionOutcome::Transport => Self::Unknown,
+        }
+    }
+}
+
+/// The count probe's path: a `Size=0` window of the section's collection-typed (`type=18`) listing,
+/// which returns no rows and just the `totalSize` (docs/pms-api.md section 2b).
+pub fn collections_count_path(section: i64) -> String {
+    paged_path(
+        &format!("/library/sections/{section}/all?type=18"),
+        PageReq::window(0, 0),
+    )
+}
+
 impl Client {
+    /// How many collections `section` holds, from one `Size=0` probe of
+    /// `/library/sections/{section}/all?type=18` reading `totalSize`.
+    pub fn collections_count(&self, section: i64) -> CollectionsCount {
+        CollectionsCount::from_outcome(self.collection_get(&collections_count_path(section)))
+    }
+
     /// `GET /library/sections/{section}/collections`, paged with both required parameters.
     pub fn section_collections(
         &self,
@@ -71,10 +113,10 @@ impl Client {
         start: i64,
         size: i64,
     ) -> CollectionOutcome {
-        let path = QueryBuilder::new(format!("/library/sections/{section}/collections"))
-            .int("X-Plex-Container-Start", start)
-            .int("X-Plex-Container-Size", size)
-            .build();
+        let path = paged_path(
+            &format!("/library/sections/{section}/collections"),
+            PageReq::window(start, size),
+        );
         self.collection_get(&path)
     }
 
@@ -90,10 +132,10 @@ impl Client {
         start: i64,
         size: i64,
     ) -> CollectionOutcome {
-        let path = QueryBuilder::new(format!("/library/collections/{rating_key}/children"))
-            .int("X-Plex-Container-Start", start)
-            .int("X-Plex-Container-Size", size)
-            .build();
+        let path = paged_path(
+            &format!("/library/collections/{rating_key}/children"),
+            PageReq::window(start, size),
+        );
         self.collection_get(&path)
     }
 
@@ -356,6 +398,27 @@ mod tests {
         assert!(!at("50077", 0).same_collection(&CollectionRef { sid: ServerId::from_raw(5), ..at("50077", 0) }),
             "another server's collection is another collection");
         assert!(at("", 0).is_identityless() && !at("", 7).is_identityless() && !at("1", 0).is_identityless());
+    }
+
+    #[test]
+    fn the_count_probe_is_a_zero_size_type_18_window() {
+        assert_eq!(
+            collections_count_path(3),
+            "/library/sections/3/all?type=18&X-Plex-Container-Start=0&X-Plex-Container-Size=0"
+        );
+    }
+
+    #[test]
+    fn the_count_probe_keeps_a_number_a_refusal_and_not_known_apart() {
+        let page = |total| {
+            let json = format!(r#"{{"size":0,"totalSize":{total},"offset":0}}"#);
+            CollectionOutcome::Ok(serde_json::from_str::<MediaContainer>(&json).unwrap())
+        };
+        assert_eq!(CollectionsCount::from_outcome(page(12)), CollectionsCount::Count(12));
+        assert_eq!(CollectionsCount::from_outcome(page(0)), CollectionsCount::Count(0));
+        assert_eq!(CollectionsCount::from_outcome(CollectionOutcome::Denied), CollectionsCount::Forbidden);
+        assert_eq!(CollectionsCount::from_outcome(CollectionOutcome::Missing), CollectionsCount::Unknown);
+        assert_eq!(CollectionsCount::from_outcome(CollectionOutcome::Transport), CollectionsCount::Unknown);
     }
 
     #[test]

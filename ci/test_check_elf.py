@@ -31,7 +31,10 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 tool = Path(sys.argv[0]).name
 key = tool + (":" + sys.argv[1] if tool == "readelf" else "")
 spec = json.loads(Path(os.environ["ELF_TEST_SPEC"]).read_text())
-if key == "readelf:-h" and "ELF_TEST_BARRIER" in os.environ:
+# Only the main binary's header read is the synchronised observation: the gate also reads the storage
+# helper's header later, after the other run may already have exited and removed its scratch, and that
+# call must not overwrite the snapshot.
+if key == "readelf:-h" and Path(sys.argv[-1]).name == "synthetic.elf" and "ELF_TEST_BARRIER" in os.environ:
     barrier = Path(os.environ["ELF_TEST_BARRIER"])
     (barrier / ("ready-" + os.environ["ELF_TEST_RUN"])).touch()
     until = time.monotonic() + RENDEZVOUS_HANG_GUARD
@@ -184,7 +187,12 @@ class ElfGateTests(unittest.TestCase):
                                  ("readelf:-n", "Build ID: abc\n"),
                                  ("readelf:-d", "Shared library: [unexpected.so]\n"),
                                  ("readelf:--dyn-syms", ""), ("strings", "no placeholder\n"),
-                                 ("objdump", "  00: dmb ish\n")]:
+                                 ("objdump", "  00: dmb ish\n"),
+                                 # float math without VFP: no vmul.f32 at all, and a libcall instead
+                                 ("objdump", "  00: dmb ish\n" * 101 + "  04: bl 0x100 <__aeabi_fmul>\n" * 200),
+                                 # VFP present but the libcalls are not the rare exception (the bound is 1 call per 20 vmul.f32)
+                                 ("objdump", "  00: dmb ish\n" * 101 + "  04: vmul.f32 s0, s1, s2\n" * 150
+                                  + "  08: bl 0x100 <__aeabi_fmul>\n" * 20)]:
             with self.subTest(key=key):
                 spec = defaults()
                 spec[key]["output"] = replacement

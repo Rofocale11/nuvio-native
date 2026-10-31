@@ -102,31 +102,31 @@
   "browse.person.born_place": "Nacimiento: {date}, {place}",
   "browse.person.died": "Fallecimiento: {date}",
   "browse.person.films": {
-    "one": "{count} película",
-    "many": "{count} películas",
-    "other": "{count} películas"
+    "one": "{count} film",
+    "many": "{count} films",
+    "other": "{count} films"
   },
   "browse.person.shows": {
-    "one": "{count} serie",
-    "many": "{count} series",
-    "other": "{count} series"
+    "one": "{count} show",
+    "many": "{count} shows",
+    "other": "{count} shows"
   },
   "browse.person.library_one": "{titles} en esta biblioteca",
   "browse.person.library_both": "{films} y {shows} en esta biblioteca",
   "browse.person.credits": {
-    "one": "{count} crédito · Más recientes primero.",
-    "many": "{count} créditos · Más recientes primero.",
-    "other": "{count} créditos · Más recientes primero."
+    "one": "{count} credit · Newest first.",
+    "many": "{count} credits · Newest first.",
+    "other": "{count} credits · Newest first."
   },
   "browse.detail.seasons": {
-    "one": "{count} temporada",
-    "many": "{count} temporadas",
-    "other": "{count} temporadas"
+    "one": "{count} season",
+    "many": "{count} seasons",
+    "other": "{count} seasons"
   },
   "browse.detail.episodes": {
-    "one": "{count} episodio",
-    "many": "{count} episodios",
-    "other": "{count} episodios"
+    "one": "{count} episode",
+    "many": "{count} episodes",
+    "other": "{count} episodes"
   },
   "browse.detail.extent": "{seasons}, {episodes}",
   "browse.detail.season_number": "Temporada {number}",
@@ -138,31 +138,31 @@
   "browse.library.no_movies": "No hay películas en {library}",
   "browse.library.no_shows": "No hay series en {library}",
   "browse.search.people": {
-    "one": "{count} persona",
-    "many": "{count} personas",
-    "other": "{count} personas"
+    "one": "{count} person",
+    "many": "{count} people",
+    "other": "{count} people"
   },
   "browse.search.count": {
-    "one": "{count} resultado",
-    "many": "{count} resultados",
-    "other": "{count} resultados"
+    "one": "{count} result",
+    "many": "{count} results",
+    "other": "{count} results"
   },
   "browse.search.items": {
-    "one": "{count} elemento",
-    "many": "{count} elementos",
-    "other": "{count} elementos"
+    "one": "{count} item",
+    "many": "{count} items",
+    "other": "{count} items"
   },
   "browse.search.no_results": "No hay resultados para «{query}»",
   "browse.search.join": "{first} y {last}",
   "browse.search.shared_libraries": {
-    "one": "{count} biblioteca compartida",
-    "many": "{count} bibliotecas compartidas",
-    "other": "{count} bibliotecas compartidas"
+    "one": "{count} shared library",
+    "many": "{count} shared libraries",
+    "other": "{count} shared libraries"
   },
   "browse.search.shared_sources": {
-    "one": "{count} fuente compartida",
-    "many": "{count} fuentes compartidas",
-    "other": "{count} fuentes compartidas"
+    "one": "{count} shared source",
+    "many": "{count} shared sources",
+    "other": "{count} shared sources"
   },
   "browse.search.searching": "Buscando en {sources}",
   "browse.search.unreachable": "No se puede conectar con {sources}",
@@ -285,14 +285,14 @@
   "browse.diagnostics.fps_unknown": "{width}×{height} · fps desconocidos",
   "browse.diagnostics.received": "HTTP {status} · {amount} recibidos",
   "browse.diagnostics.callbacks": {
-    "one": "{count} llamada de retorno",
-    "many": "{count} llamadas de retorno",
-    "other": "{count} llamadas de retorno"
+    "one": "{count} callback",
+    "many": "{count} callbacks",
+    "other": "{count} callbacks"
   },
   "browse.diagnostics.callback_error": {
-    "one": "{count} llamada de retorno · ERROR {error} en #{ordinal}",
-    "many": "{count} llamadas de retorno · ERROR {error} en #{ordinal}",
-    "other": "{count} llamadas de retorno · ERROR {error} en #{ordinal}"
+    "one": "{count} callback · ERROR {error} at #{ordinal}",
+    "many": "{count} callbacks · ERROR {error} at #{ordinal}",
+    "other": "{count} callbacks · ERROR {error} at #{ordinal}"
   },
   "browse.diagnostics.queues": "vídeo {video}/{video_cap} MB · audio {audio}/{audio_cap} MB",
   "browse.detail.unrated": "SC",
@@ -352,14 +352,14 @@
   "browse.auth.server_profile_refused": "{server} rechazó a {profile}. Inténtalo de nuevo.",
   "browse.auth.switch_invalid": "No se pudo cambiar de perfil: el servidor devolvió una respuesta no válida.",
   "browse.auth.plex_dns_retry": {
-    "one": "No se encontró Nuvio y no se comprobaron tus servidores. Se intentó una vez. Revisa la conexión a internet del televisor.",
-    "many": "No se encontró Nuvio y no se comprobaron tus servidores. Se intentó {count} veces. Revisa la conexión a internet del televisor.",
-    "other": "No se encontró Nuvio y no se comprobaron tus servidores. Se intentó {count} veces. Revisa la conexión a internet del televisor."
+    "one": "This TV couldn't find Nuvio, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
+    "many": "This TV couldn't find Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again.",
+    "other": "This TV couldn't find Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
   },
   "browse.auth.plex_connect_retry": {
-    "one": "No se pudo conectar con Nuvio y no se comprobaron tus servidores. Se intentó una vez. Revisa la conexión a internet del televisor.",
-    "many": "No se pudo conectar con Nuvio y no se comprobaron tus servidores. Se intentó {count} veces. Revisa la conexión a internet del televisor.",
-    "other": "No se pudo conectar con Nuvio y no se comprobaron tus servidores. Se intentó {count} veces. Revisa la conexión a internet del televisor."
+    "one": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
+    "many": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again.",
+    "other": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
   },
   "browse.auth.plaintext_offer": "Tu servidor Nuvio está en esta red, sin HTTPS. Selecciona Conectar para usarlo sin cifrado.",
   "browse.auth.plaintext_allowed": "Tu servidor Nuvio está en esta red, sin HTTPS. Selecciona Reintentar para usarlo sin cifrado.",
@@ -483,5 +483,11 @@
   "browse.list.remove": "Quitar de Mi lista",
   "browse.list.saving": "Sincronizando Mi lista…",
   "browse.list.retry": "Reintentar Mi lista",
-  "browse.list.signin": "Inicia sesión para Mi lista"
+  "browse.list.signin": "Inicia sesión para Mi lista",
+  "browse.action.use_another_account": "Use another account",
+  "browse.chrome.search": "Search",
+  "browse.kind.episode": "Episode",
+  "browse.detail.specials": "Specials",
+  "browse.collection.films": "Films",
+  "browse.collection.shows": "Shows"
 }

@@ -114,7 +114,7 @@ base
 | plex | `plex http` | 26k | 72% |
 | telemetry | `telemetry diag` (the event schema) | 16k | 64% |
 | ui | `ui` (the library) | 51k | 47% |
-| data | `stores browse metadata person collection search viewstate pms` | 27k | 56% |
+| data | `stores browse metadata person collection search subsearch viewstate viewledger pms watchlist catalog` | 27k | 56% |
 | session | `auth` | 11k | 35% |
 | media | `ff aq abr hls curlio player route` | 56k | 49% |
 | appkit | `appkit` (the player panels and the Sources row several screens draw) | 13k | 32% |
@@ -127,6 +127,13 @@ for build time here; they are not measured build times. Today every row would re
 the split has not happened. Of the last 33 commits that touched `rust-modules/src` at baseline, 26
 touched `screens/` or `ui/`, so a screens-only edit dropping from 100% to about 28% is where most
 of the payoff is. L10 took the player widgets out of `ui` (66k lines at baseline, 51k now).
+
+The Watchlist adds two data modules and no new edge. `watchlist` (rows, match table, `TileState`,
+intent ledger, comparator; with `stores::watchlist`) and `catalog` (the Discover-only item page; with
+`stores::catalog`) name only layers below data, chiefly `plx_plex`: `plex::watchlist`, `Client::find_by_guids`, `plex::session`
+for the plex.tv credential, and `plex::servers` for the roster, reachability and `facts_gen`
+epochs. Neither names `net` or `media`; the screens (`watchlist`, `catalog`) and the tab pulse sit
+above them, and the application alone routes between them (`docs/watchlist.md`).
 
 Four choices that were not obvious:
 
@@ -236,7 +243,7 @@ proves the references are gone and nothing more; L15b is open.
 | **L8** plex stops naming upward — **done** | 7 / 10 | `urlenc_str` is `plex::client`'s, `backoff_secs` and `EndpointRefresh(Set)` are `plex::retry` (`pms` and `stores` re-export them), `LinkClass`/`classify` are `plex::probe`'s, `route::auto_quality_ready` and `telemetry::cleanup_after_account_clear` are hooks `app::boot::install_plex_seams` installs, and `plex::session`'s whole-app tests moved to `app/plex_session_app_tests.rs`. |
 | **L9** telemetry owns its wire schema — **done** | 5 / 69 | The `*Class`/`Trace*` vocabulary and a new `FailureClass` are `telemetry::classes` (`player::report` re-exports them and converts through `FailureKind::class()`), clearing the error trace is a hook (`player::report::install_trace_eraser`, run at boot by `app::enter_application`, not by the first attempt: a failed preview traces without one), an incident hands over a telemetry-owned `ReadoutGlyph` that `screens::login` maps to an icon, and the consent adapter's live half is `telemetry::transition`. |
 | **L10** player and Plex-aware widgets out of ui — **done** | 38 / 511 | Part a moved `ui/{player_hud,track_menu,more_menu,info_panel,up_next,chapters_panel,timing_capsule,source_list}.rs` and `screens/player/skip_pill.rs` to the new `appkit` layer rather than `screens/` (the third choice above); part b gave `widgets`, `card_row`, `hero_logo`, `collection_tile` and `fmt` plain values (`ui::tile::TileFacts`, a raw `u16` server id, `fmt::RatingScale`), with `screens::registry::tile_facts::of` the one `PmsMovie` converter. |
-| **L11** data owns its seams — **done** | 13 / 74 | `app::bootstrap::stores` is `stores::tape`, `metadata` takes a `Playhead` value and owns `track_names`, `ContentArg` is `stores::content_arg`, `person` and `search` cap shelves at `pms::MAX_SHELF_ITEMS`, and the `Tile` trait is the base module `tile`. |
+| **L11** data owns its seams — **done** | 13 / 74 | `app::bootstrap::stores` is `stores::tape`, `metadata` takes a `Playhead` value and owns `track_names`, `ContentArg` is `stores::content_arg`, `search` sizes its row window from `pms::MAX_SHELF_ITEMS`, and the `Tile` trait is the base module `tile`. |
 | **L12** media owns its lifecycle seams — **done** | 7 / 28 | The foreground-resume reducer and the transport-pause contract are `player::lifecycle` (`app::lifecycle` re-exports them), the stats switch is `player::DIAG_READOUT_ON`, `Venc::open` takes the capture socket writer as an argument, and `route` takes the HUD context line as a parameter, with the up-next still prefetch a hook the app installs. |
 | **L13** tests move up to the layer that owns their parts — **done** | 41 / 96 | Part a moved the auth, plex, i18n, task and fontcov tests that named upper layers to `app/` (`session_*_tests.rs`), `screens/login_text_fit_tests.rs`, `plex`, `auth::owner` and `storage::client`, and moved `fontcov`'s `Measure` impl beside the trait, with `ui::machine`'s new `BareArg`/`BareMeasure` fixtures for the rest; part b moved the data, media and ui ones to `app/` (`dispatch_return_tests.rs`, `overscan_audit_tests.rs`) and `screens/` (`plaintext_question`, `library/labels_tests.rs`, `search/tests.rs`, `player`), and rewrote two against their own layer. |
 | **L14** session-layer presentation to screens — **done** | 2 / 4 | `auth::signed_in_reason` is a private fn of `screens::login`, its only caller, with its two tests; `auth` already handed over the plain account name. |
@@ -286,7 +293,8 @@ be a reference from the crate root into the port, which the gate refuses.
 
 The video sink landed as a verb-level cut. `tv::sink::VideoSink` has one method per verb of the
 Starfish seam, 29 of them, with the C return values and the `&MainThread` token on every method but
-`load`, `window_mode` and `window_id`. It is **Starfish-shaped**: a load payload, `feed`, and the
+`load`, `window_mode` and `window_id` (since 2026-10-15 `unload` takes an `UnloadTicket` instead, so
+a real stop's Unload can run on a worker; the trait's own doc is the current list). It is **Starfish-shaped**: a load payload, `feed`, and the
 ACB bind verbs that `pump` walks. Another TV OS cannot implement it as it stands. `player::ffi`
 keeps its `extern "C"` block unchanged and implements the trait as `StarfishSink`; `engine`, `pump`
 and `threads` call it through `player::sink()`. `player/ffi_host.rs` is no longer swapped in under
@@ -548,7 +556,7 @@ suite is 5603 tests before and after (157 + 66 + 218 + 5162). What it taught bey
 
 - **The generated code is the layer's, and so is the build script that generates it.**
   `platform/build.rs` runs the catalog generator (`platform/build_support/catalog.rs`, reading
-  `locales/`) and the install-identity generator (`rust-modules/build_support/install_identities.rs`,
+  `locales/` and the language registry `locales/languages.json`) and the install-identity generator (`rust-modules/build_support/install_identities.rs`,
   which stays where it is because the storage helper's build script calls it too). It reads no
   `PLX_*` variable and emits no `rustc-link-*`, so it is never dirty on a second run:
   `ci/test_build_not_always_dirty.py` now fails on `plx_platform` as well as on the application
@@ -593,8 +601,8 @@ suite is 5603 tests before and after (157 + 66 + 218 + 5162). What it taught bey
   (the only files with C declarations in the layer; there is no `#[link]` and no `dynlib!` in it)
   differ from their old text in `pub(crate)` alone, and the new build script links nothing, so
   `LIBS_REAL` and `ci/expected-dt-needed.txt` are untouched. The host never compiles the ARM arms:
-  `cargo check --target arm-unknown-linux-gnueabi --lib -p plxnative-modules` (`.cargo/config.toml`'s
-  `build-std`, no NDK, no link step) does, and passes with and without default features; use it for
+  `cargo +$(make -s print-rust-toolchain) check --target armv7-unknown-linux-gnueabi --lib -p plxnative-modules` (the target's
+  prebuilt std since the move to stable; it was `.cargo/config.toml`'s `build-std` on nightly; no NDK, no link step) does, and passes with and without default features; use it for
   any split that moves FFI when no NDK is at hand.
 - **Gates scoped by the path of a moved file stopped seeing it, and some by its spelling.**
   `ci/check-deps.sh` reads `SRC_PLATFORM` where it read `SRC_MACHINE`; the `frame` and `uistorage`
@@ -963,7 +971,8 @@ four lower layers'. Its 458 tests run in their own binary. What it taught beyond
   `PlaybackQuality`, legal in one crate and E0116 in two. `ceiling` and `label` (which build a
   `plex::Ceiling` and a localized row) moved onto `PlaybackQuality` in `plex::session`, beside its
   other methods; `from_index` and `index` read the route-owned `QUALITY_LADDER`, so they became
-  private free functions of `decision.rs` (`quality_from_index`, `quality_index`). Look for `impl X`
+  private free functions of the route module (`quality_from_index`, `quality_index`, now in
+  `route/prefs.rs` beside the live cells). Look for `impl X`
   without a trait in the layers above, not only for trait impls.
 - **A `cargo:rustc-env` reaches one crate, and the version is the thing that needed it.**
   `identity.rs` reported `env!("PLX_VERSION")` as `X-Plex-Version` and in the `User-Agent`.
@@ -1235,7 +1244,7 @@ ready. What it taught beyond the recipe:
   attribute and body of `mod tests` / `mod *_tests` / `mod test_support` and the wholly-test files).
   No `cfg(not(test))` arm hid from it except the shipping arms it switches: `metadata`'s detail
   fetch (a test holds the fetch instead of spawning a thread), its two dev stand-ins, `person`'s two
-  plex.tv fetches (a test that reaches them fails to link) and `pms::run`'s `EditItem` arm. Then
+  plex.tv fetches (libcurl is bound at run time, so a test that reaches them links and then either finds no libcurl or sends a real request; cut for that reason) and `pms::run`'s `EditItem` arm (since replaced by the stores' `ApplyView` commands, which carry no cfg split). Then
   the exceptions the compiler found under `--features test-support`: what only the layer's own
   tests use stays `cfg(test)` (13 private items and two imports, because under `test-support`
   alone they are dead code; `split-data-revert.py` flips them).

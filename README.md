@@ -18,6 +18,8 @@ page — the interface is drawn straight on the GPU at 60 fps, and video plays o
 **Website: [plxnative.com](https://plxnative.com/)** · [Install guide](https://plxnative.com/install/) ·
 [Troubleshooting](https://plxnative.com/troubleshooting/)
 
+<a href="https://trendshift.io/repositories/244171?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-244171" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/244171" alt="GLinnik21/plx-native | Trendshift" width="250" height="55"/></a>
+
 *In daily use on a 2019 LG set. PlxNative is an independent project and is not affiliated with Plex, Inc.
 or LG. The same install steps are in the repo: [installation guide](docs/install-and-verify.md).*
 
@@ -45,9 +47,10 @@ simulator, browsing a demo library of openly licensed films
 
 ![Library](docs/screenshots/library.jpg)
 
-**Library** — a library opens on its own shelves: what you're partway through, with the time
-left under the focused card, and what just landed. Further down is the full grid, with sort,
-filter (including unwatched-only) and an A–Z rail down the side
+**Library** — a library opens on its full poster grid, with an A–Z rail down the side and one
+header row for sort & filter (including unwatched-only), a Collections page and a Recommended
+page. The shelves live on Recommended: what you're partway through, with the time left under
+the focused card, and what just landed
 ([pictured here](docs/screenshots/ux-library-grid.jpg)).
 
 ![Search](docs/screenshots/search.jpg)
@@ -82,6 +85,8 @@ Mode. Other 3.x releases are untested, and anything older than 3.4 is unknown. P
 likely will. I develop and test on a 2019 set, and opt-in usage reports show
 video playing on sets from 2018 through the newest, on webOS 11 — both direct play and server
 transcodes, Developer Mode installs included.
+
+Owners' reports, set by set, are in the [compatibility list](docs/compatibility.md).
 
 ### Known issues
 
@@ -158,7 +163,8 @@ the final release over it either: reinstall the final by hand once it is out.
 ## Privacy
 
 **Your library data never reaches me.** The app talks to your Plex server, to `plex.tv` to sign in,
-and to `discover.provider.plex.tv` for cast biographies.
+and to `discover.provider.plex.tv` for cast biographies and the Watchlist (reading it, and adding or
+removing a title when you ask, with the active profile's plex.tv token).
 
 **Crash reports and usage analytics are off until you turn them on** — two separate first-run
 questions, each answerable with Don't Share, both reversible later under Account → Settings →

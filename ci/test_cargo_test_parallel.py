@@ -236,6 +236,47 @@ class RunnerEnvironment(unittest.TestCase):
             self.assertFalse(Path(runtime).exists())
 
 
+class RequireMatch(unittest.TestCase):
+    """`--require-match`: a filter that ran nothing is a failure, not a pass."""
+
+    def test_a_filter_that_matches_nothing_in_any_binary_fails_and_is_named(self):
+        with Fixture() as f:
+            out = f.run(["nomatch_a", "nomatch_b"], "--filter", "no_such_test", "--require-match")
+            self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+            self.assertIn("no_such_test", out.stderr)
+            self.assertIn("matched no test", out.stderr)
+            # Both binaries ran and printed their own result line first; the refusal comes after.
+            self.assertEqual(len(f.started()), 2)
+            self.assertEqual(out.stdout.count("0 passed; 0 failed"), 2)
+
+    def test_a_filter_that_matched_only_an_ignored_test_ran_nothing_either(self):
+        with Fixture() as f:
+            out = f.run(["ignored_a"], "--filter", "slow_one", "--require-match")
+            self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+            self.assertIn("1 ignored", out.stderr)
+
+    def test_one_binary_that_ran_something_is_enough(self):
+        with Fixture() as f:
+            out = f.run(["nomatch_a", "plx_b"], "--filter", "route::", "--require-match")
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_without_the_flag_a_filter_that_matches_nothing_is_still_a_pass(self):
+        # Libtest's own behaviour, kept for the callers that use the filter as a build-only run.
+        with Fixture() as f:
+            out = f.run(["nomatch_a"], "--filter", "no_such_test")
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_the_flag_without_a_filter_changes_nothing(self):
+        with Fixture() as f:
+            out = f.run(["nomatch_a"], "--require-match")
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_failing_binary_keeps_its_own_exit_status(self):
+        with Fixture() as f:
+            out = f.run(["fail_a", "nomatch_b"], "--filter", "x", "--require-match", "--jobs", "1")
+            self.assertEqual(out.returncode, 101, out.stdout + out.stderr)
+
+
 class RealCargoJson(unittest.TestCase):
     """The parser against the shape real cargo prints, captured as a literal."""
 

@@ -18,10 +18,10 @@
   "settings.about.detail": "Версія, аўтарскія правы і звесткі пра праект.",
   "settings.root.copy": "Кіруйце наладамі гэтага тэлевізара і свайго профілю Plex. Мовы гуку і субцітраў сінхранізуюцца з уліковым запісам Plex; прадвыбраныя налады прайгравання і мова праграмы дзейнічаюць на гэтым тэлевізары.",
   "settings.libraries.count": {
-    "one": "{count} абраная",
-    "few": "{count} абраныя",
-    "many": "{count} абраных",
-    "other": "{count} абранай"
+    "one": "{count} favorite",
+    "few": "{count} favorites",
+    "many": "{count} favorites",
+    "other": "{count} favorites"
   },
   "settings.account.title": "Уліковы запіс",
   "settings.account.change_profile": "Змяніць профіль",
@@ -39,10 +39,10 @@
   "settings.onboard.failed_reason": "Праверце злучэнне і паспрабуйце зноў.",
   "settings.onboard.copy": "Выберыце бібліятэкі для гэтага тэлевізара. Абраныя з’явяцца на галоўным экране і ва ўкладках бібліятэкі; усе даступныя ёсць у наладах.",
   "settings.onboard.shared": {
-    "one": "Вам даступныя бібліятэкі ад {names}. Выберыце абраныя — яны з’явяцца на галоўным экране і ў бібліятэцы. Змяніць іх можна ў наладах у любы час.",
-    "few": "Вам даступныя бібліятэкі ад {names}. Выберыце абраныя — яны з’явяцца на галоўным экране і ў бібліятэцы. Змяніць іх можна ў наладах у любы час.",
-    "many": "Вам даступныя бібліятэкі ад {names}. Выберыце абраныя — яны з’явяцца на галоўным экране і ў бібліятэцы. Змяніць іх можна ў наладах у любы час.",
-    "other": "Вам даступныя бібліятэкі ад {names}. Выберыце абраныя — яны з’явяцца на галоўным экране і ў бібліятэцы. Змяніць іх можна ў наладах у любы час."
+    "one": "{names} has shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
+    "few": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
+    "many": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like.",
+    "other": "{names} have shared libraries with you. Pick your favorites — they are what Home and the Library show, and you can change them in Settings whenever you like."
   },
   "settings.onboard.names": "{names} і {last}",
   "settings.language.title": "Мова",
@@ -176,10 +176,10 @@
   "settings.playback.deck_press.play": "Прайграць",
   "settings.playback.skip_interval": "Крок перамоткі",
   "settings.playback.skip_interval.seconds": {
-    "one": "{count} секунда",
-    "few": "{count} секунды",
-    "many": "{count} секунд",
-    "other": "{count} секунды"
+    "one": "{count} second",
+    "few": "{count} seconds",
+    "many": "{count} seconds",
+    "other": "{count} seconds"
   },
   "settings.audio.language": "Пажаданая мова гуку",
   "settings.playback.p2p": "P2P-стрымінг",
@@ -311,5 +311,18 @@
   "settings.ratings.tomatoes": "Rotten Tomatoes",
   "settings.addons.section": "Addons",
   "settings.addons.title": "Addons",
-  "settings.addons.detail": "Enable or disable installed addons for this session"
+  "settings.addons.detail": "Enable or disable installed addons for this session",
+  "settings.resolution.title": "Interface resolution",
+  "settings.resolution.detail": "Lower is smoother. Applies after restarting.",
+  "settings.resolution.auto": "Automatic",
+  "settings.playback.subtitle_size.huge": "Huge",
+  "settings.playback.hdr_overlay": "HDR overlay brightness",
+  "settings.playback.hdr_overlay.full": "100%",
+  "settings.playback.hdr_overlay.three_quarters": "75%",
+  "settings.playback.hdr_overlay.half": "50%",
+  "settings.playback.copy_profile": "Playback settings for {profile}. Changes here apply to the next playback.",
+  "settings.playback.copy_profile_forced": "Playback settings for {profile}.",
+  "settings.playback.unseated": "Choose a profile to change this",
+  "settings.playback.hdr_overlay.copy": "How bright the player's controls and subtitles are during HDR and Dolby Vision, when the TV draws them much brighter. Lower it if they dazzle. 100% leaves them as they are.",
+  "settings.consent.placeholder.library": "library file name"
 }

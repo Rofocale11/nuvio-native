@@ -99,30 +99,30 @@
   "widgets.tracks.channels": "{count} кан.",
   "widgets.tracks.depth": "{depth} біт",
   "widgets.tracks.count": {
-    "one": "{count} дарожка",
-    "few": "{count} дарожкі",
-    "many": "{count} дарожак",
-    "other": "{count} дарожкі"
+    "one": "{count} track",
+    "few": "{count} tracks",
+    "many": "{count} tracks",
+    "other": "{count} tracks"
   },
   "widgets.tracks.count_detail": {
-    "one": "{description} · {count} дарожка",
-    "few": "{description} · {count} дарожкі",
-    "many": "{description} · {count} дарожак",
-    "other": "{description} · {count} дарожкі"
+    "one": "{description} · {count} track",
+    "few": "{description} · {count} tracks",
+    "many": "{description} · {count} tracks",
+    "other": "{description} · {count} tracks"
   },
   "widgets.tracks.count_heading": {
-    "one": "{heading} · {count} ДАРОЖКА",
-    "few": "{heading} · {count} ДАРОЖКІ",
-    "many": "{heading} · {count} ДАРОЖАК",
-    "other": "{heading} · {count} ДАРОЖКІ"
+    "one": "{heading} · {count} TRACK",
+    "few": "{heading} · {count} TRACKS",
+    "many": "{heading} · {count} TRACKS",
+    "other": "{heading} · {count} TRACKS"
   },
   "widgets.reason.jail_help": "Для выпраўлення патрэбны тэлевізар з root-доступам і Homebrew Channel. Даведка: plxnative.com/troubleshooting/#playback-reports-jail_missing_rtkmem.",
   "widgets.tracks.empty": "Няма дарожак",
   "widgets.tracks.bytes": {
-    "one": "{count} байт",
-    "few": "{count} байты",
-    "many": "{count} байтаў",
-    "other": "{count} байта"
+    "one": "{count} byte",
+    "few": "{count} bytes",
+    "many": "{count} bytes",
+    "other": "{count} bytes"
   },
   "widgets.tracks.fps": "{rate} кадр/с",
   "widgets.tracks.mbps": "{rate} Мбіт/с",
@@ -265,5 +265,16 @@
   "widgets.region.nl": "Нідэрланды",
   "widgets.region.latin_america": "Лацінская Амерыка",
   "widgets.failure.play_auto": "Уключыць «Аўтаматычна» і прайграць",
-  "widgets.failure.change_source": "Змяніць крыніцу"
+  "widgets.failure.change_source": "Змяніць крыніцу",
+  "widgets.menu.quality_converted": "Converted",
+  "widgets.menu.quality_converted_note": "Your Plex server is converting this video.",
+  "widgets.tracks.forced_only": "Forced only",
+  "widgets.source.shared_with_you": "Shared with you",
+  "widgets.tracks.enh_reason_converting": "Not available while your Plex server converts this video.",
+  "widgets.tracks.enh_reason_forced": "Not available while Force Direct Play is on. Set Direct Play to Auto in Settings to use it.",
+  "widgets.tracks.enh_reason_not_copyable": "Your Plex server can't add this to this video right now.",
+  "widgets.tracks.sub_remembered_note": "The subtitles you chose for this show can’t be shown with this video.",
+  "widgets.verdict.forced_audio_codec": "Force Direct Play is on, and {codec} audio can’t play without conversion.",
+  "widgets.verdict.forced_audio_conversion_codec": "Force Direct Play is on, and this {codec} audio track needs conversion.",
+  "widgets.failure.change_quality": "Change quality"
 }

@@ -1121,14 +1121,23 @@ def triggers_for_case(case, url_base=None):
     gst_debug = case.get("gst_trace", {}).get("debug")
     if gst_debug:
         files.append(("plxnative-gstlog", gst_debug))
-    # issue #266 PR4 review: force the PERSISTED Boost Dialog / Normalize Loudness preference at
-    # boot on EVERY case, not just the two that exercise it — `dev::scenarios::arm_audio_enhancements`
-    # calls the real persisting setter, so a case's starting preference is a property of the
-    # manifest instead of of whatever a PREVIOUS case's (or a real person's) toggle left behind. A
+    # issue #266 PR4 review: force the Boost Dialog / Normalize Loudness preference at boot on EVERY
+    # case, not just the two that exercise it — `dev::scenarios::arm_audio_enhancements` calls the
+    # real setter (it sets the live preference and, for a seated profile, saves it; the injected dev
+    # token never seats one, so a token boot sets the live preference alone), so a case's starting
+    # preference is a property of the manifest instead of of whatever a PREVIOUS case's (or a real
+    # person's) toggle left behind. A
     # case opts into a non-off start with `"audio_enhancements_boot": "loudness"` (used by the
     # reset case below to prove the cold-start "a saved preference forces a remux" path);
     # everything else gets `"off"`.
     files.append(("plxnative-audioenh", case.get("audio_enhancements_boot", "off")))
+    # Track memory (the per-show audio/subtitle pick a track-menu choice on an episode writes to the
+    # SEATED profile): forget it at the seat on EVERY case, for the same reason as the line above. A
+    # case's `menupick` is a viewer's pick and is remembered, so without this the next case that plays
+    # the same show would start from the previous case's tracks. `dev::scenarios::arm_track_memory`
+    # runs once at the first seat (`app::bridge::SeatWatch`); a dev-token boot never seats, writes no
+    # memory, and so has nothing to clear.
+    files.append(("plxnative-trackmemory", "clear"))
     # Arbitrary extra dev triggers, `{"name": content}` → `plxnative-<name>` in the runtime root
     # (`null` for a bare flag). For the one-run experiments a trigger exists for — `sinkmax`,
     # `nofps` — without teaching the harness a key per knob; the case's own triggers above win on
@@ -3291,10 +3300,14 @@ def a_finished(lines):
     completion. Two links, in order, because either alone is satisfiable by something that is not
     a finish:
 
-      * `EOS reached: playpos=Ns/Ms → ended` (pump.rs) — the producer hit file EOF AND the pipeline
-        played out to within a second of the duration. Not merely "the socket closed": the pump
-        gates the flag on `eos_pushed && pos >= dur - 1s`, so a truncated transfer does not reach
-        it.
+      * `EOS reached: playpos=Ns/Ms → ended` (pump.rs) — the producer hit file EOF (the EOS was
+        pushed) AND the pipeline played out: either it reported its own end-of-stream after a
+        picture (`smp: the pipeline reached end-of-stream`, `type=28`; #865) or the playhead came
+        within a second of the duration (`stream_ended`). Not merely "the socket closed". The
+        pipeline's word is the only way out for a film whose audio outlasts its picture, whose
+        playhead stops at the last frame and never gets near the container's duration
+        (`pipe_finish_audio_tail`, `playpos=19s/23s`) — so the two numbers in the line are NOT
+        compared here, and the line alone no longer proves a transfer was read to its end.
       * `stop_bufferfeed: torn down` (engine.rs::teardown) AFTER that line — `app.rs` calls
         `finish_playback` on `player::ended()`, which with nothing queued is `exit_player`. The
         ORDER is the assertion: this app tears the engine down on every stop, including the
@@ -3722,7 +3735,7 @@ def op_audio_transcode(lines):
 
 # LG's buffer-feed audio vocabulary (`player::engine::audio_payload_codec`) back to the PMS codec
 # names a `decision output:` line uses, so the two can be compared.
-LOAD_AUDIO_TO_PMS = {"ac3": "ac3", "ac3 plus": "eac3", "aac": "aac", "dts": "dts"}
+LOAD_AUDIO_TO_PMS = {"ac3": "ac3", "ac3 plus": "eac3", "aac": "aac", "dts": "dca"}
 # The Load vocabulary's video names back to the demuxer's (`ff: v=#0 codec=..`).
 LOAD_VIDEO_TO_FF = {"h264": "h264", "h265": "hevc", "hevc": "hevc"}
 
@@ -3832,16 +3845,18 @@ def op_audio_enhancement(lines):
 
 def op_audio_enhancement_release(lines):
     """The `audio_enhancement_normalize_reset` case's own settle grade: this case boots with
-    `plxnative-audioenh=loudness` forcing the PERSISTED preference ON before the first frame (via
+    `plxnative-audioenh=loudness` forcing the preference ON before the first frame (via
     `dev::scenarios::arm_audio_enhancements` -> `player::set_audio_enhancements`, the SAME real
-    setter a person's pick calls) — proving the cold-start `route/plan.rs` path (a saved
+    setter a person's pick calls; the injected dev token never seats a profile, so this sets the LIVE
+    preference and saves nothing) — proving the cold-start `route/plan.rs` path (a saved
     preference turns an otherwise direct-playable candidate into an enhanced remux before route
     ever runs) — then picks the SAME row `op_audio_enhancement` picks, which `on_ok` TOGGLES: from
     ON, that reconciles the preference back to NONE. `enhancement_step` releases a directly-
     playable candidate straight back to it (`route/decision.rs`'s `EnhancementStep::ReleaseToDirect`
     -> `plan_original_recovery(.. EnhancementReleased)` on the frame, `run_original_recovery` on a flight worker). Because the toggle goes through the
-    ordinary commit path (not a second boot trigger), it also re-persists the preference as OFF for
-    real — the case ends idempotent with no second op needed.
+    ordinary commit path (not a second boot trigger), it also puts the live preference back to OFF
+    for real — the case ends idempotent with no second op needed (under the dev token the toggle is
+    live-only too: the write door refuses to save for nobody).
 
     Graded on where the release actually LANDED, not on the line announcing it: `enhancement:
     released to Original direct play`, then the next `stream: .. path=` is the item's
@@ -4920,11 +4935,11 @@ def _resolve_fixtures(cases, root):
     Same contract as `_resolve_items`: a case that cannot run gets `skip` and NO `path`, so a
     partition that is ever wrong raises KeyError naming the case rather than driving the TV at
     some default. Three ways to be unrunnable, and they are different answers: the pack was never
-    built, it was built SHORTER than this case seeks, or — for the one case that wants the stream
-    to run OUT — it was built LONGER than the case can play through. The last two are the quiet
-    ones: a pack regenerated at `--secs 30` while the manifest still seeks to 40 s makes the seek
-    assertion fail as though the player had regressed, and the same regeneration at `--secs 300`
-    would do it to `a_finished`.
+    built, it was built SHORTER than this case seeks, or — for a case that wants the stream to run
+    OUT (`reaches_eos`) — it was built LONGER than the case can play through. The last two are the
+    quiet ones: a pack regenerated at `--secs 30` while the manifest still seeks to 40 s makes the
+    seek assertion fail as though the player had regressed, and the same regeneration at
+    `--secs 300` would do it to `a_finished`.
     """
     for c in cases:
         name = c.get("fixture")
@@ -5047,10 +5062,27 @@ def evaluate_pipeline(case, lines, srv_delta, gst_lines=None):
     return all(ok for _, ok, _ in results), results
 
 
+def pull_runtime_file(tv, name):
+    """One file out of this install's runtime root, as text; empty when the app never wrote it."""
+    return ssh(tv, f"cat {RUNDIR}/{name} 2>/dev/null", timeout=30).stdout
+
+
 def pull_runtime_log(tv, name):
     """Read a case-owned diagnostic after playback; an absent/unreadable trace grades empty."""
-    proc = ssh(tv, f"cat {RUNDIR}/{name}", timeout=30)
-    return proc.stdout.splitlines() if proc.returncode == 0 else []
+    return pull_runtime_file(tv, name).splitlines()
+
+
+def save_logs_file(cfg, filename, text):
+    """Write `text` to `filename` in the --save-logs directory (made if need be); its path, or None
+    when --save-logs was not asked for."""
+    outdir = cfg.get("save_logs")
+    if not outdir:
+        return None
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
 
 
 def save_case_log(cfg, name, lines):
@@ -5061,14 +5093,41 @@ def save_case_log(cfg, name, lines):
     (transaction records, per-segment acquisition) and re-running a device case to recover a log
     costs a television lease.
     """
-    outdir = cfg.get("save_logs")
-    if not outdir:
-        return None
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, f"{name}.log")
-    with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    return path
+    return save_logs_file(cfg, f"{name}.log", "\n".join(lines) + "\n")
+
+
+# The counter file each profiler trigger leaves in the runtime root (`paths::profile`). One mode is
+# armed per run (`gfx/profile.rs`): `plxnative-hwcnt` writes the first file and the GL timer behind
+# `plxnative-profile` the second, so the file of a leg is the one its own trigger names.
+HWCNT_FILE = "plxnative-hwcnt.jsonl"
+GPU_TIME_FILE = "plxnative-gputime.jsonl"
+PROFILER_FILES = {"plxnative-hwcnt": HWCNT_FILE, "plxnative-profile": GPU_TIME_FILE}
+
+
+def pull_profiler_files(cfg, armed):
+    """The counter file of each profiler trigger in `armed` (a scene's trigger list), off the set:
+    `{trigger: text}`, `''` for an armed trigger that left nothing.
+
+    The files are gone by the next scene's trigger wipe (`apply_triggers`) and by the harness's
+    teardown, so this must run after the scene's app run and before either.
+    """
+    triggers = dict.fromkeys(name for name, _ in armed if name in PROFILER_FILES)
+    return {name: pull_runtime_file(cfg["tv"], PROFILER_FILES[name]) for name in triggers}
+
+
+def save_profiler_files(cfg, stem, pulled):
+    """Keep the files `pull_profiler_files` brought off the set beside the event log, if --save-logs
+    asked for them. An armed leg that left no counters is said so on the spot: it is not a leg."""
+    if not cfg.get("save_logs"):
+        return
+    for name, text in pulled.items():
+        fname = f"{stem}.{PROFILER_FILES[name]}"
+        if text:
+            save_logs_file(cfg, fname, text)
+            print(f"    profiler: kept {fname}")
+        else:
+            print(f"    profiler: {name} was armed but the set holds no {PROFILER_FILES[name]} "
+                  "(phase unknown, trigger unread, or the counters refused): this leg has no counters")
 
 
 def run_pipeline_case(case, cfg, srv, url_base, verbose):
@@ -5188,8 +5247,8 @@ def do_build(tv, timing=False):
     Functional runs keep the fast default. The profile that actually landed is checked afterwards by
     `require_release_binary`, which also covers a binary deployed without this flag.
     """
-    # The Makefile owns the whole build (it drives cargo +nightly with the load-bearing
-    # cortex-a9 flags itself) — shelling out to it keeps run.py from drifting a second
+    # The Makefile owns the whole build (it drives cargo on the pinned stable toolchain with the
+    # load-bearing cortex-a9 flags itself) — shelling out to it keeps run.py from drifting a second
     # copy of the toolchain invocation (the old hand-rolled zigbuild here did exactly that).
     profile_args = ["ARM_PROFILE=release"] if timing else []
     print("=== BUILD: make -> make deploy" + (" (ARM_PROFILE=release: timing run)" if timing else "") + " ===")
@@ -5879,6 +5938,49 @@ def grade_required_log(scene, lines):
     return True, " | required log line(s) present: " + ", ".join(repr(w) for w in want)
 
 
+def grade_scene_expect(scene, lines):
+    """`expect`: a scene's own log assertions, the playback cases' functions on the playback cases'
+    keys. For a player scene that exists to say what the app DECLARED or ROUTED (issue #665: a fixed
+    480p re-encode of a 4K file must declare the 1080p envelope, not the source's 4K60), where the
+    frame-rate gates above grade nothing it cares about. `no_error` is always checked. Returns
+    (ok, detail_suffix); a scene without `expect` passes untouched.
+
+    Keys: decision, codec (+ min_video_width / video_size), load_video, load_audio, load_fps,
+    load_max, sink_echo (all `a_load_decl`'s), min_timeline_climb_s, presented_rate (+
+    presented_rate_tol_pct; `a_presented_rate`). Anything else is a typo and
+    FAILS rather than being ignored: an assertion that silently does not run is the false pass this
+    function exists to prevent.
+    """
+    exp = scene.get("expect")
+    if not exp:
+        return True, ""
+    known = {"decision", "codec", "min_video_width", "video_size", "min_timeline_climb_s",
+             "presented_rate", "presented_rate_tol_pct"}
+    load_keys = {"load_video", "load_audio", "load_fps", "load_max", "sink_echo"}
+    unknown = sorted(set(exp) - known - load_keys)
+    if unknown:
+        return False, f" | unknown expect key(s): {', '.join(unknown)}"
+    results = []
+    if "decision" in exp:
+        results.append(("decision", *a_decision(lines, exp["decision"])))
+    if "codec" in exp:
+        results.append(("codec", *a_codec(
+            lines, exp["codec"], exp.get("min_video_width", 0), exp.get("video_size"))))
+    if load_keys & set(exp):
+        results.append(("load", *a_load_decl(lines, exp)))
+    if "min_timeline_climb_s" in exp:
+        results.append(("timeline_climb", *a_timeline_climb(lines, exp["min_timeline_climb_s"])))
+    if exp.get("presented_rate"):
+        # the sink's presented rate against the declared one (#832): `presented_rate: true` opts a
+        # scene IN; `presented_rate_tol_pct` widens the band exactly as on a playback case
+        results.append(("presented_rate", *a_presented_rate(lines, exp)))
+    results.append(("no_error", *a_no_error(lines)))
+    ok = all(r[1] for r in results)
+    detail = " | expect: " + "; ".join(
+        f"{'ok' if good else 'FAIL'} {label}: {why}" for label, good, why in results)
+    return ok, detail
+
+
 def fps_scene_needs_token(scene, has_shared_server=False):
     """Whether this scene must cross the signed-in boot gate.
 
@@ -5927,6 +6029,52 @@ def fps_trigger_files(scene):
         else:
             files.append((tname, str(tval)))
     return files
+
+
+# The statistics a scene may grade `fps_floor` on (`fps_floor_stat`); the first is the default.
+FPS_FLOOR_STATS = ("median", "live")
+
+
+def fps_floor_verdict(samples, floor, stat="median", windows=None):
+    """Grade a scene's post-warmup `fps=` windows against its `fps_floor`.
+
+    Returns `(passed, detail_suffix)`. The question is "is this screen still animating, at rate";
+    a FROZEN animator reads ~0.5/s, the keepalive alone, which no floor in this range can confuse
+    with a healthy one. What statistic answers it depends on the scene's duty cycle:
+
+    * `median` (the default) — the median window must read at least `floor`. Deliberately NOT the
+      2nd-lowest the way `loop_floor` and `fps_ceiling` are. Under the present gate a frame rate is
+      intermittent BY DESIGN, so on a scene that bounces rather than animates continuously (the
+      `*-nav` pair reverse every 1400 ms, of which only ~210 ms is fading) a 1-second window can
+      land entirely inside the settled gap and legitimately read 0. Measured: home-detail-nav ran
+      min=0, median=15 with a healthy fade.
+    * `live` — at least `windows` of the graded windows must each read at least `floor` (a window
+      that did is LIVE). For a scene whose graded windows are a live stretch followed by a long
+      idle tail, so that the median and the mean both read the tail's share and not the animation:
+      `library-switch` grades the back half of a 14-step switch cycle (about eight live seconds, the
+      idle steps among them reading 5-12 on the television) plus the spent-cycle tail (`0 1 0 1 0 1`,
+      the keepalive), and the tail is the same whether the cycle ended or the animator froze. The
+      median of those windows read 7-11 for one animation; the mean (8.8-13.3) passes an animator
+      that froze after two graded seconds (H3 4.07, H7 4.43, H9 4.21) and a frozen run plus one
+      50 fps window (3.8-4.7) at any floor that also passes the healthy runs. A count of live windows
+      is what a freeze takes away: healthy runs hold 8 or 9 of them, a freeze after N live seconds
+      holds N, a frozen run 0, a frozen run with a burst 1. What it does not see is a freeze AFTER the
+      first `windows` live seconds: that reads as a cycle that ended early, and only a scene-specific
+      count of the cycle's steps could tell them apart.
+    """
+    if stat not in FPS_FLOOR_STATS:
+        raise ValueError(f"fps_floor_stat {stat!r}: want one of {', '.join(FPS_FLOOR_STATS)}")
+    sf = sorted(samples)
+    med = sf[len(sf) // 2]
+    if stat == "live":
+        if not isinstance(windows, int) or windows < 1:
+            raise ValueError("fps_floor_stat 'live' needs fps_floor_windows, a count of at least 1")
+        live = sum(1 for n in sf if n >= floor)
+        shown = (f"live={live} of n={len(sf)} windows at >= {floor} fps (need {windows}; total={sum(sf)}, "
+                 f"median={med}, min={sf[0]}, max={sf[-1]}) vs fps_floor {floor} (live windows)")
+        return live >= windows, " | " + shown
+    shown = f"median={med} fps (min={sf[0]}, max={sf[-1]}, n={len(sf)}) vs fps_floor {floor}"
+    return med >= floor, " | " + shown
 
 
 def run_fps_scene(scene, cfg, token, *, extra_triggers=(), capture=None,
@@ -5997,10 +6145,15 @@ def run_fps_scene(scene, cfg, token, *, extra_triggers=(), capture=None,
     # FPS scenes are the runs most likely to carry profiler summaries.  Preserve them just like
     # playback cases when --save-logs is requested; otherwise teardown closes the app and the
     # only copy of the HWCNT/phase evidence is lost before it can be compared with the A/B leg.
-    save_case_log(cfg, f"fps-{name}{log_suffix}", lines)
+    stem = f"fps-{name}{log_suffix}"
+    save_case_log(cfg, stem, lines)
+    # The counter files come off the set here, once, for --save-logs and for the graphics profile
+    # (which reads its HWCNT file out of `capture`) alike: the next trigger wipe deletes them.
+    profiler = pull_profiler_files(cfg, files) if cfg.get("save_logs") or capture is not None else {}
+    save_profiler_files(cfg, stem, profiler)
     if capture is not None:
         capture.update({"lines": lines, "warmup": warmup, "run_secs": run_secs,
-                        "route": route, "overlay": overlay})
+                        "route": route, "overlay": overlay, "profiler": profiler})
     # Same refusal as the playback cases, and it matters at least as much here: a scene graded
     # against the wrong install's log, or against a release build that never read its triggers,
     # fails on the <5-samples guard and reads as "the app never reached this screen".
@@ -6070,18 +6223,8 @@ def run_fps_scene(scene, cfg, token, *, extra_triggers=(), capture=None,
 
     # `fps_floor`: for a scene whose whole point is that an ANIMATION keeps running. Graded on
     # `fps=` because `loop=` counts loop iterations and cannot see a frozen animator — the trap that
-    # let a frozen route dip and a stopped spinner both ship.
-    #
-    # Graded on the MEDIAN, deliberately NOT on the 2nd-lowest the way `loop_floor` and
-    # `fps_ceiling` are. Under the present gate a frame rate is intermittent BY DESIGN — that is the
-    # whole feature — so on a scene that bounces rather than animates continuously (the `*-nav` pair
-    # reverse every 1400ms, of which only ~210ms is fading) a 1-second heartbeat window can land
-    # entirely inside the settled gap and legitimately read 0. Measured: home-detail-nav ran min=0,
-    # median=15 with a perfectly healthy fade, and even the oscillator scenes are bursty now that
-    # the settle predicate lets them idle between steps (home-grid min=11, median=41).
-    # The median answers the question actually being asked — "is this screen animating at all, at
-    # rate" — while a FROZEN animator reads ~0.5/s, the keepalive alone, which no threshold in this
-    # range can confuse with a healthy one. Fill-rate regressions are `loop_floor`'s job, not this.
+    # let a frozen route dip and a stopped spinner both ship. The statistic is `fps_floor_stat`
+    # (the MEDIAN unless the scene opts into a count of LIVE windows); see `fps_floor_verdict`.
     f_floor = scene.get("fps_floor")
     if f_floor is not None:
         presf = parse_fps(lines, route, overlay)[warmup:]
@@ -6090,11 +6233,10 @@ def run_fps_scene(scene, cfg, token, *, extra_triggers=(), capture=None,
                    f"build without the fps= field, or the scene never reached this screen")
             print(f"    [FAIL] {msg}")
             return False, msg
-        sf = sorted(presf)
-        med = sf[len(sf) // 2]
-        ok = ok and med >= f_floor
-        detail += (f" | median={med} fps (min={sf[0]}, max={sf[-1]}, n={len(presf)}) "
-                   f"vs fps_floor {f_floor}")
+        ok_fl, detail_fl = fps_floor_verdict(presf, f_floor, scene.get("fps_floor_stat", "median"),
+                                             scene.get("fps_floor_windows"))
+        ok = ok and ok_fl
+        detail += detail_fl
 
     # `fps_ceiling`: the INVERSE assertion — this scene wants the app to stop presenting.
     # `loop_floor` still guards loop liveness so a wedged loop cannot pass by presenting nothing;
@@ -6140,6 +6282,9 @@ def run_fps_scene(scene, cfg, token, *, extra_triggers=(), capture=None,
     ok_r, detail_r = grade_required_log(scene, lines)
     ok = ok and ok_r
     detail += detail_r
+    ok_e, detail_e = grade_scene_expect(scene, lines)
+    ok = ok and ok_e
+    detail += detail_e
     detail += walk_detail
     print(f"    [{'PASS' if ok else 'FAIL'}] {detail}")
     return ok, detail
@@ -6357,8 +6502,8 @@ def run_graphics_profile(scene, cfg, token, phase, output=None):
             before_run=lambda: sampler.start(run_secs + 4.0),
         )
         hw_irq_raw = sampler.finish()
-        hwcnt_result = ssh(cfg["tv"], f"cat {RUNDIR}/plxnative-hwcnt.jsonl 2>/dev/null", timeout=30)
-        if not hwcnt_result.stdout:
+        hwcnt_jsonl = instrumented.get("profiler", {}).get("plxnative-hwcnt", "")
+        if not hwcnt_jsonl:
             raise RuntimeError(
                 "HWCNT produced no JSONL — phase unknown, trigger unread, or /dev/mali0 refused"
             )
@@ -6376,9 +6521,9 @@ def run_graphics_profile(scene, cfg, token, phase, output=None):
         out.write("\n".join(production["lines"]) + "\n")
     with open(os.path.join(bundle, "events-hwcnt.log"), "w", encoding="utf-8") as out:
         out.write("\n".join(instrumented["lines"]) + "\n")
-    hwcnt_path = os.path.join(bundle, "plxnative-hwcnt.jsonl")
+    hwcnt_path = os.path.join(bundle, HWCNT_FILE)
     with open(hwcnt_path, "w", encoding="utf-8") as out:
-        out.write(hwcnt_result.stdout)
+        out.write(hwcnt_jsonl)
 
     # The sampler starts immediately before make run. Drop launch plus the scene's declared
     # heartbeat warmup from active summaries; raw JSONL remains complete for a different cut.
@@ -6522,7 +6667,10 @@ def main():
     ap.add_argument("--save-logs", metavar="DIR", default=None,
                     help="write each case's full event log to DIR/<case>.log. The app truncates "
                          "its log every launch and each case overwrites the previous one, so a "
-                         "trace not captured here is gone when the run ends.")
+                         "trace not captured here is gone when the run ends. An FPS scene that "
+                         "arms a profiler (--extra-trigger plxnative-hwcnt=PHASE or "
+                         "plxnative-profile=PHASE) also keeps its counter file as "
+                         "DIR/fps-<scene>.<plxnative-hwcnt|plxnative-gputime>.jsonl.")
     ap.add_argument("--tv", default=None, help="override TV IP (default from manifest.local.json)")
     # Deliberately NOT `choices=`: the Makefile's FLAVORS list is the one whitelist, and a second
     # copy here would be the copy that goes stale. A bad value fails on the first `make -s print-*`
@@ -6739,10 +6887,12 @@ def main():
                 gates = f"loop_floor={s['loop_floor']}"
             elif s.get("bench"):
                 gates = f"bench_missed_max={s.get('bench_missed_max', 0)}"
+            elif s.get("expect"):
+                gates = f"expect={','.join(s['expect'])}"
             else:
                 gates = "gate=?"
             if s.get("fps_floor") is not None:
-                gates += f" fps_floor={s['fps_floor']}"
+                gates += f" fps_floor={s['fps_floor']}" + (f"({s['fps_floor_stat']}>={s['fps_floor_windows']})" if s.get("fps_floor_stat") == "live" else "")
             if s.get("fps_ceiling") is not None:
                 gates += f" fps_ceiling={s['fps_ceiling']}"
             if s.get("worst_ceiling_ms") is not None:
@@ -6755,6 +6905,8 @@ def main():
             if mock_fps.scene_mock(s) is not None:
                 mark += "  [mock-only]" if s["mock"].get("only") else "  [mock ok]"
             mark += f"  [SKIP: {s['skip']}]" if s.get("skip") else ""
+            if mock_fps.scene_mock(s) is not None and mock_fps.missing_mock_fixtures(s):
+                mark += f"  [mock SKIP: {mock_fps.missing_mock_fixtures(s)}]"
             print(f"fps:{s['name']:28s} tier={s.get('tier','ui'):6s} {tag:16s} {gates}{mark}")
         print(f"\ninstall: {APPID} [{FLAVOUR}] — runtime root {RUNDIR}")
         # Offline, so this reports what the OVERLAY says — nothing is resolved and plex.tv is not
@@ -6827,9 +6979,11 @@ def main():
         # Same partition as the playback cases, and for a sharper reason: run_fps_scene's "$rk"
         # substitution reads scene["rk"] directly, and the KeyError landed in the batch's blanket
         # `except` as `[FAIL] ERROR: 'rk'` -- a false FAILURE, indistinguishable from a regression.
-        selected, fps_skipped = partition_skips(selected)
-        # Which scenes THIS server can serve: under --mock only the ones that declare a `mock`
-        # block, and without it never a `mock.only` scene. Before anything reads a token.
+        #
+        # Which scenes THIS server can serve comes first: under --mock only the ones that declare
+        # a `mock` block, and without it never a `mock.only` scene. Before anything reads a token.
+        # `mock_scene` then gives an `item` scene its synthetic `rk` and drops the overlay's
+        # "no such item on this library" skip, which the mock's own library answers.
         selected, mock_skipped = mock_fps.partition_mock(selected, args.mock)
         if args.mock:
             selected = [mock_fps.mock_scene(s) for s in selected]

@@ -19,7 +19,7 @@
 # result against 14 real firmware inventories without leaving the desk.
 #
 # make          — build pkg/plxnative
-# make setup-env— download+extract+relocate the NDK into $(WEBOS_SDK)
+# make setup-env— install the pinned Rust (+ its ARMv7 std), then the NDK into $(WEBOS_SDK)
 # make deploy   — scp binary + appinfo to the TV (rooted, root@TV)
 # make run      — launch on TV, keep alive $(RUN_SECS)s, fetch event log
 # make test     — build + deploy + run
@@ -184,7 +184,7 @@ APPPORT      = $(if $(filter stable,$(FLAVOR)),8910,$(if $(filter nightly,$(FLAV
 
 QUERY_GOALS = print-flavor print-appid print-appdir print-rundir print-eventlog print-appport print-tv \
               print-simbin print-app-files print-deploy-files print-sentry-handler print-ffmpeg-staged \
-              print-sentry-project print-bench-config
+              print-sentry-project print-bench-config print-disk-entries
 print-flavor:   ; @echo '$(FLAVOR)'
 print-appid:    ; @echo '$(APPID)'
 print-appdir:   ; @echo '$(APPDIR)'
@@ -204,15 +204,18 @@ print-simbin:   ; @printf '%s\n' "$$SIM_MACOS_BIN_ENV"
 # reads the whole file before running a recipe, so the forward reference is fine.
 print-app-files:      ; @echo '$(APP_FILES)'
 print-deploy-files:   ; @echo '$(DEPLOY_FILES)'
+print-subs-font-files: ; @echo '$(SUBS_FONT_FILES)'
 print-sentry-handler: ; @echo '$(SENTRY_HANDLER)'
 print-ffmpeg-staged:  ; @echo '$(FFMPEG_STAGED)'
 print-sentry-project: ; @echo '$(SENTRY_PROJECT)'
+print-rust-toolchain: ; @echo '$(RUST_TOOLCHAIN)'
+print-rust-codegen: ; @echo '$(RUST_CODEGEN)'
 print-cargo-env: ; @env $(TELEMETRY_ENV) env | grep '^PLX_' | sort || true
 # What `tools/build-bench.py` needs to run the recipes' cargo invocations without restating their
 # flags: toolchain, target dirs, feature flags, RUSTFLAGS. Never the telemetry credentials -- the
 # `build-bench` recipe hands those over in the environment, exactly like `test-fast` does.
 print-bench-config:
-	@printf '%s\n' 'RUST_NIGHTLY=$(RUST_NIGHTLY)' 'RUST_TDIR=$(RUST_TDIR)' 'RUST_TARGET=$(RUST_TARGET)' \
+	@printf '%s\n' 'RUST_TOOLCHAIN=$(RUST_TOOLCHAIN)' 'RUST_TDIR=$(RUST_TDIR)' 'RUST_TARGET=$(RUST_TARGET)' \
 	  'RUST_FEATFLAGS=$(RUST_FEATFLAGS)' 'RUST_LIB=$(RUST_LIB)' 'RUST_ENV=$(RUST_ENV)' \
 	  'ARM_PROFILE=$(ARM_PROFILE)' 'ARM_PROFILE_FLAG=$(ARM_PROFILE_FLAG)' \
 	  'TEST_FAST_TDIR=$(TEST_FAST_TDIR)' 'UNIT_RUN=$(UNIT_RUN)' 'RELEASE=$(RELEASE)' \
@@ -221,8 +224,9 @@ print-bench-config:
 # `make disk` — what every checkout of this repository is costing, in one table, plus how to get
 # it back. It is a report; `tools/build-gc.sh --incremental|--lanes|--all` is the reclaim, and
 # the script's header carries the measurement that motivated all three. Nothing here has to be run
-# by hand anymore: `tools/build-gc.sh --auto` runs the same reclaim on its own, staged by free-space
-# pressure, from a `SessionEnd` hook (`.claude/hooks/build-gc-auto.sh`) and from the per-user
+# by hand anymore: `tools/build-gc.sh --auto` reclaims on its own, gated by free space (the order
+# past the cheap modes is the planner's, `tools/disk-budget.py`, which the report's last section
+# prints), from a `SessionEnd` hook (`.claude/hooks/build-gc-auto.sh`) and from the per-user
 # launchd agent `disk-watch` installs below — `make disk` remains the report to read when deciding
 # whether to intervene by hand.
 disk: ; @./tools/build-gc.sh
@@ -236,12 +240,15 @@ disk-watch-uninstall: ; @./tools/install-disk-watch.sh --uninstall
 
 # --- webOS NDK toolchain -----------------------------------------------------
 WEBOS_SDK   ?= $(HOME)/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot
-# Which nightly to use. Defaults to whatever rustup calls `nightly` (the dev-machine behaviour
-# this has always had). CI pins an exact date — `make RUST_NIGHTLY=nightly-2026-07-02 …` — because
-# `-Z build-std` recompiles std from source and is the most drift-sensitive thing this build does.
-# NB a rust-toolchain.toml would NOT work here: a `cargo +toolchain` on the command line outranks
-# the file, so the pin has to come through this variable.
-RUST_NIGHTLY ?= nightly
+# THE Rust toolchain: one release, read from rust-modules/rust-toolchain.toml (its `channel`), used
+# by the ARM cross-build AND the host unit suites, clippy and rustfmt. A fresh machine needs that
+# release plus its `armv7-unknown-linux-gnueabi` rust-std (`make setup-env` installs both) and
+# nothing else: no nightly, no `rust-src`, no `-Z build-std`. Override with `make RUST_TOOLCHAIN=...`
+# (the GPL source rebuild links its isolated toolchain as `source-rebuild`); CI reads the value from the
+# file itself (.github/actions/rust-toolchain/action.yml, with sed); `make -s print-rust-toolchain` prints it.
+# NB the file alone would NOT be enough: a `cargo +toolchain` on the command line outranks it, so
+# every recipe passes `+$(RUST_TOOLCHAIN)` explicitly and this variable is how the file reaches them.
+RUST_TOOLCHAIN ?= $(shell sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' $(CURDIR)/rust-modules/rust-toolchain.toml)
 
 # sha256 helper: coreutils `sha256sum` on Linux, perl `shasum -a 256` on macOS. Both print the
 # same "<hex>  <path>" format, so `-c -` works against either.
@@ -259,7 +266,7 @@ SYSROOT      = $(WEBOS_SDK)/arm-webos-linux-gnueabi/sysroot
 # wrapper, Starfish/ACB seam and nanosvg rasterizer) and it built without this gate until
 # 2026-08-15 — so the crash tracer and the 15-symbol C++ seam, the two places where a sloppy cast is
 # least survivable, were compiled at gcc's bare default. Turning it on cost nothing: the only hit
-# in the tree is inside vendored nanosvg, suppressed at its include in src/svg.c.
+# in the tree is inside the fetched nanosvg, suppressed at its include in src/svg.c.
 #
 # -Werror is safe to pin HERE in a way it would not be on a moving toolchain: the NDK is a fixed
 # GCC 12 installed by `make setup-env`, so no compiler upgrade can invent a new diagnostic under
@@ -272,7 +279,7 @@ WERROR      ?= -Werror
 # The out-of-process crash walker follows ARM's APCS frame chain. Keeping r11 frame pointers in
 # every C frame is therefore part of the crash-reporting ABI, not debug-only codegen; without it a
 # valid envelope contains only the faulting PC. Rust's matching flag is in RUST_ENV/config.toml.
-CFLAGS       = --sysroot=$(SYSROOT) -O2 -fno-omit-frame-pointer -funwind-tables -Wall -Wextra $(WERROR) -Iinclude -Isrc -Ivendor/nanosvg -D_GNU_SOURCE
+CFLAGS       = --sysroot=$(SYSROOT) -O2 -fno-omit-frame-pointer -funwind-tables -Wall -Wextra $(WERROR) -Isrc -Ivendor/nanosvg -D_GNU_SOURCE
 # DEBUG=1 keeps DWARF in the binary so a crash PC symbolizes to file:line instead of just
 # a function name (tools/crash-report.sh / the crash-triage skill). Same codegen, bigger
 # binary — deploy it only while chasing a crash.
@@ -350,8 +357,8 @@ endif
 # rather than appending to it. Anything added here must keep the full list intact — a partial
 # RUSTFLAGS silently drops target-cpu, and the ARMv6 CP15 barrier SIGILLs on the A53.
 #
-# --remap-path-prefix makes the binary independent of WHO built it. `-Z build-std` compiles std
-# from rust-src under $RUSTUP_HOME and every dependency from $CARGO_HOME, and rustc writes each
+# --remap-path-prefix makes the binary independent of WHO built it. Every dependency compiles
+# from $CARGO_HOME (and, under the old `-Z build-std`, std from $RUSTUP_HOME), and rustc writes each
 # absolute path into .rodata as a panic location: 252 of them on this machine before this landed
 # (113 rustup + 139 registry), which is what ci/check-elf.sh's build-host section gates on.
 # It is NOT only a privacy fix. Those paths are why two developers at the same commit and the
@@ -378,9 +385,13 @@ RUST_REMAP   = --remap-path-prefix=$(HOME)=/build \
 ifeq ($(CAPLINTS),1)
 RUST_CAPLINTS = --cap-lints=warn
 endif
-RUST_ENV = RUSTFLAGS="-C target-cpu=cortex-a9 -C target-feature=-neon -C force-frame-pointers=yes $(RUST_DEBUGINFO) $(RUST_CAPLINTS) $(RUST_REMAP)"
-# -Iinclude keeps the TV's SDL2/GLES2 headers (its SDL is a 2.0.4 fork) ahead of
-# the NDK's newer sysroot copies, so we compile against the ABI the TV runs.
+# The codegen flags alone, so ci/check-vfp.py can compile its probe with exactly these
+# (`make -s print-rust-codegen`) and compare them with rust-modules/.cargo/config.toml.
+RUST_CODEGEN = -C target-cpu=cortex-a9 -C target-feature=-neon,-soft-float -C force-frame-pointers=yes
+RUST_ENV = RUSTFLAGS="$(RUST_CODEGEN) $(RUST_DEBUGINFO) $(RUST_CAPLINTS) $(RUST_REMAP)"
+# No C translation unit includes an SDL, GLES or KHR header (the Rust layers declare their own
+# `extern` signatures and read SDL structs by raw offset), so no copy of those headers is kept
+# in the repository and CFLAGS has no -Iinclude.
 
 # Real sysroot libraries. Every one of these has the SAME SONAME on every webOS release from
 # 2.2.3 to 11.2.0 (`tools/fwcompat.py --inventory` will show you), which is what makes linking
@@ -470,7 +481,7 @@ CARGO_INCREMENTAL ?= 0
 export CARGO_INCREMENTAL
 endif
 
-# A new lane's first build recompiles every registry crate and the build-std sysroot, which are
+# A new lane's first build recompiles every registry crate, which is
 # byte-for-byte what the last lane built (cargo's hash for them does not depend on the checkout's
 # path) and are 40% of a lane's target bytes. `tools/cargo-seed.py` fills an ABSENT target dir with
 # an APFS clone of those artifacts (the app crate is stripped from it: cargo judges a path package
@@ -512,33 +523,37 @@ ARM_PROFILE ?= $(if $(or $(RELEASE),$(SYMBOLS),$(filter-out debug,$(FLAVOR)),$(C
 $(if $(filter release tvdev,$(ARM_PROFILE)),,$(error unknown ARM_PROFILE "$(ARM_PROFILE)" — one of: release tvdev))
 ARM_PROFILE_FLAG = $(if $(filter release,$(ARM_PROFILE)),--release,--profile $(ARM_PROFILE))
 
-# HOST_THREADS -- rustc's PARALLEL FRONT END for the LOCAL host test builds (`-Zthreads=N`).
+# HOST_THREADS -- OPT-IN: rustc's PARALLEL FRONT END for the local host test builds (`-Zthreads=N`).
 #
 # The crate stack is a chain (base -> platform -> ui/plex -> data/session -> media -> appkit ->
 # screens -> app), so cargo has little to run side by side, and the front end (parse, type-check,
-# borrow-check) is single-threaded per crate by default. Measured 2026-10-05, Apple M4 (10 cores),
-# `make build-bench` edit-rebuild rows, medians of 5, non-incremental: plx_base leaf 20.1 s ->
-# 17.8 s, plx_ui 10.7 -> 7.8, plx_screens 8.3 -> 5.7, app 4.8 -> 2.9 (-11% .. -40%). The
-# incremental `test-fast` loop was not slowed (it is already 2-11 s and the flag neither helps nor
-# hurts beyond noise). The price is CPU: the same rebuild uses ~20% more CPU-seconds (user time)
-# to finish sooner, so lanes sharing one Mac pay for it in each other's wall time.
-# N is the core count capped at 8: the measured gain from 8 to 10 threads was inside noise.
+# borrow-check) is single-threaded per crate by default. Measured 2026-10-05 on nightly, Apple M4
+# (10 cores), `make build-bench` edit-rebuild rows, medians of 5, non-incremental: plx_base leaf
+# 20.1 s -> 17.8 s, plx_ui 10.7 -> 7.8, plx_screens 8.3 -> 5.7, app 4.8 -> 2.9 (-11% .. -40%). The
+# price is CPU: the same rebuild uses ~20% more CPU-seconds (user time) to finish sooner, so lanes
+# sharing one Mac pay for it in each other's wall time. N is the core count capped at 8.
 #
-# Which recipes: ONLY the host `cargo test` / `check-cargo-unit-*` builds, `test-fast`, `test-crate`
-# and `build-bench` carry `$(HOST_ENV)`. It is NOT exported, so the ARM staticlib recipes (which set
-# RUSTFLAGS themselves), the simulators' builds, clippy and the package steps never see it.
-# It is off (0) for everything that ships or is graded -- the same set as ARM_PROFILE above:
-# RELEASE=1, SYMBOLS=1, FLAVOR=stable|nightly, and any CI run (CI / GITHUB_ACTIONS) -- and then
-# `$(HOST_ENV)` expands to nothing, so those recipes are the commands they always were
-# (ci/test_host_threads.py pins it). `make HOST_THREADS=0 ...` turns it off locally, `=N` picks N;
-# 0 and 1 mean the serial front end. A RUSTFLAGS the caller exported wins over it (cargo reads
-# CARGO_BUILD_RUSTFLAGS last), which is how a developer who already tunes RUSTFLAGS keeps their own.
+# It used to be ON by default for local builds, back when the host suites ran on nightly. The host
+# suites now run on the pinned STABLE toolchain, whose rustc rejects every `-Z` flag, so the default
+# is 0 (serial front end, the commands CI runs) and the flag is a choice:
+#
+#     make RUST_TOOLCHAIN=nightly HOST_THREADS=8 test-fast
+#
+# A HOST_THREADS above 1 on a non-nightly toolchain is a hard error here rather than a cargo failure
+# in the middle of a recipe. Which recipes: ONLY the host `cargo test` / `check-cargo-unit-*` builds,
+# `test-fast`, `test-crate`, `test-hostsim` and `build-bench` carry `$(HOST_ENV)`. It is NOT exported, so the ARM
+# staticlib recipes (which set RUSTFLAGS themselves), the simulators' builds, clippy and the package
+# steps never see it (ci/test_host_threads.py pins both). 0 and 1 mean the serial front end. A
+# RUSTFLAGS the caller exported wins over it (cargo reads CARGO_BUILD_RUSTFLAGS last).
 #
 # Artifacts built with and without the flag live side by side in one target dir (measured: flipping
-# it back and forth is a no-op the second time), so switching it does not cost a rebuild each way.
-# `-Zthreads` is nightly-only; `rustc -Zhelp` already calls it deprecated in favour of
-# `--jobs-frontend`, so ci/test_host_threads.py also checks that the pinned spelling is still accepted.
-HOST_THREADS ?= $(if $(or $(RELEASE),$(SYMBOLS),$(filter-out debug,$(FLAVOR)),$(CI),$(GITHUB_ACTIONS)),0,$(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1); echo $$((n > 8 ? 8 : n))))
+# it back and forth is a no-op the second time). `-Zthreads` is deprecated in nightly's own help in
+# favour of `--jobs-frontend`, so ci/test_host_threads.py also checks, when a nightly is installed,
+# that the pinned spelling is still accepted.
+HOST_THREADS ?= 0
+ifneq ($(filter-out 0 1,$(HOST_THREADS)),)
+$(if $(findstring nightly,$(RUST_TOOLCHAIN)),,$(error HOST_THREADS=$(HOST_THREADS) passes -Zthreads, which only a nightly rustc accepts; the host toolchain is $(RUST_TOOLCHAIN). Use: make RUST_TOOLCHAIN=nightly HOST_THREADS=$(HOST_THREADS) ...))
+endif
 HOST_ENV = $(if $(filter-out 0 1,$(HOST_THREADS)),CARGO_BUILD_RUSTFLAGS='-Zthreads=$(HOST_THREADS)')
 
 RUST_FEATFLAGS = $(if $(RELEASE),--no-default-features,)$(if $(LAB), --features lab-diagnostics,)
@@ -773,7 +788,11 @@ RUST_CFG       = features:$(RUST_FEATFLAGS)$(if $(filter-out release,$(ARM_PROFI
 # SEE the refusal message the cut-release skill quotes. Without it, asking that question on a
 # different configuration deleted `pkg/plxnative`, the FFmpeg header sentinel and the staged
 # libraries — measured, by a reviewer, mid-review.
-SIDE_EFFECT_FREE = $(QUERY_GOALS) release-guard lab-guard disk build-bench build-bench-quick
+#
+# `test-hostsim` and `check-nodef` join `build-bench` for the same reason: each only runs host cargo
+# in a tree under `rust-modules/`, builds none of the TV artifacts, and must not delete a release
+# binary because its caller's configuration differs from the stamp.
+SIDE_EFFECT_FREE = $(QUERY_GOALS) release-guard lab-guard disk disk-preflight build-bench build-bench-quick test-hostsim check-nodef
 PURE_QUERY := $(if $(MAKECMDGOALS),$(if $(filter-out $(SIDE_EFFECT_FREE),$(MAKECMDGOALS)),,yes),)
 ifneq ($(PURE_QUERY),yes)
 ifneq ($(RUST_CFG),$(shell cat $(RUST_STAMP) 2>/dev/null))
@@ -798,12 +817,12 @@ ifneq ($(CONFIG_LOCAL_SIG),$(shell cat $(CONFIG_LOCAL_STAMP) 2>/dev/null))
 endif
 endif
 
-RUST_TARGET = arm-unknown-linux-gnueabi
+RUST_TARGET = armv7-unknown-linux-gnueabi
 RUST_LIB    = rust-modules/$(RUST_TDIR)/$(RUST_TARGET)/$(ARM_PROFILE)/libplxnative_modules.a
 
 # Every ordinary C translation unit ships; gpdebug remains an opt-in allocator guard.
-# ass.c belongs to the privately bundled renderer, never the application ELF.
-SRCS = $(filter-out src/gpdebug.c src/ass.c,$(wildcard src/*.c)) src/compat/getauxval.c
+# ass.c and ass_fonts.c belong to the privately bundled renderer, never the application ELF.
+SRCS = $(filter-out src/gpdebug.c src/ass.c src/ass_fonts.c,$(wildcard src/*.c)) src/compat/getauxval.c
 OBJS = $(SRCS:.c=.o)
 
 all: pkg/plxnative pkg/plxnative-storage
@@ -814,18 +833,26 @@ all: pkg/plxnative pkg/plxnative-storage
 src/%.o: src/%.c $(wildcard src/*.h) Makefile $(CONFIG_LOCAL_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Rust staticlib (built-in arm-unknown-linux-gnueabi target = soft-float ABI,
-# matching the NDK's softfp calling convention). A staticlib needs no linker, so
-# this needs only the nightly compiler + rust-src — no external cross-linker.
+# Rust staticlib (target armv7-unknown-linux-gnueabi = soft-float CALLING convention, matching the
+# NDK's softfp one). A staticlib needs no linker, so this needs only the STABLE compiler and the
+# target's prebuilt std (`rustup target add armv7-unknown-linux-gnueabi`) — no nightly, no rust-src.
 # CRITICAL codegen flags for this TV (32-bit ARMv7+ / A53):
-#  - target-cpu=cortex-a9: the default arm-*-gnueabi (ARMv6) codegen emits the
-#    legacy CP15 memory barrier (mcr p15,...,c7,c10,5), UNDEFINED on the A53
-#    (ARMv8) → SIGILL. cortex-a9 (ARMv7-A) emits the dedicated `dmb`, matching
-#    the C side's default and staying portable to older ARMv7 webOS devices.
+#  - the target itself: its prebuilt std is ARMv7 (+v7,+thumb2), so it carries `dmb`, not the legacy
+#    CP15 barrier (mcr p15,...,c7,c10,5) that the ARMv6 arm-unknown-linux-gnueabi std carries and
+#    that is UNDEFINED on the A53 -> SIGILL. That is what `-Z build-std` used to buy.
+#  - target-cpu=cortex-a9: ARMv7-A codegen for our crates, portable to older ARMv7 webOS devices.
+#  - target-feature=-soft-float: the target defaults to `+soft-float` (no VFP instructions at all);
+#    this turns VFP back on in OUR crates while the calling convention stays soft (llvm-floatabi
+#    "soft" is a property of the target, not of this feature), i.e. what cortex-a9 gave on the old
+#    ARMv6 target. std's own float code stays software. On STABLE rustc prints `warning: unstable
+#    feature specified for -Ctarget-feature: soft-float ... its behavior can change in the future`
+#    for it, and the warning is the point: if a rustc release stops honouring the flag, every float
+#    op in our crates silently becomes an `__aeabi_fmul` libcall. `ci/check-vfp.py` (in `make check`
+#    and CI) compiles a probe with these exact flags and fails when it does, and `ci/check-elf.sh`
+#    repeats the count on the linked binary.
 #  - target-feature=-neon: NEON isn't needed (VFP still on for floats), and it
-#    dodges crates (simd-adler32, ...) whose NEON path uses unstable intrinsics.
-#  - -Z build-std: rebuilds std itself with these flags (precompiled std shipped
-#    the CP15 barriers), so needs the nightly toolchain + rust-src.
+#    dodges crates (simd-adler32, ...) whose NEON path uses unstable intrinsics. (Stable rustc
+#    warns `unstable feature specified for -Ctarget-feature: neon` here too; see config.toml.)
 # Codegen flags now live in rust-modules/.cargo/config.toml so they bind to the TARGET and
 # every cargo invocation gets them, not just this recipe. See that file before changing them.
 #
@@ -851,12 +878,23 @@ FFMPEG_SONAMES = libavutil-plx.so.61 libavcodec-plx.so.63 libavformat-plx.so.63 
                  $(if $(RELEASE),,libswscale-plx.so.10)
 FFMPEG_STAGED = $(addprefix pkg/,$(FFMPEG_SONAMES))
 
+# nanosvg is not in the repository. It is fetched at the commit pinned in ci/dependencies.json
+# (two header files, one sha256 each) into the gitignored vendor/nanosvg, which CFLAGS puts on the
+# include path. The host build does the same from rust-modules/build_support/host_link.rs.
+NANOSVG_STAMP = vendor/nanosvg/.staged
+$(NANOSVG_STAMP): ci/deps.py ci/dependencies.json
+	python3 ci/deps.py stage nanosvg --into vendor/nanosvg
+	@touch $@
+
+src/svg.o: $(NANOSVG_STAMP)
+
 # One pinned ASS renderer and font stack on every firmware. Only the plx_ass_* facade
 # is exported; FreeType/FriBidi/HarfBuzz are static and cannot bind to firmware copies.
 LIBASS_STAGED = pkg/libass-plx.so.0
-LIBASS_INPUTS = ci/build-libass.sh ci/build-libass.py ci/libass-dependencies.json \
+LIBASS_INPUTS = ci/build-libass.sh ci/build-libass.py ci/deps.py ci/dependencies.json \
                 ci/arm-cc.py ci/check-link-evidence.py ci/stage-link-evidence.py \
-                src/ass.c src/ass_composite.h include/ass.h
+                ci/patches/libass-0001-grow-font-faces.patch \
+                src/ass.c src/ass_fonts.c src/ass_internal.h src/ass_composite.h include/ass.h
 $(LIBASS_STAGED): $(LIBASS_INPUTS)
 	WEBOS_SDK=$(WEBOS_SDK) ./ci/build-libass.sh
 
@@ -872,7 +910,7 @@ SENTRY_UNWIND_LIB     = $(SENTRY_NATIVE_PREFIX)/lib/libunwind.a
 SENTRY_REMOTE_UNWIND_LIB = $(SENTRY_NATIVE_PREFIX)/lib/libunwind_remote.a
 SENTRY_HANDLER        = $(SENTRY_NATIVE_PREFIX)/bin/sentry-crash
 SENTRY_NATIVE_STAMP   = $(SENTRY_NATIVE_PREFIX)/.built
-SENTRY_NATIVE_INPUTS  = ci/arm-cc.py ci/check-link-evidence.py ci/stage-link-evidence.py ci/build-sentry-native.sh vendor/sentry-native/webos-arm32.patch
+SENTRY_NATIVE_INPUTS  = ci/arm-cc.py ci/check-link-evidence.py ci/stage-link-evidence.py ci/build-sentry-native.sh ci/deps.py ci/dependencies.json ci/patches/sentry-native-0001-webos-arm32.patch
 
 # `sentry_context.c` is the only application TU that includes the SDK header. Its Rust caller sees
 # plain C strings rather than sentry_value_t's opaque by-value union, whose AAPCS ABI must stay on
@@ -886,7 +924,7 @@ $(SENTRY_NATIVE_STAMP): $(SENTRY_NATIVE_INPUTS)
 
 sentry-native: $(SENTRY_NATIVE_STAMP)
 
-$(FFMPEG_INC)/libavformat/avformat.h: ci/build-ffmpeg.sh ci/arm-cc.py ci/check-link-evidence.py ci/stage-link-evidence.py
+$(FFMPEG_INC)/libavformat/avformat.h: ci/build-ffmpeg.sh ci/deps.py ci/dependencies.json ci/arm-cc.py ci/check-link-evidence.py ci/stage-link-evidence.py
 	RELEASE=$(RELEASE) ./ci/build-ffmpeg.sh
 
 # The real files carry a full version (libavutil-plx.so.58.29.100); ship them under the SONAME.
@@ -918,7 +956,7 @@ $(RUST_LIB): LICENSE $(RUST_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.l
 	mkdir -p rust-modules/$(RUST_TDIR)
 	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \
 	  $(TELEMETRY_ENV) \
-	  cargo +$(RUST_NIGHTLY) rustc $(ARM_PROFILE_FLAG) --target $(RUST_TARGET) \
+	  cargo +$(RUST_TOOLCHAIN) rustc $(ARM_PROFILE_FLAG) --target $(RUST_TARGET) \
 	    --lib --crate-type staticlib --target-dir $(RUST_TDIR) $(RUST_FEATFLAGS) \
 	    --message-format=json-render-diagnostics > $(RUST_TDIR)/.lib-artifacts.json
 	@# The crate declares `crate-type = ["rlib"]`, so this `.a` exists only because the line above
@@ -936,8 +974,8 @@ $(RUST_LIB): LICENSE $(RUST_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.l
 # feature configurations), and `make -j` runs them concurrently — exactly the hazard
 # rust-modules/.cargo/config.toml's own comment already documents ("a hand-typed cross build with a DIFFERENT ENVIRONMENT still writes the archive
 # make links... give a hand-run one its own --target-dir"). Sharing one target dir let the two
-# invocations race on the shared build-std sysroot units (std/core/alloc are never cached by
-# CI's rust-cache and so are rebuilt fresh by BOTH processes every run), which could leave
+# invocations race on shared units (back when `-Z build-std` rebuilt std/core/alloc fresh in BOTH
+# processes every run), which could leave
 # `cargo rustc`'s own fingerprint believing the just-linked plxnative-storage binary was still
 # fresh from the OTHER invocation's pass and skip re-invoking arm-cc.py — so no `.link.map`/
 # `.link.trace`/`.link.json` sidecar existed anywhere `stage-link-evidence.py` could find one,
@@ -954,8 +992,8 @@ STORAGE_INPUTS := $(shell find rust-modules/storage rust-modules/build_support r
 STORAGE_BIN = rust-modules/$(STORAGE_TDIR)/$(RUST_TARGET)/$(ARM_PROFILE)/plxnative-storage
 pkg/plxnative-storage: LICENSE $(STORAGE_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.lock ci/install-identities.json Makefile ci/arm-cc.py ci/check-link-evidence.py
 	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \
-	  CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABI_LINKER='$(CC)' \
-	  cargo +$(RUST_NIGHTLY) rustc $(ARM_PROFILE_FLAG) --target $(RUST_TARGET) \
+	  CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER='$(CC)' \
+	  cargo +$(RUST_TOOLCHAIN) rustc $(ARM_PROFILE_FLAG) --target $(RUST_TARGET) \
 	    -p plxnative-storage --bin plxnative-storage --target-dir $(STORAGE_TDIR) --no-default-features -- \
 	    -C link-arg=--sysroot=$(SYSROOT) -L native=$(SYSROOT)/usr/lib \
 	    -C link-arg=-Wl,-rpath-link,$(SYSROOT)/usr/lib -C link-arg=-Wl,--build-id=sha1
@@ -1001,16 +1039,23 @@ SMP_INTERPOSER_LDFLAG = -Wl,--export-dynamic-symbol=$(SMP_CALLBACK_HOOK)
 # explicitly. `ci/check-elf.sh` only asserts that the Starfish interposer is exported (and that
 # Load-with-context is not a loader dependency); it does not assert that nothing else is defined.
 GC_SECTIONS_LDFLAG = -Wl,--gc-sections
+# `-lm` AHEAD of $(RUST_LIB) as well as at the end: the prebuilt armv7 std's compiler_builtins
+# carries WEAK +soft-float definitions of roundf/floorf/ceilf/fmodf/cbrtf/sqrtf/... (roundf is a
+# call to __aeabi_fadd). With libm.so first, those names are already defined when the archive is
+# scanned and the members are never extracted, so every call (Rust's and svg.c's) binds to glibc's
+# VFP libm. `ci/check-elf.sh` fails if a local definition of one of them comes back.
 pkg/plxnative: $(OBJS) $(RUST_LIB) $(FFMPEG_STAGED) $(LIBASS_STAGED) $(SENTRY_NATIVE_STAMP) Makefile ci/arm-cc.py ci/check-link-evidence.py
 	$(CC) $(CFLAGS) -Wl,--build-id=sha1 $(GC_SECTIONS_LDFLAG) $(SMP_INTERPOSER_LDFLAG) \
-	  $(OBJS) $(RUST_LIB) $(SENTRY_NATIVE_LIB) \
+	  $(OBJS) -lm $(RUST_LIB) $(SENTRY_NATIVE_LIB) \
 	  $(SENTRY_UNWIND_LIB) $(LIBS_REAL) -ldl -lrt -lpthread -lm -o $@
 
 # --- NDK bootstrap -----------------------------------------------------------
 # Download + extract + relocate the webosbrew native-toolchain into $(WEBOS_SDK).
-NDK_REL ?= webos-d7ed7ee.6
+# The release, the per-host asset URLs and their sha256 are declared once, in ci/dependencies.json
+# (entry `webos-ndk`); `ci/deps.py` downloads and verifies. Nothing here carries a literal copy.
+NDK_REL = $(shell python3 ci/deps.py get webos-ndk version)
 # Host-aware asset selection. webosbrew/native-toolchain publishes exactly THREE host builds for
-# this release — darwin-arm64, darwin-x86_64, linux-aarch64 — and NO linux-x86_64. That is why CI
+# the pinned release — darwin-arm64, darwin-x86_64, linux-aarch64 — and NO linux-x86_64. That is why CI
 # runs on `ubuntu-24.04-arm`: an x86_64 Linux runner cannot obtain this toolchain at all, and the
 # old hardcoded `darwin-$(uname -m)` name RESOLVED there (downloading a Mach-O toolchain that
 # passed the `test -x` guard below and died later with "Exec format error").
@@ -1023,13 +1068,8 @@ else ifeq ($(NDK_HOST),aarch64)
 else
   NDK_PLAT = UNSUPPORTED
 endif
-NDK_TARBALL = arm-webos-linux-gnueabi_sdk-buildroot_$(NDK_PLAT).tar.bz2
-NDK_URL = https://github.com/webosbrew/native-toolchain/releases/download/$(NDK_REL)/$(NDK_TARBALL)
-# sha256 of the linux-aarch64 tarball (the one CI fetches), verified 2026-08-01. Empty for the
-# darwin assets — `make setup-env` on a dev Mac keeps its existing no-checksum behaviour; CI is
-# where an unverified 156 MB download actually matters.
-NDK_SHA256_linux-aarch64 = 45a2d12ff557457d92cde4fddaa77a6f1090fca03adc43bb74397e5e0c379501
-NDK_SHA256 = $(NDK_SHA256_$(NDK_PLAT))
+# Every host's asset carries a pinned sha256 (assets.<NDK_PLAT>.sha256 of the manifest entry).
+NDK_DL = $(dir $(WEBOS_SDK))ndk-download
 # Fetch this checkout's DEV telemetry credentials from GitHub into the gitignored local file.
 #
 # **GitHub is the single source of truth for every credential**, including the dev ones; the working
@@ -1060,18 +1100,21 @@ telemetry-local:
 	  chmod 0600 $(TELEMETRY_JSON); \
 	  echo "telemetry-local: wrote $(TELEMETRY_JSON) (dev credentials; environment=development)"
 
-setup-env:
+# The Rust half of `setup-env`: the pinned release (rust-modules/rust-toolchain.toml) with clippy,
+# rustfmt and the ARMv7 rust-std. Nothing else -- no nightly, no rust-src.
+setup-rust:
+	rustup toolchain install $(RUST_TOOLCHAIN) --profile minimal --component clippy --component rustfmt --target $(RUST_TARGET)
+
+setup-env: setup-rust
 	@test "$(NDK_PLAT)" != UNSUPPORTED || { \
 	  echo "no webOS NDK published for $(NDK_OS)-$(NDK_HOST) at $(NDK_REL)."; \
 	  echo "Available: darwin-arm64, darwin-x86_64, linux-aarch64."; exit 1; }
 	@test -x $(CC) && { echo "NDK already present at $(WEBOS_SDK)"; exit 0; } || true
 	mkdir -p $(dir $(WEBOS_SDK))
-	curl -fL --retry 3 --retry-all-errors -o $(dir $(WEBOS_SDK))/ndk.tar.bz2 "$(NDK_URL)"
-	@test -z "$(NDK_SHA256)" || { \
-	  echo "$(NDK_SHA256)  $(dir $(WEBOS_SDK))/ndk.tar.bz2" | $(SHA256SUM) -c -; }
-	tar xjf $(dir $(WEBOS_SDK))/ndk.tar.bz2 -C $(dir $(WEBOS_SDK))
+	tarball=$$(python3 ci/deps.py fetch webos-ndk --asset $(NDK_PLAT) --into $(NDK_DL)) && \
+	  tar xjf "$$tarball" -C $(dir $(WEBOS_SDK))
 	cd $(WEBOS_SDK) && ./relocate-sdk.sh
-	rm -f $(dir $(WEBOS_SDK))/ndk.tar.bz2
+	rm -rf $(NDK_DL)
 	@echo "NDK ready: $$($(CC) --version | head -1)"
 
 # tmp+mv so deploy works while the old binary is still executing (ETXTBSY)
@@ -1132,6 +1175,17 @@ APP_FILES = pkg/plxnative $(SENTRY_HANDLER) $(APPINFO) $(ICONS) pkg/splash.png \
 # long as nobody compared the two by hand. `ci/test_deploy_manifest.py` pins the relationship
 # itself (via `print-app-files`/`print-deploy-files`), not just today's four names.
 DEPLOY_FILES = $(filter-out pkg/plxnative $(SENTRY_HANDLER) $(FFMPEG_STAGED) $(LAB_FILES),$(APP_FILES))
+
+# The subtitle faces (tools/cut-noto-subs.py): Noto Sans <script> Bold, one file per script, plus the
+# manifest that names them in add order. They are NOT in `APP_FILES`, because that list is staged
+# with a flat `cp` and these live in their own directory, `fonts/subs/`, where the renderer reads
+# them from (`player::ass::fonts`) - 22 more names in the app directory's root would hide the few
+# files a person looks for there. Each recipe that handles `APP_FILES` handles this list too:
+# `ipk` stages it, `deploy` copies it and `verify-deploy` checks it. The wildcard means a face added
+# to the directory ships without a second edit here; `ci/check-package.py` compares the staged
+# archive with the manifest, so a face that did not make it in fails the package, not the television.
+SUBS_FONT_DIR   = fonts/subs
+SUBS_FONT_FILES = $(sort $(wildcard pkg/fonts/subs/*.ttf)) pkg/fonts/subs/manifest.json
 # pkg/le-roots.pem is the four public Let's Encrypt roots (ISRG Root X1, X2, YR, YE) that
 # `net::keypin`'s roots mode verifies a `*.plex.direct` host against when the television's own CA
 # store lacks the issuing root (a 2020 firmware and Let's Encrypt's 2025 roots). It is PAYLOAD
@@ -1140,11 +1194,12 @@ DEPLOY_FILES = $(filter-out pkg/plxnative $(SENTRY_HANDLER) $(FFMPEG_STAGED) $(L
 # certificate chains to a newer root stops being reachable on an old firmware. Absent, the fallback
 # simply does not engage. NOT `roots.pem`: that name is `net::post_ca`'s telemetry bundle.
 # appfont-cjk.ttf is the fallback face (Noto Sans CJK KR, tools/cut-noto-cjk.py) and it is the
-# single largest thing in the package — 21 MB raw, ~11 MB of the .ipk. It is PAYLOAD, not an
+# single largest thing in the package — 13.4 MB raw, ~7.5 MB of the .ipk. It is PAYLOAD, not an
 # optional extra: without it a Korean, Japanese or Chinese library renders as tofu end to end, and
 # the television's own DroidSansFallback is present on the sets we have measured but is not
 # something a submission can be graded against. `rust-modules/base/src/fontcov.rs`'s host gate asserts
-# what it must cover; `text.rs`'s module doc is the chain.
+# what it must cover; `text.rs`'s module doc is the chain. appfont-emoji.ttf (monochrome Noto
+# Emoji, tools/cut-noto-emoji.py, under 1 MB) is the chain's emoji link.
 
 # TRADEMARKS.md ships too: it carries the brand reservation and the Plex/LG non-affiliation
 # statement, which used to be appended to LICENSE. It was moved out because GitHub's `licensee`
@@ -1253,7 +1308,7 @@ deploy: pkg/plxnative pkg/plxnative-storage $(FFMPEG_STAGED) $(SENTRY_NATIVE_STA
 	   $(SSH) 'chmod 644 $(APPDIR)/lab.json'; \
 	 else $(SSH) 'rm -f $(APPDIR)/lab.json'; fi
 	# The rest of the payload — appinfo, both icon sizes, the splash/launch image, the three font
-	# files (including the 21 MB CJK fallback face — unconditional now, like everything else in
+	# files (including the 13 MB CJK fallback face — unconditional now, like everything else in
 	# this list: `verify-deploy` below is what makes a stale copy visible instead of a scp that
 	# quietly never ran), the OFL licence and the third-party notices — in ONE scp, ONE connection,
 	# from `DEPLOY_FILES`: the SAME list `ipk` stages via `cp $(APP_FILES) $(STAGE)/`. `scp` to a
@@ -1385,6 +1440,60 @@ clean:
 
 test: deploy run
 
+# `disk-preflight` — the disk budget, checked at EVERY build entry (docs/disk-budget.md). A cold build
+# writes several GB under its target dir; on a full disk the failure is `No space left on device (os error
+# 28)` deep inside rustc or the replay driver, which reads exactly like a code failure (2026-10-16: three
+# "blocking" gate FAILs were all ENOSPC, and the same sha passed once space was freed). So each target that
+# starts cargo, listed once in DISK_ENTRIES, has `disk-preflight` as an ORDER-ONLY prerequisite, and the
+# recipe is `tools/disk-budget.py preflight`:
+#   * 20 GiB or more free (PLX_GC_MIN_FREE_GIB): one statvfs and nothing else, ~22 ms;
+#   * below that: plan a reclaim that spares the tree being built and every live tree (the checkout's other
+#     trees lose only their incremental dirs, and only as a last resort), hand it to `build-gc.sh --evict`,
+#     re-read the free space, and go on if the build fits;
+#   * refuse (exit 1, with the reason) only when the whole ladder cannot cover the build's estimate plus the
+#     reserve (PLX_MIN_FREE_MB, default 3072), i.e. when the build would hit ENOSPC anyway.
+# `PLX_MIN_FREE_MB=0` skips it. A recipe that re-enters make for a hooked target sets
+# PLX_DISK_BUDGET_DONE=1 on that line, so the child does not run it a second time.
+#
+# ORDER-ONLY (after the `|`): a phony normal prerequisite would make every FILE target in the list out of
+# date on every run. It still runs on a `make` that has nothing to do (the fast path, ~22 ms); below
+# the comfort line that is also the moment a reclaim happens, which is the point.
+#
+# DISK_TREE is the cargo target dir the entry writes (absolute), DISK_NEED the entry's estimate in GiB when
+# it is not the table's value for that dir's name (tools/disk-budget.py NEED_GIB). `ci/test_disk_preflight.py`
+# finds every target whose recipe runs cargo and fails when one is missing from this list.
+DISK_ENTRIES = check check-replay check-cargo-lint check-cargo-unit-default check-cargo-unit-hostsim lint \
+               test-fast test-crate test-hostsim check-nodef check-ass check-ffmpeg sim-macos sim-linux screenshots-sim site-video-sim \
+               $(RUST_LIB) pkg/plxnative-storage macapp macapp-zip build-bench build-bench-quick
+$(DISK_ENTRIES): | disk-preflight
+
+# A relative CARGO_TARGET_DIR is relative to rust-modules, where cargo runs.
+DISK_TREE = $(if $(CARGO_TARGET_DIR),$(if $(filter /%,$(CARGO_TARGET_DIR)),$(CARGO_TARGET_DIR),$(CURDIR)/rust-modules/$(CARGO_TARGET_DIR)),$(CURDIR)/rust-modules/target)
+DISK_NEED =
+test-fast test-crate: DISK_TREE = $(CURDIR)/rust-modules/$(TEST_FAST_TDIR)
+test-hostsim: DISK_TREE = $(CURDIR)/rust-modules/$(TEST_HOSTSIM_TDIR)
+check-replay sim-macos: DISK_TREE = $(abspath $(SIM_TDIR)$(if $(LAB),-lab,))
+sim-linux: DISK_TREE = $(abspath $(SIM_LINUX_TDIR_ENV))
+screenshots-sim: DISK_TREE = $(abspath $(SHOT_TDIR))
+site-video-sim: DISK_TREE = $(abspath $(SITE_VIDEO_TDIR))
+macapp macapp-zip: DISK_TREE = $(abspath $(MACAPP_TDIR))
+# The ARM builds add far less than the host's: 0.6 GiB (`tvdev`) or 0.45 GiB (`release`), 0.15 for the helper.
+$(RUST_LIB): DISK_TREE = $(CURDIR)/rust-modules/$(RUST_TDIR)
+$(RUST_LIB): DISK_NEED = $(if $(filter release,$(ARM_PROFILE)),0.45,0.6)
+pkg/plxnative-storage: DISK_TREE = $(CURDIR)/rust-modules/$(STORAGE_TDIR)
+pkg/plxnative-storage: DISK_NEED = 0.15
+# The benchmark's worst case: the host `target` AND a test-fast tree built from nothing (only `ARGS=--cold`
+# builds it; a plain run reuses an existing one or skips the -inc rows).
+build-bench build-bench-quick: DISK_NEED = 6.1
+
+.PHONY: disk-preflight
+disk-preflight:
+	@python3 tools/disk-budget.py preflight --tree '$(DISK_TREE)'$(if $(DISK_NEED), --need-gib $(DISK_NEED))
+
+# The targets that carry the prerequisite, one per line: the list `ci/test_disk_preflight.py` checks every
+# cargo-running target against (a `make -s print-*` query, never `make -p`).
+print-disk-entries: ; @printf '%s\n' $(DISK_ENTRIES)
+
 # `make check` is a machine-wide QUEUE with TWO slots, not a direct alias for the suite below. On
 # 2026-09-28, ~7 agent worktrees ran `make check` at once on one 10-core/16 GB Mac: each
 # is a cold 412k-line rustc build (~1 GB RSS), swap hit 9-15 GB, and one run took 60
@@ -1399,7 +1508,7 @@ test: deploy run
 # waits for the first. See `check-unlocked` below for the actual
 # suite; CI runs `make check` uncontended, so the wrapper acquires immediately there.
 check:
-	@python3 tools/check-lock.py -- $(MAKE) --no-print-directory check-unlocked
+	@PLX_DISK_BUDGET_DONE=1 python3 tools/check-lock.py -- $(MAKE) --no-print-directory check-unlocked
 
 # `make check` — the HOST unit suite plus `lint` below, the only correctness signal
 # available without a television. Deliberately NOT a prerequisite of `all`: the normal build is a
@@ -1531,26 +1640,26 @@ check-cargo-unit-default:
 	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" PLXNATIVE_RUNTIME_DIR="$$d" \
 	  $(TELEMETRY_ENV) \
 	  $(HOST_ENV) \
-	  $(UNIT_RUN) -- cargo +$(RUST_NIGHTLY) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens
-	RUST_NIGHTLY=$(RUST_NIGHTLY) python3 ci/test_storage_service_package.py
-	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" cargo +$(RUST_NIGHTLY) test -p plxnative-storage --bin plxnative-storage
+	  $(UNIT_RUN) -- cargo +$(RUST_TOOLCHAIN) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens
+	RUST_TOOLCHAIN=$(RUST_TOOLCHAIN) python3 ci/test_storage_service_package.py
+	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" cargo +$(RUST_TOOLCHAIN) test -p plxnative-storage --bin plxnative-storage
 	@# The helper is its own package, so building it compiles no copy of the app library; this reads
 	@# cargo's resolved unit graph (`--unit-graph`, nothing is compiled) for both invocations the repo
 	@# uses for it and fails if either contains a unit of the app package.
-	RUST_NIGHTLY=$(RUST_NIGHTLY) python3 ci/test_storage_package_isolated.py
+	RUST_TOOLCHAIN=$(RUST_TOOLCHAIN) python3 ci/test_storage_package_isolated.py
 	@# The crate builds as an rlib only (the ARM archive is `cargo rustc --crate-type staticlib`, see
 	@# $(RUST_LIB), and ci/check-staticlib-artifact.py proves it exists); this reads the app library's
 	@# `crate_types` from `cargo build --lib --unit-graph` and `cargo metadata` (nothing is compiled,
 	@# cargo derives every file it writes from them) and fails if a host build could write a ~200 MB
 	@# archive again. It is proven red against a manifest that adds `staticlib`/`cdylib`.
-	RUST_NIGHTLY=$(RUST_NIGHTLY) python3 ci/test_no_host_staticlib.py
+	RUST_TOOLCHAIN=$(RUST_TOOLCHAIN) python3 ci/test_no_host_staticlib.py
 	@# Right after the lab check above on purpose, with the same `cargo check --lib --tests --features
 	@# lab-diagnostics` and CARGO_INCREMENTAL=0: the same unit, so its first run is a reuse of that
 	@# one rather than a cold compile. Checks the app crate twice and fails if the second run recompiles it
 	@# or re-runs its build script (a `rerun-if-changed` on a MISSING path made every build dirty:
 	@# 30-40 s each, 8 times per `make check`), and keeps the `RELEASE_LINE` marker's appear / edit /
 	@# disappear rebuilds honest in a scratch workspace that uses the real build.rs.
-	RUST_NIGHTLY=$(RUST_NIGHTLY) python3 ci/test_build_not_always_dirty.py
+	RUST_TOOLCHAIN=$(RUST_TOOLCHAIN) python3 ci/test_build_not_always_dirty.py
 
 # The `hostsim` unit suite (the host feed seam exists only there).
 check-cargo-unit-hostsim:
@@ -1565,7 +1674,7 @@ check-cargo-unit-hostsim:
 	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" PLXNATIVE_RUNTIME_DIR="$$d" \
 	  $(TELEMETRY_ENV) \
 	  $(HOST_ENV) \
-	  $(UNIT_RUN) -- cargo +$(RUST_NIGHTLY) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens --features hostsim
+	  $(UNIT_RUN) -- cargo +$(RUST_TOOLCHAIN) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens --features hostsim
 
 # OPT-IN incremental inner loop: the default-feature unit suite (the same `cargo test --lib` as
 # `check-cargo-unit-default`, same throwaway runtime root and telemetry env) with
@@ -1589,7 +1698,7 @@ test-fast:
 	  PATH="$$HOME/.cargo/bin:$$PATH" PLXNATIVE_RUNTIME_DIR="$$d" \
 	  $(TELEMETRY_ENV) \
 	  $(HOST_ENV) \
-	  $(UNIT_RUN) $(if $(T),--filter '$(T)') -- cargo +$(RUST_NIGHTLY) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens
+	  $(UNIT_RUN) $(if $(T),--filter '$(T)') -- cargo +$(RUST_TOOLCHAIN) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens
 
 # `make test-crate C=plx_ui [T=filter] [DEPS=1]` -- build and run ONLY the named crate's lib tests, in
 # the same incremental `$(TEST_FAST_TDIR)` tree and with the same flags as `test-fast`, so the two
@@ -1609,7 +1718,87 @@ test-crate:
 	  PATH="$$HOME/.cargo/bin:$$PATH" PLXNATIVE_RUNTIME_DIR="$$d" \
 	  $(TELEMETRY_ENV) \
 	  $(HOST_ENV) \
-	  python3 ../tools/test-crate.py --suite '$(UNIT_SUITE)' --cargo 'cargo +$(RUST_NIGHTLY)' $(if $(DEPS),--deps) $(if $(T),--filter '$(T)') $(C)
+	  python3 ../tools/test-crate.py --suite '$(UNIT_SUITE)' --cargo 'cargo +$(RUST_TOOLCHAIN)' $(if $(DEPS),--deps) $(if $(T),--filter '$(T)') $(C)
+
+# `make test-hostsim [C=<crate>...] [T=filter]` -- the `hostsim` tests: the ones under
+# `#[cfg(all(test, feature = "hostsim"))]` (the application crate's `app/run.rs`
+# `lifecycle_regression_tests`, the player-return rig; `plx_media`'s `player/engine.rs`, `pump.rs`,
+# `route/decision.rs`), which `test-fast` and `test-crate` do not compile because the feature is off
+# in the default set. `C` is the crate under test, spelled as for `test-crate` (`C=plx_media` or
+# `C=media`; the application crate, the default, is `C=app`; several allowed), and it is the ONLY
+# thing `C` changes: the same recipe, the same managed dir, the same `--require-match`. The features
+# are the crate's own plus `hostsim`, not the application crate's defaults the full suite unifies in
+# (`test-crate` documents that gap); `C=plx_media` measured identical to the suite's line (1839
+# passed, 60 ignored, 2026-10-19). It is the managed form of what AGENTS.md used to hand out as a recipe,
+# `CARGO_INCREMENTAL=1 CARGO_TARGET_DIR=/tmp/<dir> cargo test --lib -p plxnative-modules --features
+# hostsim`: every agent picked its own `/tmp/<dir>`, nothing tracked them, and on 2026-10-19 there
+# were 28 PlxNative cargo trees there, 45.6 GiB, none of them known to `make disk` or `build-gc`.
+#
+# The target dir is `rust-modules/$(TEST_HOSTSIM_TDIR)`, INSIDE the checkout like `target-fast`: it is
+# gitignored, `tools/build-gc.sh --incremental` drops its `debug/incremental` and `--lanes` /
+# `--all` the whole tree (both glob `rust-modules/target*`), and it goes with the worktree.
+# `tools/cargo-seed.py` never touches it (it handles only `target` and `target-release`).
+#
+# INCREMENTAL, FORCED ON, for the reason `test-fast` is: this is an inner loop you ask for by
+# typing the target, not something `check` does. The only measured numbers for such a loop are
+# `test-fast`'s (full default-feature suite, 5 interleaved rounds, 2026-10-01: edit-rebuild ~10 s
+# against 31-32 s non-incremental; cold 51.7 s against 46.2 s; tree ~2.7 GB against ~1.0 GB; see
+# `test-fast` below). They are not hostsim's own -- this one builds the application crate only --
+# so the claim here is the direction, not the figures; the PR that added this target reports one
+# measured cold build and tree size. It is forced rather than `?=`, because a linked worktree
+# exports `CARGO_INCREMENTAL=0` (above) and would otherwise turn the loop into the slow path it
+# exists to avoid; and it is safe for the disk because the cache lives in this dir only, which
+# build-gc reclaims. Nothing in `check*`, `lint` or CI names the dir.
+#
+# The same environment as `check-cargo-unit-hostsim` (pinned toolchain, throwaway
+# `PLXNATIVE_RUNTIME_DIR` -- honoured here because `hostsim` is what makes it steerable --, the
+# telemetry words and HOST_ENV), run through $(UNIT_RUN) so the binary gets its own runtime
+# subdirectory and an empty TMPDIR it must leave empty. `--require-match` makes a filter that
+# matches no test FAIL: libtest prints `0 passed ... N filtered out` and exits 0, which a mistyped
+# `T=` reads exactly like a green run. Refused under RELEASE=1 like `test-fast`.
+TEST_HOSTSIM_TDIR = target-hostsim
+HOSTSIM_PKGS = $(foreach c,$(or $(strip $(C)),app),$(if $(filter app,$(c)),plxnative-modules,$(if $(filter plx_% plxnative-modules,$(c)),$(c),plx_$(c))))
+.PHONY: test-hostsim
+test-hostsim:
+	@$(if $(RELEASE),echo "make test-hostsim: refused under RELEASE=1 -- it runs the default-plus-hostsim feature set incrementally; RELEASE=1 is the shipping feature set (use make check-nodef for that)." >&2; exit 1,:)
+	@echo "test-hostsim: incremental hostsim tests of $(HOSTSIM_PKGS) in rust-modules/$(TEST_HOSTSIM_TDIR) -- see 'make disk'; reclaim it with: tools/build-gc.sh --incremental (cache) or rm -rf rust-modules/$(TEST_HOSTSIM_TDIR)"
+	@set -e; d=$$(mktemp -d /tmp/plxnative-check.XXXXXX); trap 'rm -rf "'"$$d"'"' EXIT; \
+	cd rust-modules && CARGO_INCREMENTAL=1 CARGO_TARGET_DIR=$(TEST_HOSTSIM_TDIR) \
+	  PATH="$$HOME/.cargo/bin:$$PATH" PLXNATIVE_RUNTIME_DIR="$$d" \
+	  $(TELEMETRY_ENV) \
+	  $(HOST_ENV) \
+	  $(UNIT_RUN) --require-match $(if $(T),--filter '$(T)') -- cargo +$(RUST_TOOLCHAIN) test --lib $(addprefix -p ,$(HOSTSIM_PKGS)) --features hostsim
+
+# `make check-nodef` -- type-check the SHIPPING feature set (`--no-default-features`: devtools,
+# devtriggers and threadcheck off, what `RELEASE=1` builds). `make check`, `make` and `make sim` all
+# build the DEV features, so a break that only the release set has is invisible to every one of them
+# (docs/agent-reference.md; AGENTS.md says when to run it). It replaces the hand command
+# `CARGO_INCREMENTAL=0 cargo +<pin> check --manifest-path rust-modules/Cargo.toml --lib
+# --no-default-features`, which agents ran into their own `/tmp/<x>-nodef` trees.
+#
+# It SHARES the checkout's `target` (or the `CARGO_TARGET_DIR` a fleet lane exports, as `lint` and
+# `make check` do) and adds no tree. Sharing is safe, measured 2026-10-19 with `cargo ...
+# --unit-graph` (nothing compiled) against the units `make lint` builds: of the 165 units this command needs, 139 are
+# third-party crates whose package, target, mode, features and profile are identical to lint's, so
+# cargo reuses their artifacts; the 26 others are the workspace crates, whose FEATURES differ
+# (`--no-default-features` stops the app package forwarding devtools / devtriggers / threadcheck into
+# every layer crate), so each gets its own metadata hash and file names and coexists with the dev
+# set instead of replacing it. `check` writes only hashed `.rmeta`, so there is no unhashed output
+# for the two to collide on (the `.a` collision that gave RELEASE its own dir does not apply).
+# It must therefore NOT carry $(HOST_ENV) or $(TELEMETRY_ENV): they would change RUSTFLAGS or
+# build-script inputs and make the third-party units differ from lint's. The cost of sharing is
+# cargo's build-directory lock, which makes this wait for a `cargo` already running in the same
+# tree for as long as that one invocation lasts.
+#
+# The seed restore is the same line `lint` starts with: `restore` only fills an ABSENT dir, so a
+# fresh lane whose first cargo call is this one would otherwise create `target` unseeded and every
+# later `make check` there would build third-party cold. `CARGO_INCREMENTAL=0`: a one-shot gate has
+# no use for an incremental cache, and (unlike `test-hostsim`) there is no loop here.
+.PHONY: check-nodef
+check-nodef:
+	$(CARGO_SEED) restore target rust-modules/target --env-var CARGO_TARGET_DIR --env-base rust-modules
+	@set -e; cd rust-modules && CARGO_INCREMENTAL=0 PATH="$$HOME/.cargo/bin:$$PATH" \
+	  cargo +$(RUST_TOOLCHAIN) check --lib --no-default-features
 
 # `make build-bench [ARGS='--runs 5 --json out.json']` -- the repeatable local build benchmark
 # (tools/build-bench.py; docs/agent-reference.md says what it measures and when a PR must paste its
@@ -1625,7 +1814,7 @@ test-crate:
 .PHONY: build-bench build-bench-quick
 build-bench build-bench-quick:
 	@$(if $(RELEASE),echo "make $@: refused under RELEASE=1 -- it benchmarks the default-feature host build; RELEASE=1 is the shipping feature set." >&2; exit 1,:)
-	@python3 tools/check-lock.py --exclusive -- env PLX_BENCH_VIA_MAKE=1 $(TELEMETRY_ENV) $(HOST_ENV) \
+	@python3 tools/check-lock.py --exclusive -- env PLX_BENCH_VIA_MAKE=1 PLX_DISK_BUDGET_DONE=1 $(TELEMETRY_ENV) $(HOST_ENV) \
 	  python3 tools/build-bench.py $(if $(filter build-bench-quick,$@),--quick) $(ARGS)
 
 # `check-python` is TWO branches run at once (tools/check-parallel.py, the same helper as
@@ -1708,8 +1897,8 @@ check-python-rest:
 # and naming them means a nightly bump cannot silently widen what `make check` fails on. All three
 # are clean as of 2026-07-29 (so is `clippy::correctness` as a group, except ff.rs:1330's deliberate
 # `loop { … break; }`). `--all-targets` so the `#[cfg(test)]` blocks are linted too, not just the
-# lib. ~12s cold, <1s warm — clippy needs the nightly clippy component, which rustup's DEFAULT
-# profile ships (a `--profile minimal` nightly does not).
+# lib. ~12s cold, <1s warm — clippy is a toolchain component (rust-toolchain.toml lists it; a bare
+# `--profile minimal` install does not carry it).
 #
 # `if_same_then_else` is the one with a legitimate false positive here: two deliberately-identical
 # arms, e.g. `if back { exit_player() } else if stop { exit_player() }` — which app.rs's key chain
@@ -1720,7 +1909,7 @@ lint:
 	@# when a lane exports one, is the dir cargo really uses; a relative one is relative to
 	@# rust-modules).
 	$(CARGO_SEED) restore target rust-modules/target --env-var CARGO_TARGET_DIR --env-base rust-modules
-	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" cargo +$(RUST_NIGHTLY) clippy --workspace --all-targets -- \
+	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" cargo +$(RUST_TOOLCHAIN) clippy --workspace --all-targets -- \
 	  -A clippy::all \
 	  -D clippy::ifs_same_cond -D clippy::same_functions_in_if_condition -D clippy::if_same_then_else
 
@@ -1793,6 +1982,35 @@ else
 	 echo "symbols: pkg/plxnative.debug  build-id $$bin  ($$(du -h pkg/plxnative.debug | cut -f1))"
 endif
 
+# `make symbols-libs` — the same for every BUNDLED shared object: the FFmpeg libraries and libass.
+#
+# A crash frame inside `libavformat-plx.so.63` is an address in a library that ships stripped, so
+# without this it reaches Sentry as a bare address. The shipped copy is made from a link output that
+# still has `.symtab`; `pkg/symbols/<soname>.debug` is that output through `objcopy
+# --only-keep-debug`, the same treatment `symbols` gives pkg/plxnative. ci/extract-so-symbols.sh
+# refuses a library without a GNU build id (`-Wl,--build-id=sha1` on its link, which ci/build-ffmpeg.sh
+# and ci/build-libass.py now pass) and a `.debug` whose id differs from the shipped copy's or that
+# has no function symbols: `sentry-cli debug-files check` passes a symbol-less object, so the
+# assertion cannot be left to it.
+#
+# NOT `sentry-crash`: it is a separate process that never sends a report, so no frame of an event
+# lands in it; the in-process handler code is libsentry.a, linked into pkg/plxnative and covered by
+# `symbols`. libswscale, which only a non-RELEASE build bundles, is covered because FFMPEG_SONAMES
+# lists it. Independent of SYMBOLS=1 (these libraries carry no DWARF of ours; their `.symtab` is the content).
+SO_SYMBOLS_DIR        = pkg/symbols
+FFMPEG_UNSTRIPPED_DIR = $(FFMPEG_PREFIX)/lib/unstripped
+LIBASS_UNSTRIPPED     = vendor/libass-prefix/lib/libass-plx.so.0
+FFMPEG_SO_SYMBOLS     = $(addprefix $(SO_SYMBOLS_DIR)/,$(addsuffix .debug,$(FFMPEG_SONAMES)))
+LIBASS_SO_SYMBOLS     = $(SO_SYMBOLS_DIR)/libass-plx.so.0.debug
+SO_SYMBOLS            = $(FFMPEG_SO_SYMBOLS) $(LIBASS_SO_SYMBOLS)
+
+$(FFMPEG_SO_SYMBOLS): $(SO_SYMBOLS_DIR)/%.debug: pkg/% ci/extract-so-symbols.sh
+	TOOLPREFIX='$(TOOLPREFIX)' ci/extract-so-symbols.sh pkg/$* $(FFMPEG_UNSTRIPPED_DIR)/$* $@
+$(LIBASS_SO_SYMBOLS): $(LIBASS_STAGED) ci/extract-so-symbols.sh
+	TOOLPREFIX='$(TOOLPREFIX)' ci/extract-so-symbols.sh $< $(LIBASS_UNSTRIPPED) $@
+
+symbols-libs: $(SO_SYMBOLS)
+
 # Validate and upload the exact debug file that matches `pkg/plxnative`. This is a separate target
 # so a development build used for an on-device crash test gets the same fail-closed pairing as CI.
 # `SENTRY_AUTH_TOKEN` is read only from the process environment and is never echoed or written.
@@ -1801,20 +2019,31 @@ SENTRY_ORG     ?= gleb-linnik
 # development project. Release CI supplies SENTRY_PROJECT=plx-native explicitly; a checkout with
 # no telemetry cache keeps that production fallback for deliberate one-off invocations.
 SENTRY_PROJECT ?= $(or $(call telemetry_val,sentry_project),plx-native)
-SENTRY_CLI     ?= npx --yes @sentry/cli@latest
-sentry-symbols: symbols
+# The CLI is the version pinned in tools/package.json (Dependabot bumps it with its lockfile),
+# installed on first use; point SENTRY_CLI at another command to bypass that.
+SENTRY_CLI_LOCAL := tools/node_modules/.bin/sentry-cli
+SENTRY_CLI     ?= $(SENTRY_CLI_LOCAL)
+$(SENTRY_CLI_LOCAL): tools/package.json tools/package-lock.json
+	npm ci --prefix tools
+	@touch $@
+sentry-symbols: symbols symbols-libs $(filter $(SENTRY_CLI_LOCAL),$(SENTRY_CLI))
 	@test -n "$${SENTRY_AUTH_TOKEN:-}" || { \
 	  echo "sentry-symbols: SENTRY_AUTH_TOKEN is required" >&2; exit 1; }
-	@SENTRY_ORG='$(SENTRY_ORG)' SENTRY_PROJECT='$(SENTRY_PROJECT)' \
-	  $(SENTRY_CLI) debug-files check pkg/plxnative.debug
+	@# `debug-files check` on every file, requiring `debug` or `symtab` features (not merely a zero exit).
+	@SENTRY_ORG='$(SENTRY_ORG)' SENTRY_PROJECT='$(SENTRY_PROJECT)' SENTRY_CLI='$(SENTRY_CLI)' \
+	  python3 ci/check-debug-files.py pkg/plxnative.debug $(SO_SYMBOLS)
 	@SENTRY_ORG='$(SENTRY_ORG)' SENTRY_PROJECT='$(SENTRY_PROJECT)' \
 	  $(SENTRY_CLI) debug-files upload --include-sources pkg/plxnative.debug pkg/plxnative
+	@# No --include-sources for the libraries: their DWARF names third-party source files, not ours.
+	@SENTRY_ORG='$(SENTRY_ORG)' SENTRY_PROJECT='$(SENTRY_PROJECT)' \
+	  $(SENTRY_CLI) debug-files upload $(SO_SYMBOLS)
 
 ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 	python3 ci/check-link-evidence.py pkg/plxnative pkg/plxnative-storage $(SENTRY_HANDLER) $(FFMPEG_STAGED) $(LIBASS_STAGED)
 	@echo "packaging $(if $(RELEASE),RELEASE,dev) build ($(RUST_CFG)) as $(APPID) [$(FLAVOR)]"
 	rm -rf ipkroot/data/usr && mkdir -p $(STAGE)/licenses
 	cp $(APP_FILES) $(STAGE)/
+	mkdir -p $(STAGE)/$(SUBS_FONT_DIR) && cp $(SUBS_FONT_FILES) $(STAGE)/$(SUBS_FONT_DIR)/
 	cp $(LICENSE_FILES) $(STAGE)/licenses/
 	@# The Node P2P server is payload in the app's own directory; the Rust half spawns it from
 	@# `paths::app_dir()/js-service`. Its settings/cache are generated under /tmp, not shipped.
@@ -1923,7 +2152,7 @@ install: ipk tv-lock-require
 	  luna://com.webos.appInstallService/dev/install \
 	  \"{\\\"id\\\":\\\"$(APPID)\\\",\\\"ipkUrl\\\":\\\"/tmp/$(notdir $(IPK))\\\",\\\"subscribe\\\":true}\"" /dev/null' | head -20
 	$(SSH) 'rm -f /tmp/$(notdir $(IPK))'
-	@$(MAKE) --no-print-directory deploy FLAVOR=$(FLAVOR) RELEASE=$(RELEASE)
+	@PLX_DISK_BUDGET_DONE=1 $(MAKE) --no-print-directory deploy FLAVOR=$(FLAVOR) RELEASE=$(RELEASE)
 	@echo "installed and deployed $(APPID)"
 
 # Remove a flavour from the television. Refuses the stable id: uninstalling the app the household
@@ -2060,9 +2289,9 @@ libass-host: $(LIBASS_HOST_STAGED)
 .PHONY: check-ass
 check-ass: $(LIBASS_HOST_STAGED)
 	cd rust-modules && CARGO_INCREMENTAL=0 PLXNATIVE_APP_DIR="$(CURDIR)/pkg" PATH="$$HOME/.cargo/bin:$$PATH" \
-	  cargo +$(RUST_NIGHTLY) test --lib -p plx_media player::ass::tests -- --include-ignored
+	  cargo +$(RUST_TOOLCHAIN) test --lib -p plx_media player::ass::tests -- --include-ignored
 
-$(FFMPEG_HOST_INC)/libavformat/avformat.h: ci/build-ffmpeg.sh
+$(FFMPEG_HOST_INC)/libavformat/avformat.h: ci/build-ffmpeg.sh ci/deps.py ci/dependencies.json
 	HOST=1 ./ci/build-ffmpeg.sh
 
 $(FFMPEG_HOST_STAGED): pkg/%.dylib: $(FFMPEG_HOST_INC)/libavformat/avformat.h ci/stage-host-ffmpeg.sh
@@ -2074,9 +2303,13 @@ $(FFMPEG_HOST_STAGED): pkg/%.dylib: $(FFMPEG_HOST_INC)/libavformat/avformat.h ci
 # which decoders) is invisible to it. These tests load the host build of that same list and are
 # `#[ignore]`d in the plain suite; the first is the zlib-compressed PGS track that no configure
 # flag change may silently drop again (`ff_image_subtitle_tests.rs`). macOS only, like the staging.
-check-ffmpeg: $(FFMPEG_HOST_STAGED)
+# The ASS reader tests also need staged libass to compare caption pixels after packet ingestion.
+# `ff::late_audio_tests` demux real MKVs generated by the `ffmpeg`/`ffprobe` command line tools (brew's, in CI)
+# through the real `aq` lanes: audio starting late (video lane full first) and audio stored ahead of video (#600).
+# FORK (RichiL10): plus the AC3 encode lane's round trip through the bundled ac3_fixed (ff_enc.rs).
+check-ffmpeg: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED)
 	cd rust-modules && CARGO_INCREMENTAL=0 PLX_FFMPEG_DIR=$(CURDIR)/pkg PATH="$$HOME/.cargo/bin:$$PATH" \
-	  cargo +$(RUST_NIGHTLY) test --lib -p plx_media ff::image_subtitle_tests -- --ignored
+	  cargo +$(RUST_TOOLCHAIN) test --lib -p plx_media -- ff::image_subtitle_tests ff::subtitle_charset_tests ff::subside::tests::side_reader_draws_a_shifted_cue_from_a_generated_mkv ff::late_audio_tests ff::enc::tests::a_71_sine_round_trips_to_640_kbps_ac3 --ignored
 
 # The same ABI gate the cross build runs, at the other pointer width. ci/ffabi-assert.c `#if`s on
 # `__SIZEOF_POINTER__` and carries both tables, so this compile is what holds ff.rs's 64-bit
@@ -2101,7 +2334,7 @@ sim: sim-macos
 
 sim-macos: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED) pkg/.ffabi-host-ok
 	$(TELEMETRY_ENV) \
-	  cargo build --manifest-path rust-modules/Cargo.toml --target-dir $(SIM_TDIR)$(if $(LAB),-lab,) --features hostsim$(if $(LAB), --features lab-diagnostics,) --bin plxnative-sim
+	  cargo +$(RUST_TOOLCHAIN) build --manifest-path rust-modules/Cargo.toml --target-dir $(SIM_TDIR)$(if $(LAB),-lab,) --features hostsim$(if $(LAB), --features lab-diagnostics,) --bin plxnative-sim
 
 # Full product replay is a renderer-backed host gate. Keep the fast unit suite usable without
 # a window system; Simulator CI runs this same driver against the simulator it just built.
@@ -2134,7 +2367,7 @@ SHOT_CHECK  ?=
 SHOT_HERO   ?=
 SHOT_HERO_VARIANTS ?=
 screenshots-sim: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED) pkg/.ffabi-host-ok
-	CARGO_INCREMENTAL=0 cargo build --manifest-path rust-modules/Cargo.toml --target-dir $(SHOT_TDIR) \
+	CARGO_INCREMENTAL=0 cargo +$(RUST_TOOLCHAIN) build --manifest-path rust-modules/Cargo.toml --target-dir $(SHOT_TDIR) \
 	  --no-default-features --features hostsim,devtriggers --bin plxnative-sim
 
 demo-library:
@@ -2151,7 +2384,7 @@ screenshots: screenshots-sim demo-library
 # seam's existing "no video path" result.
 sim-linux: $(LIBASS_HOST_STAGED)
 	$(TELEMETRY_ENV) \
-	  cargo build --release --manifest-path rust-modules/Cargo.toml --target-dir "$$SIM_LINUX_TDIR_ENV" \
+	  cargo +$(RUST_TOOLCHAIN) build --release --manifest-path rust-modules/Cargo.toml --target-dir "$$SIM_LINUX_TDIR_ENV" \
 	  --features hostsim --bin plxnative-sim
 
 # The demo video's frame-dump simulator (`rust-modules/src/dev/framedump.rs`; `tools/site_video.py render`

@@ -1665,6 +1665,11 @@ class LoadManifest(unittest.TestCase):
                 if trigger in takes_rk and value is not True:
                     with self.subTest(scene=scene["name"], trigger=trigger):
                         self.assertIn("$rk", str(value))
+                        # a scene that plays a file the MOCK is handed (`mock.extra_media`) opens no
+                        # library item of anyone's server: its `mock.rk` is the mock's own id block
+                        if (scene.get("mock") or {}).get("extra_media"):
+                            self.assertTrue(scene["mock"].get("only"), scene["name"])
+                            continue
                         self.assertIn("item", scene)
 
     def test_the_example_overlay_names_every_item_key(self):
@@ -1798,6 +1803,9 @@ class PipelineTier(unittest.TestCase):
             # issue #266 PR4 review: EVERY case forces the persisted audio-enhancement preference
             # too, default "off" -- see test_audio_enhancement_boot_trigger_defaults_off_and_is_overridable.
             ("plxnative-audioenh", "off"),
+            # track memory: EVERY case forgets what a menu pick on an episode remembered -- see
+            # test_every_case_forgets_track_memory_at_the_seat.
+            ("plxnative-trackmemory", "clear"),
         ])
 
     def test_an_integration_case_can_explicitly_grade_auto(self):
@@ -2176,20 +2184,59 @@ class CompletionCase(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("froze", why)
 
-    def test_only_a_case_that_asks_to_reach_the_end_may_name_the_short_clip(self):
-        """The rule is not "exactly one case", which is what it said while there was one — it is
-        that a case graded through a TEARDOWN has to have asked for one. The short clip ends inside
-        every window, so any case naming it without `reaches_eos` would have its assertions cut off
-        by a finish it never declared."""
+    def test_a_finish_with_the_playhead_short_of_the_duration_is_still_a_finish(self):
+        """Since #865 the pump ends the film on the pipeline's own end-of-stream as well as on
+        `pos >= dur - 1s`, and the clip whose audio outlasts its picture (`pipe_finish_audio_tail`)
+        reads `playpos=19s/23s`: four seconds short, by construction. The assertion is the line and
+        the teardown behind it; a check of the playhead against the duration added here would fail
+        the one clip built to end the other way."""
+        eos = "EOS reached: playpos=19s/23s -> ended\n"
+        ok, why = run.a_finished([self.POS, eos, self.TORN])
+        self.assertTrue(ok, why)
+
+    def test_only_a_case_that_asks_to_reach_the_end_may_name_a_clip_that_runs_out(self):
+        """The rule is not "exactly one case", which is what it said while there was one, and not
+        "exactly one clip" either, which it said until a clip whose audio outlasts its picture
+        joined (#865) — it is that a case graded through a TEARDOWN has to have asked for one.
+        Every clip a `reaches_eos` case names ENDS inside its window, so any case naming it
+        without `reaches_eos` would have its assertions cut off by a finish it never declared."""
         cases = _manifest()["pipeline_cases"]
         eos = [c for c in cases if c["expect"].get("reaches_eos")]
         self.assertTrue(eos, "no case reaches EOS — LG #46 has nothing behind it")
-        short = {c["fixture"] for c in eos}
-        self.assertEqual(len(short), 1, f"the completion cases disagree on which clip ends: {short}")
+        runs_out = {c["fixture"] for c in eos}
         strays = [c["name"] for c in cases
-                  if c["fixture"] in short and not c["expect"].get("reaches_eos")]
-        self.assertFalse(strays, f"the short clip ENDS mid-window; {strays} would be graded "
+                  if c["fixture"] in runs_out and not c["expect"].get("reaches_eos")]
+        self.assertFalse(strays, f"{sorted(runs_out)} END mid-window; {strays} would be graded "
                                  f"through a teardown they never asked for")
+
+    def test_every_clip_a_finish_case_names_ends_inside_the_cap_it_is_given(self):
+        """The bound `_resolve_fixtures` skips on, pinned statically against the generator's own
+        table: a clip that must be played out `1 + replays` times inside 0.6 of the case's cap. The
+        runtime check only fires on a pack someone regenerated; this one fires on the edit that
+        made the manifest and the generator disagree, before any pack exists."""
+        shapes = fixturegen.PIPE_SHAPES
+        for c in _manifest()["pipeline_cases"]:
+            exp = c["expect"]
+            if not exp.get("reaches_eos"):
+                continue
+            key, _, ext = c["fixture"].rpartition(".")
+            self.assertIn(key, shapes, f"{c['name']} names a clip the generator does not build")
+            self.assertEqual(ext, shapes[key]["ext"], c["name"])
+            views = 1 + exp.get("replays", 0)
+            self.assertLessEqual(
+                shapes[key]["duration"] * views, 0.6 * c["run_secs"],
+                f"{c['name']}: {shapes[key]['duration']}s x {views} viewing(s) does not fit "
+                f"0.6 x {c['run_secs']}s, so `_resolve_fixtures` would skip it on a pack built "
+                f"at the declared length")
+
+    def test_a_clip_whose_audio_outlasts_its_picture_is_named_by_a_finish_case(self):
+        """`audio_tail_s` exists to make a clip that only the pipeline's own end-of-stream can end,
+        so a shape carrying it that no `reaches_eos` case names is media nothing grades."""
+        named = {c["fixture"] for c in _manifest()["pipeline_cases"]
+                 if c["expect"].get("reaches_eos")}
+        for key, spec in fixturegen.PIPE_SHAPES.items():
+            if spec.get("audio_tail_s"):
+                self.assertIn(f"{key}.{spec['ext']}", named, key)
 
     def test_the_replay_case_grades_both_halves_of_46(self):
         """#46 is "replay AFTER completion", so the case that grades the replay must also be the
@@ -3348,6 +3395,20 @@ class AbrTraceMetrics(unittest.TestCase):
         })
         self.assertIn(("plxnative-audioenh", "loudness"), files)
 
+    def test_every_case_forgets_track_memory_at_the_seat(self):
+        """A `menupick` is a viewer's pick, and a pick on an episode is remembered for its show by
+        the SEATED profile; without a per-case `clear` the next case that plays that show would start
+        from the previous case's tracks. Both tiers write it, and a case cannot opt out of it."""
+        for case in ({"rk": "1", "operations": [{"op": "play"}]},
+                     {"rk": "1", "operations": [{"op": "play"}, {"op": "subtitle", "tab": 1, "track": 0}]},
+                     {"rk": "1", "operations": [{"op": "play"}, {"op": "audio_switch", "tab": 0, "row": 1}]}):
+            files = run.triggers_for_case(case)
+            self.assertEqual([f for f in files if f[0] == "plxnative-trackmemory"],
+                             [("plxnative-trackmemory", "clear")], case)
+        pipeline = run.triggers_for_case({"fixture": "x.mkv", "operations": [{"op": "play"}]},
+                                         url_base="http://192.0.2.10:8020")
+        self.assertIn(("plxnative-trackmemory", "clear"), pipeline)
+
     def test_audio_enhancement_op_grades_applied_remux_and_ac3(self):
         """A live Normalize Loudness pick that took effect: the server ran the DSP params
         (`enhancement: applied ..`, printed only for `EnhancementOutcome::Applied`), the Load
@@ -4419,6 +4480,221 @@ class AbrSegmentVariation(unittest.TestCase):
                     int(shapes[key].get("hls_segments") or 0), 2,
                     f"{key} is served as an ABR rung but is not cut into segments, so that rung "
                     "delivers one byte size for the whole playback")
+
+
+class LateAudioFixture(unittest.TestCase):
+    """The late-audio clip and its case (PR #603): a file whose audio starts 11 s after its video.
+
+    Static only. The clip is only worth anything if it really puts more video than the video lane
+    holds ahead of its first audio packet, and the case is only worth anything if it can tell a
+    stalled clock and an audio lane that never reached Starfish from a healthy start.
+    """
+
+    KEY = "pipe_h264_eac3_late_audio"
+
+    def _packets(self, audio_at, video_every=1 / 24.0, video_size=1000, seconds=14):
+        pkts = [{"stream_index": 0, "pts_time": f"{i * video_every:.3f}", "size": str(video_size)}
+                for i in range(int(seconds / video_every))]
+        return pkts + [{"stream_index": 1, "pts_time": f"{audio_at + i * 0.032:.3f}",
+                        "size": "700"} for i in range(20)]
+
+    def test_the_lead_is_the_audio_start_and_the_video_bytes_before_it(self):
+        first, ahead = fixturegen.late_audio_lead(self._packets(11.008), 0, 1)
+        self.assertAlmostEqual(first, 11.008, places=3)
+        # 24 fps, 1000 bytes a frame: frames at t < 11.008 are indices 0..264, i.e. 265 of them.
+        self.assertEqual(ahead, 265 * 1000)
+
+    def test_an_on_time_audio_track_has_no_video_ahead_of_it(self):
+        first, ahead = fixturegen.late_audio_lead(self._packets(0.0), 0, 1)
+        self.assertEqual((first, ahead), (0.0, 0))
+
+    def test_a_file_without_audio_or_a_timestamp_is_refused_not_zeroed(self):
+        with self.assertRaises(ValueError):
+            fixturegen.late_audio_lead(self._packets(11.0)[:-20], 0, 1)
+        broken = self._packets(11.0)
+        broken[-1] = {"stream_index": 1, "size": "700"}
+        with self.assertRaises(ValueError):
+            fixturegen.late_audio_lead(broken, 0, 1)
+
+    def test_the_shape_is_built_to_fill_the_video_lane_before_the_first_audio_packet(self):
+        spec = fixturegen.PIPE_SHAPES[self.KEY]
+        (audio,) = spec["audio"]
+        self.assertAlmostEqual(audio["delay"], 11.008)
+        # The design arithmetic, written down where a change to either number trips it: the
+        # rate-targeted video must queue more than the lane's cap in the delay it sits behind,
+        # even at the verify() band's lower edge (0.70x), or the clip can not park the demuxer.
+        video_bytes_by_audio = spec["video"]["vbr"] * 1000 / 8 * audio["delay"] * 0.70
+        self.assertGreater(video_bytes_by_audio, fixturegen.AQ_VIDEO_BYTES)
+        self.assertEqual(spec["late_audio"]["min_video_bytes_before_audio"],
+                         fixturegen.AQ_VIDEO_BYTES)
+        self.assertLess(audio["delay"], fixturegen.PIPE_SECS - 20,
+                        "the audio must leave the case a long stretch to climb through")
+
+    def test_the_audio_input_is_offset_by_exactly_the_delay(self):
+        """`-itsoffset` must precede the delayed track's `-i` and no other input's."""
+        captured = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(fixturegen, "run",
+                                  side_effect=lambda argv, quiet=True: captured.append(list(argv)) or ""):
+            work = fixturegen.Path(d)
+            fixturegen.build_generic(
+                mock.Mock(markers=False), self.KEY, fixturegen.PIPE_SHAPES[self.KEY], 4, None,
+                work / "out.mkv", work)
+        argv = captured[0]
+        self.assertEqual(argv.count("-itsoffset"), 1, "only the delayed track is offset")
+        at = argv.index("-itsoffset")
+        self.assertEqual(argv[at + 1], "11.008")
+        self.assertEqual(argv[at + 2:at + 5], ["-t", "4", "-f"], "it must sit right before the audio -i")
+        self.assertIn("sine=", argv[at + 7], "and the input it offsets is the audio graph")
+
+    def test_the_case_grades_the_stalled_clock_and_the_unfed_audio_lane(self):
+        case = next(c for c in _manifest()["pipeline_cases"] if c["name"] == "pipe_late_audio_eac3")
+        spec = fixturegen.PIPE_SHAPES[self.KEY]
+        self.assertEqual(case["fixture"], self.KEY + ".mkv")
+        for k in ("vcodec", "acodec", "fps"):
+            self.assertEqual(case["declare"][k], spec["declare"][k], f"declare.{k} drifted from the shape")
+        exp = case["expect"]
+        # The two stalls are separate failures: a stalled clock and an audio lane that never
+        # reached Starfish. A case that graded only the first would pass a fix for stall 1 alone.
+        self.assertTrue(exp["require_audio_feed_ready"])
+        self.assertGreaterEqual(exp["min_pos_climb_s"], 12)
+        self.assertEqual(exp["audio_stream_index"], 1)
+        self.assertEqual(exp["load_audio"], "AC3 PLUS")
+        self.assertLess(exp["min_pos_climb_s"] + 5, case["run_secs"])
+        self.assertLess(case["run_secs"], fixturegen.PIPE_SECS, "the clip must not end in the window")
+
+    def test_a_stalled_clock_and_a_silent_audio_lane_both_fail_the_case_assertions(self):
+        # What the broken player logs: heartbeat position pinned at 0, video fed, audio never.
+        stalled = [f"loop=100 fps=60 pos=0s stage=Playing" for _ in range(6)]
+        self.assertFalse(run.a_timeline_climb(stalled, 15, dense_only=True)[0])
+        climbing = [f"loop=100 fps=60 pos={t}s stage=Playing" for t in range(0, 20)]
+        self.assertTrue(run.a_timeline_climb(climbing, 15, dense_only=True)[0])
+        self.assertFalse(run.a_audio_feed_ready(["feed v#1 sz=9 fed=0 reply=O qbytes=1"])[0])
+
+
+class AudioTailFixture(unittest.TestCase):
+    """The clip whose audio outlasts its picture and its case (#865): 20 s of video, 23 s of audio.
+
+    Static only. The clip is only worth anything if its audio really runs past the pump's
+    one-second tolerance, and the case is only worth anything if it names that clip and ends it.
+    """
+
+    KEY = "pipe_h264_ac3_audio_tail"
+
+    def _packets(self, video_end=20.0, audio_end=23.0):
+        v = [{"stream_index": 0, "pts_time": f"{i / 24.0:.3f}", "duration_time": "0.041667"}
+             for i in range(int(video_end * 24))]
+        a = [{"stream_index": 1, "pts_time": f"{i * 0.032:.3f}", "duration_time": "0.032000"}
+             for i in range(int(audio_end / 0.032))]
+        return v + a
+
+    def _argv(self, spec, dur):
+        captured = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(fixturegen, "run",
+                                  side_effect=lambda argv, quiet=True: captured.append(list(argv)) or ""):
+            work = fixturegen.Path(d)
+            fixturegen.build_generic(mock.Mock(markers=False), self.KEY, spec, dur, None,
+                                     work / "out.mkv", work)
+        return captured[0]
+
+    def test_the_streams_ends_are_the_last_packet_plus_its_duration(self):
+        video_end, audio_end = fixturegen.stream_ends(self._packets(), 0, 1)
+        self.assertAlmostEqual(video_end, 20.0, delta=0.05)
+        self.assertAlmostEqual(audio_end, 23.0, delta=0.05)
+
+    def test_a_missing_stream_or_timestamp_is_refused_not_zeroed(self):
+        with self.assertRaises(ValueError):
+            fixturegen.stream_ends([p for p in self._packets() if p["stream_index"] == 0], 0, 1)
+        broken = self._packets()
+        broken[-1] = {"stream_index": 1, "duration_time": "0.032"}
+        with self.assertRaises(ValueError):
+            fixturegen.stream_ends(broken, 0, 1)
+
+    def _verify(self, packets, spec=None):
+        spec = spec or fixturegen.PIPE_SHAPES[self.KEY]
+        streams = [{"codec_type": "video", "index": 0}, {"codec_type": "audio", "index": 1}]
+        rec, problems = {}, []
+        with mock.patch.object(fixturegen, "run",
+                               return_value=json.dumps({"packets": packets})):
+            fixturegen.verify_audio_tail("x.mkv", spec, streams, rec, problems)
+        return rec, problems
+
+    def test_a_clip_with_its_tail_verifies_and_records_both_ends(self):
+        rec, problems = self._verify(self._packets())
+        self.assertEqual(problems, [])
+        self.assertAlmostEqual(rec["audio_tail"]["tail_s"], 3.0, delta=0.1)
+
+    def test_a_clip_that_lost_its_tail_fails_the_build(self):
+        """The audio cut at the picture's end verifies clean on every other axis, and a player
+        without the #865 fix then ends it on the old arithmetic, so the case grades nothing."""
+        _, problems = self._verify(self._packets(audio_end=20.0))
+        self.assertTrue(any("wanted at least 2.0s" in p for p in problems), problems)
+
+    def test_a_tail_inside_the_pumps_tolerance_fails_even_if_declared(self):
+        """1.5 s past the picture is under the 2 s floor, whatever the shape asked for."""
+        spec = dict(fixturegen.PIPE_SHAPES[self.KEY], audio_tail_s=1.5)
+        _, problems = self._verify(self._packets(audio_end=21.5), spec)
+        self.assertTrue(any("wanted at least 2.0s" in p for p in problems), problems)
+
+    def test_a_tail_other_than_the_declared_one_fails_the_build(self):
+        _, problems = self._verify(self._packets(audio_end=25.0))
+        self.assertTrue(any("declares 3s" in p for p in problems), problems)
+
+    def test_the_picture_is_the_file_less_the_tail_and_no_other_shape_has_one(self):
+        spec = fixturegen.PIPE_SHAPES[self.KEY]
+        self.assertEqual((spec["duration"], spec["audio_tail_s"]), (23, 3))
+        self.assertEqual(fixturegen.picture_secs(spec, spec["duration"]), 20)
+        others = [k for k, s in fixturegen.PIPE_SHAPES.items()
+                  if s.get("audio_tail_s") and k != self.KEY]
+        self.assertEqual(others, [], "a second audio-tail shape wants its own case")
+        short = fixturegen.PIPE_SHAPES["pipe_h264_ac3_short"]
+        self.assertEqual(fixturegen.picture_secs(short, short["duration"]), short["duration"])
+
+    def test_the_picture_input_ends_at_the_picture_and_everything_else_at_the_file(self):
+        """Video `-t` 20, audio `-t` 23 and the audio graph's own duration, output `-t` 23: the mux
+        has to run on to the audio's end, and the picture must not be padded to meet it."""
+        argv = self._argv(fixturegen.PIPE_SHAPES[self.KEY], 23)
+        v = next(i for i, a in enumerate(argv) if a.startswith("testsrc2="))
+        self.assertEqual(argv[v - 5:v - 1], ["-t", "20", "-f", "lavfi"])
+        a = next(i for i, a in enumerate(argv) if a.startswith("sine="))
+        self.assertEqual(argv[a - 5:a - 1], ["-t", "23", "-f", "lavfi"])
+        self.assertIn("duration=23", argv[a])
+        self.assertEqual(argv[-3:-1], ["-t", "23"], "the output cap must not cut the tail")
+
+    def test_a_shape_without_a_tail_builds_exactly_as_before(self):
+        short = fixturegen.PIPE_SHAPES["pipe_h264_ac3_short"]
+        argv = self._argv(short, short["duration"])
+        v = next(i for i, a in enumerate(argv) if a.startswith("testsrc2="))
+        self.assertEqual(argv[v - 5:v - 1], ["-t", "20", "-f", "lavfi"])
+        self.assertEqual(argv[-3:-1], ["-t", "20"])
+
+    def test_a_build_shorter_than_its_tail_has_no_picture_and_is_refused(self):
+        with self.assertRaises(fixturegen.Fail):
+            self._argv(fixturegen.PIPE_SHAPES[self.KEY], 3)
+
+    def test_the_burned_in_layout_states_the_pictures_length(self):
+        """verify() rebuilds this from the MEASURED file length, so the V0 line must come out the
+        same from the build's 23 and from the measured 23.005 rounded."""
+        spec = fixturegen.PIPE_SHAPES[self.KEY]
+        line = fixturegen.layout_lines(self.KEY, spec, 23)[1]
+        self.assertTrue(line.endswith(" 20s"), line)
+        self.assertEqual(fixturegen.layout_lines(self.KEY, spec, round(23.005)),
+                         fixturegen.layout_lines(self.KEY, spec, 23))
+
+    def test_the_case_names_the_clip_and_declares_what_it_carries(self):
+        case = next(c for c in _manifest()["pipeline_cases"] if c["name"] == "pipe_finish_audio_tail")
+        spec = fixturegen.PIPE_SHAPES[self.KEY]
+        self.assertEqual(case["fixture"], self.KEY + ".mkv")
+        for k in ("vcodec", "acodec", "fps"):
+            self.assertEqual(case["declare"][k], spec["declare"][k], f"declare.{k} drifted from the shape")
+        self.assertTrue(case["expect"]["reaches_eos"])
+        self.assertEqual(case["expect"]["video_size"], spec["video"]["size"])
+        finish = next(c for c in _manifest()["pipeline_cases"] if c["name"] == "pipe_finish_eos")
+        self.assertEqual(case["expect"], finish["expect"],
+                         "same grading as pipe_finish_eos: the clip is the only thing that differs")
+        self.assertEqual(case["run_secs"], finish["run_secs"])
+        self.assertEqual(case["operations"], finish["operations"])
 
 
 class AbrResponseProfile(unittest.TestCase):
@@ -6020,11 +6296,240 @@ impl PersonOwnerGateFixture {
         self.assertIn("_check_deps_selftest_dt_fn.rs", out)
 
     def test_check_statics_is_green(self):
-        """Spec §0 done-criterion 1: `ci/check-statics.sh` — every `static mut` under ui/ and screens/
-        is a named render cache (ci/allow/statics.txt) or sits in a legacy module still awaiting its
-        phase (ci/allow/statics-migration.txt), and no allowlist entry is stale."""
+        """Spec §0 done-criterion 1: `ci/check-statics.sh` — every `static mut` in the gated
+        directories is named in ci/allow/statics.txt or sits in a legacy module still awaiting its
+        phase (ci/allow/statics-migration.txt), every heap-owning `static mut` anywhere under
+        rust-modules is named in ci/allow/statics.txt, and no allowlist entry is stale."""
         r = subprocess.run([os.path.join(self.ROOT, "ci", "check-statics.sh")], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def _heap_statics(self, files, lines=False):
+        """`{(path, NAME)}` that `ci/check-statics-heap.py` reports over a scratch checkout holding
+        `files` ({path under rust-modules/: Rust source}), plus a `target-fast` build tree full of
+        heap statics that must never be read. `lines=True` returns the whole report lines instead."""
+        with tempfile.TemporaryDirectory() as root:
+            files = dict(files)
+            files["target-fast/debug/build/dep/out.rs"] = "static mut BUILD_TREE: Vec<u8> = Vec::new();\n"
+            for rel, source in files.items():
+                path = os.path.join(root, "rust-modules", rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(source)
+            r = subprocess.run([sys.executable, "-I", os.path.join(self.ROOT, "ci", "check-statics-heap.py"), root],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            if lines:
+                return [line for line in r.stdout.splitlines() if line]
+            return {tuple(line.split("\t")[:2]) for line in r.stdout.splitlines() if line}
+
+    def test_heap_static_gate_refuses_a_static_mut_that_owns_heap_in_any_crate(self):
+        """The class behind `TAB_CACHE` (`plx_ui`'s test abort, 2026-10-20): a `static mut` that owns
+        heap and is replaced frees memory another thread is using. The gate reads the TYPE, so it
+        sees the heap through a struct the declaration only names (`KeyMemo`, `GroundProbe`), a
+        type alias, a multi-line declaration and a qualified path, in any crate, tests included."""
+        found = self._heap_statics({
+            "gfx/src/a.rs": (
+                "static mut CACHE: Option<HashMap<u64, String>> = None;\n"
+                "pub(crate) static mut QUEUE: Vec<String> = Vec::new();\n"
+                "static mut MEMO: Option<Memo> = None;\n"
+                "static mut PROBE: Probe<4> = Probe::new();\n"
+                "static mut ALIASED: Names = Names::new();\n"
+                "static mut SPLIT: Option<\n    plx_base::Holder,\n> = None;\n"
+                "static mut ARRAY: [Option<Memo>; 4] = [None, None, None, None];\n"
+                "struct Memo { map: HashMap<u32, Vec<u8>> }\n"
+                "struct Probe<const N: usize> { ready: Option<Vec<u8>> }\n"
+                "type Names = Vec<String>;\n"),
+            "src/b.rs": (
+                "mod tests {\n    static mut SCRATCH: Box<u32> = Box::new(0);\n}\n"
+                "pub struct Holder(Vec<u8>);\n"),
+            "src/c.rs": "static mut UNKNOWN: Option<Nowhere> = None;\n",
+        })
+        self.assertEqual(found, {
+            ("rust-modules/gfx/src/a.rs", n)
+            for n in ("CACHE", "QUEUE", "MEMO", "PROBE", "ALIASED", "SPLIT", "ARRAY")
+        } | {("rust-modules/src/b.rs", "SCRATCH"), ("rust-modules/src/c.rs", "UNKNOWN")})
+
+    def test_heap_static_gate_finds_the_other_spellings_of_the_same_static(self):
+        """Each of these slipped past a first version of the gate: a tree type that reuses a std name
+        (`screens` has its own `struct Cell` holding a `String`), an acronym alias, a declaration
+        that shares its line with an attribute or a fn body, one whose name is on the next line, and
+        one a `macro_rules!` writes."""
+        found = self._heap_statics({
+            "screens/src/a.rs": (
+                "struct Cell { thumb: String }\n"
+                "static mut SHADOW: Option<Cell> = None;\n"
+                "type LRU = Vec<u8>;\n"
+                "static mut ACRONYM: LRU = Vec::new();\n"
+                "#[allow(static_mut_refs)] static mut ATTR: Vec<u8> = Vec::new();\n"
+                "fn f() { static mut LOCAL: Vec<u8> = Vec::new(); }\n"
+                "pub static mut\n    NEXT: Vec<u8> = Vec::new();\n"
+                "macro_rules! cache { ($n:ident) => { static mut $n: u32 = 0; } }\n"),
+        })
+        self.assertEqual(found, {
+            ("rust-modules/screens/src/a.rs", n)
+            for n in ("SHADOW", "ACRONYM", "ATTR", "LOCAL", "NEXT", "cache!")
+        })
+
+    def test_heap_static_gate_leaves_plain_data_statics_alone(self):
+        """GL object names, uniform locations, function pointers, raw FFI handles, flags and
+        counters free nothing when written, so they are not the bug class and are not listed."""
+        found = self._heap_statics({
+            "gfx/src/a.rs": (
+                "static mut PROG: c_uint = 0;\n"
+                "static mut LOC: [c_int; 4] = [0; 4];\n"
+                "static mut FONTS: [*mut TtfFont; FONT_SLOTS] = [std::ptr::null_mut(); FONT_SLOTS];\n"
+                "static mut HOOK: Option<FnQuery> = None;\n"
+                "static mut IMAGE: Option<(c_uint, Uniforms, c_int)> = None;\n"
+                "static mut FENCE: Option<crate::egl::fence::Fence> = None;\n"
+                "static mut FLAG: bool = false;\n"
+                "static mut STAMP: Option<std::time::Instant> = None;\n"
+                "type FnQuery = unsafe extern \"C\" fn(*mut c_void) -> Vec2;\n"
+                "static mut CALLBACK: Option<fn(&str) -> String> = None;\n"
+                "static mut NAMER: Option<Namer> = None;\n"
+                "type Namer = fn(Vec<u8>, usize) -> String;\n"
+                "fn take(v: &'static mut Vec<u8>) -> &'static mut Vec<u8> { v }\n"
+                "struct Uniforms { rect: c_int, tint: c_int }\n"
+                "pub struct Fence { sync: usize }\n"
+                "// static mut NOTE: Vec<u8> = Vec::new();\n"
+                "const DOC: &str = \"static mut TEXT: Vec<u8> = Vec::new();\";\n"
+                "thread_local! { static CACHE: RefCell<HashMap<u64, String>> = Default::default(); }\n"
+                "static LOCKED: Mutex<Vec<String>> = Mutex::new(Vec::new());\n"
+                "struct Vec2(f32, f32);\n"
+                "pub enum TtfFont {}\n"),
+        })
+        self.assertEqual(found, set())
+
+    def test_heap_static_gate_does_not_resolve_a_name_to_an_associated_type(self):
+        """`type Item = String;` inside an `impl`/`trait` block is an ASSOCIATED type, reachable only
+        as `Self::Item`/`<T as Trait>::Item`; it is not what a bare `Item` names at module level. A
+        first version unioned it with `enum Item`, so a plain `Option<Item>` static read as owning a
+        `String`. Only module-level (and fn-local) definitions count; a `type` alias in a nested fn
+        body of an impl still does."""
+        found = self._heap_statics({
+            "ui/src/a.rs": (
+                "impl Iterator for Foo { type Item = String; fn next(&mut self) -> Option<String> { None } }\n"
+                "trait Source { type Output: Clone; type Error = Vec<u8>; }\n"
+                "unsafe impl<T: Copy> Marker for [T; 4] { type Target = Vec<u8>; }\n"
+                "enum Item { A }\n"
+                "enum Output { Left }\n"
+                "enum Error { Bad }\n"
+                "enum Target { Here }\n"
+                "static mut X: Option<Item> = None;\n"
+                "static mut Y: Option<Output> = None;\n"
+                "static mut Z: [Option<Error>; 2] = [None, None];\n"
+                "static mut W: Option<Target> = None;\n"
+                "impl Foo { fn local() { type Local = Vec<u8>; } }\n"
+                "static mut V: Option<Local> = None;\n"),
+        })
+        self.assertEqual(found, {("rust-modules/ui/src/a.rs", "V")})
+
+    def test_heap_static_gate_treats_std_plain_data_wrappers_as_plain(self):
+        """`Option<SystemTime>`, `Option<NonZeroU32>`, `RefCell<u32>` and `ManuallyDrop<u32>` own no
+        heap, and the failure message tells people to fix the detector rather than allowlist plain
+        data; a wrapper is plain only while its PARAMETER is, so `RefCell<Vec<u8>>` stays reported."""
+        found = self._heap_statics({
+            "gfx/src/a.rs": (
+                "static mut WHEN: Option<SystemTime> = None;\n"
+                "static mut WHEN2: Option<std::time::SystemTime> = None;\n"
+                "static mut SINCE: Option<Instant> = None;\n"
+                "static mut GAP: Duration = Duration::ZERO;\n"
+                "static mut NZ: Option<NonZeroU32> = None;\n"
+                "static mut NZ2: Option<std::num::NonZeroUsize> = None;\n"
+                "static mut NZ3: Option<NonZero<u16>> = None;\n"
+                "static mut WRAP: Wrapping<u32> = Wrapping(0);\n"
+                "static mut SAT: Saturating<u8> = Saturating(0);\n"
+                "static mut REF: RefCell<u32> = RefCell::new(0);\n"
+                "static mut CELL: Cell<u32> = Cell::new(0);\n"
+                "static mut UC: UnsafeCell<u32> = UnsafeCell::new(0);\n"
+                "static mut DROP: ManuallyDrop<u32> = ManuallyDrop::new(0);\n"
+                "static mut SLOT: MaybeUninit<[u8; 4]> = MaybeUninit::uninit();\n"
+                "static mut PH: PhantomData<u8> = PhantomData;\n"
+                "static mut HITS: AtomicUsize = AtomicUsize::new(0);\n"
+                "static mut HEAPY: RefCell<Vec<u8>> = RefCell::new(Vec::new());\n"
+                "static mut HEAPY2: ManuallyDrop<Option<String>> = ManuallyDrop::new(None);\n"
+                "static mut HEAPY3: Option<Cell<Box<u8>>> = None;\n"
+                "static mut HEAPY4: UnsafeCell<Holder> = UnsafeCell::new(Holder::new());\n"
+                "struct Holder { names: Vec<String> }\n"),
+        })
+        self.assertEqual(found, {("rust-modules/gfx/src/a.rs", n) for n in ("HEAPY", "HEAPY2", "HEAPY3", "HEAPY4")})
+
+    def test_heap_static_gate_does_not_read_enum_variant_names_as_types(self):
+        """A variant name (`Idle`, `Running`) is CamelCase but names no type, so it must not read as
+        "defined nowhere in the tree"; the payload of a variant is still a type (`Loaded(Vec<u8>)`)."""
+        found = self._heap_statics({
+            "appkit/src/a.rs": (
+                "#[derive(Clone, Copy)]\n"
+                "enum Phase { Idle, #[default] Running = 2, Done(u8), Moving { dx: i32, dy: i32 } }\n"
+                "enum Slot { Empty, Loaded(Vec<u8>) }\n"
+                "static mut PHASE: Phase = Phase::Idle;\n"
+                "static mut SLOT: Slot = Slot::Empty;\n"),
+        })
+        self.assertEqual(found, {("rust-modules/appkit/src/a.rs", "SLOT")})
+
+    def test_heap_static_gate_names_a_macro_static_by_its_macro_and_line(self):
+        """A `static mut $n` a `macro_rules!` declares has no name yet, and `$n` could never be
+        allowlisted (`$` anchors in `grep -E`). It is reported as `<macro>!`, with the line, so a
+        named entry in ci/allow/statics.txt can match it."""
+        report = self._heap_statics({
+            "screens/src/a.rs": (
+                "fn before() {}\n"
+                "macro_rules! cache {\n"
+                "    ($n:ident) => { static mut $n: u32 = 0; };\n"
+                "}\n"
+                "macro_rules! other { ($a:ident, $b:ident) => {\n"
+                "    static mut $a: u32 = 0;\n"
+                "    static mut $b: u32 = 0;\n"
+                "} }\n"),
+        }, lines=True)
+        fields = sorted(line.split("\t") for line in report)
+        self.assertEqual([(f[0], f[1]) for f in fields],
+                         [("rust-modules/screens/src/a.rs", "cache!"), ("rust-modules/screens/src/a.rs", "other!")])
+        self.assertIn("line 3", fields[0][2])
+        self.assertIn("line 6", fields[1][2])
+        for f in fields:
+            self.assertNotIn("$", f[1])
+
+    def test_check_statics_lets_a_named_entry_allow_a_macro_declared_static(self):
+        """End to end through `ci/check-statics.sh` on a scratch checkout: a heap static a
+        `macro_rules!` declares is refused until `ci/allow/statics.txt` names it `cache!`, then
+        passes, and the entry goes stale (fails) once the macro is gone."""
+        ci = os.path.join(self.ROOT, "ci")
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "ci", "allow"))
+            for fn in ("check-statics.sh", "check-statics-heap.py", "module_graph.py", "rust_test_modules.py"):
+                shutil.copy(os.path.join(ci, fn), os.path.join(root, "ci", fn))
+            mod = os.path.join(root, "rust-modules")
+            for d in ("ui/src", "appkit/src", "screens/src", "data/src/metadata", "data/src/stores",
+                      "data/src/search", "media/src/route", "media/src/player"):
+                os.makedirs(os.path.join(mod, d))
+            for f in ("data/src/person.rs", "data/src/metadata.rs", "data/src/pms.rs",
+                      "media/src/route/decision.rs", "media/src/player/engine.rs", "ui/src/press.rs"):
+                open(os.path.join(mod, f), "w").close()
+            source = os.path.join(mod, "gfx", "src", "a.rs")
+            os.makedirs(os.path.dirname(source))
+            allow = os.path.join(root, "ci", "allow")
+            with open(os.path.join(allow, "statics-migration.txt"), "w") as f:
+                f.write("# count: 0\n")
+
+            def run(macro, entry):
+                with open(source, "w") as f:
+                    f.write(macro)
+                with open(os.path.join(allow, "statics.txt"), "w") as f:
+                    f.write(f"# count: {len(entry)}\n" + "".join(entry))
+                r = subprocess.run([os.path.join(root, "ci", "check-statics.sh")], capture_output=True, text=True)
+                return r.returncode, r.stdout + r.stderr
+
+            macro = "macro_rules! cache { ($n:ident) => { static mut $n: Vec<u8> = Vec::new(); } }\n"
+            code, out = run(macro, [])
+            self.assertNotEqual(code, 0, out)
+            self.assertIn("static mut cache! — Vec<u8> — is declared through macro `cache!` (line 1)", out)
+            self.assertIn("do not allowlist it", out)
+            entry = "rust-modules/gfx/src/a.rs\tcache!: boot-time table, owned by the main thread\n"
+            code, out = run(macro, [entry])
+            self.assertEqual(code, 0, out)
+            code, out = run("fn nothing() {}\n", [entry])
+            self.assertNotEqual(code, 0, out)
+            self.assertIn("stale: rust-modules/gfx/src/a.rs cache!", out)
 
     def test_every_allowlist_declares_its_own_count(self):
         allow = os.path.join(self.ROOT, "ci", "allow")
@@ -6088,7 +6593,7 @@ impl PersonOwnerGateFixture {
         "nav.txt": 0,
         "sibling-migration.txt": 0,
         "statics-migration.txt": 0,
-        "statics.txt": 17,
+        "statics.txt": 5,  # the two data/search/recents.rs persistence-seam statics + the three gfx.rs GL-context heap statics (ci/check-statics-heap.py); every ui/ render cache, the elide memo, the key memo and the text-input queue are thread_local!
         "store-seams.txt": 0,
         "threads.txt": 0,
         "ticks.txt": 2,
@@ -6400,9 +6905,16 @@ class FpsMock(unittest.TestCase):
         import mock_fps
         cls.mf = mock_fps
 
+    PAGING_SURFACES = tuple(f"{b}-paging-held-{l}" for b in ("library-grid", "library-shelf", "search-row",
+                                                              "related-row", "collection", "long-season")
+                            for l in ("3g", "remote-wan"))
+
     # --- scene selection --------------------------------------------------------------
     def test_under_mock_only_scenes_with_a_mock_block_run(self):
-        runnable, skipped = self.mf.partition_mock(list(self.scenes.values()), True)
+        # the #665 scene's generated fixtures live outside the repo (present on a dev host, absent
+        # on a CI runner): treat them as built so the selection does not depend on the host
+        with mock.patch.object(self.mf, "missing_mock_fixtures", return_value=None):
+            runnable, skipped = self.mf.partition_mock(list(self.scenes.values()), True)
         names = {s["name"] for s in runnable}
         self.assertEqual(names, {"home-grid", "home-grid-deep", "home-recent-paging", "home-hint",
                                  "library-shelves-deep", "library-burst", "library-hold",
@@ -6430,7 +6942,68 @@ class FpsMock(unittest.TestCase):
                 if s.get("item"):
                     self.assertIsInstance(s["mock"].get("rk"), int, s["name"])
                 self.assertNotIn("needs_shared_server", s, s["name"])
-                self.assertEqual(s.get("tier", "ui"), "ui", s["name"])
+                # the one player-tier mock scene plays a served file and grades its own `expect`
+                want = ("player" if s["name"] in ("fixed-480p-reencode-declaration",
+                                                  "boost-remux-declares-source-rate") else "ui")
+                self.assertEqual(s.get("tier", "ui"), want, s["name"])
+
+    def test_the_press_scenes_drive_a_real_press_and_never_a_plain_ok(self):
+        # home-hold/collection-hold/home-tap/collection-tap (`plxnative-holdbench`): counted bench
+        # scenes graded off `bench: kind=hold` lines, mock-runnable, with the same trigger on
+        # a Home card and on the Collection page (a cards::Stack page, mock rk 50002).
+        for name, tap in (("home-hold", False), ("collection-hold", False),
+                          ("home-tap", True), ("collection-tap", True)):
+            s = self.scenes[name]
+            self.assertEqual(s["bench"], "hold", name)
+            self.assertEqual(s["route"], "home" if name.startswith("home") else "collection", name)
+            # limits measured on the television 2026-10-08 (fixed build); the unfixed 21 fps open
+            # (home-hold 525, collection-hold 498, home-tap 12 missed) must fail them
+            limits = {"home-hold": (110, 55, 525), "collection-hold": (60, 50, 498),
+                      "home-tap": (8, 40, 12), "collection-tap": (8, 40, None)}[name]
+            self.assertEqual(s["bench_missed_max"], limits[0], name)
+            self.assertEqual(s["bench_iv_max_ms"], limits[1], name)
+            if limits[2] is not None:
+                self.assertLess(s["bench_missed_max"], limits[2], name)
+            if not tap:
+                self.assertLess(s["bench_missed_max"], 30 * 16, name)
+            self.assertEqual(s.get("bench_drift_ms"), 4.0 if tap else None, name)
+            self.assertNotIn("PROVISIONAL", s["comment"], name)
+            self.assertIn("2026-10-08", s["comment"], name)
+            if not tap:
+                self.assertIn("#561", s["comment"], name)
+            value = s["triggers"]["plxnative-holdbench"]
+            self.assertEqual(value.endswith(",tap"), tap, name)
+            # the press itself is the bench's: no separate press/itemmenu trigger may ride along
+            self.assertNotIn("plxnative-press", s["triggers"], name)
+            self.assertNotIn("plxnative-itemmenu", s["triggers"], name)
+            # the bench ends on its own `done` line, with room to finish its cycles
+            n, period = int(value.split(",")[0]), (350 if tap else 1500)
+            self.assertGreater(s["run_secs"] - s["warmup_s"], n * 2 * period / 1000, name)
+        collection = self.mf.mock_scene(self.scenes["collection-hold"])
+        self.assertEqual(collection["rk"], 50002)
+        self.assertEqual(collection["triggers"]["plxnative-collection"], "$rk")
+        self.assertEqual(self.mf.mock_server_args(self.scenes["collection-hold"]), ["--movies", "240"])
+        self.assertIn("plxnative-grid", self.scenes["home-hold"]["triggers"])
+        with open(os.path.join(TESTS_DIR, "run.py")) as fh:
+            self.assertIn('"plxnative-holdbench"', fh.read(), "run.py clears the trigger between cases")
+
+    def test_a_hold_bench_cycle_that_pressed_nothing_or_opened_no_menu_fails_the_grade(self):
+        scene = {"bench": "hold", "bench_missed_max": 0}
+
+        def line(i, target, missed=0):
+            return (f"bench: kind=hold cycle={i}/2 target={target} worst_ms=18.0 frames=40 dur_ms=3000 "
+                    f"rss_kb=1000 first_ms=17.0 missed={missed} open=first:17.0,worst:18.0@3,iv:17.0,missed:0 "
+                    f"close=first:17.0,worst:18.0@3,iv:17.0,missed:0")
+        done = "bench: kind=hold done cycles=2"
+        ok, detail = run.grade_bench(scene, [line(1, "home"), line(2, "home"), done])
+        self.assertTrue(ok, detail)
+        ok, detail = run.grade_bench(scene, [line(1, "home"), line(2, "home-nomenu"), done])
+        self.assertFalse(ok)
+        self.assertIn("did not exercise the animation", detail)
+        ok, detail = run.grade_bench(scene, [line(1, "collection-nocard"), line(2, "collection"), done])
+        self.assertFalse(ok)
+        ok, detail = run.grade_bench(scene, [line(1, "home", 1), line(2, "home"), done])
+        self.assertFalse(ok, "a missed refresh in the press window fails the zero budget")
 
     def test_the_press_scenes_drive_a_real_press_and_never_a_plain_ok(self):
         # home-hold/collection-hold/home-tap/collection-tap (`plxnative-holdbench`): counted bench
@@ -6582,6 +7155,106 @@ class FpsMock(unittest.TestCase):
         both = [s["name"] for s in run.fps_for_tiers(scenes, False, "home-gri")]
         self.assertEqual(sorted(both), ["home-grid", "home-grid-deep"])
 
+    # --- fixed-480p-reencode-declaration (#665) ----------------------------------------
+    def test_fixed_480p_scene_pins_the_rung_and_grades_the_declaration(self):
+        sc = self.scenes["fixed-480p-reencode-declaration"]
+        self.assertEqual(sc["quality"], "480p_720_kbps")
+        self.assertEqual(sc["expect"]["load_max"], "1920x1080@60")  # not the source's 3840x2160@60
+        self.assertEqual(sc["expect"]["sink_echo"], "1920x1080@60")
+        self.assertTrue(sc["mock"]["only"])
+        ran = self.mf.mock_scene(sc)
+        self.assertEqual(dict(run.fps_trigger_files(ran))["plxnative-play"], "990001")
+        args = self.mf.mock_server_args(sc)
+        self.assertEqual(args[0], "--extra-media")
+        self.assertTrue(args[1].endswith("bug665/src-4k-h264-aac.mkv"))
+        self.assertEqual(args[2], "--transcode-fixture")
+        self.assertTrue(args[3].endswith("bug665/transcode-480p-h264-aac.mkv"))
+
+    # --- boost-remux-declares-source-rate (#832) ---------------------------------------
+    def test_boost_remux_scene_forces_boost_on_and_grades_the_source_rate(self):
+        sc = self.scenes["boost-remux-declares-source-rate"]
+        self.assertTrue(sc["mock"]["only"])
+        ran = self.mf.mock_scene(sc)
+        files = dict(run.fps_trigger_files(ran))
+        self.assertEqual(files["plxnative-play"], "990001")
+        self.assertEqual(files["plxnative-audioenh"], "boost")
+        self.assertEqual(sc["expect"]["load_fps"], 24.0)
+        self.assertEqual(sc["expect"]["load_max"], "3840x2160@24")
+        self.assertTrue(sc["expect"]["presented_rate"])
+        args = self.mf.mock_server_args(sc)
+        self.assertTrue(args[1].endswith("boost-remux/src-4k24-h264-ac3.mkv"))
+        self.assertTrue(args[3].endswith("boost-remux/remux-4k24-h264-ac3.mkv"))
+
+    def test_boost_remux_scene_fails_the_pre_fix_declaration(self):
+        sc = self.scenes["boost-remux-declares-source-rate"]
+
+        def log(fps, mx):
+            return [
+                "enhancement: boost_dialog=true normalize_loudness=false \u2014 direct play becomes an enhanced remux",
+                "stream: path=/video/:/transcode/universal/start.mkv?x=1",
+                "ff: v=#0 codec=h264 codec_id=27 3840x2160 a=#1",
+                f'load: v=H264 a="AC3" fps={fps} dv=present:0 P0/0 el:0 atmos:0 max={mx}',
+                f"smp_cb type=5 num=0 str=video/x-h264 (null) (null) 3840 2160 (null) {mx.split('@')[1]}.000000",
+                "SMP loadCompleted", "player: pos=2s", "player: pos=15s"]
+        with mock.patch.object(run, "a_timeline_climb", return_value=(True, "climbed")), \
+                mock.patch.object(run, "a_presented_rate", return_value=(True, "ok")):
+            good, why = run.grade_scene_expect(sc, log("24.000", "3840x2160@24"))
+            self.assertTrue(good, why)
+            # the declaration #832 fixed: a remux declared no rate and the 60 fps ceiling
+            bad, why = run.grade_scene_expect(sc, log("0.000", "3840x2160@60"))
+            self.assertFalse(bad)
+            self.assertIn("declared fps=0.000", why)
+        # and the sink's presented rate is graded when the scene opts in (unmocked: no counter lines)
+        with mock.patch.object(run, "a_timeline_climb", return_value=(True, "climbed")):
+            bad, why = run.grade_scene_expect(sc, log("24.000", "3840x2160@24"))
+            self.assertFalse(bad)
+            self.assertIn("presented_rate", why)
+
+    def test_mock_fixture_names_must_be_relative_and_inside_the_root(self):
+        for bad in ("/etc/x.mkv", "../x.mkv", "a/../../x.mkv", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                self.mf.mock_server_args({"name": "x", "mock": {"transcode_fixture": bad}})
+
+    def test_a_scene_with_unbuilt_mock_fixtures_is_skipped_with_the_reason(self):
+        sc = {"name": "x", "mock": {"extra_media": ["nope/absent.mkv"]}}
+        runnable, skipped = self.mf.partition_mock([sc], True)
+        self.assertEqual(runnable, [])
+        self.assertIn("nope/absent.mkv", skipped[0][1])
+
+    def test_scene_expect_grades_the_load_declaration(self):
+        sc = self.scenes["fixed-480p-reencode-declaration"]
+        log = lambda mx: [
+            "stream: path=/video/:/transcode/universal/start.mkv?x=1",
+            "ff: v=#0 codec=h264 codec_id=27 854x480 a=#1",
+            f'load: v=H264 a="AAC" fps=30.000 dv=present:0 P0/0 el:0 atmos:0 max={mx}',
+            "smp_cb type=5 num=0 str=video/x-h264 (null) (null) 1920 1080 (null) 60.000000",
+            "SMP loadCompleted",
+            "player: pos=2s", "player: pos=15s"]
+        with mock.patch.object(run, "a_timeline_climb", return_value=(True, "climbed")):
+            good, why = run.grade_scene_expect(sc, log("1920x1080@60"))
+            self.assertTrue(good, why)
+            # the pre-4f11c1aff declaration: the SOURCE raster, ignoring the 480p ceiling
+            bad, why = run.grade_scene_expect(sc, log("3840x2160@60"))
+            self.assertFalse(bad)
+            self.assertIn("declared max=3840x2160@60", why)
+            typo = dict(sc, expect={"load_mx": "1920x1080@60"})
+            self.assertFalse(run.grade_scene_expect(typo, log("1920x1080@60"))[0])
+        self.assertEqual(run.grade_scene_expect({"name": "y"}, []), (True, ""))
+
+    def test_fixed_480p_scene_is_served_by_the_mock_when_built(self):
+        sc = self.mf.mock_scene(self.scenes["fixed-480p-reencode-declaration"])
+        if self.mf.missing_mock_fixtures(sc):
+            self.skipTest(self.mf.missing_mock_fixtures(sc))
+        port = self._free_port()
+        with self.mf.MockPms("127.0.0.1", port, self.mf.mock_server_args(sc)):
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/library/metadata/{sc['rk']}", timeout=10) as r:
+                media = json.load(r)["MediaContainer"]["Metadata"][0]["Media"][0]
+            self.assertEqual((media["width"], media["height"], media["videoCodec"]),
+                             (3840, 2160, "h264"))
+            self.assertEqual(media["audioCodec"], "aac")
+            self.assertGreater(media["bitrate"], 9000)
+
     # --- the deep scene's definition ---------------------------------------------------
     def test_deep_scene_is_modelled_on_home_grid_and_walks(self):
         deep, grid = self.scenes["home-grid-deep"], self.scenes["home-grid"]
@@ -6713,7 +7386,9 @@ class FpsMock(unittest.TestCase):
         self.assertTrue(deep["mock"]["only"])
         self.assertEqual((deep["mock"]["section_hubs"], deep["mock"]["section_hubs_linked"]), (170, 40))
         self.assertEqual(deep["walk"]["landed"], "library")
-        self.assertEqual(deep["walk"]["extra_rows"], 6)
+        # the Recommended page seats its first shelf on arrival and has no toolbar to cross
+        self.assertEqual(deep["walk"]["extra_rows"], 0)
+        self.assertEqual(deep["walk"]["fingerprint_region"], "shelf")
         for t in ("plxnative-library", "plxnative-framedrop", "plxnative-focus"):
             self.assertIn(t, deep["triggers"])
         self.assertNotIn("plxnative-libosc", deep["triggers"])  # the walk is the stimulus
@@ -6721,6 +7396,52 @@ class FpsMock(unittest.TestCase):
         # room for every shelf at its worst: all of them, a second stop per linked one, the extras
         self.assertGreaterEqual(deep["walk"]["max_rows"], 170 + 40 + deep["walk"]["extra_rows"])
         self.assertEqual((deep["loop_floor"], deep["fps_floor"]), (50, 30))
+
+    # Words a page's `probe_viewport` prints that are not somewhere a walk goes: no focus at all
+    # (`none`), focus on something the page does not classify (`library`) and the retry button of a
+    # listing that failed (`status`). A scene that waits for one of them waits for the page to be
+    # broken or empty, so the check below does not count them as regions a scene may name.
+    _NOT_A_WALK_TARGET = frozenset({"none", "library", "status"})
+
+    @classmethod
+    def _regions_printed_by(cls, *path):
+        """The `region=` words a walk can reach on the page at `path`: the string literals of its
+        `probe_viewport`, the one function the focus fingerprint's `region=` comes from, less the
+        words that are not somewhere a walk goes (`_NOT_A_WALK_TARGET`)."""
+        with open(os.path.join(REPO_ROOT, *path), encoding="utf-8") as fh:
+            body = re.search(r"pub fn probe_viewport\b.*?\n    \}\n", fh.read(), re.S)
+        return set(re.findall(r'"([a-z]+)"', body.group(0))) - cls._NOT_A_WALK_TARGET if body else set()
+
+    def test_a_scene_grades_a_fingerprint_region_its_page_actually_prints(self):
+        """A scene's `walk.fingerprint_region` / `walk.reach.region` is a promise that the page prints
+        that `focus route=... region=...` word. #843 gave `library-shelves-deep` the Recommended
+        page (`plxnative-libtype: recommended`) and left it waiting for the Library page's
+        `region=grid`, which that page never printed (its probe line was empty), so the scene
+        failed on every run and nothing said why. Both pages answer one fingerprint grammar, so the
+        words each can print are read from the page's own `probe_viewport`."""
+        library = self._regions_printed_by("rust-modules", "screens", "src", "library", "mod.rs")
+        recommended = self._regions_printed_by("rust-modules", "screens", "src", "library", "recommended.rs")
+        self.assertIn("grid", library)
+        self.assertIn("shelf", recommended)
+        self.assertNotIn("grid", recommended, "the Recommended page mounts no grid")
+        self.assertNotIn("shelf", library, "the Library page mounts no shelves")
+        checked = 0
+        for name, scene in sorted(self.scenes.items()):
+            walk = scene.get("walk") or {}
+            wanted = {w for w in (walk.get("fingerprint_region"), (walk.get("reach") or {}).get("region")) if w}
+            if not wanted:
+                continue
+            with self.subTest(scene=name):
+                self.assertEqual(scene["route"], "library",
+                                 "teach this test which page prints the regions of the scene's route")
+                recommended_page = scene.get("triggers", {}).get("plxnative-libtype") == "recommended"
+                printed = recommended if recommended_page else library
+                for word in wanted:
+                    self.assertIn(word, printed,
+                                  f"{name} waits for `region={word}`, which its "
+                                  f"{'Recommended' if recommended_page else 'Library'} page never prints")
+                checked += 1
+        self.assertGreaterEqual(checked, 7, "the scenes that declare a region were not found")
 
     # --- the expected key count --------------------------------------------------------
     def test_walk_downs_for_home_is_one_per_landed_row(self):
@@ -6731,10 +7452,10 @@ class FpsMock(unittest.TestCase):
         deep = self.scenes["library-shelves-deep"]
         # a 12-shelf landing (CW + Recently Added + 10 padding hubs): 10 * 40 // 168 = 2 linked
         self.assertEqual(self.mf.linked_landed(deep, 12), 2)
-        self.assertEqual(self.mf.walk_downs(deep, 12), 12 + 2 + 6)
-        # a fully landed 170 carries every linked shelf: 170 + 40 + 6
+        self.assertEqual(self.mf.walk_downs(deep, 12), 12 + 2)
+        # a fully landed 170 carries every linked shelf: 170 + 40
         self.assertEqual(self.mf.linked_landed(deep, 170), 40)
-        self.assertEqual(self.mf.walk_downs(deep, 170), 170 + 40 + 6)
+        self.assertEqual(self.mf.walk_downs(deep, 170), 170 + 40)
         self.assertEqual(self.mf.linked_landed(deep, 500), 40)
         self.assertEqual(self.mf.linked_landed(deep, 1), 0)
         plain = {"walk": {"landed": "library", "extra_rows": 2}, "mock": {"section_hubs": 50}}
@@ -6916,8 +7637,8 @@ class FpsMock(unittest.TestCase):
     def _shelf_fp(row):
         return f"focus route=library pill=-1 card=1 menu=0 region=shelf row={row} col=0 viewport_x=0.000"
 
-    # a walk that reached the deepest shelf ON SCREEN (row 169 of 170), then crossed into the grid
-    DEEP_TAIL = [_shelf_fp.__func__(3), _shelf_fp.__func__(169), GRID_FP]
+    # a walk that reached the deepest shelf ON SCREEN (row 169 of 170): the Recommended page has no grid
+    DEEP_TAIL = [_shelf_fp.__func__(3), _shelf_fp.__func__(169)]
 
     def _library_walk(self, tail, sent=None, landed=170):
         deep = self.scenes["library-shelves-deep"]
@@ -6956,30 +7677,29 @@ class FpsMock(unittest.TestCase):
         self.assertIn("170 shelf(s) landed", detail)
 
     def test_grade_walk_prelude_needs_the_deep_shelf_on_screen(self):
-        # the store published 170 and the grid was reached, but the screen only built 12 rows
-        deep, _, lines, w = self._library_walk([self._shelf_fp(11), self.GRID_FP])
+        # the store published 170, but the screen only built 12 rows
+        deep, _, lines, w = self._library_walk([self._shelf_fp(11)])
         fail, _, _ = run.grade_walk_prelude(deep, lines, w)
         self.assertIn("region=shelf row=11", fail)
         self.assertIn("minimum row 149", fail)
         self.assertIn("SCREEN", fail)
-        # no shelf fingerprint at all
+        # no shelf fingerprint at all: the walk never carried focus onto a shelf
         deep, _, lines, w = self._library_walk([self.GRID_FP])
         fail, _, _ = run.grade_walk_prelude(deep, lines, w)
         self.assertIn("region=shelf", fail)
-        self.assertIn("SCREEN", fail)
         # the deepest of several counts, wherever it falls in the window
-        deep, _, lines, w = self._library_walk([self._shelf_fp(169), self._shelf_fp(4), self.GRID_FP])
+        deep, _, lines, w = self._library_walk([self._shelf_fp(169), self._shelf_fp(4)])
         fail, _, _ = run.grade_walk_prelude(deep, lines, w)
         self.assertIsNone(fail, fail)
         # row min_landed - 1 is enough, one less is not
-        deep, _, lines, w = self._library_walk([self._shelf_fp(149), self.GRID_FP])
+        deep, _, lines, w = self._library_walk([self._shelf_fp(149)])
         fail, _, _ = run.grade_walk_prelude(deep, lines, w)
         self.assertIsNone(fail, fail)
-        deep, _, lines, w = self._library_walk([self._shelf_fp(148), self.GRID_FP])
+        deep, _, lines, w = self._library_walk([self._shelf_fp(148)])
         fail, _, _ = run.grade_walk_prelude(deep, lines, w)
         self.assertIn("region=shelf row=148", fail)
-        # without min_landed a library walk needs no shelf fingerprint
-        deep, _, lines, w = self._library_walk([self.GRID_FP])
+        # without min_landed a library walk needs no particular shelf, only the region
+        deep, _, lines, w = self._library_walk([self._shelf_fp(4)])
         plain = dict(deep, walk={k: v for k, v in deep["walk"].items() if k != "min_landed"})
         fail, _, _ = run.grade_walk_prelude(plain, lines, w)
         self.assertIsNone(fail, fail)
@@ -6989,12 +7709,13 @@ class FpsMock(unittest.TestCase):
         self.assertEqual(self.mf.deepest_shelf_row(
             [self._shelf_fp(3), self._shelf_fp(169), self._shelf_fp(40)], "library"), 169)
 
-    def test_grade_walk_prelude_needs_a_grid_fingerprint_at_the_turn(self):
-        for tail in ([], ["focus route=library pill=-1 card=1 menu=0 region=shelf row=3 col=0"],
-                     ["focus route=home region=grid row=0 col=0"]):
+    def test_grade_walk_prelude_needs_the_scenes_region_fingerprint(self):
+        # the Recommended page's walk is graded on its shelves; the grid (the Library page's region)
+        # and another route's shelf do not stand in for them
+        for tail in ([], [self.GRID_FP], ["focus route=home region=shelf row=9 col=0"]):
             deep, _, lines, w = self._library_walk(tail)
             fail, _, _ = run.grade_walk_prelude(deep, lines, w)
-            self.assertIn("region=grid", fail)
+            self.assertIn("region=shelf", fail)
 
     def test_walk_plan_is_down_then_up_and_only_those_keys(self):
         plan = self.mf.walk_plan(21, {"max_rows": 170})
@@ -7133,9 +7854,15 @@ class FpsMock(unittest.TestCase):
         self.assertIn("refusing to run", str(cm.exception))
 
     # --- run_fps_scene: the identity gate and the walk window grade the right thing ------
-    def _run_scene(self, scene, log, walker):
+    def _run_scene(self, scene, log, walker, *, cfg=None, extra_triggers=(), patches=(), out=None, on_make=None,
+                   capture=None):
         class P:
             stdout, stderr = "\n".join(log), ""
+
+        def make(args, **kw):
+            if on_make:
+                on_make(args[0])  # the target: `kill`, `run`
+            return P
 
         class FakeWalk:
             def __init__(self, *a, **k):
@@ -7148,21 +7875,219 @@ class FpsMock(unittest.TestCase):
             def join(self, timeout=None):
                 pass
 
-        cfg = {"tv": "tv.invalid", "inject_token": True, "mock": {"host": "h", "port": 1}}
-        with mock.patch.object(run, "make", return_value=P), \
-                mock.patch.object(run, "apply_triggers"), \
-                mock.patch.object(run, "require_install"), \
-                mock.patch.object(run, "save_case_log"), \
-                mock.patch.object(run, "RUNDIR", "/r"), \
-                mock.patch.object(run, "EVENTLOG", "/r/e.log"), \
-                mock.patch.object(run.mock_fps, "KeyWalk", FakeWalk), \
-                contextlib.redirect_stdout(io.StringIO()):
-            return run.run_fps_scene(scene, cfg, "tok")
+        cfg = {"tv": "tv.invalid", "inject_token": True, "mock": {"host": "h", "port": 1}, **(cfg or {})}
+        with contextlib.ExitStack() as stack:
+            for patch in (mock.patch.object(run, "make", side_effect=make),
+                          mock.patch.object(run, "apply_triggers"),
+                          mock.patch.object(run, "require_install"),
+                          mock.patch.object(run, "save_case_log"),
+                          mock.patch.object(run, "RUNDIR", "/r"),
+                          mock.patch.object(run, "EVENTLOG", "/r/e.log"),
+                          mock.patch.object(run.mock_fps, "KeyWalk", FakeWalk),
+                          contextlib.redirect_stdout(out or io.StringIO()),
+                          *patches):  # `patches` come last, so they win over the defaults above
+                stack.enter_context(patch)
+            return run.run_fps_scene(scene, cfg, "tok", extra_triggers=extra_triggers, capture=capture)
+
+    # --- --save-logs keeps the GPU counters, which the harness otherwise wipes ----------
+    # `plxnative-hwcnt.jsonl` lives in the runtime root that every scene's trigger wipe and the
+    # harness's teardown empty, and `save_case_log` keeps only the event log: a card-attribution leg
+    # (`--extra-trigger plxnative-hwcnt=frame.ui`) used to lose the one file that holds its answer.
+    HWCNT_ARMED = (("plxnative-hwcnt", "frame.ui"),)
+    PROFILE_ARMED = (("plxnative-profile", "frame.ui"),)
+
+    def _run_saving(self, tmp, *, armed=HWCNT_ARMED, save=True, on_tv=None, capture=None):
+        """`library-switch` through the real `run_fps_scene` with a fake television: returns the
+        harness's ordered dealings with it (`kill`, `wipe`, `run`, `pull <file>`), what it printed, and
+        the `--save-logs` directory's files."""
+        events, tv_files, out = [], dict(on_tv or {}), io.StringIO()
+        legs = os.path.join(tmp, "legs")
+
+        def ssh(tv, cmd, timeout=30):
+            name = cmd.split("/r/", 1)[1].split()[0]
+            events.append(f"pull {name}")
+            return mock.Mock(stdout=tv_files.get(name, ""), returncode=0)
+
+        ok, detail = self._run_scene(
+            copy.deepcopy(self.scenes["library-switch"]), self._switch_log(self.SWITCH_SERIES["H3"]), {},
+            cfg={"save_logs": legs if save else None}, extra_triggers=armed, on_make=events.append, out=out,
+            capture=capture,
+            patches=(mock.patch.object(run, "apply_triggers", side_effect=lambda *a, **k: events.append("wipe")),
+                     mock.patch.object(run, "ssh", side_effect=ssh)))
+        self.assertTrue(ok, detail)
+        return events, out.getvalue(), sorted(os.listdir(legs)) if os.path.isdir(legs) else []
+
+    def test_save_logs_keeps_the_hwcnt_jsonl_between_the_app_run_and_the_next_wipe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # the GL-timer file is on the set too: a leg that armed hwcnt is not asked for it
+            events, out, kept = self._run_saving(
+                tmp, on_tv={"plxnative-hwcnt.jsonl": '{"phase":"frame.ui"}\n', "plxnative-gputime.jsonl": "g\n"})
+            self.assertEqual(events, ["kill", "wipe", "run", "pull plxnative-hwcnt.jsonl"])
+            self.assertEqual(kept, ["fps-library-switch.plxnative-hwcnt.jsonl"])
+            with open(os.path.join(tmp, "legs", kept[0])) as fh:
+                self.assertEqual(fh.read(), '{"phase":"frame.ui"}\n')
+            self.assertIn("kept fps-library-switch.plxnative-hwcnt.jsonl", out)
+
+    def test_save_logs_keeps_the_gputime_jsonl_of_a_plxnative_profile_leg(self):
+        # `plxnative-profile` (the GL timer) writes plxnative-gputime.jsonl and never the hwcnt file
+        with tempfile.TemporaryDirectory() as tmp:
+            events, out, kept = self._run_saving(
+                tmp, armed=self.PROFILE_ARMED, on_tv={"plxnative-hwcnt.jsonl": "h\n", "plxnative-gputime.jsonl": "g\n"})
+            self.assertEqual(events, ["kill", "wipe", "run", "pull plxnative-gputime.jsonl"])
+            self.assertEqual(kept, ["fps-library-switch.plxnative-gputime.jsonl"])
+            with open(os.path.join(tmp, "legs", kept[0])) as fh:
+                self.assertEqual(fh.read(), "g\n")
+            self.assertIn("kept fps-library-switch.plxnative-gputime.jsonl", out)
+
+    def test_save_logs_says_so_when_an_armed_leg_left_no_counters(self):
+        for armed, fname in ((self.HWCNT_ARMED, "plxnative-hwcnt.jsonl"), (self.PROFILE_ARMED, "plxnative-gputime.jsonl")):
+            with tempfile.TemporaryDirectory() as tmp:
+                _, out, kept = self._run_saving(tmp, armed=armed)
+                self.assertEqual(kept, [])
+                self.assertIn(f"{armed[0][0]} was armed but the set holds no {fname}", out)
+
+    def test_save_logs_leaves_the_set_alone_unless_a_profiler_is_armed_and_logs_are_wanted(self):
+        on_tv = {"plxnative-hwcnt.jsonl": "h\n", "plxnative-gputime.jsonl": "g\n"}
+        for leg in ({"armed": ()}, {"save": False}):
+            with tempfile.TemporaryDirectory() as tmp:
+                events, out, kept = self._run_saving(tmp, on_tv=on_tv, **leg)
+                self.assertEqual((events, kept, "profiler" in out), (["kill", "wipe", "run"], [], False), leg)
+
+    def test_one_pull_of_the_counters_serves_save_logs_and_the_graphics_profile(self):
+        # `run_graphics_profile` reads the hwcnt leg's file out of `capture`: with --save-logs on it
+        # shares the pull that wrote the copy on disk, and with it off the scene still pulls once
+        for save in (True, False):
+            with tempfile.TemporaryDirectory() as tmp:
+                capture = {}
+                events, _, kept = self._run_saving(tmp, save=save, capture=capture, on_tv={"plxnative-hwcnt.jsonl": "h\n"})
+                self.assertEqual(events, ["kill", "wipe", "run", "pull plxnative-hwcnt.jsonl"], f"save={save}")
+                self.assertEqual(capture["profiler"], {"plxnative-hwcnt": "h\n"})
+                self.assertEqual(kept, ["fps-library-switch.plxnative-hwcnt.jsonl"] if save else [])
+
+    def test_the_graphics_profile_bundles_the_hwcnt_leg_it_was_handed_and_pulls_nothing_itself(self):
+        legs = []
+
+        def fake_scene(scene, cfg, token, *, extra_triggers=(), capture=None, **kw):
+            legs.append(extra_triggers)
+            capture.update({"lines": ["beat"], "warmup": 5, "run_secs": 18, "route": "library", "overlay": None,
+                            "profiler": {"plxnative-hwcnt": "h\n"} if extra_triggers else {}})
+            return True, "ok"
+
+        pacing = {"n": 0, "p50": 0.0, "p10": 0.0, "p95": 0.0, "min": 0.0, "max": 0.0, "drift": 0.0}
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.multiple(run, MaliIrqSampler=mock.MagicMock(), make=mock.Mock(), run_fps_scene=fake_scene,
+                                    parse_irq_snapshots=mock.Mock(return_value=[{}]), write_irq_jsonl=mock.Mock(),
+                                    summarize_irq=mock.Mock(return_value={}), format_irq=mock.Mock(return_value=[]),
+                                    _pacing_profile=mock.Mock(return_value=pacing),
+                                    ssh=mock.Mock(side_effect=AssertionError("the profile pulled the file itself"))), \
+                mock.patch.object(run.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")):
+            bundle = os.path.join(tmp, "bundle")
+            self.assertEqual(run.run_graphics_profile({"name": "library-switch"}, {"tv": "tv.invalid"}, "tok", "frame.ui", output=bundle), 0)
+            with open(os.path.join(bundle, "plxnative-hwcnt.jsonl")) as fh:
+                self.assertEqual(fh.read(), "h\n")
+        self.assertEqual(legs, [(), (("plxnative-hwcnt", "frame.ui"),)])
 
     def _deep_scene(self):
         s = copy.deepcopy(self.scenes["home-grid-deep"])
         s["walk"]["max_rows"] = 3
         return s
+
+    # --- library-switch: the draw-rate floor does not flip on the phase of the switch cycle ---
+    # The scene's own heartbeats (`fps=` per 1 s window, route=library) on the television, 2026-10-19,
+    # one tuple per build of the same tree (phase H, built and run by the collections-redesign
+    # lane). The grader skips the first `warmup_s` (6) and grades the rest, so the graded window is
+    # the back half of the 14-step switch cycle plus the idle tail where the cycle is spent
+    # (`0 1 0 1 0 1`: the keepalive). Which steps land in which second moves between boots, so the
+    # graded MEDIAN read 7-11 for the same animation and failed fps_floor 8 on H7 (median 7).
+    SWITCH_SERIES = {
+        "H3": [49, 57, 42, 33, 17, 12, 21, 30, 11, 11, 33, 18, 11, 10, 0, 1, 0, 1, 0, 1],
+        "H5": [49, 56, 41, 32, 18, 12, 21, 31, 11, 11, 33, 18, 11, 11, 0, 1, 0, 1, 0, 1, 50],
+        "H7": [47, 57, 39, 33, 21, 8, 21, 35, 12, 5, 32, 22, 7, 10, 0, 1, 0, 1, 0, 1],
+        "H9": [48, 57, 41, 34, 19, 11, 21, 32, 12, 8, 32, 19, 10, 9, 0, 1, 0, 1, 0, 1],
+        # the lowest-total healthy run on record (tuck-E) and one with the idle steps elsewhere
+        "tuck-E": [56, 34, 3, 33, 20, 10, 20, 16, 6, 9, 31, 19, 10, 9, 0, 1, 0, 1, 0, 1],
+        "tv3-847-L1b": [49, 33, 3, 33, 19, 11, 20, 16, 9, 32, 32, 20, 10, 3, 1, 6, 13, 0, 1, 0],
+    }
+
+    @staticmethod
+    def _library_beat(fps):
+        return f"loop=60 route=library fps={fps} worstframe=1.0ms carried=0 dropped=0 budget=0/0"
+
+    def _switch_log(self, series):
+        return [self.SYN] + [self._library_beat(n) for n in series]
+
+    def _run_switch(self, series):
+        return self._run_scene(copy.deepcopy(self.scenes["library-switch"]), self._switch_log(series), {})
+
+    def test_library_switch_passes_every_phase_of_the_cycle(self):
+        for build, series in self.SWITCH_SERIES.items():
+            ok, detail = self._run_switch(series)
+            self.assertTrue(ok, f"{build} {series}: {detail}")
+
+    def test_library_switch_still_fails_a_frozen_animator(self):
+        # a frozen animator draws the keepalive alone, ~0.5 swaps/s, for the whole run
+        for frozen in ([1, 0] * 10, [0, 1] * 10, [1] * 20, [0] * 20):
+            ok, detail = self._run_switch(frozen)
+            self.assertFalse(ok, f"{frozen}: {detail}")
+            self.assertIn("fps_floor", detail)
+
+    def test_library_switch_fails_an_animator_that_freezes_partway(self):
+        # the keepalive tail of a SPENT cycle reads 0 1 0 1; a frozen animator reads it from the freeze
+        # on, so the graded windows (the first six are warmup) end in the same tail either way. A mean
+        # over them cannot tell the two apart (H3 4.07, H7 4.43, H9 4.21 after two live graded seconds,
+        # against 10.4-10.6 healthy); the number of windows that were LIVE can.
+        warmup = 6
+        for build in ("H3", "H5", "H7", "H9"):
+            healthy = self.SWITCH_SERIES[build]
+            for live in (0, 1, 2, 3, 4, 5):
+                froze = healthy[:warmup + live] + [0, 1] * ((len(healthy) - warmup - live + 1) // 2)
+                froze = froze[:len(healthy)]
+                ok, detail = self._run_switch(froze)
+                self.assertFalse(ok, f"{build} frozen after {live} graded seconds {froze}: {detail}")
+                self.assertIn("fps_floor", detail)
+
+    def test_library_switch_fails_a_frozen_animator_with_one_burst(self):
+        # a frozen run plus one 50-60 fps window (a teardown flush, a stray repaint) is not an animation
+        for burst in (50, 60):
+            for at in (7, 12, 19):
+                series = [0, 1] * 10
+                series[at] = burst
+                ok, detail = self._run_switch(series)
+                self.assertFalse(ok, f"{series}: {detail}")
+
+    def test_library_switch_still_fails_an_animator_at_a_quarter_of_the_rate(self):
+        slow = [round(n / 4) for n in self.SWITCH_SERIES["H3"]]
+        ok, detail = self._run_switch(slow)
+        self.assertFalse(ok, f"{slow}: {detail}")
+
+    def test_fps_floor_stat_defaults_to_the_median_and_names_a_known_statistic(self):
+        # every scene that grades fps_floor on something else says so with a statistic the grader knows
+        for name, scene in self.scenes.items():
+            stat = scene.get("fps_floor_stat")
+            if stat is not None:
+                self.assertIn(stat, run.FPS_FLOOR_STATS, name)
+                self.assertIsNotNone(scene.get("fps_floor"), f"{name}: a statistic without a floor")
+            self.assertEqual("fps_floor_windows" in scene, stat == "live",
+                             f"{name}: fps_floor_windows belongs to the live statistic and only to it")
+            if stat == "live":
+                self.assertIsInstance(scene["fps_floor_windows"], int, name)
+                self.assertGreaterEqual(scene["fps_floor_windows"], 1, name)
+        # the opt-in is the library-switch scene and nothing else: every other scene keeps the median
+        self.assertEqual({n for n, sc in self.scenes.items() if sc.get("fps_floor_stat")}, {"library-switch"})
+        ok, detail = run.fps_floor_verdict([5, 5, 5, 5, 5, 40, 40], 10)
+        self.assertFalse(ok)
+        self.assertIn("median=5 fps (min=5, max=40, n=7) vs fps_floor 10", detail)
+        # live: a window is live at >= the floor, and the count must reach `windows`
+        ok, detail = run.fps_floor_verdict([5, 5, 5, 3, 0, 1, 40], 4, "live", 4)
+        self.assertTrue(ok)
+        self.assertIn("live=4 of n=7 windows at >= 4 fps (need 4;", detail)
+        self.assertFalse(run.fps_floor_verdict([5, 5, 5, 3, 0, 1, 40], 4, "live", 5)[0])
+        with self.assertRaises(ValueError):
+            run.fps_floor_verdict([1, 2, 3, 4, 5], 1, "p95")
+        with self.assertRaises(ValueError):
+            run.fps_floor_verdict([1, 2, 3, 4, 5], 1, "live")
+        with self.assertRaises(ValueError):
+            run.fps_floor_verdict([1, 2, 3, 4, 5], 1, "mean")
 
     def _walk_log(self, server=None, fps=40, keys=6):
         out = [server or self.SYN, "hubs: landed — 90 items, 3 shelves"] + [self._beat(fps=1)] * 3

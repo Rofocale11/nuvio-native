@@ -36,6 +36,8 @@ static PORT: plx_platform::tv::Port = plx_platform::tv::Port {
     frame_probe_waiting: crate::system::frame_probe_waiting,
     frame_probe_acquired: crate::system::frame_probe_acquired,
     frame_probe_fields: crate::system::frame_probe_fields,
+    frame_probe_prepare_begin: crate::system::frame_probe_prepare_begin,
+    frame_probe_prepare_end: crate::system::frame_probe_prepare_end,
     sink: SINK,
 };
 

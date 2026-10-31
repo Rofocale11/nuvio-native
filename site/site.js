@@ -240,7 +240,7 @@
 
   /* ---------- Scroll-driven scenes ---------- */
   // Everything that moves with the scroll position rather than on a timer:
-  // the hero receding, the pinned TV scene, the close-ups opening, the Why
+  // the hero receding, the pinned TV scene, the screenshots opening, the Why
   // sentence lighting up word by word, the quotes drifting and the big
   // headlines settling. One rAF-throttled pass per scroll frame.
   //
@@ -268,7 +268,7 @@
     const screen = q(".demo-card");
     const toggle = q(".demo-toggle");
     const headerBar = document.querySelector(".site-header .header-bar");
-    const frames = [...document.querySelectorAll(".closeup-box")].map((frame) => ({
+    const frames = [...document.querySelectorAll("[data-unveil]")].map((frame) => ({
       frame,
       img: frame.querySelector("img"),
       top: 0,
@@ -281,6 +281,14 @@
     }));
     const bigs = [...document.querySelectorAll("[data-scrub-big]")].map((el) => ({ el, top: 0 }));
     const words = splitWords(document.querySelector("[data-words]"));
+    // The stack scene: a typical TV app's plates, whose browser plates leave
+    // while the rest close up (styles.css reads the progress).
+    const stack = document.querySelector(".stack-scene");
+    const stackSticky = stack && stack.querySelector(".stack-sticky");
+    const stackStage = stack && stack.querySelector(".stack-stage");
+    const stackLayers = stack ? [...stack.querySelectorAll("[data-layer]")] : [];
+    const stackCount = stack && stack.querySelector("[data-count]");
+    let stackShown = null;
 
     const demo = initDemoVideo(true);
 
@@ -333,6 +341,12 @@
     // Checked on every layout change, so turning a phone switches it.
     const flowQuery = window.matchMedia
       ? window.matchMedia("(max-width: 759px), (max-height: 559px) and (orientation: landscape)")
+      : null;
+    // The stack scene is pinned on phones too (a swipe would race through it
+    // in the flow); only a short landscape window, where it cannot fit, plays
+    // in the flow. styles.css lays it out by the same media query.
+    const stackFlowQuery = window.matchMedia
+      ? window.matchMedia("(max-height: 559px) and (orientation: landscape)")
       : null;
     let refused = false;
     let still = false;
@@ -391,6 +405,15 @@
         d.h = d.el.offsetHeight;
       });
       bigs.forEach((b) => (b.top = docTop(b.el)));
+      if (stack && stackSticky && stackStage) {
+        L.stackFlow = !!(stackFlowQuery && stackFlowQuery.matches);
+        L.stackTop = docTop(stack);
+        L.stackH = stack.offsetHeight;
+        L.stackStickyTop = parseFloat(getComputedStyle(stackSticky).top) || 0;
+        L.stackStickyH = stackSticky.offsetHeight;
+        L.stackStageTop = docTop(stackStage);
+        L.stackStageH = stackStage.offsetHeight;
+      }
       if (words.length) {
         const line = words[0].parentElement;
         L.wordsTop = docTop(line);
@@ -497,9 +520,8 @@
         demo.setInView(top < vh * 1.5 && top + L.pinH > -vh * 0.5);
       }
 
-      // Close-ups open from slightly smaller while the picture inside settles
-      // from slightly larger. Nothing is cropped at rest. (Their glow comes
-      // up with the picture's reveal: styles.css.)
+      // App screenshots open from slightly smaller while the picture inside
+      // settles from slightly larger. Nothing is cropped at rest.
       frames.forEach((f) => {
         const t = easeOut3(clamp01((vh - (f.top - y)) / (vh * 0.85)));
         const k = 1 - t;
@@ -523,6 +545,50 @@
         const s0 = narrow ? 0.12 : 0.35;
         set(b.el, "transform", `scale(${(1 + s0 - s0 * t).toFixed(4)})`);
       });
+
+      // The stack scene, p = 0..1: pinned, over the scroll that the pin
+      // lasts; in the flow (short landscape windows), from when the stack's middle
+      // is at 85% of the window's height until it reaches 40%, so all of it
+      // plays on screen.
+      //   0.00–0.18  the typical app, one closed block, opens up…
+      //   0.20–0.58  …its three browser plates leave, one after another…
+      //   0.46–0.80  …the four that stay close up into a tight stack…
+      //   0.60–0.86  …the label turns to "PlxNative", the picture's motion
+      //              blur comes in and the number counts up to 60.
+      // A band of light crosses the glass over the whole of it.
+      if (stackStage) {
+        const p = L.stackFlow
+          ? clamp01((vh * 0.85 - (L.stackStageTop + L.stackStageH / 2 - y)) / (vh * 0.45))
+          : clamp01((y + L.stackStickyTop - L.stackTop) / Math.max(1, L.stackH - L.stackStickyH));
+        const ease = (a, len) => {
+          const t = clamp01((p - a) / len);
+          return t * t * (3 - 2 * t);
+        };
+        const opened = ease(0, 0.18);
+        const open = 0.22 + 0.78 * opened;
+        setVar(stackSticky, "--open", opened.toFixed(3));
+        const d = ease(0.46, 0.34);
+        stackLayers.forEach((el) => {
+          const y0 = parseFloat(el.dataset.y0) * open;
+          let f = y0;
+          if (el.dataset.cut !== undefined) {
+            setVar(el, "--t", ease(0.2 + Number(el.dataset.cut) * 0.08, 0.22).toFixed(3));
+          } else {
+            f = y0 + (parseFloat(el.dataset.y1) - y0) * d;
+          }
+          setVar(el, "--f", f.toFixed(4));
+        });
+        const k = clamp01((p - 0.6) / 0.26);
+        setVar(stackSticky, "--k", k.toFixed(3));
+        setVar(stackSticky, "--s", p.toFixed(3));
+        if (stackCount) {
+          const n = String(Math.round(60 * (k * k * (3 - 2 * k))));
+          if (n !== stackShown) {
+            stackShown = n;
+            stackCount.textContent = n;
+          }
+        }
+      }
 
       // The Why sentence lights up word by word in reading order: from when
       // its top is at 90% of the window's height until its bottom reaches
@@ -561,6 +627,14 @@
     if (last[prop] === value) return;
     last[prop] = value;
     el.style[prop] = value;
+  }
+
+  // The same for a custom property.
+  function setVar(el, name, value) {
+    const last = el.__plxStyle || (el.__plxStyle = {});
+    if (last[name] === value) return;
+    last[name] = value;
+    el.style.setProperty(name, value);
   }
 
   // Calls fn whenever the page's layout may have moved: resizes, the load
@@ -667,6 +741,206 @@
     measure();
   }
 
+  /* ---------- Press switcher ---------- */
+  // The press list in the markup is the no-JS (and no-script crawler) form: one
+  // linked row per article. With JS it becomes a switcher: outlet names as tabs
+  // on the left, the selected article on stage on the right. The tabs are built
+  // from the list, so a new outlet is one new <li> and nothing here changes.
+  function initPress() {
+    const section = document.querySelector(".press-section");
+    const list = section && section.querySelector(".press-list");
+    if (!list) return;
+    const items = [...list.querySelectorAll(".press-item")].map((a) => {
+      const headline = a.querySelector(".press-headline");
+      const time = a.querySelector(".press-date");
+      const gloss = a.querySelector(".press-gloss");
+      const language = a.querySelector(".press-lang");
+      return {
+        href: a.getAttribute("href"),
+        outlet: a.querySelector(".press-outlet").textContent,
+        lang: headline.getAttribute("lang") || "en",
+        headline: headline.innerHTML,
+        gloss: gloss ? gloss.textContent : "",
+        language: language ? language.textContent : "",
+        date: time.textContent,
+        iso: time.getAttribute("datetime"),
+      };
+    });
+    if (items.length < 2) return;
+    items.sort((a, b) => b.iso.localeCompare(a.iso));
+
+    const el = (tag, cls, attrs) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      Object.entries(attrs || {}).forEach(([k, v]) => n.setAttribute(k, v));
+      return n;
+    };
+    const arrow = (d) =>
+      '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + d + '"></path></svg>';
+
+    const root = el("div", "press-switcher", { "data-reveal": "" });
+    const tabs = el("div", "press-tabs", { role: "tablist", "aria-label": "Press coverage", "aria-orientation": "vertical" });
+    const stage = el("div", "press-stage", { role: "tabpanel", "aria-live": "polite" });
+    const meta = el("span", "press-stage-meta");
+    const head = el("span", "press-stage-headline");
+    const gloss = el("p", "press-stage-gloss");
+    const foot = el("div", "press-stage-foot");
+    const read = el("a", "press-read");
+    read.textContent = "Read the article →";
+    const pos = el("span", "press-pos");
+    const prev = el("button", "press-step", { type: "button", "aria-label": "Previous article" });
+    const next = el("button", "press-step", { type: "button", "aria-label": "Next article" });
+    prev.innerHTML = arrow("M15 5l-7 7 7 7");
+    next.innerHTML = arrow("M9 5l7 7-7 7");
+    foot.append(read, pos, prev, next);
+    stage.append(meta, head, gloss, foot);
+
+    let sel = 0;
+    const buttons = items.map((it, i) => {
+      const b = el("button", "press-tab", { type: "button", role: "tab", id: "press-tab-" + i, title: it.outlet });
+      const label = el("span");
+      label.textContent = it.outlet;
+      b.append(label);
+      b.addEventListener("click", () => select(i, false));
+      return b;
+    });
+    tabs.append(...buttons);
+    tabs.classList.toggle("is-long", items.length > 5);
+
+    const select = (i, focus) => {
+      sel = (i + items.length) % items.length;
+      const it = items[sel];
+      buttons.forEach((b, j) => {
+        const on = j === sel;
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.tabIndex = on ? 0 : -1;
+      });
+      stage.setAttribute("aria-labelledby", "press-tab-" + sel);
+      // A foreign-language article says so beside its date, before the reader follows the link.
+      meta.textContent = it.language ? it.date + " · " + it.language : it.date;
+      head.innerHTML = it.headline;
+      head.setAttribute("lang", it.lang);
+      gloss.textContent = it.gloss;
+      gloss.hidden = !it.gloss;
+      read.setAttribute("href", it.href);
+      if (it.lang !== "en") read.setAttribute("hreflang", it.lang); else read.removeAttribute("hreflang");
+      pos.textContent = String(sel + 1).padStart(2, "0") + " / " + String(items.length).padStart(2, "0");
+      // Centre the active tab inside the tab strip only; never scroll the page.
+      const b = buttons[sel];
+      const horiz = isNarrow();
+      const t = horiz ? b.offsetLeft - (tabs.clientWidth - b.offsetWidth) / 2 : b.offsetTop - (tabs.clientHeight - b.offsetHeight) / 2;
+      tabs.scrollTo(horiz ? { left: Math.max(0, t), behavior: reducedMotion() ? "auto" : "smooth" } : { top: Math.max(0, t), behavior: reducedMotion() ? "auto" : "smooth" });
+      if (focus) b.focus({ preventScroll: true });
+    };
+    prev.addEventListener("click", () => select(sel - 1, false));
+    next.addEventListener("click", () => select(sel + 1, false));
+    tabs.addEventListener("keydown", (e) => {
+      const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+      if (step) { e.preventDefault(); select(sel + step, true); }
+      else if (e.key === "Home") { e.preventDefault(); select(0, true); }
+      else if (e.key === "End") { e.preventDefault(); select(items.length - 1, true); }
+    });
+
+    const left = el("div", "press-side");
+    left.append(tabs);
+    const badge = section.querySelector(".press-badge");
+    if (badge) left.append(badge);
+    root.append(left, stage);
+    list.after(root);
+    section.classList.add("is-switcher");
+    select(0, false);
+  }
+
+  /* ---------- Capsule outline ---------- */
+  // The design system's capsule (core/pillPath.js, documented in its
+  // tokens/shape.css): not a stadium, so no straight sides. Each end is a circle
+  // r = END_R x height; the top and bottom are one large arc R, solved from the
+  // element's width; a blend circle f = sqrt(R x r) joins them tangentially, so
+  // curvature falls by the same factor twice. SLACK is how much of the band
+  // between r and half the height the blend may use: 1 returns a stadium.
+  // Applied as clip-path: shape() to every pill-faced control; where shape() is
+  // unsupported the CSS border-radius pill stays. A clip takes an outward
+  // box-shadow with it, so these faces carry no drop shadow.
+  const END_R = 0.492;
+  const SLACK = 0.86;
+  function pillShape(w, h) {
+    const r = END_R * h;
+    const B = h / 2;
+    const half = w / 2;
+    const band = B - r;
+    if (!(half > r) || !(band > 0)) return null;
+    const g = (R) => R - r - Math.hypot(half - r, R - B) - SLACK * band;
+    let lo = r + 1;
+    let hi = r + 1e9;
+    if (g(hi) < 0) return null;
+    for (let k = 0; k < 120; k++) {
+      const m = (lo + hi) / 2;
+      if (g(m) < 0) lo = m;
+      else hi = m;
+    }
+    const R = (lo + hi) / 2;
+    const f = Math.sqrt(R * r);
+    const cx = half;
+    const cy = R;
+    const ex = r;
+    const ey = B;
+    const d = Math.hypot(cx - ex, cy - ey);
+    const a = R - f;
+    const c = f - r;
+    if (a + c < d || Math.abs(a - c) > d) return null;
+    const ux = (ex - cx) / d;
+    const uy = (ey - cy) / d;
+    const x = (d * d + a * a - c * c) / (2 * d);
+    const yy = Math.sqrt(Math.max(0, a * a - x * x));
+    const fx = cx + ux * x - uy * yy;
+    const fy = cy + uy * x + ux * yy;
+    const t1x = cx + ((fx - cx) * R) / (R - f);
+    const t1y = cy + ((fy - cy) * R) / (R - f);
+    const t2x = fx + ((ex - fx) * f) / (f - r);
+    const t2y = fy + ((ey - fy) * f) / (f - r);
+    const p = (v) => +v.toFixed(2) + "px";
+    const mx = (v) => p(w - v);
+    return (
+      "shape(from " + p(t1x) + " " + p(t1y) + "," +
+      " arc to " + mx(t1x) + " " + p(t1y) + " of " + p(R) + " small cw," +
+      " arc to " + mx(t2x) + " " + p(t2y) + " of " + p(f) + " small cw," +
+      " arc to " + mx(t2x) + " " + p(h - t2y) + " of " + p(r) + " small cw," +
+      " arc to " + mx(t1x) + " " + p(h - t1y) + " of " + p(f) + " small cw," +
+      " arc to " + p(t1x) + " " + p(h - t1y) + " of " + p(R) + " small cw," +
+      " arc to " + p(t2x) + " " + p(h - t2y) + " of " + p(f) + " small cw," +
+      " arc to " + p(t2x) + " " + p(t2y) + " of " + p(r) + " small cw," +
+      " arc to " + p(t1x) + " " + p(t1y) + " of " + p(f) + " small cw, close)"
+    );
+  }
+
+  function initPills() {
+    if (!(window.CSS && CSS.supports && CSS.supports("clip-path", "shape(from 0px 0px, close)"))) return;
+    const SELECTOR = ".button, .header-cta, .nav-pill, .press-tab";
+    const apply = (el) => {
+      // Only a face that is a pill right now (the press tabs are bare type on wide screens).
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const shape = w && h && parseFloat(getComputedStyle(el).borderTopLeftRadius) > 0 ? pillShape(w, h) : null;
+      if (shape) {
+        el.style.clipPath = shape;
+        el.setAttribute("data-pill-clip", "");
+      } else {
+        el.style.clipPath = "";
+        el.removeAttribute("data-pill-clip");
+      }
+    };
+    const ro = "ResizeObserver" in window ? new ResizeObserver((es) => es.forEach((e) => apply(e.target))) : null;
+    const els = [...document.querySelectorAll(SELECTOR)];
+    els.forEach((el) => {
+      apply(el);
+      if (ro) ro.observe(el);
+    });
+    // A breakpoint can change a face's radius without changing its size.
+    if (narrowQuery && narrowQuery.addEventListener) narrowQuery.addEventListener("change", () => els.forEach(apply));
+  }
+
+  initPress();
+  initPills();
   initReveal();
   initSpotlights();
   initHeader();

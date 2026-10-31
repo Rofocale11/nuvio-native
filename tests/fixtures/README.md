@@ -266,9 +266,10 @@ the real one.)
 | `movie_hevc_4k_pgs_subs` | 780 s | HEVC 4K HDR10 + a **PGS bitmap** subtitle track at index 0 (`subtitle_image_pgs` picks row 1; row 0 is *Off*). Seeds 600 s. |
 
 **Track ORDER is part of the spec, not a detail.** `tests/README.md`: the audio tab's row is
-the metadata audio index in file order, and the subtitle tab's row 0 is *Off* with row *r*
-being subtitle index *r−1*. Three cases assert positions, and the generator's declarative
-spec — the same one `verify()` reads back — is what pins them.
+the metadata audio index in file order, and the subtitle cases name their track by position
+(`"track": N`, which counts the Subtitles tab's tracks only), so the rows above the tracks —
+row 0 *Off*, row 1 *Forced only* — never move a case. Three cases assert positions, and the
+generator's declarative spec — the same one `verify()` reads back — is what pins them.
 
 ### You can see the shape without opening a manifest
 
@@ -522,3 +523,16 @@ with `make_fixtures.py --tier pipeline --only pipe_h264_dts_1080p`, then extract
 The host regression grades exact preservation and extension stripping; audible decoding,
 synchronization and seeking are TV checks. The many-audio fixture now uses TrueHD at ordinal
 6 so its forced-transcode case remains a test of an unsupported format on DTS-capable TVs.
+
+
+### Dolby Vision Profile 7 RPU fixtures
+
+`dovi-p7-mel-rpu.bin` and `dovi-p7-fel-rpu.bin` are one Profile 7 RPU each (MEL and FEL), and
+`dovi-p7-mel-to-81-rpu.bin` is the MEL one after `dovi_tool`'s mode-2 conversion to Profile 8.1.
+They are dovi_tool's own test assets (`assets/tests/mel_orig.bin`, `fel_orig.bin` and
+`mel_to_81.bin` at commit `614c816b6446dcd1dbaf433403d499a6026fbb5a`, MIT; see
+`THIRD-PARTY-NOTICES.md`), copied unmodified. Each file is a 4-byte start code followed by the
+RPU after its `7C 01` NAL header, the form `dovi_tool` writes. The host regression in
+`ff_packet_framing_tests.rs` holds the in-app MEL conversion to dovi_tool's output byte for byte
+and the FEL one to a Profile 8 result (dovi_tool keeps no mode-2 output for its FEL asset);
+whether the panel engages Dolby Vision on the converted stream is a TV check.

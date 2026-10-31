@@ -10,16 +10,17 @@
 //! the read layer (`pms`/`metadata`/`posters`/`detail`) and the playback layer (`route.rs`
 //! decision/start/stop/selection, PlayQueue/identity, and the player's `/:/timeline`) all go
 //! through `client()` (history: `docs/plex-api-migration.md`). The module-wide allow covers
-//! the ops written ahead of a UI feature (browse/leaves — no callers yet). `search` had one
-//! too until the Search screen landed and `crate::search` began calling it; the name was left
-//! in this list for several commits afterwards, long enough for a test-manifest note to cite
-//! it as the check for whether that screen existed.
+//! the few items the library build does not reach: transport helpers on `Client` (`get_bytes`,
+//! `get_void`, `get_status_until`, `post_status_until`) and a handful of functions
+//! (`servers::register_with_client_id`, `transcoder::profile_for`, `session::peek_locked`,
+//! `session::install_or_drop_after_write`).
 #![allow(dead_code)]
 
 mod client;
 pub mod identity; // ONE X-Plex-* identity for both transports (plex.tv headers + PMS query)
 mod models;
 mod params;
+mod paging;
 // WHICH servers exist and which one is current. `client()`/`client_opt()` live here now (they
 // mean "the current server"); `client.rs` is just the type. See its module doc for why the hot
 // path is an atomic pointer table rather than a lock.
@@ -34,6 +35,9 @@ pub mod collections;
 /// Agent-backed subtitle search & download. `docs/pms-api.md` §8 is the verified contract; the
 /// bundled OpenAPI spec is wrong about this endpoint and must not be read as authority for it.
 pub mod subtitles;
+/// The PMS server-sent-event notification feed: the SSE parser, the lenient `playing` models and
+/// the one-connection client. `docs/pms-api.md` §9; the data layer decides when to connect.
+pub mod notify;
 /// The one client-side hub-title override rule (issue #12): shared by Home's whole-catalog merge
 /// (`crate::pms`) and a library's own `/hubs/sections/{id}` shelves (`crate::browse::section_hubs`)
 /// so neither reimplements or drifts from the other's id table.
@@ -80,8 +84,12 @@ pub mod pins;
 
 // The plex.tv METADATA PROVIDER (`discover.provider.plex.tv`) — a third service, but one that
 // shares the account API's transport + identity headers exactly, so it only adds an
-// `impl AccountClient` block (same pattern as the PMS op files above).
+// `impl AccountClient` block (same pattern as the PMS op files above). Its host is
+// `account::discover()`, the one base the Watchlist shares.
 pub mod discover;
+
+// The plex.tv Watchlist (discover provider): `impl AccountClient`, contract frozen in watchlist.rs.
+pub mod watchlist;
 
 // The hub fetch's backoff ladder and the advisory "re-discover this server's endpoint" request —
 // shared by `grant`'s upgrade retry here and by the data layer (`pms`, `stores`), which re-export
@@ -89,7 +97,8 @@ pub mod discover;
 pub mod retry;
 
 // The re-exports are the public surface the call sites import.
-pub use hubs::is_pageable_hub_key;
+pub use hubs::{is_pageable_hub_key, SearchKind};
+pub use paging::PageReq;
 pub use client::ArtFetch;
 pub use client::JsonDeadlineOutcome;
 // The one percent-encoder (RFC 3986 unreserved passthrough) — see its doc.
@@ -99,6 +108,8 @@ pub use client::urlenc_str;
 pub use client::{decode_ip, decode_link, encode_ip, encode_link};
 #[allow(unused_imports)]
 pub use client::{Client, IpVersion, StreamUrl};
+// `Client::find_by_guids`' vocabulary (library.rs stays private).
+pub use library::{GuidKind, GuidLookupError, GuidMatch, GUIDS_PER_REQUEST};
 // WHERE a server is, as one value. `Origin` is what `register_origin`/`install` take and what a
 // `Client` carries; `Scheme` is re-exported beside it because `dev::DevServer` deserializes one
 // straight out of the `plxnative-servers` trigger.
@@ -108,15 +119,22 @@ pub use origin::{plex_direct_literal, url_host, CredentialPolicy, Origin, Resolv
 // singleton accessors, so every call site outside `plex/` reads unchanged; `client_for`,
 // `register`, `set_current` and `ServerId` are the multi-server additions.
 #[allow(unused_imports)]
+/// **FORK (Nuvio Native): the size of a fixed server roster.** Upstream replaced the fixed
+/// 16-slot table with a dynamic registry, so nothing in `plex` needs this any more; the layers
+/// below still index fixed arrays by server (`search::scope`'s roster, `person`'s profile table),
+/// and they keep the 16 they were sized for. A registry holding more servers than this is
+/// truncated by those arrays, never by the registry itself.
+pub const MAX_SERVERS: usize = 16;
+
 pub use servers::{
     client, client_for, client_opt, commit_if_current, commit_reachability_if_current,
     count as server_count, current as current_server, describe as describe_server,
-    describe_name as describe_server_name, facts as server_facts, ids as server_ids, install,
+    describe_name as describe_server_name, facts as server_facts, id_space_exhausted, ids as server_ids, install,
     facts_gen as server_facts_gen, is_household, owner_credit,
     probe_result as server_probe_result, publish_probe_result, register,
     roster_gen as server_roster_gen, same_item, set_current, Grant, GrantEvidence,
     ServerFacts,
-    ServerId, MAX_SERVERS,
+    ServerId,
 };
 // Sign-out. `pub` like the function itself: retiring the whole table is `auth::sign_out`'s
 // to call and nothing else's — a caller that merely wants to stop using a server wants
@@ -236,5 +254,6 @@ pub use timeline::{queue_index_of, QueueRow};
 // the connection. Forced mode retains software feed limits and uses a separate PMS profile.
 #[allow(unused_imports)]
 pub use transcoder::{
-    DP_AUDIO_CODECS, DP_SUBTITLE_CODECS, LinkPolicy, is_dp_audio, is_dp_audio_track, is_dp_audio_track_at, is_dp_subtitle, link_policy,
+    DP_AUDIO_CODECS, DP_SUBTITLE_CODECS, LinkPolicy, direct_play_video_codecs, is_dp_audio, is_dp_audio_track,
+    is_dp_audio_track_at, is_dp_subtitle, link_policy,
 };

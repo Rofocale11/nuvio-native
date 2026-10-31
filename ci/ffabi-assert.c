@@ -25,6 +25,7 @@
 #include <libavutil/frame.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/dict.h>
 
 #define SAME(expr, want, what) _Static_assert((expr) == (want), what)

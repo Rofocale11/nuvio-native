@@ -32,7 +32,7 @@ use plx_machine::machine::StoreOrd;
 pub use plx_plex::plex::retry::{EndpointRefresh, EndpointRefreshSet};
 pub use plx_plex::plex::retry::EndpointRefreshHost as StoreEffectHost;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[must_use]
 pub struct StoreOutcome {
     pub changed: bool,
@@ -423,7 +423,7 @@ pub fn take_landing_owed<T>(gate: &plx_machine::landgate::Gate, id: StoreId,
 }
 
 /// [`take_landings`] for a queue site; see [`take_landing_owed`].
-pub fn take_landings_owed<T>(gate: &plx_machine::landgate::Gate, id: StoreId,
+pub fn take_landings_owed<T: Send + 'static>(gate: &plx_machine::landgate::Gate, id: StoreId,
     owed: impl Fn(&[T]) -> bool, f: impl FnMut() -> Vec<T>) -> Vec<T> {
     gate.take_all_owed(id.ord(), id.name(), owed, f)
 }

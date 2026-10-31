@@ -35,6 +35,8 @@ fn a3() -> CarriedAudio { track(13, 3, "ac3", 6, true, false) }
 fn a4() -> CarriedAudio { track(14, 4, "truehd", 8, true, false) }
 fn a5() -> CarriedAudio { track(15, 5, "ac3", 2, false, false) }
 
+const SOURCE_FPS: f64 = 23.976;
+
 fn candidate(direct: bool, audio: CarriedAudio, subtitle_ordinal: Option<i32>) -> AutoOriginalCandidate {
     AutoOriginalCandidate {
         direct,
@@ -137,6 +139,8 @@ fn install(
             acodec: audio.codec.clone(),
             src_vcodec: "hevc".into(),
             src_acodec: audio.codec.clone(),
+            // The fixture's file is a 23.976 fps one, whichever route carries it.
+            src_fps: SOURCE_FPS,
             contract,
             enhancement,
             transport_kbps: 28_000,
@@ -578,6 +582,45 @@ fn enhancement_released_contract_allows_auto_and_original() {
 }
 
 // ---- toggling ------------------------------------------------------------------------------
+
+/// A remux copies the source's video elementary stream, so the Load must declare the SOURCE rate:
+/// a 4K H.264 24p stream declared at the 60 an unknown rate keeps is presented at ~13 fps
+/// (`player/CLAUDE.md`, "Load's adaptiveStreaming ceiling"). The claim path that lands it is
+/// `apply_retranscode_outcome_to_projection`.
+#[test]
+fn toggle_on_from_direct_declares_the_source_rate_for_the_remux() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), None)), 0);
+    assert!(toggle(&mut ps, PREF));
+    let (action, tail) = claim(&mut ps);
+    settle(&mut ps, &action, tail);
+    assert!(ps.cur_contract.remux, "the enhanced route copies the video");
+    assert_eq!(ps.stream_fps, SOURCE_FPS);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// The recovery path (`install_original_remux`) is the other writer of a remux's `stream_fps`.
+#[test]
+fn recovery_to_an_enhanced_remux_declares_the_source_rate() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    crate::player::restore_audio_enhancements(PREF);
+    install(&mut ps, &live, Delivery::Hls, a1(), Some(candidate(true, a1(), None)), 0);
+    let ticket = worker_ticket();
+    assert_eq!(
+        recover_auto_to_original_for(&mut ps, &ticket, 60, RecoveryCause::Automatic),
+        Some(AutoOriginalReload::Remux),
+    );
+    assert!(ps.cur_contract.remux);
+    assert_eq!(ps.stream_fps, SOURCE_FPS);
+    live.finish();
+    cleanup(&mut ps);
+}
 
 #[test]
 fn toggle_on_from_direct_queues_retranscode_then_remux_params() {
@@ -1170,8 +1213,10 @@ fn eac3_joc_to_ac3_release_immersive_false() {
         can_normalize_loudness: true,
         ..Default::default()
     };
-    // `app::playback::commit_track`'s `TrackCommit::Audio` arm is exactly this call (that arm only
-    // forwards the frozen snapshot); route tests cannot name the app or the track menu above it.
+    // `app::playback::commit_track`'s `TrackCommit::Audio` arm is this call plus the track memory's
+    // write (`commit_audio_pick`, which a pick with no descriptor skips); the route tests under
+    // `decision_track_memory_tests` grade the write, and this one the route, which cannot name the
+    // app or the track menu above it.
     commit_audio_selection(&mut ps, CarriedAudio::from_stream(&stream, 3));
     assert!(toggle(&mut ps, NONE));
     let (_, tail) = claim(&mut ps);
@@ -1550,19 +1595,20 @@ fn dv_declared() -> plx_data::metadata::DvDecision {
 /// The source of the device report: 4K HEVC, Dolby Vision P7, the facts frozen at playback start.
 fn make_4k_dv_source(ps: &mut PlaybackSession) {
     ps.cur_src = (60_000, 3_840, 2_160);
-    ps.item_dovi = dv_p7();
-    ps.item_dv_decision = dv_declared();
+    ps.src_dovi = dv_p7();
+    ps.src_dv_decision = dv_declared();
 }
 
-/// FORK (RichiL10) D1: the item's DV facts survive any route that dropped them and are declared
-/// again by the next route that copies the video; a re-encode or an undeclared item gets none.
+/// FORK (RichiL10) D1: the file's DV facts (`src_dovi`, frozen at the resolve) survive any route
+/// that dropped them and are declared again by the next route that copies the video (upstream
+/// #839's `plan::copied_video_dv`); a re-encode gets none.
 #[test]
-fn fork_copied_video_dv_prefers_the_item_facts() {
+fn fork_copied_video_dv_hands_on_the_file_facts() {
     let none = (plx_data::metadata::Dovi::NONE, plx_data::metadata::DvDecision::NONE);
-    let item = (dv_p7(), dv_declared());
-    assert_eq!(copied_video_dv(item, none).map(|(d, _)| d.profile), Some(7));
-    assert_eq!(copied_video_dv(none, item).map(|(d, _)| d.profile), Some(7));
-    assert!(copied_video_dv(none, none).is_none());
+    let remux = plx_plex::plex::EncodeContract { remux: true, ..Default::default() };
+    let reencode = plx_plex::plex::EncodeContract { remux: false, ..Default::default() };
+    assert_eq!(copied_video_dv(None, &remux, dv_p7(), dv_declared()).0.profile, 7);
+    assert_eq!(copied_video_dv(None, &reencode, dv_p7(), dv_declared()), none);
 }
 
 /// FORK (RichiL10) D1 (brief test 1): a burn on a DV source (`sub_burn=allow`) dropped the
@@ -1620,6 +1666,54 @@ fn fork_an_embedded_subtitle_pick_on_the_remux_releases_to_the_file() {
     let requests = live.finish();
     assert!(decisions(&requests).is_empty(), "no burn was asked for: {requests:?}");
     cleanup(&mut ps);
+}
+
+/// FORK (RichiL10) `sub_reseek`: an Off -> image pick on the remux never re-reads from the playhead:
+/// the server's stream is not the app's to re-read (here the pick releases to the file, whose
+/// fresh demux starts with the subtitle on).
+#[test]
+fn fork_an_image_pick_on_the_remux_does_not_reread() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    install(&mut ps, &live, Delivery::Remux(NONE), a1(), Some(candidate(true, a1(), None)), 0);
+    make_4k_dv_source(&mut ps);
+    let arranged = crate::player::sub_reseek_tests::Arranged::playing(736_000_000_000, 12_000_000_000, 0b100);
+    plx_base::forkknobs::with_conf_for_test(None, || commit_subtitle_selection(&mut ps, 2, 77, true));
+    assert_eq!(arranged.seeks(), 0, "a remux pick asks for no seek");
+    drop(arranged);
+    let _ = live.finish();
+    cleanup(&mut ps);
+}
+
+/// FORK (RichiL10) `sub_reseek`: in direct play the viewer's commit drives the re-read: Off ->
+/// image re-reads once from the playhead; Off -> text, a sidecar and Off itself do not.
+#[test]
+fn fork_a_direct_play_off_to_image_pick_rereads_once() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    apply_plan(
+        &mut ps,
+        Plan { url: "http://fixture.invalid/reseek.mkv".into(), ..Default::default() },
+        "rk-reseek",
+    );
+    assert!(!is_transcoding(&ps), "fixture: direct play");
+    let arranged = crate::player::sub_reseek_tests::Arranged::playing(736_000_000_000, 12_000_000_000, 0b110);
+    plx_base::forkknobs::with_conf_for_test(None, || {
+        commit_subtitle_selection(&mut ps, 0, 76, true);
+        assert_eq!(arranged.seeks(), 0, "Off -> text: text is decoded while Off");
+        commit_subtitle_selection(&mut ps, -1, 0, false);
+        commit_subtitle_selection(&mut ps, -1, 55, true);
+        assert_eq!(arranged.seeks(), 0, "a sidecar is not demuxed");
+        commit_subtitle_selection(&mut ps, -1, 0, false);
+        commit_subtitle_selection(&mut ps, 1, 77, true);
+        assert_eq!(arranged.seeks(), 1, "Off -> image re-reads");
+        assert_eq!(crate::player::seek_pending(), 736_000_000_000, "from the playhead");
+        commit_subtitle_selection(&mut ps, 2, 78, true);
+        assert_eq!(arranged.seeks(), 1, "image -> image while on: no second re-read");
+    });
+    drop(arranged);
+    reset_session(&mut ps);
 }
 
 /// FORK (RichiL10) D2 fallback: a release refused at claim time leaves the in-place pick standing,
@@ -1739,7 +1833,7 @@ fn fork_burn_refusal_covers_4k_or_dolby_vision() {
     assert!(burn_refused_for_source(&ps));
     ps.cur_src = (8_000, 1_920, 1_080);
     assert!(!burn_refused_for_source(&ps), "a 1080p SDR source still burns");
-    ps.item_dovi = dv_p7();
+    ps.src_dovi = dv_p7();
     assert!(burn_refused_for_source(&ps));
     set_sub_burn_for_test(Some(true));
     assert!(!burn_refused_for_source(&ps), "sub_burn=allow is upstream's burn");
@@ -1766,6 +1860,98 @@ fn fork_sub_burn_allow_keeps_the_upstream_burn() {
     let requests = live.finish();
     let last = *decisions(&requests).last().expect("a decision was made");
     assert_eq!(query_param(last, "subtitles"), Some("burn"), "{last}");
+    cleanup(&mut ps);
+}
+
+// ---- FORK (RichiL10): pacchetto 7 regressions, modelled on "Le due torri" ----------------------
+// DV P7 (bl_compat 6), HEVC 3840x2160 at about 66 Mbit/s, ita DTS core 5.1, eng FLAC 7.1, PGS ita/eng.
+// The host caps are `Caps::assumed()` (aac, ac3, eac3), so the track the TV decodes is an AC3 here
+// and the track only the server converts is the TrueHD of `a4`; the route rules do not look at
+// which codec stands where.
+
+/// Defect (a) of the TV run: picking back to a track the TV decodes left the server's remux
+/// running. The pick now releases the fork's remux back to the file (a fresh direct-play session,
+/// the remux retired by upstream's release once frames confirm), with no new remux asked for, and
+/// the release keeps the source's Dolby Vision.
+#[test]
+fn fork_le_due_torri_picking_back_to_a_decodable_track_releases_the_remux() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    install_fork_remux(&mut ps, &live);
+    make_4k_dv_source(&mut ps);
+    if let Some(c) = ps.auto_original.as_mut() {
+        c.dovi = dv_p7();
+        c.dv_decision = dv_declared();
+    }
+    commit_audio_selection(&mut ps, a1());
+    assert!(pending_user_route_intent(UserRouteIntent::RecoverOriginal(RecoveryCause::EnhancementReleased)));
+    let (_, tail) = claim(&mut ps);
+    assert_eq!(tail, ClaimTail::Original(AutoOriginalReload::Direct));
+    assert!(!is_transcoding(&ps), "back to the file");
+    let fresh = active_encoder();
+    assert_ne!(fresh, "enh-remux-1", "the direct play does not own the remux's session");
+    assert_eq!(stream_dv_decision(&ps), dv_declared(), "the direct play declares the source's DV");
+    let requests = live.finish();
+    assert!(decisions(&requests).is_empty(), "no remux was asked for: {requests:?}");
+    cleanup(&mut ps);
+}
+
+/// Defect (b): a subtitle pick on a 66 Mbit/s DV remux (the side reader refused: the Part is above
+/// its bitrate cap) made the server burn the subtitle, an H.264 4K re-encode that stalled. Now the
+/// pick is committed in place, withheld, and the stream and its Dolby Vision stay exactly as they
+/// were. Defect (c): turning the subtitle Off again keeps the copy and its Dolby Vision, and a later
+/// rebuild (a seek) asks for the copy.
+#[test]
+fn fork_le_due_torri_a_subtitle_on_a_66_mbps_dv_remux_is_withheld_and_off_keeps_dv() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    install_fork_remux(&mut ps, &live);
+    make_4k_dv_source(&mut ps);
+    ps.stream_dovi = dv_p7();
+    ps.stream_dv_decision = dv_declared();
+    ps.cur_transport_kbps = 66_000;
+    if let Some(c) = ps.auto_original.as_mut() {
+        c.probe_part = "/library/parts/960001/1/file.mkv".into();
+    }
+    assert!(!side_subs_allowed_for(&ps, 77, true, false), "setup: the side reader is refused at 66 Mbit/s");
+    let url = ps.url.clone();
+    commit_subtitle_selection(&mut ps, 2, 77, true);
+    assert!(!pending_user_route_intent(UserRouteIntent::Retranscode), "no rebuild, no burn");
+    assert_eq!(ps.url, url, "the live remux is kept");
+    assert_eq!(subtitle_presenter(&ps), SubtitlePresenter::Withheld);
+    assert_eq!(stream_dv_decision(&ps), dv_declared(), "the copy keeps its Dolby Vision");
+    assert_eq!(retranscode_contract(&ps), enhanced_remux_contract(NONE, false), "a seek stays the copy");
+    commit_subtitle_selection(&mut ps, -1, 0, false);
+    assert!(!pending_user_route_intent(UserRouteIntent::Retranscode), "Off on the copy changes nothing");
+    assert_eq!(ps.url, url);
+    assert_eq!(subtitle_presenter(&ps), SubtitlePresenter::None);
+    assert_eq!(stream_dv_decision(&ps), dv_declared(), "Off keeps the Dolby Vision declared");
+    assert_eq!(retranscode_contract(&ps), enhanced_remux_contract(NONE, false));
+    let requests = live.finish();
+    assert!(decisions(&requests).is_empty(), "nothing was asked of the server: {requests:?}");
+    cleanup(&mut ps);
+}
+
+/// The knob `sub_burn` read from the conf file: `never4k` is the default, `allow` restores the burn.
+#[test]
+fn fork_knob_sub_burn_reads_never4k_and_allow() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    make_4k_dv_source(&mut ps);
+    for (conf, allowed) in [(None, false), (Some("sub_burn=never4k\n"), false), (Some("sub_burn=allow\n"), true)] {
+        plx_base::forkknobs::with_conf_for_test(conf, || {
+            assert_eq!(sub_burn_allowed(), allowed, "{conf:?}");
+            assert_eq!(burn_refused_for_source(&ps), !allowed, "{conf:?}");
+        });
+    }
+    // HDR10 alone (a 1080p PQ source) is refused too.
+    let mut hdr = PlaybackSession::IDLE;
+    hdr.cur_src = (8_000, 1_920, 1_080);
+    assert!(!burn_refused_for_source(&hdr), "control: a 1080p SDR source burns");
+    hdr.item_hdr = true;
+    assert!(burn_refused_for_source(&hdr));
     cleanup(&mut ps);
 }
 
@@ -2401,6 +2587,9 @@ fn recovery_enhanced_remux_ignored_falls_back_to_plain_original_refused() {
 fn subtitle_repick_while_cold_start_burn_keeps_the_burn() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
     restore_quality(Quality::Auto);
     reset_player_control_for_test(&ps);
     crate::player::restore_audio_enhancements(PREF);
@@ -2931,6 +3120,8 @@ fn the_stale_arms_of_the_drain_stop_their_encoder_off_the_frame_thread() {
             url: String::new(),
             vcodec: "hevc".into(),
             acodec: "ac3".into(),
+            dovi: plx_data::metadata::Dovi::NONE,
+            dv_decision: plx_data::metadata::DvDecision::NONE,
             contract: plx_plex::plex::EncodeContract::default(),
             enhancement: EnhancementOutcome::Off,
             video_copied: false,
@@ -3055,6 +3246,8 @@ fn a_stale_landing_at_drain_time_stops_the_leaked_encoder_instead_of_installing_
             ),
             vcodec: "hevc".into(),
             acodec: "ac3".into(),
+            dovi: plx_data::metadata::Dovi::NONE,
+            dv_decision: plx_data::metadata::DvDecision::NONE,
             contract: plx_plex::plex::EncodeContract::default(),
             enhancement: EnhancementOutcome::Off,
             video_copied: false,
@@ -3898,6 +4091,9 @@ fn an_untracked_track_on_a_burned_subtitle_says_not_analyzed() {
 fn a_cold_start_burn_records_the_burned_subtitle_in_the_plan() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
     restore_quality(Quality::Auto);
     reset_player_control_for_test(&ps);
     crate::player::restore_audio_enhancements(PREF);
@@ -4752,5 +4948,208 @@ fn sidecar_to_embedded_and_back_rebuilds_then_returns_to_remux() {
     let last = d.last().expect("a decision was made");
     assert!(!last.contains("subtitles=burn"), "{last}");
     assert_eq!(query_param(last, "directStreamAudio"), Some("1"), "{last}");
+    cleanup(&mut ps);
+}
+
+
+// ---- a subtitle turned ON mid-play offers the same enhancement as one the playback started with ----
+//
+// Owner report: a Family Guy episode (MKV, AC3 2.0 with `canNormalizeLoudness`, ONE embedded ASS
+// subtitle, subtitles ON, Direct Play Auto) showed Boost dialog / Normalize loudness disabled with
+// "Available only at Original quality" under Quality: Original. Path A starts with the subtitle,
+// Path B enables it during playback; M7 says an embedded subtitle takes the Burn route either way.
+
+/// What the Audio tab says for a direct play that STARTED with subtitle `sub_sid` on screen.
+fn availability_when_started_with(sub_sid: i64, ordinal: Option<i32>) -> EnhancementAvailability {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), ordinal)), sub_sid);
+    let got = menu_enhancement_availability(&ps);
+    live.finish();
+    cleanup(&mut ps);
+    got
+}
+
+/// What the Audio tab says after the same subtitle is enabled MID-PLAY through the real commit.
+fn availability_after_midplay_pick(
+    sub_idx: i32,
+    sub_sid: i64,
+    client_renderable: bool,
+) -> (EnhancementAvailability, bool) {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), None)), 0);
+    commit_subtitle_selection(&mut ps, sub_idx, sub_sid, client_renderable);
+    let got = (menu_enhancement_availability(&ps), ps.auto_original.is_some());
+    live.finish();
+    cleanup(&mut ps);
+    got
+}
+
+/// Control: an EMBEDDED subtitle (ASS, PGS, any codec: the menu hands `client_renderable =
+/// render_ordinal >= 0`) keeps the candidate, so mid-play equals start-with-sub. Passes.
+#[test]
+fn embedded_subtitle_enabled_midplay_offers_the_same_burn_as_one_at_start() {
+    let at_start = availability_when_started_with(77, Some(2));
+    let (midplay, kept) = availability_after_midplay_pick(2, 77, true);
+    assert_eq!(at_start, EnhancementAvailability::Offered(EnhancementRoute::Burn));
+    assert!(kept, "the candidate follows the embedded pick");
+    assert_eq!(midplay, at_start);
+}
+
+/// A pick the client does not draw (`client_renderable == false`, e.g. an external image sidecar)
+/// used to DROP the candidate (`TrackPickDropped`), so the Audio tab read Disabled(NotCopyable) for
+/// the rest of the playback. It now keeps it and offers the Burn: an intended mid-play behaviour.
+/// (A cold start with an image sidecar selected plays with the subtitle OFF, `pick_dp_subtitle`
+/// excludes externals, so this is not "parity with start".)
+#[test]
+fn non_drawable_subtitle_enabled_midplay_keeps_the_candidate_and_offers_burn() {
+    let (midplay, kept) = availability_after_midplay_pick(-1, 78, false);
+    assert!(kept, "the Original candidate must survive a pick it can only burn");
+    assert_eq!(midplay, EnhancementAvailability::Offered(EnhancementRoute::Burn));
+}
+
+/// An image sidecar (`.sup`/`.idx`: no ordinal, no sidecar key) on a standing enhanced Burn.
+fn undrawable_sidecar_on_burn(ps: &mut PlaybackSession, live: &Live) {
+    install(ps, live, Delivery::Burn(PREF), a1(), Some(candidate(true, a1(), None)), 78);
+    ps.cur_sub_sidecar = true;
+    ps.cur_sub_client_drawable = false;
+}
+
+/// The plain Original route is untouched by the kept candidate: with no enhancement wanted, a
+/// non-drawable pick on direct play leaves the step alone and records no drop.
+#[test]
+fn non_drawable_subtitle_midplay_leaves_the_plain_original_route_alone() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), None)), 0);
+    commit_subtitle_selection(&mut ps, -1, 78, false);
+    assert!(ps.auto_original.is_some() && ps.original_declined.is_none());
+    assert_eq!(ps.auto_original.as_ref().and_then(|c| c.subtitle_ordinal), None);
+    assert_eq!(live_subtitle_effect(&ps), SubtitleEffect::Embedded, "never a drawable sidecar");
+    assert_eq!(enhancement_step(&ps), EnhancementStep::NotInvolved);
+    assert!(!is_transcoding(&ps), "still the direct play it was");
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// Releasing the enhancement while the undrawable subtitle is still selected must keep the
+/// burn, never return to a direct play that would show nothing.
+#[test]
+fn releasing_the_enhancement_with_a_non_drawable_subtitle_keeps_the_burn() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    undrawable_sidecar_on_burn(&mut ps, &live);
+    assert_eq!(live_subtitle_effect(&ps), SubtitleEffect::Embedded);
+    assert_eq!(enhancement_step(&ps), EnhancementStep::Remux(enhanced_remux_contract(NONE, true)));
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// Turning the subtitle Off afterwards: the enhancement stays wanted as a plain enhanced remux
+/// (no burn), and once it is released too the way back is the direct play.
+#[test]
+fn turning_a_non_drawable_subtitle_off_lands_on_the_plain_routes() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(PREF);
+    undrawable_sidecar_on_burn(&mut ps, &live);
+    commit_subtitle_selection(&mut ps, -1, 0, false);
+    reset_player_control_for_test(&ps);
+    assert_eq!(ps.cur_sub_sid, 0);
+    assert!(ps.auto_original.is_some());
+    assert_eq!(enhancement_step(&ps), EnhancementStep::Remux(enhanced_remux_contract(PREF, false)));
+    crate::player::restore_audio_enhancements(NONE);
+    assert_eq!(enhancement_step(&ps), EnhancementStep::ReleaseToDirect);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// A cold start that lands on the enhancement's Burn records `cur_sub_client_drawable == false` even
+/// for an embedded track the app CAN draw (`force_burn` leaves no `sub_render_ordinal`), while the
+/// candidate still names the ordinal. Releasing the enhancement returns to direct play, where the
+/// candidate draws that subtitle.
+#[test]
+fn cold_start_burn_released_returns_to_direct_with_the_subtitle_restored() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(PREF);
+    install(&mut ps, &live, Delivery::Burn(PREF), a1(), Some(candidate(true, a1(), Some(2))), 77);
+    assert!(!ps.cur_sub_client_drawable, "what a cold-start burn records");
+    crate::player::restore_audio_enhancements(NONE);
+    assert_eq!(enhancement_step(&ps), EnhancementStep::ReleaseToDirect);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// Recovery to the Original candidate while a subtitle only a burn can show is selected must not
+/// land on a direct play (or a plain remux) that drops it: it is the plain Original burn.
+#[test]
+fn recovery_with_a_non_drawable_subtitle_burns_instead_of_dropping_it() {
+    for (quality, cause) in [
+        (Quality::Auto, RecoveryCause::Automatic),
+        (Quality::Original, RecoveryCause::ManualOriginal),
+    ] {
+        let mut ps = PlaybackSession::IDLE;
+        let _g = fresh_registry(&mut ps);
+        let live = Live::start(EnhMode::Honor("ac3"));
+        restore_quality(quality);
+        reset_player_control_for_test(&ps);
+        crate::player::restore_audio_enhancements(NONE);
+        install(&mut ps, &live, Delivery::Hls, a1(), Some(candidate(true, a1(), None)), 78);
+        ps.cur_sub_sidecar = true;
+        ps.cur_sub_client_drawable = false;
+        let ticket = worker_ticket();
+        assert_eq!(
+            recover_auto_to_original_for(&mut ps, &ticket, 60, cause),
+            Some(AutoOriginalReload::Remux),
+            "{quality:?}",
+        );
+        assert_eq!(ps.cur_contract, enhanced_remux_contract(NONE, true), "{quality:?}");
+        let requests = live.finish();
+        let d = decisions(&requests);
+        assert!(d.last().is_some_and(|r| r.contains("subtitles=burn")), "{quality:?}: {requests:?}");
+        cleanup(&mut ps);
+    }
+}
+
+/// Same recovery, but the subtitle is one the candidate shows: the direct play stays direct.
+#[test]
+fn recovery_with_a_drawable_subtitle_still_returns_to_direct() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Hls, a1(), Some(candidate(true, a1(), Some(2))), 77);
+    let ticket = worker_ticket();
+    assert_eq!(
+        recover_auto_to_original_for(&mut ps, &ticket, 60, RecoveryCause::Automatic),
+        Some(AutoOriginalReload::Direct),
+    );
+    live.finish();
     cleanup(&mut ps);
 }

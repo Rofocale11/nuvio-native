@@ -1414,6 +1414,7 @@ fn a_retry_keeps_the_subtitle_offset_a_new_item_does_not() {
         selection: Some((17, 23)),
         sub_offset_ms: crate::player::subtitle_offset_ms(),
         suppress_enhancement: false,
+        sub_mode: SubMode::Track,
     };
     reset_track_selection(plx_plex::plex::ServerId::UNSET, "rk-no-memory", Some(retry));
     assert_eq!(
@@ -1474,6 +1475,7 @@ fn a_refused_retry_keeps_its_position_and_full_request_for_the_next_quality() {
             selection: Some((17, 23)),
             sub_offset_ms: 0,
             suppress_enhancement: false,
+            sub_mode: SubMode::Track,
         },
         "a rescue must not silently restore the server-default tracks",
     );
@@ -2354,7 +2356,10 @@ fn a_subtitle_offset_survives_a_resume_of_the_same_item() {
     let mut ps = crate::route::PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
     let session = plx_plex::plex::session::TempSession::new("subtitle-offset-resume");
-    session.watching("u-resume");
+    // The memory door needs a seat (P-d11): a profile signed in and published under its account stamp.
+    session.seated("u-resume", "acct-resume");
+    // The memory the player reads is seeded at a restore (boot, the credentials handoff).
+    seed_memory_for_test::<plx_plex::plex::session::SubtitleOffsetEntry>(&plx_plex::plex::session::peek());
     let sid = plx_plex::plex::register_for_test("machine-resume", "10.0.0.9", 32400, "tok", "cid-resume");
     apply_plan(&mut ps, Plan::default(), "rk-resume-a");
     swap_cur_sid_for_test(&mut ps, sid);
@@ -2530,6 +2535,8 @@ fn a_cold_start_with_a_subtitle_keeps_a_same_language_or_foreign_non_commentary_
 #[test]
 #[cfg(feature = "devtriggers")]
 fn a_cold_start_with_a_subtitle_and_only_a_commentary_to_stand_in_burns_it() {
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
     let (plan, requests) = cold_audio_resolve(
         "cold-sub-burn",
         4,
@@ -2537,7 +2544,7 @@ fn a_cold_start_with_a_subtitle_and_only_a_commentary_to_stand_in_burns_it() {
         vec![cold_track(1, "truehd", "eng", true, ""), cold_track(2, "ac3", "eng", false, "Commentary")],
         vec![selected_sub(50, "srt")],
         "truehd",
-        |_, _| {},
+        |_, _| set_sub_burn_for_test(Some(true)),
     );
     let tc = requests.iter().find(|l| l.contains("/decision?") && !l.contains("hasMDE=1")).expect("transcode decision");
     assert_eq!(query_param(tc, "subtitleStreamID"), Some("50"), "{tc}");
@@ -2630,7 +2637,43 @@ fn forced_direct_play_refuses_an_unplayable_session_pick() {
         "ac3",
         |env, _| { env.direct_play_mode = DirectPlayMode::Forced; env.audio_sid = 2; },
     );
-    assert!(matches!(plan.verdict, Some(PlayVerdict::Forced(ForcedFailure::Audio))), "{:?}", plan.verdict);
+    assert!(matches!(plan.verdict, Some(PlayVerdict::Forced(ForcedFailure::Audio { .. }))), "{:?}", plan.verdict);
+}
+
+/// The Force Direct Play audio refusal names the codec it refused, by the one codec->name map: PMS
+/// spells DTS `dca`, and the read-out must say "DTS" for it, "Dolby TrueHD" for `truehd`.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn forced_audio_refusal_names_the_codec() {
+    for (name, raw, shown) in [("cold-forced-names-dca", "dca", "DTS"), ("cold-forced-names-truehd", "truehd", "Dolby TrueHD")] {
+        let (plan, _) = cold_audio_resolve(
+            name,
+            2,
+            MDE_DIRECTPLAY,
+            vec![cold_track(1, "ac3", "rus", true, ""), cold_track(2, raw, "eng", false, "")],
+            Vec::new(),
+            "ac3",
+            |env, _| { env.direct_play_mode = DirectPlayMode::Forced; env.audio_sid = 2; },
+        );
+        let Some(PlayVerdict::Forced(ForcedFailure::Audio { codec })) = &plan.verdict else {
+            panic!("{raw}: {:?}", plan.verdict);
+        };
+        assert_eq!(codec, shown, "{raw}");
+        let sentence = plan.verdict.as_ref().unwrap().text();
+        assert!(sentence.contains(shown), "{raw}: {sentence}");
+    }
+}
+
+/// With no codec known (no tracks, no Media-level audio codec) the refusal keeps the generic
+/// sentence rather than naming an empty codec.
+#[test]
+fn forced_audio_refusal_without_a_codec_keeps_the_generic_sentence() {
+    let blank = PlayVerdict::Forced(ForcedFailure::Audio { codec: String::new() });
+    assert_eq!(blank.text(), plx_platform::i18n::msg::widgets_verdict_forced_audio());
+    let blank = PlayVerdict::Forced(ForcedFailure::AudioNeedsConversion { codec: String::new() });
+    assert_eq!(blank.text(), plx_platform::i18n::msg::widgets_verdict_forced_audio_conversion());
+    let named = PlayVerdict::Forced(ForcedFailure::AudioNeedsConversion { codec: "DTS".into() });
+    assert!(named.text().contains("DTS"), "{}", named.text());
 }
 
 /// Rule 2: with no copy to fall back on, today's ladder stays — a non-commentary stand-in first.
@@ -2676,4 +2719,48 @@ fn uncopyable_video_keeps_its_stand_in() {
     );
     assert!(plan.url.contains("/library/parts/36013/"), "{}", plan.url);
     assert!(request_with(&requests, "hasMDE=1").iter().all(|l| query_param(l, "audioStreamID") == Some("3")), "{requests:?}");
+}
+
+/// FORK (RichiL10) B4: the commentary stand-in's burn (rule 3) is refused on a 4K source under
+/// `sub_burn=never4k` (the default): the route stays the plain remux, the video is copied and
+/// nothing burns ("Il ritorno del re": eng TrueHD, a commentary beside it, a subtitle selected).
+#[test]
+#[cfg(feature = "devtriggers")]
+fn fork_a_cold_start_commentary_stand_in_on_4k_is_not_burned() {
+    let (plan, requests) = cold_audio_resolve(
+        "fork-cold-no-burn",
+        4,
+        MDE_TRANSCODE_COPY,
+        vec![cold_track(1, "truehd", "eng", true, ""), cold_track(2, "ac3", "eng", false, "Commentary")],
+        vec![selected_sub(50, "srt")],
+        "truehd",
+        |_, _| {},
+    );
+    let tc = requests.iter().find(|l| l.contains("/decision?") && !l.contains("hasMDE=1")).expect("transcode decision");
+    assert!(plan.contract.remux, "{}", plan.url);
+    assert!(request_with(&requests, "subtitles=burn").is_empty(), "{requests:?}");
+    assert!(!tc.contains("maxVideoBitrate") && !tc.contains("videoResolution"), "a copy carries no cap: {tc}");
+    assert_eq!(query_param(tc, "audioStreamID"), Some("1"), "{tc}");
+}
+
+/// Force Direct Play with a PMS-spelled `dca` track on a set whose table has no DTS row: refused
+/// with `ForcedFailure::Audio` and no part URL to Load, not a Load the pipeline cannot decode
+/// (#584's endless spinner). The test-process caps are `Caps::assumed()`, which lists no DTS.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn forced_direct_play_refuses_dca_without_a_dts_row() {
+    let (plan, _) = cold_audio_resolve(
+        "cold-forced-dca-no-row",
+        2,
+        MDE_DIRECTPLAY,
+        vec![cold_track(1, "dca", "eng", true, "")],
+        Vec::new(),
+        "dca",
+        |env, _| { env.direct_play_mode = DirectPlayMode::Forced; },
+    );
+    let Some(PlayVerdict::Forced(ForcedFailure::Audio { codec })) = &plan.verdict else {
+        panic!("{:?}", plan.verdict);
+    };
+    assert_eq!(codec, "DTS");
+    assert!(!plan.url.contains("/library/parts/"), "no part URL may reach the Load: {}", plan.url);
 }

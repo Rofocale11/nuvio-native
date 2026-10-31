@@ -103,6 +103,16 @@
       "outputs": [{"file": "player.jpg", "size": "1600x900"}]
     },
     {
+      "name": "site-fan",
+      "state": "The website's libraries card fans three posters, supersampled 3x: the library-grid scene (Movies, All grid, focus on the third card of the first row), cropped to the first row's first, fourth and fifth cards, which are unfocused and so at rest size. Crops in canvas pixels sit 4 px inside each card, past its rounded corner, so the card's own background never shows; the page rounds them again.",
+      "triggers": {"library": "0", "libgrid": "0,2"},
+      "render_scale": 3,
+      "expect": ["libgrid: focus seated at row 0 col 2"],
+      "outputs": [{"file": "closeup-fan-caligari.jpg", "dest": "site", "crop": [385, 336, 242, 366], "size": "240x363"},
+                  {"file": "closeup-fan-cosmos.jpg", "dest": "site", "crop": [1241, 336, 242, 366], "size": "240x363"},
+                  {"file": "closeup-fan-elephants.jpg", "dest": "site", "crop": [1526, 336, 242, 366], "size": "240x363"}]
+    },
+    {
       "name": "site-glass",
       "state": "The website's glass close-up, supersampled 3x. The Movies library lists its collections after Recently Added, as a real server does; focus is seated on the third card of the last one (Silent Classics), so the Blender Open Movies shelf above it has scrolled up under the tab bar and fills it edge to edge in the collection's pinned custom order (catalog.json `collection_order`): Wing It! behind Home and Movies, Spring behind TV Shows, Sprite Fright past the search button. Measured as the area under the bar, mean HSV saturation 0.49 and mean chroma 0.16, against 0.16 and 0.04 for Continue Watching under it. Crop in canvas pixels: centred on the bar, which the app centres on the canvas (canvas x 688 to 1233, centre 960): 880 wide, so 168 px of shelf shows either side, at the page's 5.5:1 desktop shape. The phone crop (site-glass-narrow) stays cut from the bar's left end.",
       "triggers": {"library": "0", "libshelf": "3,2"},

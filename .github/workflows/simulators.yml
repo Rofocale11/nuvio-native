@@ -14,10 +14,13 @@ on:
       - 'src/svg.c'
       - 'src/ass.c'
       - 'src/ass_composite.h'
+      - 'src/ass_fonts.c'
+      - 'src/ass_internal.h'
       - 'include/ass.h'
       - 'assets/icons/**'
-      - 'vendor/nanosvg/**'
       - 'pkg/appfont*.ttf'
+      - 'pkg/fonts/subs/**'
+      - 'tools/cut-noto-subs.py'
       - 'pkg/OFL.txt'
       - 'pkg/le-roots.pem'
       - 'LICENSE'
@@ -26,7 +29,9 @@ on:
       - 'ci/stage-host-ffmpeg.sh'
       - 'ci/build-libass.sh'
       - 'ci/build-libass.py'
-      - 'ci/libass-dependencies.json'
+      - 'ci/dependencies.json'
+      - 'ci/deps.py'
+      - 'ci/patches/libass-0001-grow-font-faces.patch'
       - 'ci/ffabi-assert.c'
       - 'tests/fixtures/mkv_zlib_subs.mkv'
       - 'tests/fixtures/replay/**'
@@ -53,7 +58,7 @@ jobs:
     # bounds (typical 4.2); the limit is the apt bound plus the typical build with margin (unset = 360).
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install SDL/OpenGL and virtual display
         # One shared, bounded apt path (cached .debs, `timeout` on every network phase, http AND
         # https timeouts): a plain `apt-get update` here once stalled a sibling job for 4 h 36 min.
@@ -106,7 +111,7 @@ jobs:
             --core-dir "$RUNNER_TEMP/cores"
       - name: Preserve Linux capture
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: simulator-linux-${{ github.sha }}
           path: ${{ runner.temp }}/plxnative-linux.png
@@ -114,7 +119,7 @@ jobs:
           retention-days: 7
       - name: Preserve Linux event log and core on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: simulator-linux-crash-${{ github.sha }}
           path: |
@@ -130,7 +135,7 @@ jobs:
     # Measured max 22.6 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install SDL
         # A step-level bound: macOS runners have no `timeout(1)`, and a stalled bottle download
         # would otherwise run to the job's limit.
@@ -206,7 +211,7 @@ jobs:
             --output "$RUNNER_TEMP/plxnative-replay"
       - name: Preserve replay evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: simulator-replay-${{ github.sha }}
           path: |
@@ -223,7 +228,7 @@ jobs:
             --output "$RUNNER_TEMP/plxnative-macos.png"
       - name: Preserve macOS capture
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: simulator-macos-${{ github.sha }}
           path: ${{ runner.temp }}/plxnative-macos.png
@@ -240,10 +245,13 @@ jobs:
     # allows a cold FFmpeg build (a ci/build-ffmpeg.sh change) like the `macos` job's does.
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install SDL
-        # Same step-level bound and package set as the `macos` job: the host test binary links SDL
-        # (build.rs links it for every host test binary) and libass's dependencies need cmake.
+        # Same step-level bound as the `macos` job, and its package set plus `ffmpeg`: the host test binary links SDL
+        # (build.rs links it for every host test binary) and libass's dependencies need cmake. The
+        # `ffmpeg` formula supplies the `ffmpeg`/`ffprobe` command line tools that
+        # `ff::late_audio_tests` writes and measures its fixtures with (not the library it demuxes
+        # with: that is the pinned host build below). Without them those tests fail under CI.
         timeout-minutes: 15
         run: brew install sdl2_ttf cmake pkg-config
       - id: toolchain
@@ -274,10 +282,8 @@ jobs:
           key: host-libass-sources-${{ hashFiles('ci/libass-dependencies.json') }}
       - name: Install nightly Rust
         # `make check-ffmpeg` runs the host suite's FFmpeg-backed tests on the toolchain `make
-        # check` uses; the simulator job builds on the runner's default one. `rust-src` is not
-        # optional: rust-modules/.cargo/config.toml sets `[unstable] build-std` for every nightly
-        # cargo run, host tests included — the same component ci.yml's host checks install.
-        run: rustup toolchain install nightly --profile minimal --component rust-src
+        # check` uses (rust-modules/rust-toolchain.toml's release).
+        uses: ./.github/actions/rust-toolchain
       - name: Tests against the bundled FFmpeg
         # The one place the host FFmpeg (same component list as the shipped one) is available to
         # the test suite — `make check` has none, so these are #[ignore]d there.
@@ -293,7 +299,7 @@ jobs:
     # Measured max 0.8 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Parse with Windows PowerShell 5.1
         shell: powershell
         run: |

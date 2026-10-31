@@ -1180,18 +1180,18 @@ impl BrowseState {
         plx_plex::plex::session::queue_update(move |current| {
             let mut next = current.clone();
             let slot = match next
-                .last_library
+                .prefs.last_library
                 .iter_mut()
                 .find(|library| library.user == user)
             {
                 Some(library) => library,
                 None => {
-                    next.last_library.push(plx_plex::plex::session::LastLibrary {
+                    next.prefs.last_library.push(plx_plex::plex::session::LastLibrary {
                         user: user.clone(),
                         libs: Vec::new(),
                         extensions: Default::default(),
                     });
-                    next.last_library.last_mut()?
+                    next.prefs.last_library.last_mut()?
                 }
             };
             slot.set(wire, &machine, key);
@@ -1733,7 +1733,7 @@ impl BrowseState {
         }
     }
     fn load_remembered(&mut self, session: &plx_plex::plex::session::Session, user: &str) {
-        self.remembered = session.last_library.iter().find(|library| library.user == user)
+        self.remembered = session.prefs.last_library.iter().find(|library| library.user == user)
             .map(|library| library.libs.iter().filter_map(|target| {
                 SecKind::from_wire(&target.kind)
                     .map(|kind| (kind, target.machine_id.clone(), target.key))

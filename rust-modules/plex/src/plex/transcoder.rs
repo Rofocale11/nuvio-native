@@ -48,7 +48,7 @@ pub fn is_dp_audio_track_at(codec: &str, channels: i64, rate: i64) -> bool {
 /// does not burn/transcode a sub the demuxer will draw itself.
 ///
 /// Spellings are PMS profile names plus the FFmpeg/Stream.codec aliases they arrive as
-/// (`movtext` as in Roku; `dvd` beside `vobsub` / `dvd_subtitle`). Obscure `ff.rs` Plain
+/// (`movtext` as in Roku; `dvd` beside `vobsub` / `dvd_subtitle`). Obscure `text_ass::TextDialect::Plain`
 /// aliases (`vplayer`, `jacosub`, …) stay off this list on purpose — unknown selected codecs
 /// take the `0` path rather than a full re-encode.
 pub const DP_SUBTITLE_CODECS: &str = "srt,subrip,ass,ssa,mov_text,movtext,webvtt,text,pgs,hdmv_pgs_subtitle,vobsub,dvd,dvd_subtitle,dvdsub,dvb_subtitle,dvbsub";
@@ -139,6 +139,25 @@ pub fn link_policy(link: Option<Location>) -> LinkPolicy {
     }
 }
 
+/// The video codecs the profile lists for direct play, in list order: h264 always, hevc when the
+/// table lists it, then the table-gated copy codecs (vp9, av1). **The one definition**: the profile
+/// string is built from it, and `route::plan::video_direct_plays` (the local gate that stands in for
+/// `/decision` when it is unreachable) is held to it by a test over every capability combination,
+/// so the two can no longer drift apart silently.
+pub fn direct_play_video_codecs(caps: &plx_platform::devcaps::Caps) -> Vec<&'static str> {
+    let mut v = vec!["h264"];
+    if caps.hevc {
+        v.push("hevc");
+    }
+    if caps.vp9 {
+        v.push("vp9");
+    }
+    if caps.av1 {
+        v.push("av1");
+    }
+    v
+}
+
 /// Capability profile (X-Plex-Client-Profile-Extra, raw form — the QueryBuilder encodes it),
 /// as a PURE function of the device's decode capabilities: direct-play an MKV or MP4 whose video
 /// the SoC decodes (H264 everywhere; HEVC when its table says so, VP9 / AV1 when the table lists
@@ -163,7 +182,8 @@ pub fn link_policy(link: Option<Location>) -> LinkPolicy {
 ///   numbers (the dev set: 4096x2176; the pre-devcaps constants 3840x2176 remain the fallback).
 ///   With a VP9 or AV1 row, a codec-scoped limitation tightens each axis the row measures, but
 ///   only where the row is strictly tighter than `hevc_max` (see `row_limits` below). VP9 is also
-///   capped at `video.bitDepth` 8 (Profile 0): Profile 2 is not claimed.
+///   capped at `video.bitDepth` `Caps::vp9_bit_depth` (8, or 10 on the webOS 4 family where 10-bit
+///   VP9 was measured), and with the cap at 10 no VP9 bit-depth scope is emitted at all.
 /// * **`bitDepth=10`** — a CONSTANT, not a derivation: the device table has no bit-depth axis
 ///   anywhere, so it can neither confirm nor deny 10-bit. The claim stays because it is what
 ///   keeps HDR10 through a transcode (HEVC Main10, BT.2020+PQ in-bitstream — the same in-band
@@ -200,21 +220,11 @@ fn profile_for_delivery(caps: &plx_platform::devcaps::Caps, delivery: TranscodeD
 
 /// [`profile_for_delivery`] with the fork's `encode` knob passed in (pure, for tests).
 fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: TranscodeDelivery, encode: bool) -> String {
-	let mut dp_video = "h264".to_string();
-	if caps.hevc {
-	    dp_video.push_str(",hevc");
-	}
-// The table-gated copy codecs, in list order. Each one is advertised only when the table
-// carries ITS row, and each brings the row's own bound (see `row_limits`).
-	let copy_codecs: [(&str, bool, (u32, u32, u32)); 2] =
-	    [("vp9", caps.vp9, caps.vp9_row), ("av1", caps.av1, caps.av1_row)];
-	for (name, listed, _) in copy_codecs {
-	    if listed {
-	        dp_video.push(',');
-	        dp_video.push_str(name);
-	    }
-	}
-
+    let dp_video = direct_play_video_codecs(caps).join(",");
+    // The table-gated copy codecs, in list order. Each one is advertised only when the table
+    // carries ITS row, and each brings the row's own bound (see `row_limits`).
+    let copy_codecs: [(&str, bool, (u32, u32, u32)); 2] =
+        [("vp9", caps.vp9, caps.vp9_row), ("av1", caps.av1, caps.av1_row)];
     // The chain's head is the ONE encode-target definition, `Caps::encode_vcodec` — the same
     // accessor route.rs's /decision-unreachable Load-payload guess and retranscode read, so the
     // payload can never name a codec this profile did not ask the server to produce — with h264
@@ -234,14 +244,6 @@ fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: Trans
         }
     }
     let (w, h) = caps.hevc_max;
-    // FORK (RichiL10): plus the codecs only the in-app AC3 encode lane decodes (TrueHD, MLP,
-    // DTS). Deduped against `caps.audio`: DTS is in the television's own table too, and appending
-    // it blindly put `dts` in `audioCodec=` twice.
-    let enc_only = caps.enc_lane_profile_codecs(encode);
-    let dp_audio = &std::iter::once(caps.audio.as_str())
-        .chain(enc_only.iter().copied().filter(|c| !caps.audio_has(c)))
-        .collect::<Vec<_>>()
-        .join(",");
     // The codec-scoped bounds: the row's own axis, never roomier than the shared bound, and only
     // where it is strictly tighter. PMS's way of combining a codec scope with the `*` scope is
     // unverified, so a codec scope must never claim more than the client gate enforces, and it is
@@ -268,18 +270,30 @@ fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: Trans
             codec_limits.push_str(&row_limits(name, row));
         }
     }
-    // VP9 Profile 2 (10-bit) is not claimed: this profile's `*` bitDepth bound is 10 for HEVC
-    // Main10, and nothing has shown the VP9 decoder takes the feed at 10 bits, so VP9 is capped at 8
-    // here and a 10-bit VP9 source takes the server route.
-    if caps.vp9 {
-        codec_limits.push_str(
-            "+add-limitation(scope=videoCodec&scopeName=vp9&type=upperBound&name=video.bitDepth&value=8&replace=true)",
-        );
+    // VP9 Profile 2 (10-bit) is claimed only where it was measured (`Caps::vp9_bit_depth`, 10 on the
+    // webOS 4 ACB family). Elsewhere the `*` bitDepth bound of 10 (HEVC Main10) would otherwise cover
+    // VP9 too, so VP9 is capped at the depth the set is known for and a deeper VP9 source takes the
+    // server route.
+    if caps.vp9 && caps.vp9_bit_depth < 10 {
+        codec_limits.push_str(&format!(
+            "+add-limitation(scope=videoCodec&scopeName=vp9&type=upperBound&name=video.bitDepth&value={}&replace=true)",
+            caps.vp9_bit_depth
+        ));
     }
+    // FORK (RichiL10): plus the codecs only the in-app AC3 encode lane decodes (TrueHD, MLP).
+    let enc_only = caps.enc_lane_profile_codecs(encode);
+    let dp_audio = caps
+        .audio
+        .split(',')
+        .chain(enc_only.iter().copied())
+        .map(profile_codec_name)
+        .collect::<Vec<_>>()
+        .join(",");
     // ac3 first — the preferred ENCODE target — then the rest of the caps subset as copy lanes.
     let target_audio = ["ac3", "eac3", "aac", "dts"]
         .into_iter()
         .filter(|c| caps.audio_has(c))
+        .map(profile_codec_name)
         .collect::<Vec<_>>()
         .join(",");
     // PMS scopes audio carried by a video profile as videoAudioCodec (Plex-for-Kodi's
@@ -288,17 +302,15 @@ fn profile_for_delivery_with(caps: &plx_platform::devcaps::Caps, delivery: Trans
         .filter(|(codec, _)| caps.audio_has(codec))
         // FORK (RichiL10): the stated bound, which for DTS admits the 6.1/7.1 tracks whose core
         // the demuxer feeds, and for FLAC/PCM the 8 channels the encode lane converts
-        // (`Caps::profile_channel_limit_with`).
-        .map(|(codec, raw)| (codec.as_str(), caps.profile_channel_limit_with(codec, encode).unwrap_or(*raw)))
+        // (`Caps::profile_channel_limit_with`). Named in PMS's spelling (`profile_codec_name`).
+        .map(|(codec, raw)| (profile_codec_name(codec), caps.profile_channel_limit_with(codec, encode).unwrap_or(*raw)))
         .chain(enc_only.iter().map(|c| (*c, caps.profile_channel_limit_with(c, encode).unwrap_or(8))))
         .map(|(codec, channels)| format!(
             "+add-limitation(scope=videoAudioCodec&scopeName={codec}&type=upperBound&name=audio.channels&value={channels}&replace=true)"
         ))
-        // FORK (RichiL10): TrueHD/MLP and FLAC/PCM always go through the encode lane, which has
-        // no resampler, so PMS converts any of them above 48 kHz itself. DTS is exempt: a rate the
-        // lane refuses falls back to the DTS core (`ff.rs`'s `dts_audio && enc_lane.is_none()`),
-        // which plays at any rate, so capping DTS at 48 kHz would cost a capability it still has.
-        .chain(enc_only.iter().filter(|c| **c != "dts").map(|codec| format!(
+        // FORK (RichiL10): TrueHD/MLP always go through the encode lane, which has no resampler,
+        // so PMS converts any of them above 48 kHz itself.
+        .chain(enc_only.iter().map(|codec| format!(
             "+add-limitation(scope=videoAudioCodec&scopeName={codec}&type=upperBound&name=audio.samplingRate&value={}&replace=true)",
             plx_platform::devcaps::ENC_LANE_RATE
         )))
@@ -364,7 +376,10 @@ fn sound_output_value() -> String {
 /// * `Encode` (the TV cannot decode the track): ONLY what should leave the server. On an optical
 ///   (S/PDIF) output that is AC3 alone: optical carries Dolby Digital 5.1 at most, and DD+ would
 ///   be decoded and re-encoded to DD by the TV, a second lossy pass. Elsewhere `eac3,ac3`, which
-///   keeps up to 7.1. Knob `encode_audio=ac3|eac3` overrides.
+///   keeps up to 7.1. Knob `encode_audio=ac3|eac3|auto` decides off optical (`auto`, the default,
+///   is `eac3,ac3`); on optical it is AC3 whatever the knob says. An output settingsservice did
+///   not report (`unknown`) is treated as optical unless the knob says `eac3`: AC3 is the one
+///   encode every output carries, so a failed read can cost 7.1 but never the surround.
 /// * `CopyLane(codec)`: the fork-lane track is named first so the remux copies it.
 /// * `Unknown`: the established copy-lane list, AC3-first on optical, E-AC3-first elsewhere.
 fn target_audio(
@@ -375,18 +390,19 @@ fn target_audio(
 ) -> String {
     use super::params::AudioTarget;
     let optical = output.to_ascii_lowercase().contains("optical");
+    let unreported = output == "unknown" && knob != Some("eac3");
     let has = |c: &&str| caps.audio_has(c);
-    let lanes: Vec<&str> = if optical || knob == Some("ac3") {
+    let lanes: Vec<&str> = if optical || unreported || knob == Some("ac3") {
         ["ac3", "eac3", "aac", "dts"].into_iter().filter(has).collect()
     } else {
         ["eac3", "ac3", "aac", "dts"].into_iter().filter(has).collect()
     };
     let list: Vec<&str> = match target {
         AudioTarget::Encode => {
+            // An optical (S/PDIF) output carries Dolby Digital 5.1 at most, whatever the knob asks.
             let wanted: &[&str] = match knob {
+                _ if optical || unreported => &["ac3"],
                 Some("ac3") => &["ac3"],
-                Some("eac3") => &["eac3", "ac3"],
-                _ if optical => &["ac3"],
                 _ => &["eac3", "ac3"],
             };
             let chosen: Vec<&str> = wanted.iter().copied().filter(has).collect();
@@ -409,9 +425,14 @@ fn profile_extra(delivery: TranscodeDelivery, audio: super::params::AudioTarget)
     let output = sound_output_value();
     let list = target_audio(caps, audio, &output, plx_base::forkknobs::get("encode_audio").as_deref());
     plx_base::eventlog::log(&format!("audio: target={list} for {audio:?} (sound output={output})"));
+    // PMS's spelling in the profile text (`dca` for DTS, #899): both the list the baseline
+    // carries and the one replacing it.
+    let pms = |codecs: &str| codecs.split(',').map(profile_codec_name).collect::<Vec<_>>().join(",");
+    let list = pms(&list);
     let current = ["ac3", "eac3", "aac", "dts"]
         .into_iter()
         .filter(|codec| caps.audio_has(codec))
+        .map(profile_codec_name)
         .collect::<Vec<_>>()
         .join(",");
     let (before, target) = baseline
@@ -434,7 +455,27 @@ fn forced_direct_profile_for(caps: &plx_platform::devcaps::Caps) -> String {
     if caps.av1 {
         video.push_str(",av1");
     }
-    format!("add-direct-play-profile(type=videoProfile&container=mkv,mp4&videoCodec={video}&audioCodec={DP_AUDIO_CODECS}&subtitleCodec={DP_SUBTITLE_CODECS})")
+    // The pipeline's feed formats, DTS only under the Forced rule (`Caps::forced_admits_dts`):
+    // a profile that offered DTS to a set with no DTS row would have PMS direct-play a Load the
+    // pipeline cannot decode.
+    let audio = DP_AUDIO_CODECS
+        .split(',')
+        .filter(|c| caps.forced_feeds_audio(c))
+        .map(profile_codec_name)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("add-direct-play-profile(type=videoProfile&container=mkv,mp4&videoCodec={video}&audioCodec={audio}&subtitleCodec={DP_SUBTITLE_CODECS})")
+}
+
+/// The spelling PMS reads for an audio codec in a profile: the direct-play list, the transcode
+/// target and the `add-limitation(scopeName=…)` all name DTS `dca` (every DTS entry in the
+/// profiles shipped with PMS does), where the pipeline and the device table say `dts`. The one
+/// place profile text leaves our own vocabulary.
+fn profile_codec_name(codec: &str) -> &str {
+    match plx_platform::devcaps::audio_codec_id(codec).as_ref() {
+        "dts" => "dca",
+        _ => codec,
+    }
 }
 
 fn forced_direct_profile() -> String {
@@ -1222,6 +1263,7 @@ mod tests {
                 hevc_row: (0, 0, 0),
                 vp9: true,
                 vp9_row: (0, 0, 0),
+                vp9_bit_depth: 8,
                 av1: false,
                 av1_row: (0, 0, 0),
                 audio: "aac,ac3,eac3".into(),
@@ -1380,12 +1422,32 @@ mod tests {
         caps.audio.push_str(",dts");
         caps.audio_channels.insert("dts".into(), 6);
         let profile = super::profile_for(&caps);
-        assert!(list_of(&profile, "audioCodec=").contains(&"dts".into()));
-        assert!(list_of(target_of(&profile), "audioCodec=").contains(&"dts".into()));
+        // PMS's own spelling in every place it reads a codec name: the direct-play list, the
+        // transcode target and the channel limitation's scopeName. `dts` appears nowhere.
+        assert!(list_of(&profile, "audioCodec=").contains(&"dca".into()));
+        assert!(list_of(target_of(&profile), "audioCodec=").contains(&"dca".into()));
         // FORK (RichiL10): the device row says 6, but the demuxer feeds a DTS-HD track's core, so
         // PMS may direct-play 6.1/7.1 DTS-HD (the `dts_core=never` knob restores 6).
-        assert!(profile.contains("scope=videoAudioCodec&scopeName=dts&type=upperBound&name=audio.channels&value=8&replace=true"));
+        assert!(profile.contains("scope=videoAudioCodec&scopeName=dca&type=upperBound&name=audio.channels&value=8&replace=true"));
+        assert!(!profile.contains("dts"), "{profile}");
         assert!(!profile.contains("truehd"));
+    }
+
+    /// Force Direct Play offers DTS only on the same table evidence the planner asks for
+    /// (`Caps::forced_admits_dts`); without the row the profile cannot invite a Load the
+    /// pipeline cannot decode.
+    #[test]
+    fn forced_profile_offers_dca_only_with_a_dts_row() {
+        let without = super::forced_direct_profile_for(&Caps::assumed());
+        // FORK (RichiL10): plus the fork's PCM lane (flac, pcm) and native Opus.
+        assert_eq!(list_of(&without, "audioCodec="), ["aac", "ac3", "eac3", "flac", "pcm", "opus"]);
+        assert!(!without.contains("dts") && !without.contains("dca"), "{without}");
+        let mut caps = Caps::assumed();
+        caps.audio.push_str(",dts");
+        caps.audio_channels.insert("dts".into(), 6);
+        let with = super::forced_direct_profile_for(&caps);
+        assert_eq!(list_of(&with, "audioCodec="), ["aac", "ac3", "eac3", "dca", "flac", "pcm", "opus"]);
+        assert!(!with.contains("dts"), "{with}");
     }
 
     /// Forced mode advertises the engine's formats with no device limits and no transcode target.
@@ -1396,7 +1458,7 @@ mod tests {
     fn force_profile_advertises_engine_formats_without_device_limits_or_transcode() {
         let p = super::forced_direct_profile();
         // FORK (RichiL10): plus the fork's PCM lane (flac, pcm) and native Opus.
-        assert_eq!(list_of(&p, "audioCodec="), ["aac", "ac3", "eac3", "dts", "flac", "pcm", "opus"]);
+        assert_eq!(list_of(&p, "audioCodec="), ["aac", "ac3", "eac3", "flac", "pcm", "opus"], "no DTS row on the assumed caps");
         assert_eq!(list_of(&p, "videoCodec="), ["h264", "hevc"]);
         assert!(!p.contains("add-limitation"));
         assert!(!p.contains("transcode-target"));
@@ -1415,7 +1477,7 @@ mod tests {
         }
         let on = super::profile_for_delivery_with(&caps, TranscodeDelivery::ProgressiveMkv, true);
         let dp = on.split("add-transcode-target").next().unwrap();
-        assert_eq!(list_of(dp, "audioCodec="), ["aac", "ac3", "eac3", "dts", "flac", "pcm", "opus", "truehd", "mlp"]);
+        assert_eq!(list_of(dp, "audioCodec="), ["aac", "ac3", "eac3", "dca", "flac", "pcm", "opus", "truehd", "mlp"]);
         for codec in ["flac", "pcm", "truehd", "mlp"] {
             assert!(
                 on.contains(&format!("scopeName={codec}&type=upperBound&name=audio.channels&value=8&replace=true")),
@@ -1451,9 +1513,16 @@ mod tests {
         // optical: AC3 only (DD 5.1 is the most S/PDIF carries; DD+ would be re-encoded by the TV)
         assert_eq!(t(AudioTarget::Encode, "external_optical", None), "ac3");
         assert_eq!(t(AudioTarget::Encode, "external_arc", None), "eac3,ac3");
-        assert_eq!(t(AudioTarget::Encode, "unknown", None), "eac3,ac3");
+        // an output settingsservice did not report counts as optical unless the knob says eac3
+        assert_eq!(t(AudioTarget::Encode, "unknown", None), "ac3");
+        assert_eq!(t(AudioTarget::Encode, "unknown", Some("auto")), "ac3");
+        assert_eq!(t(AudioTarget::Encode, "unknown", Some("eac3")), "eac3,ac3");
+        assert_eq!(t(AudioTarget::Unknown, "unknown", None), "ac3,eac3,aac,dts");
         assert_eq!(t(AudioTarget::Encode, "external_arc", Some("ac3")), "ac3");
-        assert_eq!(t(AudioTarget::Encode, "external_optical", Some("eac3")), "eac3,ac3");
+        assert_eq!(t(AudioTarget::Encode, "external_arc", Some("eac3")), "eac3,ac3");
+        assert_eq!(t(AudioTarget::Encode, "external_arc", Some("auto")), "eac3,ac3");
+        // optical stays AC3 whatever the knob asks
+        assert_eq!(t(AudioTarget::Encode, "external_optical", Some("eac3")), "ac3");
         // a fork-lane track the remux should copy is named first
         assert_eq!(t(AudioTarget::CopyLane("flac"), "external_optical", None), "flac,ac3,eac3,aac,dts");
         // unknown track: the established copy lanes, ordered by output
@@ -1479,6 +1548,7 @@ mod tests {
             hevc_row: (0, 0, 0),
             vp9: false,
             vp9_row: (0, 0, 0),
+            vp9_bit_depth: 8,
             av1: false,
             av1_row: (0, 0, 0),
             audio: "aac,ac3,eac3".into(),
@@ -1509,6 +1579,7 @@ mod tests {
                 hevc_row: (0, 0, 0),
                 vp9: false,
                 vp9_row: (0, 0, 0),
+                vp9_bit_depth: 8,
                 av1: false,
                 av1_row: (0, 0, 0),
                 audio: "aac".into(),
@@ -1536,6 +1607,7 @@ mod tests {
             hevc_row: (0, 0, 0),
             vp9: true,
             vp9_row: (0, 0, 0),
+            vp9_bit_depth: 8,
             av1: false,
             av1_row: (0, 0, 0),
             audio: "aac".into(),
@@ -1664,14 +1736,15 @@ mod tests {
     }
 
     /// The forced profile is the engine's own formats with no device limits: its literal is
-    /// unchanged on the assumed caps, and av1 joins its codec list only when the table lists it.
+    /// the assumed-caps literal (no DTS row, so no DTS), and av1 joins its codec list only when the table lists it.
     #[test]
     fn forced_profile_names_av1_only_with_the_row() {
         assert_eq!(
             super::forced_direct_profile_for(&Caps::assumed()),
             format!(
                 "add-direct-play-profile(type=videoProfile&container=mkv,mp4&videoCodec=h264,hevc&audioCodec={}&subtitleCodec={})",
-                super::DP_AUDIO_CODECS,
+                // FORK (RichiL10): plus the fork's PCM lane (flac, pcm) and native Opus.
+                "aac,ac3,eac3,flac,pcm,opus",
                 super::DP_SUBTITLE_CODECS,
             )
         );
@@ -1742,6 +1815,17 @@ mod tests {
         assert!(!p.contains("scopeName=vp9&type=upperBound&name=video.width"), "{p}");
         assert!(!p.contains("scopeName=vp9&type=upperBound&name=video.height"), "{p}");
         assert!(p.contains("scopeName=vp9&type=upperBound&name=video.bitDepth&value=8"), "{p}");
+    }
+
+    /// Where 10-bit VP9 was measured (`Caps::vp9_bit_depth` = 10, the webOS 4 family) no VP9
+    /// bit-depth scope is emitted: the `*` bound of 10 stands, so a Profile 2 source direct-plays.
+    #[test]
+    fn a_set_measured_at_ten_bit_vp9_emits_no_vp9_bit_depth_cap() {
+        let caps = Caps { vp9: true, vp9_row: (4096, 2304, 60), vp9_bit_depth: 10, ..Caps::assumed() };
+        let p = super::profile_for(&caps);
+        assert!(p.contains("videoCodec=h264,hevc,vp9&"), "{p}");
+        assert!(!p.contains("scopeName=vp9&type=upperBound&name=video.bitDepth"), "{p}");
+        assert!(p.contains("scopeName=*&type=upperBound&name=video.bitDepth&value=10"), "{p}");
     }
 
     /// Without the row, no `vp9` anywhere: the shipped string on every set whose table lists no

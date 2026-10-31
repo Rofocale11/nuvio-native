@@ -1,11 +1,19 @@
 //! Handled playback errors for Sentry: one terminal event, preceded by a bounded typed trace.
 //!
 //! This is deliberately not a log uploader. Every value accepted here is a closed enum from
-//! [`super::classes`]; there is no title, URL, rating key, playhead, duration, measured bitrate or
-//! free-text error slot. Sparse transitions are retained in memory only while error reporting is
+//! [`super::classes`], a bool (`attempt_started`), a bounded ordinal (`attempt_ordinal`: `1` to `9`,
+//! then `9+`), or one of two bounded integers: `http_status` (100-599, else 0) and `pipeline_error`
+//! (the firmware's own `i32` error number). `attempt_origin` and `attempt_ordinal` say why the
+//! failed engine open was made and which open of the playback it was. The fingerprint is
+//! `["playback-error", kind]`, except for origin `preview` (a failed detail-page trailer), which
+//! groups apart as `["playback-error", "preview", kind]`. There is no
+//! title, URL, rating key, playhead, duration, measured bitrate or free-text error slot. Sparse transitions are retained in memory only while error reporting is
 //! enabled, and nothing is queued unless the viewer actually reaches `PlaybackState::Error`.
 
-use super::classes::{FailureClass, PlaybackErrorContext, TraceEvent, TraceOutcome, TraceStep};
+use super::classes::{
+    AttemptOrdinal, AttemptOrigin, FailureClass, PlaybackErrorContext, TraceEvent, TraceOutcome,
+    TraceStep,
+};
 use serde_json::{Map, Value};
 
 /// How telemetry erases the in-memory trace the player keeps for the current attempt. The trace
@@ -139,7 +147,13 @@ pub fn event_body(
         "logger": "playback",
         "transaction": "playback",
         "culprit": format!("playback::{code}"),
-        "fingerprint": ["playback-error", code],
+        // A preview is not a playback the viewer asked for: its failures group apart. Every other
+        // origin keeps `["playback-error", code]` exactly.
+        "fingerprint": if context.attempt_origin == AttemptOrigin::Preview {
+            serde_json::json!(["playback-error", "preview", code])
+        } else {
+            serde_json::json!(["playback-error", code])
+        },
         "exception": {"values": [{
             "type": "PlaybackError",
             "value": code,
@@ -165,6 +179,11 @@ pub fn event_body(
             "raster": context.raster.code(),
             "pipeline": context.pipeline.code(),
             "http": context.http.code(),
+            "http_status": context.http_status,
+            "attempted_delivery": context.attempted_delivery.code(),
+            "attempt_started": context.attempt_started,
+            "attempt_origin": context.attempt_origin.code(),
+            "attempt_ordinal": context.attempt_ordinal.code(),
             "buffer": context.buffer.code(),
             "transport": context.transport.code(),
             "transfer_age": context.transfer_age.code(),
@@ -202,9 +221,22 @@ pub fn event_body(
     serde_json::to_vec(&body).unwrap_or_default()
 }
 
+/// How many times the player has asked for a handled report, whether or not consent let one
+/// through. Test seam: "exactly one report for the user-visible failure" is a count of calls.
+#[cfg(any(test, feature = "test-support"))]
+static REPORT_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// See [`REPORT_CALLS`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn report_calls_for_test() -> u32 {
+    REPORT_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Queue one handled event and ask the existing background sender to flush it. No network work is
 /// performed on the render thread.
 pub fn report_error(kind: FailureClass, context: PlaybackErrorContext, trace: &[TraceStep]) {
+    #[cfg(any(test, feature = "test-support"))]
+    REPORT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if !super::consent::allows_errors() || !super::sender::has_sentry() {
         return;
     }
@@ -321,6 +353,12 @@ pub fn preview_event() -> Vec<u8> {
             transport: TransportClass::RecvError,
             transfer_age: TransferAgeClass::S30To90,
             started: true,
+            attempted_delivery: DeliveryClass::Direct,
+            attempt_started: false,
+            attempt_origin: AttemptOrigin::QualityChange,
+            attempt_ordinal: AttemptOrdinal::new(2),
+            http_status: 404,
+            pipeline_error: 601,
             // Representative of a `decision_refused` report's extra block, shown here so the
             // consent screen's sample carries every key a report can; a real report has it only
             // when the server refused the plan.
@@ -356,10 +394,11 @@ pub fn preview_domains() -> String {
         TransferAgeClass as T, TransportClass as K,
     };
     use crate::telemetry::classes::{AudioCodecClass as Z, DecisionCodeClass as N, VideoCodecClass as V};
+    use crate::telemetry::classes::{AttemptOrdinal, AttemptOrigin};
     use FailureClass as F;
     use plx_platform::i18n::msg;
     // The labels are the reader's words; the codes after them are the wire values themselves.
-    let domains: [(&str, String); 19] = [
+    let domains: [(&str, String); 24] = [
         (msg::core_preview_domain_failure_kind(), codes(
             &[
                 F::DecisionRefused,
@@ -375,10 +414,15 @@ pub fn preview_domains() -> String {
             F::code,
         )),
         (msg::core_preview_domain_delivery(), codes(&[D::Unknown, D::Direct, D::Remux, D::Hls, D::Transcode], D::code)),
-        // The four rows below ride a `decision_refused` report only (`PlaybackErrorContext::
+        // The route the failed attempt was opening rides every report (a refusal's own block names
+        // the same value), so its row is the whole delivery domain.
+        (msg::core_preview_domain_attempted_delivery(), codes(&[D::Unknown, D::Direct, D::Remux, D::Hls, D::Transcode], D::code)),
+        (msg::core_preview_domain_attempt_started(), "yes / no".to_owned()),
+        (msg::core_preview_domain_attempt_origin(), codes(&AttemptOrigin::ALL, AttemptOrigin::code)),
+        (msg::core_preview_domain_attempt_ordinal(), codes(&AttemptOrdinal::all().collect::<Vec<_>>(), AttemptOrdinal::code)),
+        // The three rows below ride a `decision_refused` report only (`PlaybackErrorContext::
         // refusal`); the labels say so, and each list is its enum's own `ALL`/variant set.
         (msg::core_preview_domain_refusal_codes(), codes(&N::ALL, N::code)),
-        (msg::core_preview_domain_attempted_delivery(), codes(&[D::Remux, D::Hls, D::Transcode], D::code)),
         (msg::core_preview_domain_source_video(), codes(&V::ALL, V::code)),
         (msg::core_preview_domain_source_audio(), codes(&Z::ALL, Z::code)),
         (msg::core_preview_domain_quality(), codes(
@@ -416,6 +460,9 @@ pub fn preview_domains() -> String {
         )),
         (msg::core_preview_domain_raster(), codes(&[X::Unknown, X::Sd, X::Hd, X::Fhd, X::Uhd], X::code)),
         (msg::core_preview_domain_pipeline(), codes(&[L::Loading, L::Playing, L::Bound, L::Streaming], L::code)),
+        // The one NUMERIC field, so its domain is its range rather than a list of words: the TV
+        // firmware's own error number (0 = none recorded), already clamped to `i32`.
+        (msg::core_preview_domain_pipeline_error(), format!("{} to {}", i32::MIN, i32::MAX)),
         (msg::core_preview_domain_http(), codes(
             &[
                 H::None,
@@ -426,6 +473,8 @@ pub fn preview_domains() -> String {
             ],
             H::code
         )),
+        // Numeric, so its domain is its range: the exact status beside the class above (0 = none).
+        (msg::core_preview_domain_http_status(), "0 / 100 to 599".to_owned()),
         (msg::core_preview_domain_buffer(), codes(
             &[
                 B::Unknown,
@@ -451,14 +500,7 @@ pub fn preview_domains() -> String {
             A::code
         )),
         (msg::core_preview_domain_hls_direction(), codes(&[I::Up, I::Down, I::Refresh], I::code)),
-        (msg::core_preview_domain_delivery_reason(), codes(
-            &[
-                W::LinkFallback,
-                W::OriginalRecovery,
-                W::OriginalOpenRollback
-            ],
-            W::code
-        )),
+        (msg::core_preview_domain_delivery_reason(), codes(&W::ALL, W::code)),
         (msg::core_preview_domain_original_phase(), codes(
             &[
                 P::RetireHls,
@@ -515,6 +557,12 @@ mod tests {
             transport: TransportClass::None,
             transfer_age: TransferAgeClass::Unknown,
             started: true,
+            attempted_delivery: DeliveryClass::Hls,
+            attempt_started: true,
+            attempt_origin: AttemptOrigin::Fresh,
+            attempt_ordinal: AttemptOrdinal::FIRST,
+            http_status: 0,
+            pipeline_error: 0,
             refusal: None,
         }
     }
@@ -752,17 +800,23 @@ mod tests {
         );
         assert_eq!(
             keys(&v["contexts"]["hardware"]),
-            ["install", "model", "revision", "rtkmem", "soc", "type"]
+            ["install", "model", "probe", "revision", "rtkmem", "soc", "type"]
         );
         assert_eq!(
             keys(&v["contexts"]["playback"]),
             [
+                "attempt_ordinal",
+                "attempt_origin",
+                "attempt_started",
+                "attempted_delivery",
                 "buffer",
                 "declared_rate",
                 "delivery",
                 "http",
+                "http_status",
                 "media_rate",
                 "pipeline",
+                "pipeline_error",
                 "raster",
                 "requested_quality",
                 "selected_quality",
@@ -775,9 +829,15 @@ mod tests {
         assert_eq!(
             keys(&v["tags"]),
             [
+                "playback.attempt_ordinal",
+                "playback.attempt_origin",
+                "playback.attempt_started",
+                "playback.attempted_delivery",
                 "playback.declared_rate",
                 "playback.delivery",
+                "playback.http_status",
                 "playback.kind",
+                "playback.pipeline_error",
                 "playback.requested_quality",
                 "playback.selected_quality",
                 "playback.started",
@@ -868,10 +928,15 @@ mod tests {
         assert_eq!(
             keys(&v["tags"]),
             [
+                "playback.attempt_ordinal",
+                "playback.attempt_origin",
+                "playback.attempt_started",
                 "playback.attempted_delivery",
                 "playback.declared_rate",
                 "playback.delivery",
+                "playback.http_status",
                 "playback.kind",
+                "playback.pipeline_error",
                 "playback.refusal_general",
                 "playback.refusal_transcode",
                 "playback.requested_quality",

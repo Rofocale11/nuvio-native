@@ -115,7 +115,7 @@ pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: 
             // 1. Tell the Nuvio Shim to update the mediaIndex
             if plx_media::route::set_stream_index(ps, index) {
                 // 2. Force the player to reload the stream from the new URL
-                retry_failed_playback(ps, pa, bridge.metadata_mut(), None);
+                retry_failed_playback(ps, pa, bridge.metadata_mut(), None, plx_media::player::report::AttemptOrigin::QualityChange);
             }
         }
 
@@ -140,6 +140,7 @@ pub(crate) fn retry_failed_playback(
     pa: &mut plx_media::player::adapter::PlayerAdapter,
     meta: &mut plx_data::stores::metadata::MetadataStore,
     direct_play: Option<plx_plex::plex::session::DirectPlayMode>,
+    origin: plx_media::player::report::AttemptOrigin,
 ) -> bool {
     // URL/dev-trigger playback has no Plex descriptor.  Check BEFORE teardown: extinguishing its
     // Error Engine and only then discovering it cannot be rebuilt would replace an actionable
@@ -156,7 +157,7 @@ pub(crate) fn retry_failed_playback(
         .max(plx_media::route::unpresented_resume_ns(ps))
         .max(0);
     plx_media::player::stop_bufferfeed(ps, pa);
-    if plx_media::route::retry_current_play(ps, meta, resume_ns, direct_play) {
+    if plx_media::route::retry_current_play(ps, meta, resume_ns, direct_play, origin) {
         plx_machine::idle::invalidate();
         true
     } else {
@@ -186,7 +187,7 @@ pub(crate) fn play_automatically(
         }
         plx_machine::idle::invalidate();
     });
-    retry_failed_playback(ps, pa, meta, Some(DirectPlayMode::Auto))
+    retry_failed_playback(ps, pa, meta, Some(DirectPlayMode::Auto), plx_media::player::report::AttemptOrigin::QualityChange)
 }
 
 /// **Where a session that is STARTING returns to** — the whole of what `app::nav::Origin` was,
@@ -537,7 +538,11 @@ pub(crate) fn commit_track(
 ) {
     use plx_appkit::track_menu::TrackCommit;
     match commit {
-        TrackCommit::Audio(audio) => plx_media::route::commit_audio_selection(ps, audio),
+        // The route reports whether it accepted the pick (track memory is written on that); the
+        // menu's own commit path has nothing to do with the answer.
+        TrackCommit::Audio(audio) => {
+            let _ = plx_media::route::commit_audio_selection(ps, audio);
+        }
         TrackCommit::AudioEnhancement(a) => plx_media::player::request_audio_enhancement(ps, a),
         TrackCommit::Subtitle { render_ordinal, stream_id, sidecar_key, sidecar_codec } => {
             // What the client can draw itself — an embedded ordinal or an external sidecar — is
@@ -582,7 +587,7 @@ pub(crate) fn player_requests(
     for req in reqs {
         match req {
             PlayerReq::RetryPlayback => {
-                retry_failed_playback(ps, pa, bridge.metadata_mut(), None);
+                retry_failed_playback(ps, pa, bridge.metadata_mut(), None, plx_media::player::report::AttemptOrigin::UserRetry);
             }
             PlayerReq::PlayAutomatically => {
                 play_automatically(ps, pa, bridge.metadata_mut());

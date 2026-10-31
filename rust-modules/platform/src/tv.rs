@@ -1,6 +1,7 @@
 //! The television, as everything outside the port sees it (step L15, docs/module-layers.md).
 pub mod device;
 pub mod home;
+pub mod launch;
 pub mod sandbox;
 pub mod secure;
 pub mod sink;
@@ -32,12 +33,15 @@ pub struct Port {
     pub deliver_toast: fn(&str, toast::Identity) -> toast::Sent,
     pub bind_window: fn(*mut c_void),
     pub grab_surface: fn(*mut c_void),
-    pub release_surface: fn(),
+    /// Answers whether a surface was held (and so actually let go of).
+    pub release_surface: fn() -> bool,
     pub arm_opaque_region: fn(),
     pub opaque_route: fn(bool),
     pub clear_opaque_region: fn(),
     pub pump_bus: fn(),
     pub frame_probe_request: fn(),
+    pub frame_probe_prepare_begin: fn(),
+    pub frame_probe_prepare_end: fn(),
     pub frame_probe_waiting: fn(),
     pub frame_probe_acquired: fn(),
     pub frame_probe_fields: fn() -> String,
@@ -65,12 +69,14 @@ static ABSENT: Port = Port {
     deliver_toast: toast::deliver_without_port,
     bind_window: |_| {},
     grab_surface: |_| {},
-    release_surface: nothing,
+    release_surface: || false,
     arm_opaque_region: nothing,
     opaque_route: |_| {},
     clear_opaque_region: nothing,
     pump_bus: nothing,
     frame_probe_request: nothing,
+    frame_probe_prepare_begin: nothing,
+    frame_probe_prepare_end: nothing,
     frame_probe_waiting: nothing,
     frame_probe_acquired: nothing,
     frame_probe_fields: String::new,

@@ -1575,6 +1575,9 @@ impl TrackMenuState {
             DisabledReason::DolbyVisionSubtitle => plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_subtitle(),
             DisabledReason::NotOriginalQuality => plx_platform::i18n::msg::widgets_tracks_enh_reason_quality(),
             DisabledReason::ServerRefused => plx_platform::i18n::msg::widgets_tracks_enh_reason_refused(),
+            DisabledReason::ForcedDirectPlay => plx_platform::i18n::msg::widgets_tracks_enh_reason_forced(),
+            DisabledReason::ServerConverting => plx_platform::i18n::msg::widgets_tracks_enh_reason_converting(),
+            DisabledReason::NotCopyable => plx_platform::i18n::msg::widgets_tracks_enh_reason_not_copyable(),
         }
         .to_string()
     }
@@ -1588,9 +1591,6 @@ impl TrackMenuState {
         use plx_media::route::{EnhancementRoute, SubtitleEffect};
         match route {
             EnhancementRoute::Burn => Some(plx_platform::i18n::msg::widgets_tracks_enh_note_burn().to_string()),
-            EnhancementRoute::RemuxDropsDolbyVision => {
-                Some(plx_platform::i18n::msg::widgets_tracks_enh_note_dv_off().to_string())
-            }
             EnhancementRoute::Remux if subtitle_effect == SubtitleEffect::Sidecar => {
                 Some(plx_platform::i18n::msg::widgets_tracks_enh_note_sidecar().to_string())
             }
@@ -2122,6 +2122,7 @@ pub fn subtitle_size_label(size: SubtitleSize) -> &'static str {
         SubtitleSize::Medium => msg::settings_playback_subtitle_size_medium(),
         SubtitleSize::Large => msg::settings_playback_subtitle_size_large(),
         SubtitleSize::ExtraLarge => msg::settings_playback_subtitle_size_extra_large(),
+        SubtitleSize::Huge => msg::settings_playback_subtitle_size_huge(),
     }
 }
 

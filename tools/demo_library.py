@@ -97,6 +97,10 @@ UA = "PlxNativeDemoLibrary/1.0 (+https://github.com/GLinnik21/plex-native-poc)"
 POSTER = (600, 900)
 ART = (1920, 1080)
 THUMB = (1280, 720)
+# A person's photograph as the mock serves it: 2:3, the shape of a real server's headshots, which the
+# app's cast tile crops high (`Crop::Headshot`).
+HEADSHOT = (600, 900)
+SIZES = {"poster": POSTER, "art": ART, "thumb": THUMB, "photo": HEADSHOT}
 
 
 def cache_dir():
@@ -235,6 +239,8 @@ def derive_image(src, dst, size, recipe):
       show may not use it (the pad boundary is a visible seam in the text zone): `hero_geometry`
       refuses `extend`, so such a title is `cover` with a declared `art.subject`.
     * `crop: focus-right` / `upper` — a named anchor for a cover crop (poster from a landscape still).
+    * `box: [x, y, w, h]` — cut that part of the source first (`mode: cover` only): a person's
+      photograph is the face, not the page it was printed on.
     """
     w, h = size
     mode = recipe.get("mode", "cover")
@@ -246,7 +252,7 @@ def derive_image(src, dst, size, recipe):
                  f"[b]scale=-2:{h}:flags=lanczos,crop='min(iw,{w})':{h}:'max(iw-{w},0)':0[fg];"
                  f"[bg][fg]overlay=x={x}:y=0,format=yuvj444p[o]")
     else:
-        graph = f"[0:v]format=rgb24,{_cover(w, h, anchor)},format=yuvj444p[o]"
+        graph = f"[0:v]format=rgb24,{box}{_cover(w, h, anchor)},format=yuvj444p[o]"
     _ffmpeg(["-i", str(src), "-filter_complex", graph, "-map", "[o]", "-frames:v", "1",
              "-q:v", "3", "-bitexact", str(dst)])
 
@@ -375,6 +381,27 @@ def item_keys(catalog):
         for season in s["seasons"]:
             for e in season["episodes"]:
                 yield f"{s['id']}/{season['index']}/{e['index']}", "episode", e
+
+
+def person_key(name):
+    """The derived-file key of one of the catalog's `people`: `person-<slug of the name>`."""
+    return "person-" + re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def people(catalog):
+    """(derived key, name, record) for every person the catalog gives a photograph."""
+    for name, rec in catalog.get("people", {}).items():
+        yield person_key(name), name, rec
+
+
+def credited_names(catalog):
+    """Every name a title credits: cast, directors, writers, creators."""
+    names = set()
+    for _, _, rec in item_keys(catalog):
+        names.update(c["name"] for c in rec.get("cast", []))
+        for job in ("directors", "writers", "creators"):
+            names.update(rec.get(job, []))
+    return names
 
 
 def derived_dir():
@@ -1130,7 +1157,9 @@ def _changes(role, recipe):
         text = "Title lettering cut out of the poster onto a transparent ground for the clear logo"
         return text + ("; dark lettering recoloured to read over a backdrop." if any("fill" in k for k in recipe["keys"])
                        else ".")
-    w, h = {"poster": POSTER, "art": ART, "thumb": THUMB}[role]
+    if role == "photo":
+        return f"Cut to the performer's face and scaled to a {HEADSHOT[0]}×{HEADSHOT[1]} portrait."
+    w, h = SIZES[role]
     what = {"poster": "poster", "art": "backdrop", "thumb": "episode still"}[role]
     if role == "art" and recipe.get("mode") == "extend":
         return (f"Scaled to fit a {w}×{h} {what}; the sides are filled with a blurred, "
@@ -1196,6 +1225,13 @@ def site_works(assets, catalog):
                     e["roles"] = ["Episode stills"]
             works.append({"id": rec["id"], "kind": kind, "title": rec["title"], "year": rec.get("year"),
                           "entries": entries})
+    # The people a Cast & Crew row shows a photograph of, in the catalog's order.
+    for key, name, rec in people(catalog):
+        a = assets[rec["photo"]["asset"]]
+        who = a["author"] if a["attribution"] in ("", a["author"]) else f"{a['author']}; {a['attribution']}"
+        works.append({"id": key, "kind": "person", "title": name, "year": None, "entries": [
+            {"roles": ["Portrait"], "author": who, "licence": a["licence"], "changes": [_changes("photo", rec["photo"])],
+             "sources": [((), _source_host(a["source_page"]), a["source_page"])]}]})
     return works
 
 
@@ -1244,7 +1280,8 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
     used = [name for name in LICENCE_TEXTS if any(a["licence"] == name for a in assets.values())]
     licences = ", ".join(f'<a href="{esc(LICENCE_TEXTS[n])}" rel="license">{esc(n)}</a>' for n in used)
     repo = "https://github.com/GLinnik21/plx-native/blob/main/"
-    sections = "\n".join(section("film", "Films") + section("series", "Series"))
+    sections = "\n".join(section("film", "Films") + section("series", "Series")
+                         + (section("person", "People") if any(w["kind"] == "person" for w in works) else []))
     page = f"""<!doctype html>
 <!-- Written by `python3 tools/demo_library.py site-credits` (make screenshots) from
      tests/demo_library/assets.json and catalog.json. Do not edit by hand. -->
@@ -1288,9 +1325,10 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
               <span class="brand-name"><span class="back-arrow" aria-hidden="true">&larr;</span> PlxNative</span>
             </a>
             <nav class="site-nav" aria-label="Primary navigation">
-              <a href="./#feel">Demo</a>
-              <a href="./#why">Why</a>
-              <a href="./#showcase">Features</a>
+              <a href="./#features">Features</a>
+              <a href="./#approach">Approach</a>
+              <a href="./#install">Install</a>
+              <a href="./#faq">FAQ</a>
             </nav>
             <div class="header-actions">
               <a class="header-github" href="https://github.com/GLinnik21/plx-native" aria-label="PlxNative on GitHub">

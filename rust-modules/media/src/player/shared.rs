@@ -260,6 +260,17 @@ enum NativeSessionPhase {
     Abandoned {
         epoch: u32,
     },
+    /// A real stop handed this epoch's ready object to the OFF-FRAME release (`engine`'s
+    /// `PendingRelease`): its `Unload` is running on a worker while the main thread has already
+    /// reset the session for whatever comes next. The admission rule is `Abandoned`'s — only the
+    /// firmware's UNLOADCOMPLETED is admitted, recorded in `unload_completed` rather than as a move
+    /// to `Unloaded` so that [`Shared::reset_session`] (which preserves this phase) cannot erase the
+    /// evidence the release then reads — and no new native session may begin until the release has
+    /// retired it.
+    Releasing {
+        epoch: u32,
+        unload_completed: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +318,13 @@ pub enum NativeEventClass {
     Other,
 }
 
+/// Whose state a native callback may write; see [`Shared::with_native_session_scoped`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventScope {
+    Live,
+    Release,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HlsPauseCompletion {
     Accepted,
@@ -346,17 +364,6 @@ struct AbrSeed {
     observed_at: Instant,
 }
 
-/// one client-rendered subtitle cue (content-time ns). `track` is the 0-based subtitle-stream
-/// index it belongs to; the demuxer pushes cues for ALL text tracks and the render filters by
-/// the selected `desired_sub_idx`, so switching tracks is instant (no re-demux of the buffered
-/// region). Content-time ns matches the fed video PTS timeline (see active_subtitle).
-pub struct SubCue {
-    pub track: i32,
-    pub start_ns: i64,
-    pub end_ns: i64,
-    pub text: String,
-}
-
 /// one rect of a decoded image-subtitle display set: `w`×`h` at position (`x`,`y`) **in the
 /// subtitle stream's own authoring canvas** (see [`SubBitmap::cw`]) — NOT in screen pixels; the
 /// renderer scales it into the video rect.
@@ -379,9 +386,11 @@ pub struct SubRect {
 }
 
 impl SubRect {
-    /// the bytes this rect holds in the store (what the byte budget counts)
+    /// the bytes this rect holds in the store (what the byte budget counts): its index buffer as
+    /// ALLOCATED (a `Vec` that grew by doubling holds its spare capacity) plus its palette. The
+    /// store holds only this indexed form; the RGBA expansion exists for the one set on screen.
     pub fn bytes(&self) -> usize {
-        self.index.len() + std::mem::size_of::<[[u8; 4]; 256]>()
+        self.index.capacity() + std::mem::size_of::<[[u8; 4]; 256]>()
     }
 
     /// The straight-alpha RGBA bitmap of `w`×`h` the renderer uploads.
@@ -427,7 +436,8 @@ impl SubBitmap {
 /// at 0:00 / -0:00 instead, which is the half of the frozen-HUD report that is not blocking I/O.
 ///
 /// Derived once per frame in `pump::set_state` from signals the workers already publish; no
-/// new cross-thread plumbing. Ordered so `>= Playing` reads as "actually on screen".
+/// new cross-thread plumbing. `Playing` alone means "a frame is on the panel"; `Paused` (a paused
+/// player with no picture and nothing in flight) is neither busy nor playing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum PlaybackState {
@@ -446,6 +456,11 @@ pub enum PlaybackState {
     Playing = 5,
     /// the producer died (a failed open / no video stream). Terminal until teardown.
     Error = 6,
+    /// the viewer is paused on a session that has no picture yet and the pump has no work in
+    /// flight for one (`pump::paused_and_idle`): not `Buffering` (nothing is being waited on, so
+    /// no spinner) and not `Playing` (no frame is on the panel, so no `is_playing`, no
+    /// `PlaybackStarted`). The HUD draws its ordinary paused transport.
+    Paused = 7,
 }
 
 /// How long a viewer's audio pick may stand as "the reason for the next rebuild" before the
@@ -483,6 +498,7 @@ impl PlaybackState {
             4 => PlaybackState::Seeking,
             5 => PlaybackState::Playing,
             6 => PlaybackState::Error,
+            7 => PlaybackState::Paused,
             _ => PlaybackState::Idle,
         }
     }
@@ -529,6 +545,13 @@ pub struct Shared {
     /// see `appkit::player_hud::busy_surface`. Monotone within a session (false→true only), which is
     /// what lets two readers in one frame sample it independently without disagreeing.
     pub seen_frame: AtomicBool,
+    /// **The raw pts of the first audio AU the demuxer pushed since its last open or seek**.
+    /// Written by `ff::demux` BEFORE that push, so the feed thread that pops the AU
+    /// sees it. The audio lane uses it to tell the real start of a late audio track (an MKV
+    /// audio `Delay` of several seconds) from stale pre-seek audio, which looks the same — far
+    /// ahead of the video — but never carries this pts (see `engine::feed_audio_lane`). `i64::MIN`
+    /// before one, since a real pts may be negative.
+    pub first_audio_pts: AtomicI64,
     /// **Why the NEXT rebuild is happening, when the viewer's audio-track pick is the cause**: the
     /// read-out beside the load spinner says "Switching audio…" instead of "Buffering…". A
     /// [`AudioSwitch`] value. `Picked` (set by `route::commit_audio_selection` once its rebuild is
@@ -543,6 +566,9 @@ pub struct Shared {
     pub load_completed: AtomicBool,          // bf_loaded signal
     pub media_id: Mutex<Option<CString>>,    // bf_mediaId (captured once)
     pub source_info: Mutex<Option<Vec<u8>>>, // sourceInfoRaw, VERBATIM incl NUL
+    /// What the demuxer read of a VP9 stream's colour (PQ tag, mastering display, light level). Set
+    /// only for VP9, cleared per session; `pump` writes it into `source_info` before ACB is sent it.
+    pub container_hdr: Mutex<Option<super::vp9_hdr::ContainerHdr>>,
 
     // main/pump (M) -> library callback thread (K)
     pub pts_shift: AtomicI64, // g_pts_shift
@@ -609,6 +635,13 @@ pub struct Shared {
     /// `error_shape` tell a k5lp-style hang apart from an ordinary firmware refusal on the wire,
     /// as `FailureKind::LoadTimeout` rather than the generic `FailureKind::TvPipeline`.
     pub load_timed_out: AtomicBool,
+    /// The pipeline took the video decoder back from an ESTABLISHED session: `type=18 num=600`
+    /// (`"VDEC resource is released by policy action"`) after a picture. Measured on the dev set
+    /// (webOS 4, 2026-10-13): a direct play left paused until the screensaver came on got this
+    /// with NO `LIFECYCLE: background`, and every later Play was refused for good. Set on the
+    /// callback thread, taken once by the app loop ([`super::take_decoder_revoked`]), which parks
+    /// the session exactly as an app switch does and rebuilds it on the viewer's next press.
+    pub decoder_revoked: AtomicBool,
     /// issue #74 D.1: the epoch this session last logged "native: loadCompleted while Load in
     /// flight — deferring" for — 0 = never. `epoch` is monotonic and never 0 for a real session
     /// ([`NativeSessionState::next`] skips 0 on wraparound), so comparing against this is enough
@@ -642,7 +675,6 @@ pub struct Shared {
     /// picker's rows are the only place this reaches, and only on DIRECT PLAY: a transcode is a
     /// remux the server built, and its tags are whatever the server put there.
     pub track_names: Mutex<TrackNames>,
-    pub sub_cues: Mutex<Vec<SubCue>>,
     pub ass_sources: Mutex<super::ass_source::Store>,
     pub ass_renderer: super::ass::Runtime,
     pub sub_bitmaps: Mutex<Vec<SubBitmap>>, // image-sub cues (every image track while subs are on)
@@ -728,6 +760,13 @@ pub struct Shared {
     // set once the pipeline has drained to true end-of-stream (EOS pushed AND the last fed frame
     // has been presented). app.rs polls player::ended() to tear the player down at the credits.
     pub ended: AtomicBool,
+    /// The pipeline reported end-of-stream: `type=28` (0x1c, `STATE_UPDATE__ENDOFSTREAM`, the same
+    /// number on every webOS since the renumbering starts above it), `str=true`, after a picture.
+    /// It is the pipeline's own word that it presented the last of what it was given, which the
+    /// `ended` arithmetic cannot always reach: on the C1 (2026-10-20) a film whose audio ran 3 s
+    /// past its last video frame stopped its clock at 5894 s of 5897 s, refused the audio after
+    /// the EOS, and sat on the last frame for good. Cleared with the session and by a seek.
+    pub pipeline_eos: AtomicBool,
 
     // close-to-interrupt handle: raw ptr to the Engine-owned HttpStream box, so
     // the pump/teardown can close(fd) to unblock a blocked recv. The box outlives
@@ -768,6 +807,15 @@ pub struct Shared {
     /// session, and the index says whether it was immediate or after a long healthy run.
     pub dg_cb_err: AtomicI32,
     pub dg_cb_err_at: AtomicU32,
+    /// The firmware's own error NUMBER (`num`) of that same first `ty == 18` callback — the
+    /// `601` of `type=18 num=601 Resource Allocation Error`. Latched together with `dg_cb_err`
+    /// (first one wins, so a later callback cannot overwrite the explanation) and cleared where
+    /// that clears. Already clamped to the `i32` range: it is the one number a handled `tv_pipeline`
+    /// report carries about the refusal, never the callback's string. A SYNCHRONOUS Load refusal
+    /// (`sf_load` returning 0) has no number to latch — Starfish's `Load` hands back a bare
+    /// success flag, and the other refusals inside `sf_load` are the seam's own lifecycle gates —
+    /// so a session that failed that way leaves this at 0 ("none recorded").
+    pub dg_cb_err_num: AtomicI32,
     /// The media GET's HTTP status and the bytes actually delivered to the demuxer. Written by the
     /// DEMUX thread — the third writer of this block. 0/0 = no connection was ever made, which is
     /// a different failure from a connection that answered 401.
@@ -900,6 +948,13 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// The container's track names ([`Shared::track_names`]) for a READER on the main thread. A
+    /// panicked writer cannot leave the names half-built (they are replaced whole), so a poisoned
+    /// lock still holds a usable value and the reader takes it rather than panic.
+    pub fn track_names_lenient(&self) -> std::sync::MutexGuard<'_, TrackNames> {
+        self.track_names.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub const fn new() -> Self {
         Shared {
             native_session: Mutex::new(NativeSessionState::new()),
@@ -908,6 +963,7 @@ impl Shared {
             dg_feed_state: AtomicU8::new(0),
             dg_cb_err: AtomicI32::new(0),
             dg_cb_err_at: AtomicU32::new(0),
+            dg_cb_err_num: AtomicI32::new(0),
             dg_http_status: AtomicI32::new(0),
             dg_transport_rc: AtomicI32::new(0),
             dg_transport_age_ms: AtomicI64::new(-1),
@@ -955,11 +1011,13 @@ impl Shared {
             pres_fed: AtomicI64::new(0),
             frames: AtomicI32::new(0),
             seen_frame: AtomicBool::new(false),
+            first_audio_pts: AtomicI64::new(i64::MIN),
             audio_switch: AtomicU8::new(AudioSwitch::None as u8),
             audio_pick_ms: AtomicI64::new(0),
             load_completed: AtomicBool::new(false),
             media_id: Mutex::new(None),
             source_info: Mutex::new(None),
+            container_hdr: Mutex::new(None),
             pts_shift: AtomicI64::new(0),
             disp_base: AtomicI64::new(0),
             seek_to_ns: AtomicI64::new(-1),
@@ -974,12 +1032,12 @@ impl Shared {
             demux_no_video: AtomicBool::new(false),
             load_failed: AtomicBool::new(false),
             load_timed_out: AtomicBool::new(false),
+            decoder_revoked: AtomicBool::new(false),
             native_load_deferred_logged_epoch: AtomicU32::new(0),
             native_load_elapsed_ms: AtomicU64::new(0),
             playback_trace: Mutex::new(super::report::PlaybackTrace::new()),
             desired_sub_idx: AtomicI32::new(-1),
             track_names: Mutex::new(TrackNames::new()),
-            sub_cues: Mutex::new(Vec::new()),
             ass_sources: Mutex::new(super::ass_source::Store::new()),
             ass_renderer: super::ass::Runtime::new(),
             sub_bitmaps: Mutex::new(Vec::new()),
@@ -1003,6 +1061,7 @@ impl Shared {
             hls_trial_reserve_ms: AtomicI64::new(-1),
             hls_candidate_generation: AtomicU64::new(0),
             ended: AtomicBool::new(false),
+            pipeline_eos: AtomicBool::new(false),
             hs_ptr: AtomicPtr::new(std::ptr::null_mut()),
         }
     }
@@ -1200,6 +1259,7 @@ impl Shared {
             NativeSessionPhase::Active { epoch: active, .. }
                 | NativeSessionPhase::Unloaded { epoch: active }
                 | NativeSessionPhase::Abandoned { epoch: active }
+                | NativeSessionPhase::Releasing { epoch: active, .. }
                 if epoch != 0 && active == epoch
         );
         if !owns {
@@ -1209,9 +1269,22 @@ impl Shared {
         true
     }
 
+    /// Hand `epoch`'s ready object to the off-frame release (see
+    /// [`NativeSessionPhase::Releasing`]). Taking the lock is the drain barrier for a callback
+    /// already inside the session; from here only UNLOADCOMPLETED is admitted. `false` when `epoch`
+    /// does not own the `Active` phase (the caller then releases synchronously, as before).
+    pub fn begin_native_release(&self, epoch: u32) -> bool {
+        self.leave_active(epoch, NativeSessionPhase::Releasing { epoch, unload_completed: false })
+    }
+
     /// Hand `epoch`'s still-in-flight Load to the abandoned-Load release (see
     /// [`NativeSessionPhase::Abandoned`]). `false` when `epoch` does not own the `Active` phase.
     pub fn abandon_native_session(&self, epoch: u32) -> bool {
+        self.leave_active(epoch, NativeSessionPhase::Abandoned { epoch })
+    }
+
+    /// Move `epoch`'s `Active` phase to `to`; `false` (nothing changed) when `epoch` does not own it.
+    fn leave_active(&self, epoch: u32, to: NativeSessionPhase) -> bool {
         let mut state = self
             .native_session
             .lock()
@@ -1220,8 +1293,20 @@ impl Shared {
         {
             return false;
         }
-        state.phase = NativeSessionPhase::Abandoned { epoch };
+        state.phase = to;
         true
+    }
+
+    /// Whether a timed-out Load is parked ([`NativeSessionPhase::Abandoned`]): the native object
+    /// is still owned by a `Load` that has not returned, so every native start is refused.
+    pub fn native_load_abandoned(&self) -> bool {
+        matches!(
+            self.native_session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phase,
+            NativeSessionPhase::Abandoned { .. }
+        )
     }
 
     /// Test-only: drop an abandoned phase that a failing test left behind, which
@@ -1238,11 +1323,15 @@ impl Shared {
     /// This is one mandatory lifecycle assertion, separate from the native interposer's admission
     /// and in-flight proof. A missing/renumbered callback quarantines the object rather than D1.
     pub fn native_unload_completed(&self, epoch: u32) -> bool {
-        self.native_session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .phase
-            == NativeSessionPhase::Unloaded { epoch }
+        matches!(
+            self.native_session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phase,
+            NativeSessionPhase::Unloaded { epoch: e }
+                | NativeSessionPhase::Releasing { epoch: e, unload_completed: true }
+                if e == epoch
+        )
     }
 
     /// Fence pre-seek presentations while retaining non-frame Load/error callbacks. Locking is a
@@ -1368,6 +1457,20 @@ impl Shared {
         num: i64,
         event: impl FnOnce() -> R,
     ) -> Option<R> {
+        self.with_native_session_scoped(epoch, class, num, |_| event())
+    }
+
+    /// [`with_native_session`](Self::with_native_session), telling the event whose state it may
+    /// write: [`EventScope::Live`] for the session that owns the process-long diagnostics,
+    /// [`EventScope::Release`] for the lifecycle evidence of an object already handed to a release
+    /// (the main thread reset that state for the NEXT session before this callback arrived).
+    pub fn with_native_session_scoped<R>(
+        &self,
+        epoch: u32,
+        class: NativeEventClass,
+        num: i64,
+        event: impl FnOnce(EventScope) -> R,
+    ) -> Option<R> {
         let mut state = self
             .native_session
             .lock()
@@ -1378,8 +1481,19 @@ impl Shared {
             if epoch == 0 || abandoned != epoch || class != NativeEventClass::UnloadCompleted {
                 return None;
             }
-            let result = event();
+            let result = event(EventScope::Release);
             state.phase = NativeSessionPhase::Unloaded { epoch };
+            return Some(result);
+        }
+        if let NativeSessionPhase::Releasing { epoch: releasing, unload_completed } = &mut state.phase {
+            // The same rule for an object a real stop handed to the off-frame release: the main
+            // thread has already reset the state this callback would write into for the NEXT
+            // session, so only the release's own lifecycle evidence gets through.
+            if epoch == 0 || *releasing != epoch || class != NativeEventClass::UnloadCompleted {
+                return None;
+            }
+            let result = event(EventScope::Release);
+            *unload_completed = true;
             return Some(result);
         }
         let NativeSessionPhase::Active {
@@ -1403,7 +1517,7 @@ impl Shared {
                 }
             }
         }
-        let result = event();
+        let result = event(EventScope::Live);
         if class == NativeEventClass::UnloadCompleted {
             state.phase = NativeSessionPhase::Unloaded { epoch };
         }
@@ -1490,7 +1604,12 @@ impl Shared {
         // An ABANDONED native object is not this engine's session: it outlives the engine by
         // design until its `Load` returns and `engine::reap_abandoned_load` releases it. Clearing
         // it here would let the next session begin while the C seam still owns that object.
-        if !matches!(native.phase, NativeSessionPhase::Abandoned { .. }) {
+        // The same holds for an object handed to the off-frame release: its Unload is still running
+        // and the release retires the phase itself once it has the evidence.
+        if !matches!(
+            native.phase,
+            NativeSessionPhase::Abandoned { .. } | NativeSessionPhase::Releasing { .. }
+        ) {
             native.phase = NativeSessionPhase::Idle;
         }
         // the diagnostics mirror is per-session too — a stale bind outcome from the last item is
@@ -1502,6 +1621,7 @@ impl Shared {
         // playback red for the life of the process.
         self.dg_cb_err.store(0, Ordering::Relaxed);
         self.dg_cb_err_at.store(0, Ordering::Relaxed);
+        self.dg_cb_err_num.store(0, Ordering::Relaxed);
         self.dg_http_status.store(0, Ordering::Relaxed);
         self.dg_transport_rc.store(0, Ordering::Relaxed);
         self.dg_transport_age_ms.store(-1, Ordering::Relaxed);
@@ -1547,6 +1667,7 @@ impl Shared {
         // places (declaration, `new`, here): a reload that forgot the bit would silently suppress
         // the centred read-out for the rest of the app's life.
         self.seen_frame.store(false, Ordering::Relaxed);
+        self.first_audio_pts.store(i64::MIN, Ordering::Relaxed);
         // an audio pick's rebuild has begun (a reload keeps the pick's meaning for this session);
         // any other reset ends it
         let next = match AudioSwitch::from_u8(self.audio_switch.load(Ordering::Relaxed)) {
@@ -1566,6 +1687,7 @@ impl Shared {
         self.native_load_elapsed_ms.store(0, Ordering::Relaxed);
         *self.media_id.lock().unwrap() = None;
         *self.source_info.lock().unwrap() = None;
+        *self.container_hdr.lock().unwrap() = None;
         self.pts_shift.store(0, Ordering::Relaxed);
         self.disp_base.store(0, Ordering::Relaxed);
         self.seek_to_ns.store(-1, Ordering::Relaxed);
@@ -1581,6 +1703,7 @@ impl Shared {
         self.demux_no_video.store(false, Ordering::Relaxed);
         self.load_failed.store(false, Ordering::Relaxed);
         self.load_timed_out.store(false, Ordering::Relaxed);
+        self.decoder_revoked.store(false, Ordering::Relaxed);
         // NB: desired_sub_idx is NOT reset here — like desired_audio_idx it persists across
         // seeks/reloads so a reload-based seek keeps the chosen subtitle. It is reset on a new
         // item (player::reset_subtitle). ASS packets are immutable file facts, not
@@ -1590,8 +1713,7 @@ impl Shared {
             let mut sources = self.ass_sources.lock().unwrap_or_else(|e| e.into_inner());
             if for_reload { sources.retain_for_reload(); } else { sources.reset(); }
         }
-        // These decoded cue/bitmap stores are transient render state and refill on read.
-        self.sub_cues.lock().unwrap().clear();
+        // The decoded bitmap store is transient render state and refills on read.
         self.sub_bitmaps.lock().unwrap().clear();
         // Cleared with them, and for the same reason: they describe the FILE the last demuxer had
         // open. A reload-based seek re-opens the same part and re-publishes the same names, but a
@@ -1614,6 +1736,7 @@ impl Shared {
             .store(-1, Ordering::Relaxed);
         self.reset_hls_clock();
         self.ended.store(false, Ordering::Relaxed);
+        self.pipeline_eos.store(false, Ordering::Relaxed);
         self.hs_ptr.store(std::ptr::null_mut(), Ordering::Release);
     }
 
@@ -1701,6 +1824,13 @@ impl Shared {
     /// the same item cannot inherit `Held` forever.
     pub fn cancel_clock_session_start(&self) {
         self.reset_hls_clock();
+    }
+
+    /// Whether the native clock is held for the VIEWER's pause, which fences the start's first
+    /// Play behind a prime (`reserve_hls_prime_play`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clock_user_held_for_test(&self) -> bool {
+        self.hls_clock.lock().unwrap_or_else(|e| e.into_inner()).user_held
     }
 
     #[cfg(all(any(test, feature = "test-support"), feature = "hostsim"))]
@@ -1856,6 +1986,28 @@ impl Shared {
             | HlsClockPhase::PlayIssuing { .. }
             | HlsClockPhase::Stopping => None,
         }
+    }
+
+    /// A viewer Pause that lands on a clock a seek or an Initial hold already owns marks it
+    /// `user_held`, and `reserve_hls_prime_play` refuses a Play on a user-held clock: the keyframe
+    /// would be fed through the preroll's open gate and never be allowed to present. When the pump
+    /// opens a preroll for such a Pause it hands the hold back to the seek prime exactly as
+    /// [`Self::prepare_seek_pause`] does for a seek dispatched from a user hold. `false` when the
+    /// clock is not held (transitioning, running, rebuffering): the caller tries again next tick.
+    pub fn hand_hold_to_seek_prime(&self) -> bool {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        let HlsClockPhase::Held {
+            hold: ClockHold::User | ClockHold::Initial | ClockHold::Seek | ClockHold::ResumePrime,
+        } = clock.phase
+        else {
+            return false;
+        };
+        if clock.user_held {
+            clock.user_held = false;
+            clock.resume_acb_pending = true;
+        }
+        clock.phase = HlsClockPhase::Held { hold: ClockHold::Seek };
+        true
     }
 
     pub fn complete_seek_pause(&self, token: u64, accepted: bool) -> HlsPauseCompletion {
@@ -2313,6 +2465,9 @@ impl Shared {
     }
 }
 
+/// `Transport::preroll_volume` while the sink is not muted (a saved volume is 0..=100).
+const PREROLL_VOLUME_NONE: i32 = i32::MIN;
+
 /// UI-facing transport state. Main-thread-only in practice (plex_run + pump +
 /// player_hud all run on M), but exposed as atomics so app.rs / player_hud.rs read
 /// it with plain .load()/.store(). Replaces the #[no_mangle] transport globals.
@@ -2327,6 +2482,17 @@ pub struct Transport {
     /// The viewer remains logically paused while a seek is allowed to feed, Play one landed frame,
     /// then re-pause. Keeping this separate prevents the UI/user intent from lying during preroll.
     seek_preroll: AtomicBool,
+    /// The seek preroll above was opened by the PUMP, not by a caller, and the pump closes it: the
+    /// target (ns) the seek was dispatched at, `-1` when the preroll is absent or a caller's.
+    /// Transport-wide on purpose: a reload (`reset_for_reload`) replaces the Engine but keeps the
+    /// viewer's Pause and this ownership, so the landing is settled on whichever Engine is live.
+    seek_preroll_owned: AtomicI64,
+    /// The sink volume the paused preroll's Play window muted (`player::mute_for_preroll`) saved for
+    /// its restore, `PREROLL_VOLUME_NONE` when the pipeline is not muted. The volume is PER PIPELINE:
+    /// a stop unloads it (`reset` forgets this with it) and a reload's fresh Load starts at the
+    /// default again, so only a still-live pipeline ever needs the restore
+    /// (`player::restore_preroll_volume`: resume, the accepted re-pause, and the pump's per-tick sweep).
+    preroll_volume: AtomicI32,
     pub hud_until: AtomicU32,  // pl_hud_until (SDL ticks)
     pub scrub_ns: AtomicI64,   // pl_scrub_ns (-1 = not scrubbing)
     pub seek_to_ns: AtomicI64, // g_seek_to_ns (UI seek request, -1 = none)
@@ -2447,6 +2613,8 @@ impl Transport {
             pause_clock: Mutex::new(UserPauseClock::new()),
             resume_pend: AtomicBool::new(false),
             seek_preroll: AtomicBool::new(false),
+            seek_preroll_owned: AtomicI64::new(-1),
+            preroll_volume: AtomicI32::new(PREROLL_VOLUME_NONE),
             hud_until: AtomicU32::new(0),
             scrub_ns: AtomicI64::new(-1),
             seek_to_ns: AtomicI64::new(-1),
@@ -2523,9 +2691,62 @@ impl Transport {
         !self.paused.load(Ordering::Acquire) || self.seek_preroll_active()
     }
 
+    /// Open the paused-seek preroll for a seek the PUMP dispatched under a viewer Pause, and take
+    /// ownership of closing it (`pump::settle_paused_seek`). A preroll a caller already opened (the
+    /// foreground restore) stays the caller's: `false`. Re-opening an owned one just retargets it
+    /// (a coalesced tap). Not paused: nothing to hold, `false`.
+    pub fn own_paused_seek(&self, target_ns: i64) -> bool {
+        if self.seek_preroll_owned.load(Ordering::Acquire) >= 0 {
+            self.seek_preroll_owned.store(target_ns.max(0), Ordering::Release);
+            return true;
+        }
+        if self.seek_preroll_active() || !self.begin_paused_seek() {
+            return false;
+        }
+        self.seek_preroll_owned.store(target_ns.max(0), Ordering::Release);
+        true
+    }
+
+    /// The target of the preroll the pump owns, if it owns one.
+    pub fn owned_paused_seek(&self) -> Option<i64> {
+        let target = self.seek_preroll_owned.load(Ordering::Acquire);
+        (target >= 0 && self.seek_preroll_active()).then_some(target)
+    }
+
+    /// Closing the preroll ends any ownership of it, so a failed re-pause (which leaves the preroll
+    /// open) keeps the pump retrying, and every other closer (Resume, an abandoned seek, a stop)
+    /// drops it without the pump re-pausing a film the viewer has since released.
     pub fn finish_seek_preroll(&self) {
         self.seek_preroll.store(false, Ordering::Release);
+        self.seek_preroll_owned.store(-1, Ordering::Release);
         self.resume_pend.store(false, Ordering::Release);
+    }
+
+    /// The paused preroll muted the sink; `saved` (0..=100) is what [`take_preroll_volume`]
+    /// returns. A second mute (a reload's fresh pipeline inside one open preroll) keeps the first
+    /// saved value (always the pipeline default today: the volume is never read back).
+    ///
+    /// [`take_preroll_volume`]: Transport::take_preroll_volume
+    pub fn note_preroll_muted(&self, saved: i32) {
+        let _ = self.preroll_volume.compare_exchange(
+            PREROLL_VOLUME_NONE,
+            saved.clamp(0, 100),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    /// Whether a mute is outstanding.
+    pub fn preroll_muted(&self) -> bool {
+        self.preroll_volume.load(Ordering::Acquire) != PREROLL_VOLUME_NONE
+    }
+
+    /// Take the volume to restore, clearing the mute. `None` when nothing is muted.
+    pub fn take_preroll_volume(&self) -> Option<i32> {
+        match self.preroll_volume.swap(PREROLL_VOLUME_NONE, Ordering::AcqRel) {
+            PREROLL_VOLUME_NONE => None,
+            v => Some(v),
+        }
     }
 
     /// An engine reload is not a new playback and must not erase viewer Pause or the paused-seek
@@ -2552,6 +2773,9 @@ impl Transport {
         self.paused.store(false, Ordering::Release);
         self.resume_pend.store(false, Ordering::Relaxed);
         self.seek_preroll.store(false, Ordering::Relaxed);
+        self.seek_preroll_owned.store(-1, Ordering::Relaxed);
+        // The pipeline a mute belonged to is unloaded with the stop; the next one starts unmuted.
+        self.preroll_volume.store(PREROLL_VOLUME_NONE, Ordering::Relaxed);
         // …and not `scrub_ns`, for `reset_for_reload`'s reason: a new session is a fresh
         // `PlayerScreen` (or, on an auto-advance chain, `start_playback`'s in-place reset of the
         // live one), and both publish `Scrub::IDLE` themselves.

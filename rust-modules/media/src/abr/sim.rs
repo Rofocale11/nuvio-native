@@ -87,11 +87,11 @@ use super::{
     SegmentSample,
 };
 
-/// Video AU queue byte cap. `player::engine::AQ_VIDEO_BYTES` = `50 * 1024 * 1024`, carried by value
+/// Video AU queue byte cap. `player::engine::AQ_VIDEO_BYTES` = `96 * 1024 * 1024`, carried by value
 /// because this plant must not depend on the app's own model of itself (see the module note). If
 /// that constant moves, [`tests::the_plant_constants_still_match_the_pipeline`] fails — and it did,
 /// which is how the Phase 0 enlargement reached this file rather than being forgotten in it.
-pub(super) const VIDEO_QUEUE_BYTES: u64 = 50 * 1024 * 1024;
+pub(super) const VIDEO_QUEUE_BYTES: u64 = 96 * 1024 * 1024;
 /// **The video cap the M4 census was taken at**, 8 MiB, and the reason it has to be written down.
 ///
 /// [`tests::the_calibration_reproduces_the_device_census`] grades a MODEL against a MEASUREMENT,
@@ -102,12 +102,12 @@ pub(super) const VIDEO_QUEUE_BYTES: u64 = 50 * 1024 * 1024;
 /// prediction to check against is `1600 + 83886080/R_v`, about 25% above every video-bound row of
 /// the current table.
 pub(super) const CENSUS_VIDEO_QUEUE_BYTES: u64 = 8 * 1024 * 1024;
-/// **The audio cap the M4 census was taken at**, 1 MiB, for the same reason: the audio lane is the
+/// FORK (RichiL10): **the audio cap the M4 census was taken at**, 1 MiB, for the same reason: the audio lane is the
 /// binding one at the low rungs (320, 720), so the census reproduction has to run at the audio
 /// size it was measured with, not at the size that ships.
 pub(super) const CENSUS_AUDIO_QUEUE_BYTES: u64 = 1024 * 1024;
-/// Audio AU queue byte cap. `player::engine::AQ_AUDIO_BYTES` = `4 * 1024 * 1024`.
-pub(super) const AUDIO_QUEUE_BYTES: u64 = 4 * 1024 * 1024;
+/// Audio AU queue byte cap. `player::engine::AQ_AUDIO_BYTES` = `8 * 1024 * 1024`.
+pub(super) const AUDIO_QUEUE_BYTES: u64 = 8 * 1024 * 1024;
 /// Video feed-ahead throttle. `player::engine::MAX_FEED_AHEAD_NS` = 1.6 s.
 pub(super) const VIDEO_LEAD_MS: i64 = 1_600;
 /// Audio feed-ahead throttle: `MAX_FEED_AHEAD_NS + AUDIO_SLACK_NS` = 1.6 s + 2.0 s.
@@ -1003,7 +1003,7 @@ mod tests {
     fn the_lane_ceilings_come_from_elementary_rates() {
         let plant = Plant::default();
         // Each lane's ceiling is lead + queue_bits/rate, and the plant answers the SMALLER one.
-        // (The fork's 96 MiB / 8 MiB queues moved both numbers the comment above derives for the
+        // (FORK (RichiL10): the 96 MiB / 8 MiB queues moved both numbers the comment above derives for the
         // 10 MiB / 1 MiB plant, so the expectation is computed from the constants, not quoted.)
         let lane = |lead: i64, bytes: u64, kbps: u32| lead + (bytes * 8 / u64::from(kbps)) as i64;
         let p = p20000();

@@ -75,11 +75,40 @@ internal component labels, app and webOS versions, television model and hardware
 details needed to reproduce and symbolicate the failure.
 
 A native crash report may also contain the last 16 window diagnostic steps: entering or leaving
-background, querying the native window, and beginning or completing the first frame after return.
+background, releasing the borrowed window surface, querying the native window, finishing the background
+or return step, and beginning or completing the first frame after return. While the app is being sent to
+the background or brought back it also records the video player's teardown and video-window steps:
+unloading, destroying or retaining the player's native object, releasing the video plane, and creating
+and destroying the video window. The create step is recorded once the create call has returned, whether
+or not it produced a window, so it does not mean the window was obtained. These teardown and video-window
+steps are not recorded when the player is merely restarted (a trailer preview, a seek or a quality change).
 These steps include technical timestamps, fixed labels, whether playback was active, whether display/surface handles were
 available, and SDL's version numbers. They contain no window addresses or viewing content.
 They are collected only while crash reporting is enabled and accompany a crash rather than being
 sent as usage events. Disabling crash reports removes the local trace.
+
+When the television's own crash reporter leaves nothing for a crash that was a native fault (a
+signal such as a segmentation fault), PlxNative sends a simpler report built from its own crash
+log instead. It carries the same kernel name and release, webOS and hardware compatibility
+details as a native report (plus the same `probe` fact described for playback-error reports
+below), and the file name (never the folder) and build identifier of each
+library (a library of the television's firmware or one bundled with PlxNative) the faulting
+address and the return address were in, with the library's load address and size. A library that
+has no build identifier (the television's own C library has none) is still named, with its load
+address and size and an all-zero placeholder identifier, as the native report lists it. It carries the
+time of the crash, to the second, as the television's clock read it when the crash was logged (it
+is left out when that clock reads an implausible time). It also says in
+one fixed word why the primary report is missing: `no_envelope` (no usable report was left:
+the crash reporter left none, or left one that was malformed and was deleted before the comparison,
+which looks the same) or `envelope_unmatched` (it left reports, none of them this crash). No path, library
+folder or other file content is sent.
+
+When the crash was a Rust panic rather than a fault, the fallback report is smaller still: the
+source file and line of the panic, a hash of the panic message (the message itself is never sent),
+the app version and build identifier of PlxNative, the `environment` label of the build (`production`
+or `development`), the time of the panic (read and bounded as above), the same kernel name and release,
+webOS and hardware compatibility details (including the `probe` fact) that the fault fallback report carries, and
+the Crash report ID below. It carries none of the library details above.
 
 Every crash and error report carries a **Crash report ID**: a random identifier created on this
 television when you turn crash reports on, sent as the report's `user.id`. It exists so that
@@ -92,16 +121,19 @@ the local identifier; enabling them later creates a new one. Reports already sen
 identifier, so copy it down first if you intend to ask for their deletion.
 
 The same independent choice also covers a handled playback-error report when playback reaches its
-explicit terminal error screen. That report contains a fixed failure kind, delivery and quality
+explicit terminal error screen, or when a trailer preview behind a detail page fails. That report contains a fixed failure kind, delivery and quality
 classes, coarse raster, rate, HTTP and buffer classes, whether a first picture appeared, and at
 most 32 typed playback transitions with bucketed elapsed times. It contains no title, ratingKey,
 URL, path, playhead, duration, exact bitrate, server identity, address, token, account or profile,
 and is not joined to the product analytics identifier or `playback_id`. It carries the same Crash
 report ID as a crash report, and the same television model, SoC, hardware revision, webOS release
-and the `rtkmem`/`install` sandbox facts a crash report carries. Buffering, seeking, holding
+and the `rtkmem`/`install` sandbox facts a crash report carries. It also carries a `probe` fact:
+two fixed words, each `ok`, `no_keys`, `unreadable` or `unprobed` (the boot probe had not run yet), one for each of the two firmware information
+files the television model and webOS release are read from (`probe` is `ok/ok` when both
+answered), saying why that model, SoC or release is empty when it is. Buffering, seeking, holding
 a low quality, or rejecting an adaptive-bitrate candidate does not by itself send a report.
 The closed diagnostic vocabulary includes terminal kinds such as `playback_interrupted` and
-`original_rollback`; HLS direction `refresh`; delivery reason `original_open_rollback`; and
+`original_rollback`; HLS direction `refresh`; delivery reasons `original_open_rollback` and `quality_pick`; and
 Original-check outcomes `started`, `succeeded`, `no_body`, `deadline`, `transport`,
 `inconclusive`, `server_state` and `refused`.
 
@@ -186,7 +218,7 @@ Every product analytics event also carries this bounded compatibility and connec
 | `webos_api` | the webOS API version reported by nyx |
 | `webos_codename` | the webOS firmware family reported by nyx |
 | `device_model` | the LG model/platform class reported by nyx |
-| `soc` | the SoC/board class reported by nyx |
+| `soc` | the SoC/board class reported by nyx or, when nyx names none, the leading board-family token (at most eight lowercase letters and digits, such as `k5lp`) of the television's machine name |
 | `hardware_revision` | the hardware revision class reported by nyx |
 | `server_connection` | `local` / `remote` / `relay` / `unknown` — omitted entirely on an event with no one server, such as `app.launch`, `route.entered` or a `signin.*` event |
 | `ip_version` | `v4` / `v6` / `unknown` — omitted entirely on an event with no one server, same as `server_connection` |

@@ -779,6 +779,13 @@ plx_base::devtrig::latched_flag!(
 
 /// Prewarm both payload diagnostics before the first frame scope. Their getters are subsequently
 /// filesystem-free even when preview or payload construction first reaches them during a frame.
+/// Can a Dolby Vision declaration ride on this video codec (the source's own spelling, `"hevc"`,
+/// `"av1"`)? HEVC carries Profiles 5, 7 and 8; AV1 carries Profile 10. Anything else (an AVC
+/// Profile 9, VP9) is never declared.
+pub fn dv_video_codec(vcodec: &str) -> bool {
+    vcodec.eq_ignore_ascii_case("hevc") || vcodec.eq_ignore_ascii_case("av1")
+}
+
 pub fn prewarm_dv_latches() {
     let _ = dv_withheld();
     let _ = dv_node_suppressed();
@@ -2088,7 +2095,7 @@ fn fetch_detail(sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, Stri
         kind: it.kind.clone(),
         show_title: it.grandparent_title.clone(),
         show_rk: it.grandparent_rating_key.clone(),
-        season: it.parent_index,
+        season: it.parent_index.unwrap_or(0),
         index: it.index,
         title: it.title.clone(),
         year: it.year,
@@ -2461,6 +2468,10 @@ pub struct PlayingItem {
     /// The show's ratingKey when this is an episode (`grandparentRatingKey`), else empty — what
     /// the resolve asks the show's own language settings of (`route::plan::build_stream`).
     pub show_rk: String,
+    /// This item's own type — `movie | episode | show | season` — as the server's `type` says.
+    /// The track memory keys on it (per-show memo vs per-item), so an empty value only means the
+    /// server sent none (a local sample).
+    pub kind: String,
     pub audio: Vec<Stream>,
     pub subs: Vec<Stream>,
     pub video_fps: f64, // the played leaf's video fps (0 = unknown) — feeds the Load esInfo
@@ -2480,6 +2491,9 @@ pub struct PlayingItem {
     /// whose base layer we cannot display correctly (Profile 5, or a dual-layer Profile 7) would
     /// otherwise be fed to the decoder verbatim and shown in the wrong colours. See [`Dovi`].
     pub dovi: Dovi,
+    /// The source's video is HDR (PQ/HLG transfer, or Dolby Vision): a burn would re-encode it,
+    /// which is what `route::burn_refused_for_item` refuses on a 4K-capable server.
+    pub hdr: bool,
     pub markers: Vec<Marker>, // intro / credits segments — the in-player Skip prompt
     pub chapters: Vec<Chapter>, // chapter boundaries — the in-player Chapters tab/strip
     /// The played leaf's own `UltraBlurColors` corners (tl, tr, br, bl), or `None` when the server
@@ -2498,6 +2512,7 @@ impl PlayingItem {
             sid: plx_plex::plex::ServerId::from_raw(0),
             rk: "rk".into(),
             show_rk: String::new(),
+            kind: String::new(),
             audio: Vec::new(),
             subs,
             video_fps: 0.0,
@@ -2505,6 +2520,7 @@ impl PlayingItem {
             height: 0,
             bitrate: 0,
             dovi: Default::default(),
+            hdr: false,
             markers: Vec::new(),
             chapters: Vec::new(),
             blur: None,
@@ -2545,6 +2561,7 @@ fn cached_playing(state: &MetadataState, sid: plx_plex::plex::ServerId, rk: &str
             sid,
             rk: rk.to_string(),
             show_rk: d.show_rk.clone(),
+            kind: d.kind.clone(),
             audio: d.audio.clone(),
             subs: d.subs.clone(),
             video_fps: d.video_fps,
@@ -2552,6 +2569,7 @@ fn cached_playing(state: &MetadataState, sid: plx_plex::plex::ServerId, rk: &str
             height: d.height,
             bitrate: d.bitrate,
             dovi: d.dovi,
+            hdr: d.hdr,
             markers: d.markers.clone(),
             chapters: d.chapters.clone(),
             blur: d.has_blur.then_some(d.blur),
@@ -2587,7 +2605,8 @@ pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: O
         .as_ref()
         .and_then(|it| it.first_part().map(|p| convert_streams(&p.stream)))
         .unwrap_or_default();
-    let (audio, subs, video_fps, dovi) = (st.audio, st.subs, st.fps, st.dovi);
+    let (audio, subs, video_fps, dovi, hdr) = (st.audio, st.subs, st.fps, st.dovi, st.hdr);
+    let kind = it.map(|it| it.kind.clone()).unwrap_or_default();
     let show_rk = it
         .as_ref()
         .map(|it| it.grandparent_rating_key.clone())
@@ -2606,6 +2625,7 @@ pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: O
         sid,
         rk: rk.to_string(),
         show_rk,
+        kind,
         audio,
         subs,
         video_fps,
@@ -2613,6 +2633,7 @@ pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: O
         height,
         bitrate,
         dovi,
+        hdr,
         markers,
         chapters,
         blur,
@@ -3118,7 +3139,7 @@ fn convert_episode(x: &plx_plex::plex::Metadata) -> Episode {
     Episode {
         rk: x.rating_key.clone(),
         index: x.index,
-        season: x.parent_index,
+        season: x.parent_index.unwrap_or(0),
         title: x.title.clone(),
         summary: x.summary.clone(),
         aired: x.originally_available_at.clone(),

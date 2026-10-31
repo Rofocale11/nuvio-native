@@ -436,7 +436,15 @@
 {"e":"App","f":41,"from":"inst:1","payload":{"work":"discovery"},"t":"eff"}
 {"e":"Deliver","f":41,"from":"inst:1","payload":{"delivery":"hubs","to":"store:1"},"t":"eff"}
 {"e":"Deliver","f":41,"from":"inst:1","payload":{"delivery":"discovery","to":"store:0"},"t":"eff"}
-{"f":41,"payload":{"by":0,"entry":1,"focus":[1,0],"from":null,"group":0,"kind":"Focus","outcome":0,"phase":2,"to":null},"t":"rs"}
+{"e":"Deliver","f":41,"from":"Nav","payload":{"delivery":{"body":null,"event":"mount"},"to":"inst:2"},"t":"eff"}
+{"ev":"mount","f":41,"inst":2,"t":"life"}
+{"e":"Deliver","f":41,"from":"Nav","payload":{"delivery":{"body":{"fresh":{"group":0}},"event":"enter"},"to":"inst:2"},"t":"eff"}
+{"ev":"enter","f":41,"inst":2,"t":"life"}
+{"f":41,"payload":{"by":2,"entry":2,"focus":[2,1],"from":null,"group":0,"kind":"Focus","outcome":1,"phase":0,"to":[2,1]},"t":"rs"}
+{"e":"Deliver","f":41,"from":"Input","payload":{"delivery":{"body":{"by":"restore","from":null,"to":[2,1]},"event":"focus_moved"},"to":"inst:2"},"t":"eff"}
+{"e":"Deliver","f":41,"from":"Nav","payload":{"delivery":{"body":null,"event":"cover"},"to":"inst:1"},"t":"eff"}
+{"ev":"cover","f":41,"inst":1,"t":"life"}
+{"f":41,"payload":{"by":0,"entry":2,"focus":[2,1],"from":null,"group":0,"kind":"Focus","outcome":0,"phase":2,"to":null},"t":"rs"}
 {"bit":true,"f":41,"t":"present","why":null}
 {"elem":0,"entry":1,"f":41,"group":0,"t":"fo"}
 {"f":41,"hash":7882118029973291327,"t":"st"}
@@ -3563,6 +3571,8 @@
 {"e":"Deliver","f":461,"from":"Nav","payload":{"delivery":{"body":{"dt_us":7000,"ms":4065},"event":"tick"},"to":"inst:2"},"t":"eff"}
 {"f":461,"payload":{"by":0,"entry":2,"focus":[2,0],"from":null,"group":0,"kind":"Focus","outcome":0,"phase":2,"to":null},"t":"rs"}
 {"bit":true,"f":461,"t":"present","why":null}
+{"bits":1116209152,"f":461,"q":{"bold":false,"kind":"Width","sz":28,"text":[68,111,110,101]},"t":"metrics"}
+{"bits":1108082688,"f":461,"q":{"bold":true,"kind":"Width","sz":26,"text":[79,110]},"t":"metrics"}
 {"elem":0,"entry":2,"f":461,"group":0,"t":"fo"}
 {"f":461,"hash":10740780017576432449,"t":"st"}
 {"dt_us":8000,"f":462,"ms":4073,"t":"tick"}

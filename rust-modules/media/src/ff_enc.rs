@@ -856,7 +856,7 @@ mod tests {
     #[ignore = "needs the host build of the bundled FFmpeg — run by `make check-ffmpeg`"]
     fn a_71_sine_round_trips_to_640_kbps_ac3() {
         let _g = plx_base::testlock::serial();
-        super::super::image_subtitle_tests::bind_host_ffmpeg();
+        let _ffmpeg = super::super::image_subtitle_tests::bind_host_ffmpeg();
         let mut lane = unsafe {
             EncLane {
                 src: Source::Raw { fmt: SrcFmt::S32Le, roles: L71.to_vec() },
@@ -914,7 +914,7 @@ mod tests {
     #[ignore = "needs the host build of the bundled FFmpeg and PLX_ENC_FIXTURES"]
     fn real_flac_and_truehd_streams_encode_to_ac3() {
         let _g = plx_base::testlock::serial();
-        super::super::image_subtitle_tests::bind_host_ffmpeg();
+        let _ffmpeg = super::super::image_subtitle_tests::bind_host_ffmpeg();
         let dir = std::path::PathBuf::from(std::env::var_os("PLX_ENC_FIXTURES").expect("PLX_ENC_FIXTURES"));
         let mut ran = 0;
         for name in ["flac71.mkv", "flac51.mkv", "truehd.mkv"] {

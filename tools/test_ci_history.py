@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -66,6 +67,22 @@ class Fake:
         if "/jobs" in path:
             rid = int(path.split("/runs/")[1].split("/")[0])
             return {"jobs": self.jobs.get(rid, [job("only job", 10)])}
+        if path.endswith("/artifacts?per_page=100"):
+            rid = int(path.split("/runs/")[1].split("/")[0])
+            return {"artifacts": [{"id": aid, "name": name, "expired": False, "size_in_bytes": 10} for aid, name, _ in self.artifacts.get(rid, [])]}
+        raise AssertionError(path)
+
+    def blob(self, path):
+        """The artifact download double: the zip bytes of the artifact id in `.../artifacts/<id>/zip`."""
+        with self.lock:
+            self.calls.append(path)
+        aid = int(path.split("/artifacts/")[1].split("/")[0])
+        for items in self.artifacts.values():
+            for a, _, data in items:
+                if a == aid:
+                    if isinstance(data, Exception):
+                        raise data
+                    return data
         raise AssertionError(path)
 
     def job_calls(self):
@@ -84,7 +101,7 @@ def go(fake, src_doc=None, extra=()):
         if src_doc is not None:
             src.write_text(src_doc if isinstance(src_doc, str) else json.dumps(src_doc))
         with contextlib.redirect_stdout(io.StringIO()):
-            code = h.main(["--in", str(src), "--out", str(out), *extra], api=fake, now=NOW)
+            code = h.main(["--in", str(src), "--out", str(out), *extra], api=fake, now=NOW, blob=fake.blob)
         return code, (json.loads(out.read_text()) if out.exists() else None), (out.read_text() if out.exists() else "")
 
 

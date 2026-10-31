@@ -138,6 +138,32 @@ fn pass_capable_ac3_local_original_is_enhanced_remux() {
     plx_plex::plex::reset_servers_for_test();
 }
 
+/// The enhanced remux COPIES the source's video stream, so the plan must carry the file's own rate
+/// (23.976 in `fourk_item`) for the Load to declare: a 4K H.264 24p stream declared at the 60 an
+/// unknown rate keeps is presented at ~13 fps on webOS 4. The re-encoding burn below it claims none.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn enhanced_remux_plan_carries_the_source_rate_and_a_burn_does_not() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3", ac3_item, |_, _| {});
+    assert_enhanced(&r);
+    assert_eq!(r.plan.fps, 23.976, "a video copy keeps the source's rate");
+    assert_eq!(r.plan.src_fps, 23.976);
+    plx_plex::plex::reset_servers_for_test();
+
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
+        |sid| fourk_item_with_subs(sid, vec![track(1, "ac3", 2, true)], vec![selected_sub(9, "srt")]),
+        |_, _| {});
+    assert!(!r.plan.contract.remux, "a burn is a real re-encode");
+    assert_eq!(r.plan.fps, 0.0, "a re-encode owns its rate");
+    assert_eq!(r.plan.src_fps, 23.976, "the file's rate is still the file's");
+    plx_plex::plex::reset_servers_for_test();
+}
+
 #[test]
 #[cfg(feature = "devtriggers")]
 fn no_pass_is_direct_no_params() {
@@ -209,13 +235,14 @@ fn named_unfetched_audio_keeps_its_id_and_fails_closed() {
     plx_plex::plex::reset_servers_for_test();
 }
 
-/// Owner decision: a declared Dolby Vision source whose base layer IS self-displayable (P7/P8)
-/// gets the enhancement too — the remux plays the HDR10 base layer and simply never re-declares
-/// Dolby Vision (a remux was never able to carry `DolbyHdrInfo` at all — see `fill_direct_plan`'s
-/// own doc — so this drops nothing a remux could have kept).
+/// A declared Dolby Vision source whose base layer IS self-displayable (P7/P8) gets the
+/// enhancement too, and the remux keeps the declaration: the server copies the video, so the
+/// elementary stream still carries the DOVI configuration record the Load payload describes.
+/// (Measured on the dev PMS, `docs/pms-api.md` M9: the copied output keeps the DOVI record; a
+/// Jellyfin DirectStream, `-codec:v copy`, showed the same.)
 #[test]
 #[cfg(feature = "devtriggers")]
-fn dv_declared_p8_usable_base_is_enhanced_remux_without_dv() {
+fn dv_declared_p8_usable_base_is_enhanced_remux_that_keeps_dv() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
     let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
@@ -225,16 +252,17 @@ fn dv_declared_p8_usable_base_is_enhanced_remux_without_dv() {
             item
         },
         |env, _| env.dv_capability = Some(plx_platform::devcaps::dv::DvCapability::Supported));
+    let direct = r.plan.auto_original.as_ref().map(|c| c.dv_decision);
     assert!(
-        r.plan.auto_original.as_ref().is_some_and(|c| c.dv_decision.presentation.declared().is_some()),
+        direct.is_some_and(|d| d.presentation.declared().is_some()),
         "precondition: the P8 direct play would have declared DolbyHdrInfo",
     );
     assert_enhanced(&r);
-    // FORK (RichiL10): the server COPIES the video of this remux, RPUs included, so the fork
-    // declares the same Dolby Vision the direct play would (`remux_dv`, on by default).
-    assert!(
-        r.plan.dv_decision.presentation.declared().is_some(),
-        "FORK: a video-copy remux keeps DolbyHdrInfo while the enhancement is on",
+    assert_eq!(r.plan.dovi, p8(), "the copied video keeps its raw record");
+    assert_eq!(
+        Some(r.plan.dv_decision),
+        direct,
+        "the remux declares what the direct play would have: the video is copied, not re-encoded",
     );
     plx_plex::plex::reset_servers_for_test();
 }
@@ -248,7 +276,7 @@ fn dv_unusable_base_is_disabled_not_offered() {
     let carried = CarriedAudio::from_stream(&track(1, "ac3", 2, true), 0);
     let mut base = test_original_candidate(None);
     base.audio = Some(carried.clone());
-    let facts = |b| EnhancementFacts { pass: Subscription::Yes, base: Some(b), carried: Some(&carried), subtitle_effect: SubtitleEffect::None, refused: false };
+    let facts = |b| EnhancementFacts { pass: Subscription::Yes, base: Some(b), carried: Some(&carried), subtitle_effect: SubtitleEffect::None, refused: false, quality: Quality::Original, declined: None };
     assert!(enhancements_offered(&facts(&base), RouteFamily::Direct), "control: the clean base is offered");
     let mut unusable = base.clone();
     unusable.dovi = p5();
@@ -268,6 +296,9 @@ fn dv_unusable_base_is_disabled_not_offered() {
 fn embedded_default_subtitle_with_enhancement_is_burned() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
     let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
         |sid| fourk_item_with_subs(sid, vec![track(1, "ac3", 2, true)], vec![selected_sub(9, "srt")]),
         |_, _| {});
@@ -295,14 +326,17 @@ fn embedded_default_subtitle_with_enhancement_is_burned() {
 fn embedded_default_subtitle_with_enhancement_logs_applied_on_cold_start() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
-    let log_path = plx_base::paths::in_runtime_dir(plx_base::paths::runtime_file::EVENTS);
-    let before = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
-        |sid| fourk_item_with_subs(sid, vec![track(1, "ac3", 2, true)], vec![selected_sub(9, "srt")]),
-        |_, _| {});
+    // A PRIVATE log: the shared one is a single machine-wide file every other test binary (and any
+    // other `make check` beside this one) appends to and the simulator truncates, so slicing "what it
+    // gained" off it by offset can read another run's lines or panic on a file that shrank. The
+    // resolve logs on this thread (`eventlog::with_private_log`).
+    let (r, appended) = plx_base::eventlog::with_private_log(|| {
+        let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
+            |sid| fourk_item_with_subs(sid, vec![track(1, "ac3", 2, true)], vec![selected_sub(9, "srt")]),
+            |_, _| {});
+        (r, std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default())
+    });
     assert_eq!(r.plan.enhancement, EnhancementOutcome::Applied, "precondition: cold start is a Burn");
-    let written = std::fs::read(&log_path).unwrap();
-    let appended = String::from_utf8_lossy(&written[before as usize..]);
     assert!(
         appended.contains("enhancement: applied boost=0 loudness=1"),
         "no `enhancement: applied` line from the cold-start branch :: {appended:?}"
@@ -425,6 +459,9 @@ fn direct_play_start_leaves_the_servers_selected_download_alone() {
 fn a_viewer_pick_made_before_play_still_wins_over_the_servers_selection() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
     let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
         embedded_english_and_selected_download, |env, _| env.subtitle_override = Some(5));
     // (over this 48 Mbit/s Part the embedded track is burned, M7; only the selection is graded)
@@ -504,6 +541,9 @@ fn cold_reresolve_of_a_drawn_embedded_track_burns_where_the_reader_is_not_admitt
     ] {
         let mut ps = PlaybackSession::IDLE;
         let _g = fresh_registry(&mut ps);
+        // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+        // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+        set_sub_burn_for_test(Some(true));
         let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "truehd",
             |sid| {
                 let mut item = fourk_item(sid, vec![track(1, "truehd", 8, true)]);
@@ -864,4 +904,208 @@ fn aac51_source_outcome_unverified() {
     assert_eq!(classify_outcome(Some(&mc), Some(&not_copyable), PREF), EnhancementOutcome::Unverified);
     assert_eq!(classify_outcome(None, Some(&copyable), PREF), EnhancementOutcome::Unverified);
     assert_eq!(classify_outcome(Some(&mc), Some(&copyable), plx_plex::plex::AudioEnhancements::NONE), EnhancementOutcome::Off);
+}
+
+// ---- Q-TOP (b) beside the enhancement: a remembered subtitle on the forced burn ------------------
+
+/// What the profile remembered for show 4242: the English text track.
+fn remembers_english_subtitle() -> Vec<plx_plex::plex::session::prefs::TrackMemoryEntry> {
+    use plx_plex::plex::session::prefs::{SubtitleMemo, SubtitleTrackMemo, TrackMemoryEntry};
+    let english = SubtitleTrackMemo { lang: "eng".into(), kind: "text".into(), ..Default::default() };
+    vec![TrackMemoryEntry::new("enh-pms", "4242", None, Some(SubtitleMemo::Track(english)))]
+}
+
+/// An episode of show 4242 with one embedded English subtitle the server has NOT selected.
+fn episode_with_an_unselected_subtitle(
+    sid: ServerId, audio: Vec<plx_data::metadata::Stream>,
+) -> plx_data::metadata::PlayingItem {
+    let sub = plx_data::metadata::Stream { selected: false, ..selected_sub(9, "srt") };
+    plx_data::metadata::PlayingItem {
+        kind: "episode".into(),
+        show_rk: "4242".into(),
+        ..fourk_item_with_subs(sid, audio, vec![sub])
+    }
+}
+
+/// M7's forced burn is a route that already re-encodes (it denies the remux), so the remembered pick
+/// rides it: the same wire an embedded server selection gets.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn q_top_b_the_forced_burn_carries_the_remembered_subtitle() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
+        |sid| episode_with_an_unselected_subtitle(sid, vec![track(1, "ac3", 2, true)]),
+        |env, _| env.memory = remembers_english_subtitle());
+    assert!(r.plan.url.contains("start.mkv") && !r.plan.contract.remux, "a burn is a re-encode: {}", r.plan.url);
+    assert_eq!(query_param(&r.plan.url, "subtitleStreamID"), Some("9"), "{}", r.plan.url);
+    assert_eq!(query_param(&r.plan.url, "subtitles"), Some("burn"), "{}", r.plan.url);
+    assert_eq!(selection_subtitles(&r.requests), vec!["9"], "{:?}", r.requests);
+    assert_eq!((r.plan.sub_sid, r.plan.memory_note), (9, false));
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// The edge: the server refuses the enhancement and the route falls back to the direct play it
+/// decorated. The burn existed only for the enhancement, so the fallback wire carries none (its MDE
+/// is the direct play's own), the plan draws the remembered track itself, and the menu has no note.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn q_top_b_a_refused_enhancement_falls_back_to_a_direct_play_with_no_burn() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Refuse, 0, MKV, "ac3",
+        |sid| episode_with_an_unselected_subtitle(sid, vec![track(1, "ac3", 2, true)]),
+        |env, _| env.memory = remembers_english_subtitle());
+    assert!(r.plan.url.contains("/library/parts/") && !r.plan.url.contains("start.mkv"), "direct play: {}", r.plan.url);
+    assert_eq!(r.plan.enhancement, EnhancementOutcome::Refused);
+    let after_refusal = r.requests.iter().rposition(|l| l.contains("/decision?") && !l.contains("hasMDE=1"))
+        .expect("the refused transcode decision");
+    assert!(
+        r.requests[after_refusal + 1..].iter().all(|l| !l.contains("subtitles=burn")),
+        "nothing after the refusal burns: {:?}", r.requests,
+    );
+    let fallback_mde = r.requests.last().expect("requests");
+    assert!(fallback_mde.contains("hasMDE=1"), "the direct play's own MDE closes the resolve: {fallback_mde}");
+    assert_eq!(query_param(fallback_mde, "subtitles"), Some("none"), "{fallback_mde}");
+    assert_eq!((r.plan.sub_sid, r.plan.sub_render_ordinal, r.plan.memory_note), (9, Some(0), false));
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A refused enhancement on an enhanced remux that was a forced burn (no direct play behind it) is
+/// still a re-encode: the rebuilt request keeps the remembered subtitle the plan reports, instead of
+/// dropping to the session's (empty) selection.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn q_top_b_a_refused_forced_burn_keeps_the_remembered_subtitle() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    // FORK (RichiL10): a 4K fixture, which the fork never burns into by default (`sub_burn=never4k`,
+    // `decision::burn_refused_for_source`); this pins upstream's burn under `sub_burn=allow`.
+    set_sub_burn_for_test(Some(true));
+    let r = resolve(&mut ps, MDE_TRANSCODE_COPY, EnhMode::Refuse, 0, MKV, "truehd",
+        |sid| episode_with_an_unselected_subtitle(sid, vec![track(1, "truehd", 8, true)]),
+        |env, _| env.memory = remembers_english_subtitle());
+    assert!(r.plan.url.contains("start.mkv"), "setup: the server still encodes: {}", r.plan.url);
+    assert_eq!(r.plan.enhancement, EnhancementOutcome::Refused);
+    assert!(!r.plan.contract.remux, "setup: the forced burn was a re-encode");
+    assert_eq!(r.plan.sub_sid, 9);
+    assert_eq!(query_param(&r.plan.url, "subtitleStreamID"), Some("9"), "{}", r.plan.url);
+    assert_eq!(query_param(&r.plan.url, "subtitles"), Some("burn"), "{}", r.plan.url);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// **Both enhancement toggles off, the route is not forced into a burn.** `enhancement_route` says
+/// what the enhancement WOULD take where it is offered (Plex Pass, an analysed track, an embedded
+/// subtitle on screen: `Burn`), and says it whether or not the viewer turned anything on. The forced
+/// re-encode is that route spent, so with no param to send it has nothing to carry: the plan stays
+/// the codec-preserving remux the server's own decision named, with the video copied and nothing
+/// burned.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn burn_route_offered_but_no_enhancement_wanted_is_not_forced_into_a_re_encode() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_TRANSCODE_COPY, EnhMode::Honor("ac3"), 0, MKV, "truehd",
+        |sid| fourk_item_with_subs(sid, vec![track(1, "truehd", 8, true)], vec![selected_sub(9, "srt")]),
+        |env, _| env.audio_enhancements = plx_plex::plex::AudioEnhancements::NONE);
+    assert!(r.plan.url.contains("start.mkv"), "setup: the TrueHD is converted by the server: {}", r.plan.url);
+    assert_eq!(r.plan.contract.audio, plx_plex::plex::AudioEnhancements::NONE, "setup: nothing is asked for");
+    assert!(!any_param(&r.requests), "no enhancement param rides: {:?}", r.requests);
+    assert!(r.plan.contract.remux, "the video is copied: nothing was asked that needs a re-encode");
+    for d in transcode_decisions(&r.requests) {
+        assert!(!d.contains("subtitles=burn"), "nothing burns: {d}");
+    }
+    plx_plex::plex::reset_servers_for_test();
+}
+
+// ---- FORK (RichiL10): pacchetto 7, the cold start of a 4K Dolby Vision film -------------------
+
+/// "Le due torri" as the server must remux it (its audio converted by the server: TrueHD here, the
+/// host caps having no lane), with a subtitle the series memory remembered.
+fn le_due_torri_episode(sid: ServerId) -> plx_data::metadata::PlayingItem {
+    let mut item = episode_with_an_unselected_subtitle(sid, vec![track(1, "truehd", 8, true)]);
+    item.dovi = plx_data::metadata::Dovi { present: true, profile: 7, bl_compat: 6, el_present: true, ..plx_data::metadata::Dovi::NONE };
+    item.hdr = true;
+    item.bitrate = 66_000;
+    item
+}
+
+/// B2 + B4 at the cold start: a remembered per-series subtitle on a 4K DV film whose audio only the
+/// server converts. The remux copies the video and declares the source's Dolby Vision (P7, fed as
+/// 8.1) and frame rate exactly as direct play would, and nothing is burned, with the audio
+/// enhancement off and with it on (upstream's forced burn, refused under `sub_burn=never4k`).
+#[test]
+#[cfg(feature = "devtriggers")]
+fn fork_cold_start_remembered_subtitle_on_a_4k_dv_film_keeps_dv_and_burns_nothing() {
+    for enh in [plx_plex::plex::AudioEnhancements::NONE, PREF] {
+        let mut ps = PlaybackSession::IDLE;
+        let _g = fresh_registry(&mut ps);
+        let r = resolve(&mut ps, MDE_TRANSCODE_COPY, EnhMode::Honor("ac3"), 0, MKV, "truehd",
+            le_due_torri_episode,
+            |env, _| {
+                env.memory = remembers_english_subtitle();
+                env.audio_enhancements = enh;
+                env.dv_capability = Some(plx_platform::devcaps::dv::DvCapability::Supported);
+            });
+        assert!(r.plan.url.contains("start.mkv") && r.plan.contract.remux, "{enh:?}: a copy: {}", r.plan.url);
+        for d in transcode_decisions(&r.requests) {
+            assert!(!d.contains("subtitles=burn"), "{enh:?}: nothing burns: {d}");
+            assert!(!d.contains("maxVideoBitrate") && !d.contains("videoResolution"), "{enh:?}: no cap: {d}");
+        }
+        assert!(!r.plan.url.contains("subtitles=burn"), "{enh:?}: {}", r.plan.url);
+        assert!(r.plan.dv_decision.presentation.declared().is_some(), "{enh:?}: the copy declares DV");
+        assert_eq!(r.plan.fps, 23.976, "{enh:?}: the copy declares the film's own rate (#832)");
+        assert_eq!(r.plan.dovi.profile, 7, "{enh:?}");
+        assert!(r.plan.src_dovi.converts_to_p81() && r.plan.source_hdr, "{enh:?}: the item's facts");
+        plx_plex::plex::reset_servers_for_test();
+    }
+}
+
+/// Defect (b) at a cold re-resolve (a retry or restart): a subtitle the session carried that the
+/// server would have to burn into the 66 Mbit/s DV copy is not burned: the wire says
+/// `subtitles=none`, the route stays the copy with its Dolby Vision.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn fork_cold_reresolve_carrying_a_burn_into_a_4k_dv_copy_sends_none() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_TRANSCODE_COPY, EnhMode::Honor("ac3"), 0, MKV, "truehd",
+        le_due_torri_episode,
+        |env, _| {
+            env.audio_enhancements = plx_plex::plex::AudioEnhancements::NONE;
+            env.dv_capability = Some(plx_platform::devcaps::dv::DvCapability::Supported);
+            env.sub_sid = 77;
+            env.sub_drawn = Some(0);
+        });
+    assert!(r.plan.contract.remux, "{}", r.plan.url);
+    assert_eq!(query_param(&r.plan.url, "subtitles"), Some("none"), "{}", r.plan.url);
+    for d in transcode_decisions(&r.requests) {
+        assert!(!d.contains("subtitles=burn"), "{d}");
+    }
+    assert!(r.plan.dv_decision.presentation.declared().is_some());
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// The control: `sub_burn=allow` gives the same carried subtitle upstream's burn.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn fork_cold_reresolve_with_sub_burn_allow_keeps_upstreams_burn() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    set_sub_burn_for_test(Some(true));
+    let r = resolve(&mut ps, MDE_TRANSCODE_COPY, EnhMode::Honor("ac3"), 0, MKV, "truehd",
+        le_due_torri_episode,
+        |env, _| {
+            env.audio_enhancements = plx_plex::plex::AudioEnhancements::NONE;
+            env.sub_sid = 77;
+            env.sub_drawn = Some(0);
+        });
+    assert_ne!(query_param(&r.plan.url, "subtitles"), Some("none"), "{}", r.plan.url);
+    plx_plex::plex::reset_servers_for_test();
 }

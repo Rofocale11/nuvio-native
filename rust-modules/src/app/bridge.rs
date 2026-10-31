@@ -1446,7 +1446,7 @@ impl Rig<AppHost> for Bridge {
             match msg {
                 AppMsg::Store(StoreCmd::Hubs(cmd)) => {
                     let directory = self.directory.view();
-                    io.hubs_with_directory(&mut self.stores.hubs, Some(cmd.clone()), 0.0, directory)
+                    let _ = io.hubs_with_directory(&mut self.stores.hubs, Some(cmd.clone()), 0.0, directory)
                         .endpoints.emit(fx);
                     return Handled::Yes;
                 }
@@ -1461,12 +1461,12 @@ impl Rig<AppHost> for Bridge {
                     if outcome.changed {
                         self.stores.browse.borrow_mut().capture_directory(&mut self.directory);
                     }
-                    endpoints.emit(fx);
+                    let _ = endpoints.emit(fx);
                     return Handled::Yes;
                 }
                 AppMsg::StoreWork(plx_data::stores::StoreWork::Hubs) => {
                     let directory = self.directory.view();
-                    io.hubs_with_directory(&mut self.stores.hubs, None, parts.tick.dt(), directory)
+                    let _ = io.hubs_with_directory(&mut self.stores.hubs, None, parts.tick.dt(), directory)
                         .endpoints.emit(fx);
                     return Handled::Yes;
                 }
@@ -1511,29 +1511,29 @@ impl Rig<AppHost> for Bridge {
             }
             AppMsg::Store(StoreCmd::Hubs(c)) => {
                 let directory = self.directory.view();
-                self.stores.hubs.run_with_directory(c.clone(), directory)
+                let _ = self.stores.hubs.run_with_directory(c.clone(), directory)
                     .endpoints.emit(fx);
                 Handled::Yes
             }
             AppMsg::Store(cmd) => step_store(cmd, &cx, fx),
             AppMsg::HubsResult(result) => {
                 let directory = self.directory.view();
-                self.stores.hubs.land_with_directory(result, directory)
+                let _ = self.stores.hubs.land_with_directory(result, directory)
                     .endpoints.emit(fx);
                 Handled::Yes
             }
             AppMsg::StoreWork(plx_data::stores::StoreWork::Hubs) => {
                 let directory = self.directory.view();
-                self.stores.hubs.tick_with_directory(parts.tick.dt(), directory)
+                let _ = self.stores.hubs.tick_with_directory(parts.tick.dt(), directory)
                     .endpoints.emit(fx);
                 Handled::Yes
             }
             AppMsg::StoreWork(plx_data::stores::StoreWork::BrowseDiscovery) => {
-                self.stores.browse.borrow_mut().discover_pump_with_gate(&self.stores.landgate).endpoints.emit(fx);
+                let _ = self.stores.browse.borrow_mut().discover_pump_with_gate(&self.stores.landgate).endpoints.emit(fx);
                 Handled::Yes
             }
             AppMsg::StoreWork(plx_data::stores::StoreWork::Browse) => {
-                self.stores.browse.borrow_mut().pump_with_gate(&self.stores.landgate).endpoints.emit(fx);
+                let _ = self.stores.browse.borrow_mut().pump_with_gate(&self.stores.landgate).endpoints.emit(fx);
                 Handled::Yes
             }
             AppMsg::StoreWork(plx_data::stores::StoreWork::Search { dt_us }) => {

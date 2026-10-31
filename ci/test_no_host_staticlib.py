@@ -13,7 +13,7 @@ This used to run a full `cargo build --lib` (30-50 s of codegen on the serial ca
 file it writes for a library unit from that unit's `crate_types`, so the property is decided before
 rustc starts, and this reads it there at no compile cost:
 
-  * `cargo build --lib --unit-graph` (nightly, `-Zunstable-options`) prints the resolved unit
+  * `cargo build --lib --unit-graph` (`-Zunstable-options`, let through with RUSTC_BOOTSTRAP=1 on the stable pin) prints the resolved unit
     graph of the build the old test ran, without compiling anything. The app library unit's
     `target.crate_types` must be exactly `["rlib"]`;
   * `cargo metadata --no-deps` reports the declared `[lib]` target; its `crate_types` and `kind`
@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from rust_toolchain import pinned
 
 ROOT = Path(__file__).resolve().parent.parent
 CRATE = "plxnative_modules"
@@ -82,9 +83,13 @@ def layer_offences(unit_graph):
 def cargo(args, cwd):
     env = dict(os.environ)
     env["PATH"] = str(Path.home() / ".cargo/bin") + os.pathsep + env.get("PATH", "")
-    # cwd matters: cargo finds rust-modules/.cargo/config.toml (build-std and the codegen flags)
-    # from the working directory.
-    proc = subprocess.run(["cargo", f"+{NIGHTLY}", *args], cwd=cwd, stdout=subprocess.PIPE,
+    # `--unit-graph` is cargo's only interface to the resolved compile units and it is nightly-only
+    # (`-Zunstable-options`). The repo's toolchain is stable, so RUSTC_BOOTSTRAP=1 lets that one
+    # read-only query through; nothing is compiled and nothing here ships.
+    env["RUSTC_BOOTSTRAP"] = "1"
+    # cwd matters: cargo finds rust-modules/.cargo/config.toml (the codegen flags) from the working
+    # directory.
+    proc = subprocess.run(["cargo", f"+{TOOLCHAIN}", *args], cwd=cwd, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True, env=env)
     if proc.returncode != 0:
         raise AssertionError(f"cargo {' '.join(args)} failed: {proc.stderr[-2000:]}")

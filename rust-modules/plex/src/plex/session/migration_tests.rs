@@ -44,7 +44,7 @@ fn v1_routine_public_edit_does_not_upgrade_or_reencrypt_auth() {
     });
     public.preferences["future_public"] = "keep".into();
     let mut session = join_canonical(&public, &protected).unwrap();
-    session.auto_sign_in = false;
+    session.prefs.auto_sign_in = false;
     let mut requests = Vec::new();
     let response = loaded(
         &public,
@@ -251,16 +251,16 @@ fn malformed_hero_hint_is_discarded_without_losing_credentials() {
     let mut value = serde_json::to_value(fixture()).unwrap();
     value["last_hero_blur"] = serde_json::json!({"future":"shape"});
     let session: Session = serde_json::from_value(value).unwrap();
-    assert!(session.last_hero_blur.is_none());
+    assert!(session.prefs.last_hero_blur.is_none());
     assert_eq!(session.account_token, "synthetic-account");
     let (_, auth) = split_canonical(&session).unwrap();
     let mut public = state::PublicPayload::default();
     public.preferences =
         serde_json::json!({"auto_sign_in":"bad","last_library":null,"last_hero_blur":"bad"});
     let session = join_canonical(&public, &auth).unwrap();
-    assert!(!session.auto_sign_in);
-    assert!(session.last_library.is_empty());
-    assert!(session.last_hero_blur.is_none());
+    assert!(!session.prefs.auto_sign_in);
+    assert!(session.prefs.last_library.is_empty());
+    assert!(session.prefs.last_hero_blur.is_none());
 }
 
 struct Opener {
@@ -320,7 +320,7 @@ impl persistence::MigrationStore for MigrationFixture {
             return CanonicalRead::Blocked(error);
         }
         if self.cleared {
-            return CanonicalRead::Cleared { revision: 1, language: plx_platform::i18n::Preference::System };
+            return CanonicalRead::Cleared { revision: 1, kept: Default::default() };
         }
         match &self.data {
             Some(payload) => CanonicalRead::Data {
@@ -423,7 +423,7 @@ fn live_load_and_update_use_the_canonical_authority() {
     assert!(super::update(|current| {
         assert_eq!(current.account_token, "synthetic-account");
         let mut next = current.clone();
-        next.auto_sign_in = true;
+        next.prefs.auto_sign_in = true;
         Some(next)
     }));
     let CanonicalRead::Data { payload, revision } = persistence::load() else {
@@ -641,8 +641,8 @@ fn locked_boot_exposes_only_public_preferences_and_never_offline_profiles() {
     else {
         panic!("locked snapshot")
     };
-    assert!(session.auto_sign_in);
-    assert_eq!(session.last_library.len(), 1);
+    assert!(session.prefs.auto_sign_in);
+    assert_eq!(session.prefs.last_library.len(), 1);
     assert!(session.account_token.is_empty());
     assert!(session.user.token.is_empty());
     assert!(session.profiles.is_empty());
@@ -733,7 +733,7 @@ fn production_client_coordinator_and_helper_backend_reconcile_committed_lost_rep
         panic!("helper snapshot")
     };
     let mut next = session.clone();
-    next.auto_sign_in = false;
+    next.prefs.auto_sign_in = false;
     assert!(matches!(
         persistence::commit_session_with(
             &next,
@@ -768,15 +768,17 @@ fn helper_signout_retains_the_language_and_only_the_delete_all_reset_removes_it(
     let mut backend = plx_platform::storage::backend::Backend::new(
         Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
-    let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
+    let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() }.with_ui_resolution(UiResolution::Hd720);
     assert!(matches!(
         persistence::commit_session_with(&session, false, SaveAuthority::FreshReauthentication, 4, &mut transport),
         persistence::CanonicalCommit::Durable { .. }));
     assert!(matches!(persistence::commit_clear_with(&mut transport),
         persistence::CanonicalCommit::Durable { .. }));
     assert!(matches!(persistence::load_helper_with(&mut transport),
-        CanonicalRead::Cleared { language: plx_platform::i18n::Preference::Be, .. }),
-        "sign-out must keep the install-wide language readable");
+        CanonicalRead::Cleared {
+            kept: Retained { language: plx_platform::i18n::Preference::Be, ui_resolution: UiResolution::Hd720 }, ..
+        }),
+        "sign-out must keep the install-wide language and Interface resolution readable");
     let client::Load::Present(cleared) = client::load_with(&mut transport).unwrap() else {
         panic!("helper snapshot")
     };
@@ -784,8 +786,10 @@ fn helper_signout_retains_the_language_and_only_the_delete_all_reset_removes_it(
     assert!(matches!(persistence::reset_cleared_language_with(&mut transport),
         persistence::CanonicalCommit::Durable { .. }));
     assert!(matches!(persistence::load_helper_with(&mut transport),
-        CanonicalRead::Cleared { language: plx_platform::i18n::Preference::System, .. }),
-        "Delete all local data must reset the language");
+        CanonicalRead::Cleared {
+            kept: Retained { language: plx_platform::i18n::Preference::System, ui_resolution: UiResolution::Hd720 }, ..
+        }),
+        "Delete all local data must reset the language (the cleared tenure accepts the removal of `language` alone)");
     let client::Load::Present(reset) = client::load_with(&mut transport).unwrap() else {
         panic!("helper snapshot")
     };
@@ -822,22 +826,29 @@ fn stored_preferences(transport: &mut dyn client::Transport) -> Value {
 #[test]
 fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite() {
     let mut backend = plx_platform::storage::backend::Backend::new(
-        Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
+        Db8::default(), state::Flavor::Stable, "com.beb.plxnative.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
+    let base = fixture();
     let session = Session {
-        subtitle_size: SubtitleSize::Large,
-        subtitle_position: SubtitlePosition::High,
-        skip_interval: SkipInterval::Seconds30,
-        ..fixture()
+        prefs: Preferences {
+            subtitle_size: SubtitleSize::Large,
+            subtitle_position: SubtitlePosition::High,
+            skip_interval: SkipInterval::Seconds30,
+            ..base.prefs.clone()
+        },
+        ..base
     };
     commit_fresh(&session, &mut transport);
     let stored = stored_preferences(&mut transport);
     assert_eq!(stored["subtitle_size"], "large");
 
     let back = Session {
-        subtitle_size: SubtitleSize::default(),
-        subtitle_position: SubtitlePosition::default(),
-        skip_interval: SkipInterval::default(),
+        prefs: Preferences {
+            subtitle_size: SubtitleSize::default(),
+            subtitle_position: SubtitlePosition::default(),
+            skip_interval: SkipInterval::default(),
+            ..session.prefs.clone()
+        },
         ..session
     };
     assert!(matches!(
@@ -846,9 +857,9 @@ fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite
     let persistence::CanonicalRead::Opened { session: opened, .. } = persistence::load_helper_with(&mut transport) else {
         panic!("the session opens")
     };
-    assert_eq!(opened.subtitle_size, SubtitleSize::default(), "size stays at the default");
-    assert_eq!(opened.subtitle_position, SubtitlePosition::default(), "position stays at the default");
-    assert_eq!(opened.skip_interval, SkipInterval::default(), "skip interval stays at the default");
+    assert_eq!(opened.prefs.subtitle_size, SubtitleSize::default(), "size stays at the default");
+    assert_eq!(opened.prefs.subtitle_position, SubtitlePosition::default(), "position stays at the default");
+    assert_eq!(opened.prefs.skip_interval, SkipInterval::default(), "skip interval stays at the default");
 }
 
 /// **Issue #380: a learned server key belongs to the account that learned it.** The key rides in
@@ -867,11 +878,14 @@ fn helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_
 
     // A pin write: public-only, the auth half untouched.
     let learned = Session {
-        server_key_pins: vec![ServerKeyPin {
-            machine_id: "machine".into(),
-            pin: plx_base::spki::pin_from_spki_der(b"synthetic spki"),
-            extensions: Default::default(),
-        }],
+        prefs: Preferences {
+            server_key_pins: vec![ServerKeyPin {
+                machine_id: "machine".into(),
+                pin: plx_base::spki::pin_from_spki_der(b"synthetic spki"),
+                extensions: Default::default(),
+            }],
+            ..session.prefs.clone()
+        },
         ..session.clone()
     };
     let client::Load::Present(before) = client::load_with(&mut transport).unwrap() else { panic!("helper snapshot") };
@@ -900,7 +914,50 @@ fn helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_
     let persistence::CanonicalRead::Opened { session: opened, .. } = persistence::load_helper_with(&mut transport) else {
         panic!("the new account's session opens")
     };
-    assert!(opened.server_key_pins.is_empty(), "no key carried over from the previous account");
+    assert!(opened.prefs.server_key_pins.is_empty(), "no key carried over from the previous account");
+}
+
+/// **Issue #385: an answer to "Connect without encryption?" belongs to the account that gave it.**
+/// Same shape as the learned-key test above, same reason: the answer rides in the PUBLIC
+/// preferences, which ClearTenure retains whole, so sign-out has to drop it by name. Through the
+/// real helper backend: an answer is stored, sign-out and "Delete all local data" leave the record
+/// naming no server and no account fingerprint, and the same account signing back in is asked
+/// again rather than handed its earlier answer.
+#[test]
+fn helper_signout_forgets_the_plaintext_answers_and_signing_back_in_asks_again() {
+    let mut backend = plx_platform::storage::backend::Backend::new(
+        Db8::default(), state::Flavor::Stable, "com.beb.plxnative.storage".into());
+    let mut transport = |request: Request| Ok(backend.dispatch(request));
+    let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
+    commit_fresh(&session, &mut transport);
+
+    // An answer write: public-only, the auth half untouched.
+    let answered = session.with_plaintext_choice("account-fingerprint", "machine", PlaintextChoice::Allowed);
+    let client::Load::Present(before) = client::load_with(&mut transport).unwrap() else { panic!("helper snapshot") };
+    assert!(matches!(
+        persistence::commit_session_with(&answered, false, SaveAuthority::PublicOnly, 4, &mut transport),
+        persistence::CanonicalCommit::Durable { .. }));
+    let client::Load::Present(after) = client::load_with(&mut transport).unwrap() else { panic!("helper snapshot") };
+    assert_eq!(before.state.auth_envelope, after.state.auth_envelope, "an answer write reseals nothing");
+    assert!(stored_preferences(&mut transport).get("plaintext_consent").is_some(), "the answer is stored");
+
+    // Sign-out.
+    assert!(matches!(persistence::commit_clear_with(&mut transport), persistence::CanonicalCommit::Durable { .. }));
+    let kept = stored_preferences(&mut transport);
+    assert!(kept.get("plaintext_consent").is_none(), "sign-out must forget every plaintext answer: {kept}");
+    assert_eq!(kept["language"], "be", "the install-wide language is still retained");
+
+    // "Delete all local data" follows sign-out and must leave the record just as clean.
+    assert!(matches!(persistence::reset_cleared_language_with(&mut transport),
+        persistence::CanonicalCommit::Durable { .. }));
+    assert!(stored_preferences(&mut transport).get("plaintext_consent").is_none());
+
+    // The same account signs back in: it is asked again.
+    commit_fresh(&session, &mut transport);
+    let persistence::CanonicalRead::Opened { session: opened, .. } = persistence::load_helper_with(&mut transport) else {
+        panic!("the returning account's session opens")
+    };
+    assert_eq!(opened.plaintext_choice("account-fingerprint", "machine"), PlaintextChoice::Undecided);
 }
 
 /// **Issue #385: an answer to "Connect without encryption?" belongs to the account that gave it.**
@@ -1083,7 +1140,7 @@ fn check_v1_extension_bootstrap_roundtrip(keys: &[String]) {
     assert!(ready.profiles.is_empty());
     assert_eq!(serde_json::to_value(&ready.extensions).unwrap(), extensions);
     session = ready;
-    session.auto_sign_in = !session.auto_sign_in;
+    session.prefs.auto_sign_in = !session.prefs.auto_sign_in;
     assert!(matches!(
         persistence::commit_session_with(
             &session,

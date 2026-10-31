@@ -22,6 +22,7 @@
 #include <libavcodec/bsf.h>
 #include <libavutil/frame.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/mastering_display_metadata.h>
 
 /* Two ways to recover the same list, chosen by the platform's constraint rather than by taste.
  *

@@ -67,7 +67,7 @@
             "name": "How do I install PlxNative on an LG webOS TV?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Install PlxNative from your computer through LG Developer Mode (no root required), or open Homebrew Channel on your TV and install it from the catalogue. The step-by-step guide covers both."
+              "text": "Install PlxNative from your computer through LG Developer Mode, or open Homebrew Channel on your TV and install it from the catalogue. The step-by-step guide covers both."
             }
           },
           {
@@ -76,6 +76,22 @@
             "acceptedAnswer": {
               "@type": "Answer",
               "text": "No. Developer Mode installation works on a regular LG webOS TV. Homebrew Channel is optional and only needed for catalogue installs and updates."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does it work with a free Plex server?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. PlxNative works with free Plex servers. You need a Plex account and a Plex Media Server."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does it play music or Live TV?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. PlxNative plays movies and TV shows. There is no music, photos or Live TV."
             }
           },
           {
@@ -183,9 +199,10 @@
               <span class="brand-name">PlxNative</span>
             </a>
             <nav class="site-nav" aria-label="Primary navigation">
-              <a href="#feel">Demo</a>
-              <a href="#why">Why</a>
-              <a href="#showcase">Features</a>
+              <a href="#features">Features</a>
+              <a href="#approach">Approach</a>
+              <a href="#install">Install</a>
+              <a href="#faq">FAQ</a>
               <span class="nav-pill" aria-hidden="true"></span>
             </nav>
             <div class="header-actions">
@@ -202,23 +219,25 @@
 
         <section class="hero" id="top" aria-labelledby="hero-title">
           <h1 id="hero-title">
-            <span class="hero-kicker" data-intro>An unofficial Plex client for LG webOS TVs</span>
             <span class="hero-line hero-line--lead" data-intro>Your Plex library.</span>
             <span class="hero-line hero-line--sub" data-intro><span class="hero-shine">A pleasure to explore.</span></span>
           </h1>
           <div class="hero-copy">
             <p class="hero-lede" data-intro>
-              PlxNative is an independent Plex client for webOS. Explore your Plex Media Server library
-              through a fast, fluid native interface designed for LG webOS TVs.
+              An independent Plex app for LG webOS TVs that keeps up with your remote and plays video on the
+              TV's own decoder.
             </p>
             <div class="hero-actions" data-intro>
               <a class="button button-primary" href="#install">Install PlxNative</a>
-              <a class="hero-gh-link" href="https://github.com/GLinnik21/plx-native">View on GitHub</a>
+              <a class="button button-secondary" href="https://github.com/GLinnik21/plx-native">View on GitHub</a>
             </div>
             <p class="hero-meta" data-intro>
               <span class="hero-meta-item">Open source</span><span class="sep" aria-hidden="true">&nbsp;·</span>
-              <span class="hero-meta-item">No root required</span><span class="sep" aria-hidden="true">&nbsp;·</span>
-              <span class="hero-meta-item">Built for LG webOS</span>
+              <span class="hero-meta-item">Needs webOS 4.0+, no root</span>
+            </p>
+            <p class="hero-version" data-intro>
+              Version 0.8.0<span class="sep" aria-hidden="true">&nbsp;·</span>
+              <a href="https://github.com/GLinnik21/plx-native/releases">Changelog</a>
             </p>
           </div>
         </section>
@@ -231,7 +250,6 @@
           <div class="feel-sticky">
             <div class="feel-heading">
               <h2 id="feel-title">See how it feels</h2>
-              <p>Responsiveness is hard to describe. It is easier to show.</p>
             </div>
             <div class="feel-stage">
               <picture>
@@ -276,120 +294,192 @@
           </div>
         </section>
 
-        <section class="why-section" id="why" aria-labelledby="why-title">
-          <h2 id="why-title" data-reveal>Why I built PlxNative</h2>
-          <p class="why-lead" data-words>
-            Browsing my Plex library on my 2019 LG TV felt slower than it needed to, even though the picture still looked great.
-          </p>
-          <p class="why-copy" data-reveal>
-            I wanted an interface that felt quick under the remote and enjoyable to spend time in. PlxNative grew from that idea.
-          </p>
+        <section class="quote-section quote-section--lead" aria-label="What people say">
+          <div class="quote-lead" data-reveal>
+            <p class="quote-lead-text">
+              <span class="quote-mark" aria-hidden="true">&ldquo;</span
+              ><span>The most responsive and speedy Plex experience I've had on any platform</span>
+            </p>
+            <a class="quote-lead-link" href="https://github.com/GLinnik21/plx-native/issues/103"
+              >Read the original comment on GitHub →</a
+            >
+          </div>
         </section>
 
-        <section class="showcase-section" id="showcase" aria-labelledby="showcase-title">
-          <div class="section-heading" data-reveal>
-            <h2 id="showcase-title" data-scrub-big>Made for the big screen.</h2>
-            <p>Fast navigation, clear focus, and a bit of delight in the details.</p>
-          </div>
-
-          <figure class="closeup-figure closeup-figure--full">
-            <picture>
-              <source media="(max-width: 759px)" srcset="media/closeup-glass-narrow-glow.png" />
-              <img class="closeup-glow" src="media/closeup-glass-glow.png" alt="" aria-hidden="true" loading="lazy" decoding="async" />
-            </picture>
-            <div data-reveal="media" class="closeup-box closeup-box--glass">
+        <section class="features-section" id="features" aria-labelledby="features-title">
+          <h2 id="features-title" class="visually-hidden">What PlxNative looks and feels like</h2>
+          <p class="look-lead" data-reveal>Glass panels over your own posters and artwork. Text is large enough to read from across the room, and the focused item is always obvious.</p>
+          <div class="feature-grid">
+            <figure class="look-panel look-panel--glass" data-reveal="media">
+              <!-- Phones crop the middle of the wide render rather than use the narrow cut,
+                   which ends at "TV S" and loses the search button. -->
               <picture>
-                <source media="(max-width: 759px)" srcset="media/closeup-glass-narrow.webp" type="image/webp" />
-                <source media="(max-width: 759px)" srcset="media/closeup-glass-narrow.jpg" />
                 <source srcset="media/closeup-glass.webp" type="image/webp" />
-                <img
-                  src="media/closeup-glass.jpg"
-                  alt="Close-up of the translucent tab bar blurring the posters behind it"
-                  loading="lazy"
-                  decoding="async"
-                />
+                <img src="media/closeup-glass.jpg" alt="Close-up of the PlxNative navigation bar: a frosted glass pane over movie posters, with Home, Movies, TV Shows and search" width="2640" height="480" loading="lazy" decoding="async" />
               </picture>
-            </div>
-            <figcaption data-reveal>
-              <h3>Depth without distraction</h3>
-              <p>Translucent surfaces keep artwork visible and controls readable.</p>
-            </figcaption>
-          </figure>
-
-          <div class="closeup-row">
-            <figure class="closeup-figure">
-              <img class="closeup-glow" src="media/closeup-tiles-glow.png" alt="" aria-hidden="true" loading="lazy" decoding="async" />
-              <div data-reveal="media" class="closeup-box closeup-box--tiles">
-                <picture>
-                  <source media="(max-width: 759px)" srcset="media/closeup-tiles-narrow.webp" type="image/webp" />
-                  <source media="(max-width: 759px)" srcset="media/closeup-tiles-narrow.jpg" />
-                  <source srcset="media/closeup-tiles.webp" type="image/webp" />
-                  <img
-                    src="media/closeup-tiles.jpg"
-                    alt="Close-up of a poster row with the focused tile raised above its neighbours"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </picture>
-              </div>
-              <figcaption data-reveal>
-                <h3>Designed for ten feet away</h3>
-                <p>Clear focus states make remote navigation obvious.</p>
+              <figcaption>
+                <span class="look-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="12" height="12" rx="3"></rect><rect x="8.5" y="9" width="12" height="10" rx="3"></rect></svg></span>
+                <div><h3>Glass look</h3><p>Translucent panels over posters and backdrops.</p></div>
               </figcaption>
             </figure>
-            <figure class="closeup-figure">
-              <img class="closeup-glow" src="media/closeup-player-glow.png" alt="" aria-hidden="true" loading="lazy" decoding="async" />
-              <div data-reveal="media" class="closeup-box closeup-box--player">
-                <picture>
-                  <source media="(max-width: 759px)" srcset="media/closeup-player-narrow.webp" type="image/webp" />
-                  <source media="(max-width: 759px)" srcset="media/closeup-player-narrow.jpg" />
-                  <source srcset="media/closeup-player.webp" type="image/webp" />
-                  <img
-                    src="media/closeup-player.jpg"
-                    alt="Close-up of the Up Next card with the Next Episode countdown button"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </picture>
+            <div class="feature-card feature-card--fast" data-reveal="card" data-spot>
+              <p class="feature-stat" aria-hidden="true">60<span>fps</span></p>
+              <div class="feature-fast-copy">
+                <h3>A fast interface</h3>
+                <p>Every screen drawn directly on the TV's GPU, even on a 2019 set.</p>
               </div>
+            </div>
+            <div class="feature-card feature-card--half" data-reveal="card" data-spot>
+              <div class="feature-stage feature-stage--qr" aria-hidden="true"><div class="feature-qr"><svg viewBox="0 0 25 25" width="100" height="100" shape-rendering="crispEdges"><path fill="#08080a" d="M0 0h7v1h-7zM13 0h1v1h-1zM18 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM9 1h1v1h-1zM13 1h4v1h-4zM18 1h1v1h-1zM24 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM8 2h2v1h-2zM11 2h2v1h-2zM15 2h2v1h-2zM18 2h1v1h-1zM20 2h3v1h-3zM24 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM8 3h1v1h-1zM12 3h4v1h-4zM18 3h1v1h-1zM20 3h3v1h-3zM24 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM8 4h2v1h-2zM16 4h1v1h-1zM18 4h1v1h-1zM20 4h3v1h-3zM24 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h4v1h-4zM13 5h1v1h-1zM15 5h1v1h-1zM18 5h1v1h-1zM24 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h7v1h-7zM8 7h2v1h-2zM14 7h1v1h-1zM16 7h1v1h-1zM0 8h1v1h-1zM2 8h5v1h-5zM9 8h2v1h-2zM12 8h5v1h-5zM18 8h5v1h-5zM2 9h1v1h-1zM4 9h2v1h-2zM8 9h1v1h-1zM11 9h3v1h-3zM16 9h1v1h-1zM19 9h1v1h-1zM23 9h1v1h-1zM0 10h1v1h-1zM3 10h1v1h-1zM5 10h2v1h-2zM9 10h3v1h-3zM13 10h5v1h-5zM21 10h1v1h-1zM23 10h2v1h-2zM0 11h2v1h-2zM7 11h2v1h-2zM10 11h2v1h-2zM14 11h2v1h-2zM18 11h1v1h-1zM24 11h1v1h-1zM1 12h2v1h-2zM4 12h1v1h-1zM6 12h3v1h-3zM10 12h1v1h-1zM12 12h3v1h-3zM17 12h4v1h-4zM22 12h3v1h-3zM0 13h3v1h-3zM7 13h1v1h-1zM10 13h1v1h-1zM13 13h1v1h-1zM16 13h2v1h-2zM19 13h1v1h-1zM21 13h1v1h-1zM23 13h1v1h-1zM0 14h1v1h-1zM3 14h1v1h-1zM5 14h2v1h-2zM9 14h1v1h-1zM11 14h2v1h-2zM14 14h2v1h-2zM19 14h3v1h-3zM23 14h2v1h-2zM0 15h1v1h-1zM2 15h1v1h-1zM4 15h1v1h-1zM7 15h1v1h-1zM9 15h3v1h-3zM14 15h3v1h-3zM18 15h3v1h-3zM24 15h1v1h-1zM0 16h1v1h-1zM2 16h1v1h-1zM4 16h1v1h-1zM6 16h1v1h-1zM11 16h1v1h-1zM15 16h6v1h-6zM22 16h1v1h-1zM8 17h1v1h-1zM12 17h2v1h-2zM16 17h1v1h-1zM20 17h2v1h-2zM0 18h7v1h-7zM10 18h1v1h-1zM13 18h2v1h-2zM16 18h1v1h-1zM18 18h1v1h-1zM20 18h1v1h-1zM22 18h3v1h-3zM0 19h1v1h-1zM6 19h1v1h-1zM8 19h1v1h-1zM12 19h2v1h-2zM16 19h1v1h-1zM20 19h2v1h-2zM23 19h2v1h-2zM0 20h1v1h-1zM2 20h3v1h-3zM6 20h1v1h-1zM8 20h3v1h-3zM12 20h1v1h-1zM14 20h7v1h-7zM22 20h3v1h-3zM0 21h1v1h-1zM2 21h3v1h-3zM6 21h1v1h-1zM8 21h1v1h-1zM17 21h2v1h-2zM20 21h5v1h-5zM0 22h1v1h-1zM2 22h3v1h-3zM6 22h1v1h-1zM8 22h5v1h-5zM15 22h1v1h-1zM21 22h2v1h-2zM24 22h1v1h-1zM0 23h1v1h-1zM6 23h1v1h-1zM9 23h1v1h-1zM11 23h1v1h-1zM14 23h4v1h-4zM19 23h3v1h-3zM24 23h1v1h-1zM0 24h7v1h-7zM8 24h1v1h-1zM10 24h2v1h-2zM19 24h6v1h-6z"></path></svg><span class="qr-frame"><i></i><i></i><i></i><i></i></span></div></div>
+              <h3>Sign in on the TV</h3>
+              <p>Scan a QR code with your phone, then pick your Plex Home profile. PIN-protected profiles are supported.</p>
+            </div>
+            <div class="feature-card feature-card--half" data-reveal="card" data-spot>
+              <div class="feature-stage feature-stage--fan" aria-hidden="true"><div class="feature-fan"><i></i><i></i><i></i></div></div>
+              <h3>All your libraries</h3>
+              <p>Your own libraries and the ones shared with you.</p>
+            </div>
+            <div class="feature-card feature-card--wide feature-card--decode" data-reveal="card" data-spot>
+              <div class="feature-stage feature-stage--decode" aria-hidden="true">
+                <span class="net-row">
+                  <span class="net-node"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5M10 11.5v5l4-2.5z"></path></svg><b>HEVC 10-bit</b></span>
+                  <span class="net-link"></span>
+                  <span class="net-node net-node--chip"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect><rect x="9.5" y="9.5" width="5" height="5" rx="1"></rect><path d="M9 2.5V6M15 2.5V6M9 18v3.5M15 18v3.5M2.5 9H6M2.5 15H6M18 9h3.5M18 15h3.5"></path></svg><b>TV decoder</b></span>
+                  <span class="net-link"></span>
+                  <span class="net-node"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="12.5" rx="2"></rect><path d="M8 20h8"></path></svg><b>4K HDR</b></span>
+                </span>
+              </div>
+              <h3>Video on the TV's own decoder</h3>
+              <p>Up to 4K HDR with Dolby Vision and Atmos where your set supports them. Before you press Play, it shows whether a title plays directly or converts on your server.</p>
+            </div>
+            <div class="feature-card feature-card--wide feature-card--shot" data-reveal="card" data-spot>
+              <div class="feature-stage feature-stage--shot">
+                <img src="docs/screenshots/player.jpg" alt="PlxNative player with the transport bar over video" width="1600" height="900" loading="lazy" decoding="async" />
+              </div>
+              <div class="feature-chips" aria-hidden="true"><span>Resume</span><span>Chapters</span><span>Audio tracks</span><span>Subtitles</span><span class="is-opt">Skip Intro</span></div>
+              <h3>A full player</h3>
+              <p>Styled and image subtitles you can retime, and progress that syncs back to Plex.</p>
+            </div>
+            <div class="feature-card feature-card--half" data-reveal="card" data-spot>
+              <div class="feature-stage feature-stage--net" aria-hidden="true">
+                <span class="net-cloud"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.2 4.5 4.5 0 0 0 7 18z"></path><path d="M4 4l16 16"></path></svg><b>Internet · off</b></span>
+                <span class="net-row"><span class="net-node"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="12.5" rx="2"></rect><path d="M8 20h8"></path></svg><b>TV</b></span><span class="net-link"></span><span class="net-node"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3.5" width="16" height="7" rx="1.8"></rect><rect x="4" y="13.5" width="16" height="7" rx="1.8"></rect><path d="M8 7h.01M8 17h.01"></path></svg><b>Plex server</b></span></span>
+                <span class="net-label">Home network · on</span>
+              </div>
+              <h3>Works without internet</h3>
+              <p>After the first sign-in, PlxNative talks to your Plex server directly. Your library keeps working on your home network when the internet is down.</p>
+            </div>
+          </div>
+          <p class="kicker shots-kicker" data-reveal>Real captures from the app</p>
+          <div class="shot-grid">
+            <figure class="shot">
+              <div class="shot-frame" data-reveal="media" data-unveil><img src="docs/screenshots/ux-library-sort.jpg" alt="PlxNative Movies library as a poster grid, with the Sort by menu open on Title and the A to Z rail at the right edge" width="1920" height="1080" loading="lazy" decoding="async" /></div>
               <figcaption data-reveal>
-                <h3>Ready for the next episode</h3>
-                <p>When the credits roll, the next episode is one press away.</p>
+                <h3>Library</h3>
+                <p>Every movie or show in one grid, sorted and filtered the way you choose.</p>
+              </figcaption>
+            </figure>
+            <figure class="shot">
+              <div class="shot-frame" data-reveal="media" data-unveil><img src="docs/screenshots/search.jpg" alt="PlxNative Search screen with grouped results" width="1600" height="900" loading="lazy" decoding="async" /></div>
+              <figcaption data-reveal>
+                <h3>Search</h3>
+                <p>One query across every server you can reach, with results grouped by kind.</p>
               </figcaption>
             </figure>
           </div>
         </section>
 
-        <section class="built-section" aria-label="How PlxNative is built">
-          <div class="built-card" data-reveal="card" data-spot>
-            <h3 class="built-title">Built differently.</h3>
-            <p>
-              PlxNative draws its interface directly on the TV's GPU, without running it in Chromium or a WebView.
-              This keeps browsing light and responsive, even on older LG TVs. Video uses the TV's own hardware decoder.
-            </p>
-            <p class="built-tech">Rust &middot; OpenGL &middot; Native webOS &middot; Open source</p>
+        <section class="works-section" id="plex" aria-labelledby="plex-title">
+          <div class="works-heading" data-reveal>
+            <h2 id="plex-title">Works with your Plex</h2>
+            <p>Your account, servers and profiles carry over from Plex.</p>
           </div>
-          <div class="built-card built-card--offline" data-reveal="card" data-spot>
-            <h3 class="built-title">No internet? Keep watching.</h3>
-            <p>
-              After the initial online sign-in, PlxNative connects directly to your local Plex server, so your
-              library stays available over your home network, even when the internet is down.
-            </p>
+          <!-- A block of type, not a checklist: every line runs the full width, each line's
+               size fitted to it (--fit, measured from the real font, in container units so the
+               block keeps its shape at any width). The lines are grouped so their fits stay
+               within about 10% of each other, which keeps each tier one size. Key features large and white, the everyday
+               ones medium grey, the long tail small and dim. -->
+          <div class="works-cloud">
+            <ul class="works-row" style="--fit: 7.332" data-reveal><li class="is-key">Continue Watching</li><li>Recently Added</li></ul>
+            <ul class="works-row" style="--fit: 6.756" data-reveal><li>Collections</li><li class="is-minor">Trailers &amp; extras</li><li class="is-minor">Cast &amp; Crew</li><li class="is-minor">A–Z rail</li><li class="is-minor">Sort &amp; filter</li></ul>
+            <ul class="works-row" style="--fit: 7.51" data-reveal><li class="is-key">Plex Home profiles</li><li>Shared libraries</li></ul>
+            <ul class="works-row" style="--fit: 6.587" data-reveal><li>Search across servers</li><li>Subtitle search</li><li class="is-minor">Mark as Watched</li></ul>
+            <ul class="works-row" style="--fit: 6.655" data-reveal><li class="is-key">Skip Intro</li><li>Skip Credits</li><li class="is-minor">Chapters</li><li class="is-minor">Normalize loudness</li></ul>
+            <ul class="works-row" style="--fit: 6.507" data-reveal><li>Styled subtitles</li><li class="is-minor">Image subtitles</li><li class="is-minor">Subtitle timing</li><li class="is-minor">Forced subtitles</li></ul>
+            <ul class="works-row" style="--fit: 6.69" data-reveal><li class="is-key">Up Next</li><li>Language preferences</li><li class="is-minor">Remove from Deck</li></ul>
           </div>
+        </section>
+
+        <section class="approach-section" id="approach" aria-labelledby="approach-title">
+          <h2 id="approach-title" data-reveal>Built differently.</h2>
+          <p class="approach-statement" data-words>Browsing my Plex library on my 2019 LG TV felt slower than it needed to, even though the picture still looked great.</p>
+          <p class="approach-lede" data-reveal>I wanted an interface that felt quick under the remote and enjoyable to spend time in. PlxNative takes a different route: it is written in Rust, and video goes to the TV's own decoder. I use it every day to watch things off my server in the next room.</p>
+          <!-- One stack that changes as it scrolls (site.js sets the progress; pinned, in the
+               page's flow only in short landscape windows): a typical TV app's seven layers, as
+               glass plates under a plain wireframe of a TV app, then its three browser layers slide away, the
+               four that stay close up under the app, and a still motion blur of the picture shows it
+               dropping straight from the app to the screen; the picture sharpens into PlxNative's
+               as the label turns. Without the scene (no JS, reduced
+               motion) it is the settled PlxNative stack. -->
+          <figure class="stack-scene" aria-labelledby="stack-title">
+            <div class="stack-sticky">
+              <p class="stack-title" id="stack-title"><strong>Most TV apps run inside a browser.</strong> PlxNative doesn't.</p>
+              <div class="stack-stage" role="img" aria-label="An exploded stack of layers. A typical TV app: the app as a web page, JavaScript, a browser engine, a compositor, OpenGL, the GPU, the screen. PlxNative has no JavaScript, browser engine or compositor: the app, in native code, draws with OpenGL straight to the GPU and the screen.">
+                <p class="stack-kicker" aria-hidden="true"><span class="is-typical">A typical TV app</span><span class="is-ours">PlxNative</span></p>
+                <div class="stack-layers" aria-hidden="true">
+                  <div class="layer" data-layer data-y0="0" data-y1="0" style="--z: 9; --f: 0">
+                    <div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture><span class="plate-generic"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
+                    <span class="layer-label">The app<span class="layer-sub"><span class="is-typical">a web page</span><span class="is-ours">native code</span></span></span>
+                  </div>
+                  <div class="layer" data-layer data-cut="0" data-y0="0.22" style="--z: 6; --f: 0.22">
+                    <div class="plate plate--glass plate--code"><i style="width: 44%; margin-left: 0%"></i><i style="width: 70%; margin-left: 8%"></i><i style="width: 56%; margin-left: 16%"></i><i style="width: 62%; margin-left: 8%"></i><i style="width: 22%; margin-left: 0%"></i></div>
+                    <span class="layer-label">JavaScript</span>
+                  </div>
+                  <div class="layer" data-layer data-cut="1" data-y0="0.44" style="--z: 5; --f: 0.44">
+                    <div class="plate plate--glass plate--page"><i></i><i></i><i></i></div>
+                    <span class="layer-label">Browser engine</span>
+                  </div>
+                  <div class="layer" data-layer data-cut="2" data-y0="0.66" style="--z: 4; --f: 0.66">
+                    <div class="plate plate--glass plate--panes"><i></i><i></i><i></i></div>
+                    <span class="layer-label">Compositor</span>
+                  </div>
+                  <div class="layer" data-layer data-y0="0.88" data-y1="0.24" style="--z: 3; --f: 0.24">
+                    <div class="plate plate--glass"><svg viewBox="0 0 160 90" preserveAspectRatio="none"><path d="M12 78L40 16L70 78ZM40 16L100 12L70 78ZM70 78L100 12L128 70ZM100 12L148 30L128 70ZM12 78L70 78L128 70M40 16L12 40L12 78M128 70L148 30L148 78Z"></path></svg></div>
+                    <span class="layer-label">OpenGL</span>
+                  </div>
+                  <div class="layer" data-layer data-y0="1.10" data-y1="0.48" style="--z: 2; --f: 0.48">
+                    <div class="plate plate--glass plate--grid"></div>
+                    <span class="layer-label">GPU</span>
+                  </div>
+                  <div class="layer" data-layer data-y0="1.32" data-y1="0.72" style="--z: 1; --f: 0.72">
+                    <div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture><span class="plate-generic"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
+                    <span class="layer-label">Screen</span>
+                  </div>
+                  <div class="stack-trail">
+                    <div class="ghost" style="--f: 0.0655; --o: 0.055"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.1309; --o: 0.066"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.1964; --o: 0.081"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.2618; --o: 0.100"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.3273; --o: 0.121"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.3927; --o: 0.145"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.4582; --o: 0.171"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.5236; --o: 0.200"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.5891; --o: 0.231"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                    <div class="ghost" style="--f: 0.6545; --o: 0.265"><div class="plate plate--picture"><picture><source media="(max-width: 759px)" srcset="media/feel-poster-narrow.jpg" /><img src="media/feel-poster.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" /></picture></div></div>
+                  </div>
+                  <div class="stack-stat">
+                    <p class="stack-fps"><span class="stack-fps-n" data-count="60">60</span><span class="stack-fps-u">fps</span></p>
+                    <p class="stack-caption">on a 2019 LG TV</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </figure>
         </section>
 
         <section class="quote-section" aria-label="Community feedback">
           <p class="kicker" data-reveal>From the community</p>
           <div class="quote-cloud">
-            <div class="quote-lead" data-reveal>
-              <p class="quote-lead-text">
-                <span class="quote-mark" aria-hidden="true">&ldquo;</span
-                ><span>The most responsive and speedy Plex experience I've had on any platform</span>
-              </p>
-              <a class="quote-lead-link" href="https://github.com/GLinnik21/plx-native/issues/103"
-                >Read the original comment on GitHub →</a
-              >
-            </div>
             <a data-reveal data-drift="-1" class="quote-lg" href="https://www.reddit.com/r/webos/comments/1wj44l2/comment/pbocndj/"
               ><span class="quote-text">Amazing stuff, been daily driving it for a few days now on 2 different TVs</span
               ><span class="quote-source">Reddit &middot; 2 LG TVs</span></a
@@ -401,10 +491,6 @@
             <a data-reveal data-drift="0.7" class="quote-sm" href="https://www.reddit.com/r/webos/comments/1wj44l2/comment/pbcn8ph/"
               ><span class="quote-text">She said it feels like a real streaming service</span
               ><span class="quote-source">Reddit &middot; LG C2</span></a
-            >
-            <a data-reveal data-drift="0.5" class="quote-sm" href="https://www.reddit.com/r/webos/comments/1wj44l2/comment/pbr022v/"
-              ><span class="quote-text">I'm happy to replace the main Plex client with PlxNative</span
-              ><span class="quote-source">Reddit</span></a
             >
             <a data-reveal data-drift="0.9" class="quote-sm" href="https://github.com/GLinnik21/plx-native/issues/103"
               ><span class="quote-text">Love the liquid glass aesthetic</span
@@ -453,10 +539,14 @@
           </ol>
         </section>
 
+
         <section class="install-section" id="install" aria-labelledby="install-title">
           <div class="install-intro" data-reveal>
             <h2 id="install-title" data-scrub-big>Bring PlxNative to your LG TV.</h2>
             <p>Start with a regular LG webOS TV, or use your existing Homebrew Channel setup.</p>
+            <div class="install-chips">
+              <span class="chip"><svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5.5c0 4.2 2.8 7.6 7 9.5 4.2-1.9 7-5.3 7-9.5V6z"></path><path d="m9 12 2.2 2.2L15.5 10"></path></svg>Developer Mode is LG's official feature</span>
+            </div>
           </div>
           <div class="install-grid">
             <article class="install-card" data-reveal="card" data-spot>
@@ -471,46 +561,39 @@
             <article class="install-card" data-reveal="card" data-spot>
               <p class="install-eyebrow">Already have Homebrew Channel?</p>
               <h3>Homebrew Channel</h3>
-              <p>Open Homebrew Channel on your TV, find PlxNative, and select Install. Get future updates there too.</p>
+              <p>Open Homebrew Channel on your TV, find PlxNative, and select Install. Updates arrive there too.</p>
               <a href="https://repo.webosbrew.org/apps/com.beb.plxnative/">Open in the catalogue →</a>
             </article>
           </div>
-          <p class="install-footnote" data-reveal>
-            <span>LG Content Store:</span> I'm exploring an official release. Availability and timing aren't
-            confirmed.
-          </p>
-        </section>
-
-        <section class="notes-section" aria-labelledby="notes-title">
-          <div class="notes-heading" data-reveal>
-            <h2 id="notes-title">Before you install</h2>
-            <div class="notes-links">
-              <a href="https://github.com/GLinnik21/plx-native/blob/main/README.md">Compatibility notes</a>
-              <span>·</span>
-              <a href="/troubleshooting/">Troubleshooting</a>
-              <span>·</span>
-              <a href="https://github.com/GLinnik21/plx-native/blob/main/PRIVACY.md">Privacy policy</a>
-            </div>
+          <div class="store-note" data-reveal>
+            <span class="store-pill">LG Content Store</span>
+            <p>Not available. LG’s standard store process is Web-only, so a native app like PlxNative can’t go through it. I’ve asked LG whether any other route exists. <a href="https://github.com/GLinnik21/plx-native/discussions/754">Full story and updates →</a></p>
           </div>
-          <div class="notes-grid">
+          <div class="notes-split">
             <div data-reveal>
-              <h3>LG webOS</h3>
-              <p>Built for webOS 4.0 and newer. Compatibility can vary by TV model.</p>
+              <h2 id="notes-title">Compatibility notes</h2>
+              <div class="notes-stack">
+                <div>
+                  <h3>LG webOS</h3>
+                  <p>Needs webOS 4.0 or newer. Compatibility can vary by TV model.</p>
+                </div>
+                <div>
+                  <h3>Plex</h3>
+                  <p>Needs a Plex account and a Plex Media Server.</p>
+                </div>
+                <div>
+                  <h3>Playback</h3>
+                  <p>PlxNative uses the codecs your television lists and falls back to Plex transcoding when needed.</p>
+                </div>
+              </div>
+              <div class="notes-links">
+                <a href="/troubleshooting/">Troubleshooting →</a>
+              </div>
             </div>
-            <div data-reveal>
-              <h3>Plex</h3>
-              <p>
-                Requires a Plex account and Plex Media Server. Internet access is needed for initial
-                sign-in; local playback works without it.
-              </p>
-            </div>
-            <div data-reveal>
-              <h3>Playback</h3>
-              <p>PlxNative uses the codecs available on your television and falls back to Plex transcoding when needed.</p>
-            </div>
-            <div data-reveal>
-              <h3>Privacy</h3>
-              <p>At first launch, PlxNative asks whether you'd like to share crash reports and usage analytics. You can opt in to either one, both, or neither.</p>
+            <div class="privacy-card" data-reveal>
+              <h2>Privacy</h2>
+              <p class="privacy-lead">Your library data never reaches me. Crash reports and usage analytics are off until you turn them on. No title, search term, subtitle line, server name or address appears in any report.</p>
+              <a href="https://github.com/GLinnik21/plx-native/blob/main/PRIVACY.md">Read the privacy policy →</a>
             </div>
           </div>
         </section>
@@ -533,9 +616,26 @@
               <p>No. Developer Mode installation works on a regular LG webOS TV. Homebrew Channel is optional and only needed for catalogue installs and updates.</p>
             </div>
             <div data-reveal>
+              <h3>Does it work with a free Plex server?</h3>
+              <p>Yes. PlxNative works with free Plex servers. You need a Plex account and a Plex Media Server.</p>
+            </div>
+            <div data-reveal>
+              <h3>Does it play music or Live TV?</h3>
+              <p>No. PlxNative plays movies and TV shows. There is no music, photos or Live TV.</p>
+            </div>
+            <div data-reveal>
               <h3>Is PlxNative made by Plex or LG?</h3>
               <p>No. It is an independent, unofficial project and is not affiliated with or endorsed by Plex GmbH or LG Electronics.</p>
             </div>
+          </div>
+        </section>
+
+        <section class="support-section" aria-label="Support PlxNative">
+          <div class="community-support" data-reveal="card">
+            <p>PlxNative is free and open source. Support helps keep it going.</p>
+            <a class="footer-kofi" href="https://ko-fi.com/0xbeb">
+              <img src="icons/support_me_on_kofi_dark.png" alt="Support me on Ko-fi" width="180" height="36" loading="lazy" />
+            </a>
           </div>
         </section>
 
@@ -558,12 +658,6 @@
               <a href="https://github.com/GLinnik21/plx-native/blob/main/THIRD-PARTY-NOTICES.md">Third-party notices</a>
               <a href="https://github.com/GLinnik21/plx-native/blob/main/TRADEMARKS.md">Trademarks</a>
             </nav>
-          </div>
-          <div class="footer-support">
-            <p>PlxNative is free and open source. Support helps keep it going.</p>
-            <a class="footer-kofi" href="https://ko-fi.com/0xbeb">
-              <img src="icons/support_me_on_kofi_dark.png" alt="Support me on Ko-fi" width="180" height="36" loading="lazy" />
-            </a>
           </div>
           <p class="footer-meta">
             <span>GPL-3.0-or-later</span>

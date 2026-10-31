@@ -34,8 +34,9 @@ Scene fields (tests/manifest.json, `fps_scenes`):
   "walk": {"key_gap_s": 0.33, "max_rows": 170, ...}
                                 after the Home shelves land, press Down once per landed row at
                                 that pace and then Up back, and grade the heartbeats of THAT window
-  "walk": {"landed": "library", "extra_rows": 6, "fingerprint_region": "grid", ...}
-                                the same walk over the Library: sized from the seated section's
+  "walk": {"landed": "library", "extra_rows": 0, "fingerprint_region": "shelf", ...}
+                                the same walk over the Library's Recommended page (the Library page
+                                mounts no shelves): sized from the seated section's
                                 `libhubs: section N landed M shelves` line, a second Down per
                                 linked shelf, `extra_rows` more to reach the grid, and a
                                 `focus route=... region=grid` fingerprint required in the window
@@ -51,6 +52,13 @@ Scene fields (tests/manifest.json, `fps_scenes`):
   "walk": {"min_landed": 150, ...}
                                 the scene FAILS when fewer shelves (rows) than that landed, so a
                                 cap that shortens the surface cannot pass on the shorter walk
+
+  "expect": {"decision": "transcode", "load_max": "1920x1080@60", ...}
+                                a scene's own log assertions, the SAME functions and keys as a
+                                playback case's `expect` (run.py `grade_scene_expect`): decision,
+                                codec + video_size, load_video / load_audio / load_max / sink_echo,
+                                min_timeline_climb_s; `no_error` is always checked. For a player
+                                scene whose point is what the app DECLARED, not how fast it drew
 
 A scene with no `mock` block is never run under --mock: it needs real library content, and guessing
 which scenes do not is how a synthetic library grades the wrong thing.
@@ -114,6 +122,15 @@ def mock_server_args(scene):
             args += ["--section-hubs-linked", str(linked)]
     elif block.get("section_hubs_linked"):
         raise ValueError(f"{scene.get('name')}: mock.section_hubs_linked needs mock.section_hubs")
+    for spec in block.get("link") or []:
+        args += ["--link", str(spec)]  # tests/link_conditioner.py; mock_pms validates it at start
+    for key in ("shows", "seasons", "episodes"):
+        if block.get(key) is not None:
+            args += [f"--{key}", str(int(block[key]))]
+    for path in mock_fixture_paths(scene):
+        args += ["--extra-media", path]
+    if block.get("transcode_fixture") is not None:
+        args += ["--transcode-fixture", fixture_path(scene, block["transcode_fixture"])]
     return args
 
 
@@ -145,6 +162,8 @@ def partition_mock(scenes, mock):
         elif mock and block is None:
             skipped.append((s["name"], "needs real library content (no `mock` block); "
                                        "not runnable against the synthetic mock"))
+        elif mock and block is not None and missing_mock_fixtures(s):
+            skipped.append((s["name"], missing_mock_fixtures(s)))
         elif not mock and block is not None and block.get("only"):
             skipped.append((s["name"], "mock-only scene: run with --mock"))
         else:
@@ -334,7 +353,13 @@ def landed_library_count(lines, section):
 def landed_shelves(scene, lines):
     """The shelf count the scene's walk is sized from: the seated Library section's landing when
     `walk.landed` is `"library"`, otherwise Home's. None before it has landed."""
-    if (scene.get("walk") or {}).get("landed") == "library":
+    walk = scene.get("walk") or {}
+    if walk.get("reach"):
+        # A surface with no landing line of its own (`walk.reach`): it is up once its first
+        # focus fingerprint is logged, and the walk's size is its fixed key plan (one "row").
+        rx = re.compile(rf"^focus route={re.escape(scene['route'])}\b")
+        return 1 if any(rx.match(ln) for ln in lines) else None
+    if walk.get("landed") == "library":
         return landed_library(lines, library_section_index(scene))
     found = landed(lines)
     return found[1] if found else None
@@ -342,6 +367,8 @@ def landed_shelves(scene, lines):
 
 def landed_lands(scene, lines):
     """How many times the scene's walk surface landed (see `landed_shelves`)."""
+    if (scene.get("walk") or {}).get("reach"):
+        return 1 if landed_shelves(scene, lines) else 0
     if (scene.get("walk") or {}).get("landed") == "library":
         return landed_library_count(lines, library_section_index(scene))
     return landed_count(lines)
@@ -377,8 +404,13 @@ def walk_downs(scene, shelves):
     """The Down presses a walk of `scene` makes for `shelves` landed shelves (before the
     `max_rows` cap `walk_plan` applies). Home: one per row. Library (`walk.landed: "library"`):
     one per shelf, a SECOND for each linked shelf (its heading is a stop of its own, then its
-    row), and `extra_rows` more to cross the toolbar into the grid."""
+    row), and `extra_rows` more (the Library page's toolbar, to reach its grid; the Recommended
+    page seats its first shelf on arrival and needs none). A `walk.reach` surface (the
+    Library page, which mounts no shelves and logs no landing) has a fixed plan: its one "row"
+    plus `extra_rows` Downs from the page header into the grid."""
     w = scene["walk"]
+    if w.get("reach"):
+        return int(shelves) + int(w.get("extra_rows", 0))
     if w.get("landed") != "library":
         return int(shelves)
     return int(shelves) + linked_landed(scene, shelves) + int(w.get("extra_rows", 0))
@@ -709,7 +741,9 @@ class KeyWalk(threading.Thread):
                 break
             self.cancel.wait(2.0)
         if not found:
-            what = ("the Library never logged `libhubs: section "
+            what = (f"the {self.scene['route']} screen never logged a `focus route={self.scene['route']}` "
+                    "fingerprint (is `plxnative-focus` armed?)" if self.walk.get("reach") else
+                    "the Library never logged `libhubs: section "
                     f"{library_section_index(self.scene)} landed`"
                     if self.walk.get("landed") == "library" else "Home never logged `hubs: landed`")
             self.error = f"{what}, so there were no rows to walk"

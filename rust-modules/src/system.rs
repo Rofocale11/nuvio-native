@@ -70,7 +70,7 @@ pub(crate) fn clear_opaque_region() {
 /// Background notifications revoke the borrow before any later frame can marshal through it.
 /// This does not destroy SDL's objects. Foreground reacquires them from SDL, and resets the
 /// opaque-region cache so a replacement surface receives its own request.
-pub(crate) fn sys_release_wayland() {
+pub(crate) fn sys_release_wayland() -> bool {
     unsafe {
         let had_surface = !G_WL_SURFACE.is_null();
         G_WL_SURFACE = std::ptr::null_mut();
@@ -82,6 +82,7 @@ pub(crate) fn sys_release_wayland() {
         if had_surface {
             log("wm: released borrowed Wayland handles");
         }
+        had_surface
     }
 }
 
@@ -704,6 +705,16 @@ pub(crate) fn frame_probe_fields() -> String {
     }
     out
 }
+
+/// `prepare_window` is about to run: opens the frame's `p` stretch on the dev-trigger probe.
+///
+/// The prepare-cost span (upstream's `PREPARE_COST`/`ThreadCost` report) is NOT ported: this is a
+/// `--arm` diagnostic of the origin project's own frame timeline, and nothing in this fork reads
+/// it. Declared so the port table is complete; it does nothing.
+pub(crate) fn frame_probe_prepare_begin() {}
+
+/// `prepare_window` has returned: closes the frame's `p` stretch (not ported — see the begin).
+pub(crate) fn frame_probe_prepare_end() {}
 
 #[cfg(any(feature = "hostsim", not(feature = "devtriggers")))]
 pub(crate) fn frame_probe_request() {}

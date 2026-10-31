@@ -49,10 +49,15 @@ plx_plex = { path = "../plex" }
 plx_telemetry = { path = "../telemetry" }
 plx_data = { path = "../data" }
 libc = "0.2"
+# Legacy-encoding text subtitles (GBK, Big5, Shift_JIS, EUC-KR, windows-125x): `player::sub_charset`. Pure Rust, no FFI.
+encoding_rs = { version = "0.8", default-features = false, features = ["alloc"] }
+# Guesses the encoding of a legacy (non-UTF-8) subtitle track from its bytes, hinted by its language. Pure Rust, on encoding_rs.
+chardetng = { version = "1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
-# Dolby Vision RPU parse/rewrite (quietvoid's dovi_tool library, MIT): the in-app Profile 7 -> 8.1
-# conversion in ff.rs. Pure Rust; the RPU API needs none of the optional (xml/serde/capi) features.
+# Dolby Vision RPU parse/convert/write (quietvoid's dovi_tool library, MIT): the in-app Profile 7 ->
+# 8.1 conversion in `ff::packet_to_annexb`. Pure Rust; the RPU API needs none of its optional
+# features (xml, serde, capi).
 dolby_vision = { version = "3.4", default-features = false }
 
 [dev-dependencies]

@@ -476,7 +476,7 @@ impl<H: super::StoreEffectHost> Machine<H> for BrowseStore {
                 self.run(c.clone());
             }
             StoreEv::Pump { .. } => {
-                self.pump_with_gate(&plx_machine::landgate::Gate::default()).endpoints.emit(fx);
+                let _ = self.pump_with_gate(&plx_machine::landgate::Gate::default()).endpoints.emit(fx);
             }
         }
         Handled::Yes

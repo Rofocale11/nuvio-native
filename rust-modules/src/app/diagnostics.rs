@@ -490,14 +490,17 @@ fn header(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, n
 /// The verdict text: what the pipeline thinks it is doing, wrapped in the diagnostic header.
 fn playback_line(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, now: u32) -> String {
     use plx_media::player::PlaybackState as S;
-    let s = match plx_media::player::state(ps) {
-        S::Idle => plx_platform::i18n::msg::browse_diagnostics_idle(),
-        S::Resolving => plx_platform::i18n::msg::browse_diagnostics_resolving(),
-        S::Connecting => plx_platform::i18n::msg::browse_diagnostics_connecting(),
-        S::Buffering => plx_platform::i18n::msg::browse_diagnostics_buffering(),
-        S::Seeking => plx_platform::i18n::msg::browse_diagnostics_seeking(),
-        S::Playing => plx_platform::i18n::msg::browse_diagnostics_playing(),
-        S::Error => plx_platform::i18n::msg::browse_diagnostics_error(),
+    let s: String = match plx_media::player::state(ps) {
+        S::Idle => plx_platform::i18n::msg::browse_diagnostics_idle().to_owned(),
+        S::Resolving => plx_platform::i18n::msg::browse_diagnostics_resolving().to_owned(),
+        S::Connecting => plx_platform::i18n::msg::browse_diagnostics_connecting().to_owned(),
+        S::Buffering => plx_platform::i18n::msg::browse_diagnostics_buffering().to_owned(),
+        S::Seeking => plx_platform::i18n::msg::browse_diagnostics_seeking().to_owned(),
+        S::Playing => plx_platform::i18n::msg::browse_diagnostics_playing().to_owned(),
+        // The pause is QUALIFIED below (`TX.paused` wraps the state it applies to), so the state
+        // itself reads as the playing pipeline it is.
+        S::Paused => plx_platform::i18n::msg::browse_diagnostics_playing().to_owned(),
+        S::Error => plx_platform::i18n::msg::browse_diagnostics_error().to_owned(),
     };
     // The reason is part of every Error verdict — bare "Playback error" made the reviewer derive
     // "the server dropped the video track" from the server's own transcoder logs (issue #22);
@@ -510,13 +513,13 @@ fn playback_line(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::
     }
     if plx_media::player::TX.paused.load(Ordering::Relaxed) {
         // the frozen clock must DISARM while paused — a paused picture is not a stalled one
-        return plx_platform::i18n::msg::browse_diagnostics_paused(s);
+        return plx_platform::i18n::msg::browse_diagnostics_paused(&s);
     }
     // A stream that says "Playing" while nothing has moved for seconds is the failure with no
     // error at all: the app freezes on its last frame and every other row still reads healthy.
     let stuck = since(d.frame_at, now) / 1000;
     if matches!(plx_media::player::state(ps), S::Playing) && d.seen_frame && stuck >= STALL_MS / 1000 {
-        return plx_platform::i18n::msg::browse_diagnostics_stalled(stuck as i64, s);
+        return plx_platform::i18n::msg::browse_diagnostics_stalled(stuck as i64, &s);
     }
     s.to_string()
 }
@@ -678,7 +681,7 @@ fn pipeline_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::
             dv.profile,
             dv.bl_compat,
             decision.presentation.display(),
-            decision.capability.display(),
+            decision.capability.label(),
         ));
     }
     v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_video(), video));

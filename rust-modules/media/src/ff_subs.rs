@@ -11,6 +11,7 @@
 //! this context's clock and the playhead.
 
 use super::*;
+use crate::player::text_ass::TextDialect;
 /// How a subtitle stream's payload turns into displayable text — classified by the codec's
 /// name (avcodec_get_name is already linked, so we avoid hardcoding the n3.3 subtitle codec-id
 /// block, which the ABI probe never verified). Bitmap subs (PGS/VobSub/DVB/teletext) carry no
@@ -18,21 +19,21 @@ use super::*;
 /// menu's desired_sub_idx stays aligned with the metadata subs list.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum SubKind {
-    Plain,   // SRT / subrip / text / webvtt: packet payload is UTF-8 text
-    Ass,     // ASS / SSA: dialogue line; text is the field after the 8th comma
-    MovText, // mp4 tx3g: 2-byte big-endian text-length prefix, then UTF-8 text
-    Bitmap,  // PGS / VobSub / DVB / teletext: image subtitle, not renderable here
+    /// SRT / subrip / webvtt / sami / text / mov_text ...: the packet payload is text, UTF-8 or (see
+    /// `sub_charset`) a legacy encoding, converted to ASS by the dialect (`player::text_ass`) and
+    /// rendered by libass like an authored track. mov_text (mp4 tx3g) also carries a 2-byte
+    /// big-endian text-length prefix before the text.
+    Text(TextDialect),
+    Ass,    // ASS / SSA: dialogue line; text is the field after the 8th comma
+    Bitmap, // PGS / VobSub / DVB / teletext: image subtitle, not renderable here
 }
 
 pub(super) unsafe fn sub_kind(codec_id: c_int) -> SubKind {
     let name = std::ffi::CStr::from_ptr(avcodec_get_name(codec_id)).to_string_lossy();
-    match name.as_ref() {
-        "ass" | "ssa" => SubKind::Ass,
-        "mov_text" => SubKind::MovText,
-        "subrip" | "srt" | "text" | "webvtt" | "vplayer" | "pjs" | "jacosub" | "microdvd"
-        | "sami" | "realtext" | "subviewer" | "subviewer1" | "stl" | "mpl2" => SubKind::Plain,
-        _ => SubKind::Bitmap,
+    if matches!(name.as_ref(), "ass" | "ssa") {
+        return SubKind::Ass;
     }
+    TextDialect::from_codec_name(&name).map_or(SubKind::Bitmap, SubKind::Text)
 }
 
 /// Open a software decoder for an image-subtitle stream (PGS/VobSub/DVB). Returns a
@@ -121,10 +122,32 @@ unsafe fn sub_canvas(dec: *mut AVCodecContext) -> (i32, i32) {
 /// `ui::guard`). The palette is the decoders' fixed `AVPALETTE_SIZE` (256 entries, which pgssub
 /// and dvdsub allocate whole), so any index byte stays inside it.
 unsafe fn rect_to_indexed(r: *const AVSubtitleRect) -> Option<crate::player::SubRect> {
+    let pixels = rect_pixels(r)?;
+    let (x, y, w, h, stride) = ((*r).x, (*r).y, (*r).w, (*r).h, (*r).linesize[0]);
+    let idx = (*r).data[0];
+    let pal = (*r).data[1] as *const u32;
+    let (hu, su, wu) = (h as usize, stride as usize, w as usize);
+    let mut index = Vec::with_capacity(pixels);
+    for row in 0..hu {
+        index.extend_from_slice(std::slice::from_raw_parts(idx.add(row * su), wu));
+    }
+    let mut palette = Box::new([[0u8; 4]; 256]);
+    for (i, entry) in palette.iter_mut().enumerate() {
+        let p = *pal.add(i); // 0xAARRGGBB (native u32)
+        *entry = [(p >> 16) as u8, (p >> 8) as u8, p as u8, (p >> 24) as u8];
+    }
+    Some(crate::player::SubRect { x, y, w, h, index, palette })
+}
+
+/// The pixel count (`w*h`) of a rect that [`rect_to_indexed`] would copy, read from the rect's own
+/// fields alone — nothing is allocated — or None if the decoder left it unusable. This is the
+/// whole validation, so the cost of a copy is known before it is made
+/// ([`rects_within_budget`]).
+unsafe fn rect_pixels(r: *const AVSubtitleRect) -> Option<usize> {
     if r.is_null() {
         return None;
     }
-    let (x, y, w, h, stride) = ((*r).x, (*r).y, (*r).w, (*r).h, (*r).linesize[0]);
+    let (w, h, stride) = ((*r).w, (*r).h, (*r).linesize[0]);
     let idx = (*r).data[0];
     let pal = (*r).data[1] as *const u32;
     // no real subtitle bitmap approaches 8192 on a side — the largest authoring canvas in the
@@ -140,19 +163,8 @@ unsafe fn rect_to_indexed(r: *const AVSubtitleRect) -> Option<crate::player::Sub
     {
         return None;
     }
-    let (wu, hu, su) = (w as usize, h as usize, stride as usize);
     // the 4x headroom keeps `to_rgba`'s expansion of this rect inside `usize` too
-    let pixels = wu.checked_mul(hu).filter(|n| n.checked_mul(4).is_some())?;
-    let mut index = Vec::with_capacity(pixels);
-    for row in 0..hu {
-        index.extend_from_slice(std::slice::from_raw_parts(idx.add(row * su), wu));
-    }
-    let mut palette = Box::new([[0u8; 4]; 256]);
-    for (i, entry) in palette.iter_mut().enumerate() {
-        let p = *pal.add(i); // 0xAARRGGBB (native u32)
-        *entry = [(p >> 16) as u8, (p >> 8) as u8, p as u8, (p >> 24) as u8];
-    }
-    Some(crate::player::SubRect { x, y, w, h, index, palette })
+    (w as usize).checked_mul(h as usize).filter(|n| n.checked_mul(4).is_some())
 }
 
 /// Decode one image-subtitle packet (the demux loop calls this for EVERY image track while
@@ -178,15 +190,12 @@ unsafe fn decode_bitmap(
         avsubtitle_free(&mut sub);
         return Some(SubCue::BitmapClear { track, pts });
     }
-    // A pathological display set cannot be allowed to bloat the 24 MiB store or the renderer's
-    // texture set; DVB regions are the realistic source of many rects, PGS allows at most 2.
-    let n = (sub.num_rects as usize).min(MAX_RECTS);
-    let mut rects = Vec::with_capacity(n);
-    for i in 0..n {
-        if let Some(r) = rect_to_indexed(*sub.rects.add(i)) {
-            rects.push(r);
-        }
-    }
+    let rects = rects_within_budget(
+        sub.num_rects as usize,
+        |i| rect_pixels(*sub.rects.add(i)).map(|pixels| pixels + PALETTE_BYTES),
+        |i| rect_to_indexed(*sub.rects.add(i)),
+        crate::player::SUB_BITMAP_BUDGET,
+    );
     let cue = if rects.is_empty() {
         None
     } else {
@@ -197,7 +206,40 @@ unsafe fn decode_bitmap(
     cue
 }
 
-const MAX_RECTS: usize = 8;
+/// The rects of one decoded display set that are kept, in the decoder's order: every usable rect
+/// until the next one would take the set past `budget` bytes ([`crate::player::SubRect::bytes`],
+/// the measure the store's ceiling counts). A rect the decoder left unusable is skipped and costs
+/// nothing. The first rect that does not fit ends the set, so the kept rects are always a prefix of
+/// the decoder's order. The FIRST usable rect is kept whatever it costs, even past the budget: a
+/// cue the viewer should see is never dropped for its size (`MAX_SIDE` in [`rect_to_indexed`]
+/// bounds one rect), and the store evicts OTHER cues to make room for it.
+///
+/// `cost_at` is a rect's store cost ([`crate::player::SubRect::bytes`]) read from the decoder's own
+/// fields, or None for an unusable rect; `rect_at` is the copy. A rect the budget will refuse is
+/// never copied: the copy of one the decoder claims at 8192x8192 is 64 MiB, made only to be
+/// dropped on the next line.
+fn rects_within_budget(
+    num_rects: usize,
+    mut cost_at: impl FnMut(usize) -> Option<usize>,
+    mut rect_at: impl FnMut(usize) -> Option<crate::player::SubRect>,
+    budget: usize,
+) -> Vec<crate::player::SubRect> {
+    let mut kept = Vec::new();
+    let mut bytes = 0usize;
+    for i in 0..num_rects {
+        let Some(cost) = cost_at(i) else { continue };
+        if !kept.is_empty() && bytes.saturating_add(cost) > budget {
+            break;
+        }
+        let Some(r) = rect_at(i) else { continue };
+        bytes += r.bytes();
+        kept.push(r);
+    }
+    kept
+}
+
+/// The palette's share of a rect's store cost (`SubRect::bytes`).
+const PALETTE_BYTES: usize = std::mem::size_of::<[[u8; 4]; 256]>();
 
 /// [`decode_bitmap`] then [`SubCue::push`]: the decode-and-store step the demux loop runs for an
 /// image-subtitle packet.
@@ -214,8 +256,12 @@ pub(super) unsafe fn decode_bitmap_cue(
 
 /// One cue produced from one subtitle packet, in the stream's clock (`pts_ns`), not yet delivered.
 pub(super) enum SubCue<'a> {
-    /// SRT / WebVTT / mov_text payload (mov_text's length prefix already dropped) for the text store.
-    Text { track: i32, start: i64, end: i64, payload: &'a [u8] },
+    /// SRT / WebVTT / mov_text ... payload (mov_text's length prefix already dropped), converted to
+    /// ASS by the track's dialect in `ass_source::push_text`.
+    /// `payload` is always UTF-8 here: [`SubTracks::decode`] ran the track's charset step.
+    /// `identity` is `ass_source::packet_identity` of the packet bytes BEFORE the charset step: the
+    /// dedup key of a re-read, which must not depend on how the detector decoded it this time.
+    Text { track: i32, start: i64, end: i64, payload: std::borrow::Cow<'a, [u8]>, identity: u64 },
     /// An ASS/SSA dialogue line for `ass_source`.
     Ass { track: i32, start: i64, end: i64, payload: &'a [u8] },
     /// A decoded image display set (every rect, indexed) on its authoring canvas.
@@ -225,7 +271,8 @@ pub(super) enum SubCue<'a> {
         cw: i32,
         ch: i32,
         rects: Vec<crate::player::SubRect>,
-        /// Rects the decoder produced, before the `MAX_RECTS` cap (for the cap's log line).
+        /// Rects the decoder produced, before the byte budget and the unusable-rect skip (for the
+        /// log line that reports a set the store had to thin).
         total_rects: usize,
     },
     /// An image-subtitle CLEAR: closes the track's open bitmap cue at `pts`.
@@ -238,8 +285,8 @@ impl<'a> SubCue<'a> {
     /// so each one goes through this with `-delta` before [`Self::push`].
     pub(super) fn shifted(self, by_ns: i64) -> SubCue<'a> {
         match self {
-            SubCue::Text { track, start, end, payload } => {
-                SubCue::Text { track, start: start.saturating_add(by_ns), end: end.saturating_add(by_ns), payload }
+            SubCue::Text { track, start, end, payload, identity } => {
+                SubCue::Text { track, start: start.saturating_add(by_ns), end: end.saturating_add(by_ns), payload, identity }
             }
             SubCue::Ass { track, start, end, payload } => {
                 SubCue::Ass { track, start: start.saturating_add(by_ns), end: end.saturating_add(by_ns), payload }
@@ -253,12 +300,13 @@ impl<'a> SubCue<'a> {
 }
 
 impl SubCue<'_> {
-    /// Hand the cue to the render store. `ass_generation` is the `ass_source::begin` token an
-    /// `Ass` cue is pushed under; the other kinds ignore it.
+    /// Hand the cue to the render store. `ass_generation` is the `ass_source::begin` token a
+    /// `Text` or `Ass` cue is pushed under; the image kinds ignore it.
     pub(super) fn push(self, ass_generation: u64) {
         match self {
-            SubCue::Text { track, start, end, payload } => {
-                crate::player::push_subtitle_cue(track, start, end, payload);
+            SubCue::Text { track, start, end, payload, identity } => {
+                let text = String::from_utf8_lossy(&payload);
+                crate::player::ass_source::push_text(ass_generation, track, start, end, &text, identity);
             }
             SubCue::Ass { track, start, end, payload } => {
                 crate::player::ass_source::push(ass_generation, track, start, end, payload);
@@ -277,10 +325,11 @@ impl SubCue<'_> {
                         rects.len()
                     ));
                 }
+                let rects_kept = rects.len();
                 crate::player::push_subtitle_bitmap(track, pts, cw, ch, rects);
-                if total_rects > MAX_RECTS {
+                if rects_kept < total_rects {
                     crate::player::log(&format!(
-                        "ff: image-sub track#{track} {total_rects} rects (capped at {MAX_RECTS})"
+                        "ff: image-sub track#{track} kept {rects_kept} of {total_rects} rects"
                     ));
                 }
             }
@@ -294,12 +343,19 @@ pub(super) struct SubTracks {
     /// (ffmpeg stream index, kind, decoder ctx). The decoder is non-null only for Bitmap tracks
     /// (PGS/VobSub/DVB), which are software-decoded to pixels; text tracks carry a null ctx.
     streams: Vec<(c_int, SubKind, *mut AVCodecContext)>,
+    /// Per track (same order as `streams`): the language-derived text charset, fixed by the first
+    /// non-UTF-8 packet (`player::sub_charset`).
+    charsets: Vec<crate::player::sub_charset::TrackCharset>,
 }
 
 impl SubTracks {
     /// Enumerate `fmt`'s subtitle streams and open a decoder for each image one.
     pub(super) unsafe fn open(fmt: *mut AVFormatContext, streams: *mut *mut AVStream) -> Self {
+        if fmt.is_null() || streams.is_null() {
+            return Self::empty();
+        }
         let mut out: Vec<(c_int, SubKind, *mut AVCodecContext)> = Vec::new();
+        let mut charsets = Vec::new();
         for i in 0..(*fmt).nb_streams {
             let cp = stream_codecpar(*streams.add(i as usize));
             if (*cp).codec_type == AVMEDIA_TYPE_SUBTITLE {
@@ -310,14 +366,17 @@ impl SubTracks {
                     std::ptr::null_mut()
                 };
                 out.push((i as c_int, k, dec));
+                charsets.push(crate::player::sub_charset::TrackCharset::new(
+                    stream_language(*streams.add(i as usize)).as_deref(),
+                ));
             }
         }
-        SubTracks { streams: out }
+        SubTracks { streams: out, charsets }
     }
 
     /// No tracks: what the main demuxer holds while a side reader owns the subtitles.
     pub(super) fn empty() -> Self {
-        SubTracks { streams: Vec::new() }
+        SubTracks { streams: Vec::new(), charsets: Vec::new() }
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -327,6 +386,11 @@ impl SubTracks {
     /// The (stream index, kind, decoder) list, in file order.
     pub(super) fn entries(&self) -> &[(c_int, SubKind, *mut AVCodecContext)] {
         &self.streams
+    }
+
+    /// FORK (RichiL10): bit N set = track N is an image kind (`player::image_sub_mask`).
+    pub(super) fn image_mask(&self) -> u64 {
+        crate::player::image_sub_mask(self.streams.iter().map(|(_, k, _)| *k == SubKind::Bitmap))
     }
 
     /// The track position of ffmpeg stream `stream_index`, if it is a subtitle stream.
@@ -345,8 +409,8 @@ impl SubTracks {
             .map(|(si, k, _)| {
                 let kn = match k {
                     SubKind::Ass => "ass",
-                    SubKind::MovText => "mov_text",
-                    SubKind::Plain => "text",
+                    SubKind::Text(TextDialect::MovText) => "mov_text",
+                    SubKind::Text(_) => "text",
                     SubKind::Bitmap => "image",
                 };
                 format!("#{si}:{kn}")
@@ -391,7 +455,7 @@ impl SubTracks {
         }
         let raw: &'p [u8] = std::slice::from_raw_parts((*pkt).data, sz);
         // mp4 tx3g: drop the 2-byte big-endian text-length prefix.
-        let payload: &[u8] = if kind == SubKind::MovText && sz >= 2 {
+        let payload: &[u8] = if kind == SubKind::Text(TextDialect::MovText) && sz >= 2 {
             let tl = ((raw[0] as usize) << 8) | raw[1] as usize;
             &raw[2..2 + tl.min(sz - 2)]
         } else {
@@ -401,7 +465,13 @@ impl SubTracks {
         Some(if kind == SubKind::Ass {
             SubCue::Ass { track, start, end, payload }
         } else {
-            SubCue::Text { track, start, end, payload }
+            // Text is UTF-8 by the spec and legacy-encoded (GBK, Big5, ...) in practice (#628).
+            let identity = crate::player::ass_source::packet_identity(payload);
+            let payload = match crate::player::sub_charset::subtitle_text(payload, &self.charsets[pos]) {
+                std::borrow::Cow::Borrowed(text) => std::borrow::Cow::Borrowed(text.as_bytes()),
+                std::borrow::Cow::Owned(text) => std::borrow::Cow::Owned(text.into_bytes()),
+            };
+            SubCue::Text { track, start, end, payload, identity }
         })
     }
 
@@ -419,12 +489,102 @@ impl SubTracks {
 mod tests {
     use super::*;
 
+    /// A rect whose store cost is exactly `pixels + 1024` (its indices plus the palette), so a
+    /// budget can be written as a count of rects.
+    fn rect_of_pixels(pixels: usize, x: i32) -> crate::player::SubRect {
+        crate::player::SubRect { x, y: 0, w: pixels as i32, h: 1, index: vec![0; pixels], palette: Box::new([[0; 4]; 256]) }
+    }
+
+    /// A display set of `n` rects, each `pixels` wide, through the same helper the decoder uses.
+    fn set_of(n: usize, pixels: usize, budget: usize) -> Vec<crate::player::SubRect> {
+        rects_within_budget(n, |_| Some(pixels + PALETTE_BYTES), |i| Some(rect_of_pixels(pixels, i as i32)), budget)
+    }
+
+    /// PGS can carry more than eight objects in one display set, and a dense set (a two-line
+    /// dialogue plus a sign plus a logo, from DVB regions) is authored that way. The eighth-rect
+    /// cap silently left rects 9 onward undrawn, so all twelve must survive, in the decoder's order.
+    #[test]
+    fn a_display_set_of_twelve_rects_keeps_all_twelve() {
+        let kept = set_of(12, 16, crate::player::SUB_BITMAP_BUDGET);
+        assert_eq!(kept.len(), 12, "every rect of the decoded set is kept, not the first eight");
+        let xs: Vec<i32> = kept.iter().map(|r| r.x).collect();
+        assert_eq!(xs, (0..12).collect::<Vec<i32>>(), "decoder order is preserved");
+    }
+
+    /// The store's byte ceiling still bounds one cue's pixels: a rect that does not fit ends the set,
+    /// the rects before it are kept, and nothing panics. Each rect here costs 2024 bytes, so a
+    /// 10_000-byte budget holds four.
+    #[test]
+    fn a_display_set_over_the_byte_budget_keeps_the_prefix_that_fits() {
+        let kept = set_of(12, 1000, 10_000);
+        assert_eq!(kept.len(), 4, "four rects of 2024 bytes fit in 10_000");
+        assert!(kept.iter().map(|r| r.bytes()).sum::<usize>() <= 10_000);
+        assert_eq!(kept.last().map(|r| r.x), Some(3), "the kept rects are the first four, in order");
+    }
+
+    /// **A cue that alone exceeds the budget is still shown.** The budget bounds the cache of OTHER
+    /// cues, never the one the viewer is meant to read: a set's first usable rect is always kept,
+    /// and only the rects after it are held to what is left.
+    #[test]
+    fn a_rect_larger_than_the_budget_is_kept_as_the_cue_itself() {
+        let kept = set_of(3, 5000, 4000);
+        assert_eq!(kept.len(), 1, "the oversized first rect is the cue; nothing after it fits");
+        assert_eq!(kept[0].x, 0);
+        // an unusable rect in front does not use up the exemption
+        let kept = rects_within_budget(
+            3,
+            |i| (i != 0).then_some(5000 + PALETTE_BYTES),
+            |i| (i != 0).then(|| rect_of_pixels(5000, i as i32)),
+            4000,
+        );
+        assert_eq!(kept.iter().map(|r| r.x).collect::<Vec<_>>(), [1]);
+    }
+
+    /// A rect the decoder left unusable is skipped and does not stop the set, and does not spend
+    /// budget.
+    #[test]
+    fn an_unusable_rect_is_skipped_and_costs_no_budget() {
+        let kept = rects_within_budget(
+            3,
+            |i| (i != 1).then_some(100 + PALETTE_BYTES),
+            |i| (i != 1).then(|| rect_of_pixels(100, i as i32)),
+            2 * (100 + 1024),
+        );
+        assert_eq!(kept.iter().map(|r| r.x).collect::<Vec<_>>(), [0, 2]);
+    }
+
+    /// **A rect the budget will refuse is never copied.** Rect 1 is far over what is left, so the set
+    /// ends there; the counter proves its pixels were never allocated (only rect 0 was).
+    #[test]
+    fn a_rect_the_budget_rejects_is_never_allocated() {
+        let copies = std::cell::RefCell::new(Vec::new());
+        let kept = rects_within_budget(
+            3,
+            |i| Some(if i == 1 { 8192 * 8192 + PALETTE_BYTES } else { 100 + PALETTE_BYTES }),
+            |i| {
+                copies.borrow_mut().push(i);
+                Some(rect_of_pixels(100, i as i32))
+            },
+            crate::player::SUB_BITMAP_BUDGET,
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(*copies.borrow(), [0], "only the rect that fits was copied");
+    }
+
+    /// A set of one to eight rects is kept exactly as it always was: every rect, under the budget.
+    #[test]
+    fn a_display_set_of_one_to_eight_rects_is_unchanged() {
+        for n in 1..=8 {
+            assert_eq!(set_of(n, 16, crate::player::SUB_BITMAP_BUDGET).len(), n, "{n} rects");
+        }
+    }
+
     #[test]
     fn shifted_moves_every_variant() {
         let by = -2_500_000_000;
-        match (SubCue::Text { track: 1, start: 10_000_000_000, end: 12_000_000_000, payload: b"x" }).shifted(by) {
-            SubCue::Text { track, start, end, payload } => {
-                assert_eq!((track, start, end, payload), (1, 7_500_000_000, 9_500_000_000, &b"x"[..]));
+        match (SubCue::Text { track: 1, start: 10_000_000_000, end: 12_000_000_000, payload: b"x"[..].into(), identity: 7 }).shifted(by) {
+            SubCue::Text { track, start, end, payload, .. } => {
+                assert_eq!((track, start, end, &payload[..]), (1, 7_500_000_000, 9_500_000_000, &b"x"[..]));
             }
             _ => panic!("a text cue stays a text cue"),
         }

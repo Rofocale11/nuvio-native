@@ -34,8 +34,8 @@ impl SessionGround {
     pub fn refresh(&mut self) -> bool {
         if !self.from_session || !self.watch.changed() { return false; }
         let Some(session) = plx_plex::plex::session::peek_settled() else { return false; };
-        if self.seed == session.last_hero_blur { return false; }
-        self.seed = session.last_hero_blur;
+        if self.seed == session.prefs.last_hero_blur { return false; }
+        self.seed = session.prefs.last_hero_blur;
         self.ground = plx_ui::route_screen::RouteGround::for_home(self.seed);
         true
     }

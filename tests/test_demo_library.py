@@ -43,7 +43,7 @@ SCENES = ROOT / "tests" / "screenshots" / "scenes.json"
 CATALOG = ROOT / "tests" / "demo_library" / "catalog.json"
 RUST = ROOT / "rust-modules" / "src"
 # Armed by tools/screenshots.py on every scene, not by the manifest.
-DRIVER_TRIGGERS = {"token", "plextv", "stillclock"}
+DRIVER_TRIGGERS = {"token", "plextv", "discover", "stillclock"}
 
 HAVE_CACHE = (mock_pms.demo_cache_dir() / "derived").is_dir() and shutil.which("ffmpeg") and shutil.which("ffprobe")
 
@@ -1419,7 +1419,8 @@ class SceneManifest(unittest.TestCase):
         site = {o["file"]: s for s in self.scenes for o in s["outputs"]
                 if o.get("dest") == "site" and "card" not in o}
         self.assertEqual(set(site), {"closeup-glass.jpg", "closeup-glass-narrow.jpg",
-                                     "closeup-tiles.jpg", "closeup-player.jpg"})
+                                     "closeup-tiles.jpg", "closeup-player.jpg", "closeup-fan-caligari.jpg",
+                                     "closeup-fan-cosmos.jpg", "closeup-fan-elephants.jpg"})
         for file, s in site.items():
             with self.subTest(file=file):
                 self.assertGreaterEqual(s.get("render_scale", 1), 3)

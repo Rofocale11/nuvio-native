@@ -102,36 +102,36 @@
   "browse.person.born_place": "Нараджэнне: {date}, {place}",
   "browse.person.died": "Смерць: {date}",
   "browse.person.films": {
-    "one": "{count} фільм",
-    "few": "{count} фільмы",
-    "many": "{count} фільмаў",
-    "other": "{count} фільма"
+    "one": "{count} film",
+    "few": "{count} films",
+    "many": "{count} films",
+    "other": "{count} films"
   },
   "browse.person.shows": {
-    "one": "{count} серыял",
-    "few": "{count} серыялы",
-    "many": "{count} серыялаў",
-    "other": "{count} серыяла"
+    "one": "{count} show",
+    "few": "{count} shows",
+    "many": "{count} shows",
+    "other": "{count} shows"
   },
   "browse.person.library_one": "{titles} у гэтай бібліятэцы",
   "browse.person.library_both": "{films} і {shows} у гэтай бібліятэцы",
   "browse.person.credits": {
-    "one": "{count} праца · Спачатку новыя.",
-    "few": "{count} працы · Спачатку новыя.",
-    "many": "{count} прац · Спачатку новыя.",
-    "other": "{count} працы · Спачатку новыя."
+    "one": "{count} credit · Newest first.",
+    "few": "{count} credits · Newest first.",
+    "many": "{count} credits · Newest first.",
+    "other": "{count} credits · Newest first."
   },
   "browse.detail.seasons": {
-    "one": "{count} сезон",
-    "few": "{count} сезоны",
-    "many": "{count} сезонаў",
-    "other": "{count} сезона"
+    "one": "{count} season",
+    "few": "{count} seasons",
+    "many": "{count} seasons",
+    "other": "{count} seasons"
   },
   "browse.detail.episodes": {
-    "one": "{count} серыя",
-    "few": "{count} серыі",
-    "many": "{count} серый",
-    "other": "{count} серыі"
+    "one": "{count} episode",
+    "few": "{count} episodes",
+    "many": "{count} episodes",
+    "other": "{count} episodes"
   },
   "browse.detail.extent": "{seasons}, {episodes}",
   "browse.detail.season_number": "Сезон {number}",
@@ -143,36 +143,36 @@
   "browse.library.no_movies": "У бібліятэцы {library} няма фільмаў",
   "browse.library.no_shows": "У бібліятэцы {library} няма серыялаў",
   "browse.search.people": {
-    "one": "{count} асоба",
-    "few": "{count} асобы",
-    "many": "{count} асоб",
-    "other": "{count} асобы"
+    "one": "{count} person",
+    "few": "{count} people",
+    "many": "{count} people",
+    "other": "{count} people"
   },
   "browse.search.count": {
-    "one": "{count} вынік",
-    "few": "{count} вынікі",
-    "many": "{count} вынікаў",
-    "other": "{count} выніку"
+    "one": "{count} result",
+    "few": "{count} results",
+    "many": "{count} results",
+    "other": "{count} results"
   },
   "browse.search.items": {
-    "one": "{count} элемент",
-    "few": "{count} элементы",
-    "many": "{count} элементаў",
-    "other": "{count} элемента"
+    "one": "{count} item",
+    "few": "{count} items",
+    "many": "{count} items",
+    "other": "{count} items"
   },
   "browse.search.no_results": "Няма вынікаў для «{query}»",
   "browse.search.join": "{first} і {last}",
   "browse.search.shared_libraries": {
-    "one": "{count} агульная бібліятэка",
-    "few": "{count} агульныя бібліятэкі",
-    "many": "{count} агульных бібліятэк",
-    "other": "{count} агульнай бібліятэкі"
+    "one": "{count} shared library",
+    "few": "{count} shared libraries",
+    "many": "{count} shared libraries",
+    "other": "{count} shared libraries"
   },
   "browse.search.shared_sources": {
-    "one": "{count} агульная крыніца",
-    "few": "{count} агульныя крыніцы",
-    "many": "{count} агульных крыніц",
-    "other": "{count} агульнай крыніцы"
+    "one": "{count} shared source",
+    "few": "{count} shared sources",
+    "many": "{count} shared sources",
+    "other": "{count} shared sources"
   },
   "browse.search.searching": "Пошук: {sources}",
   "browse.search.unreachable": "Недаступныя: {sources}",
@@ -295,16 +295,16 @@
   "browse.diagnostics.fps_unknown": "{width}×{height} · кадр/с невядомыя",
   "browse.diagnostics.received": "HTTP {status} · атрымана {amount}",
   "browse.diagnostics.callbacks": {
-    "one": "{count} зваротны выклік",
-    "few": "{count} зваротныя выклікі",
-    "many": "{count} зваротных выклікаў",
-    "other": "{count} зваротнага выкліку"
+    "one": "{count} callback",
+    "few": "{count} callbacks",
+    "many": "{count} callbacks",
+    "other": "{count} callbacks"
   },
   "browse.diagnostics.callback_error": {
-    "one": "{count} зваротны выклік · ПАМЫЛКА {error} на #{ordinal}",
-    "few": "{count} зваротныя выклікі · ПАМЫЛКА {error} на #{ordinal}",
-    "many": "{count} зваротных выклікаў · ПАМЫЛКА {error} на #{ordinal}",
-    "other": "{count} зваротнага выкліку · ПАМЫЛКА {error} на #{ordinal}"
+    "one": "{count} callback · ERROR {error} at #{ordinal}",
+    "few": "{count} callbacks · ERROR {error} at #{ordinal}",
+    "many": "{count} callbacks · ERROR {error} at #{ordinal}",
+    "other": "{count} callbacks · ERROR {error} at #{ordinal}"
   },
   "browse.diagnostics.queues": "відэа {video}/{video_cap} МБ · аўдыя {audio}/{audio_cap} МБ",
   "browse.detail.unrated": "БР",
@@ -364,16 +364,16 @@
   "browse.auth.server_profile_refused": "Сервер «{server}» адхіліў профіль «{profile}». Паспрабуйце зноў.",
   "browse.auth.switch_invalid": "Не ўдалося змяніць профіль — сервер даслаў няправільны адказ.",
   "browse.auth.plex_dns_retry": {
-    "one": "Не ўдалося знайсці Nuvio, таму серверы не правераны. Паспрабавалі {count} раз. Праверце злучэнне з інтэрнэтам.",
-    "few": "Не ўдалося знайсці Nuvio, таму серверы не правераны. Паспрабавалі {count} разы. Праверце злучэнне з інтэрнэтам.",
-    "many": "Не ўдалося знайсці Nuvio, таму серверы не правераны. Паспрабавалі {count} разоў. Праверце злучэнне з інтэрнэтам.",
-    "other": "Не ўдалося знайсці Nuvio, таму серверы не правераны. Паспрабавалі {count} раза. Праверце злучэнне з інтэрнэтам."
+    "one": "This TV couldn't find Nuvio, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
+    "few": "This TV couldn't find Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again.",
+    "many": "This TV couldn't find Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again.",
+    "other": "This TV couldn't find Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
   },
   "browse.auth.plex_connect_retry": {
-    "one": "Не ўдалося злучыцца з Nuvio, таму серверы не правераны. Паспрабавалі {count} раз. Праверце злучэнне з інтэрнэтам.",
-    "few": "Не ўдалося злучыцца з Nuvio, таму серверы не правераны. Паспрабавалі {count} разы. Праверце злучэнне з інтэрнэтам.",
-    "many": "Не ўдалося злучыцца з Nuvio, таму серверы не правераны. Паспрабавалі {count} разоў. Праверце злучэнне з інтэрнэтам.",
-    "other": "Не ўдалося злучыцца з Nuvio, таму серверы не правераны. Паспрабавалі {count} раза. Праверце злучэнне з інтэрнэтам."
+    "one": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried once. Check the TV's internet connection, then try again.",
+    "few": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again.",
+    "many": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again.",
+    "other": "This TV couldn't reach Nuvio, so your servers weren't checked. We tried {count} times. Check the TV's internet connection, then try again."
   },
   "browse.auth.plaintext_offer": "Ваш сервер Nuvio у гэтай сетцы недаступны праз HTTPS. Націсніце «Злучыцца» для злучэння без шыфравання.",
   "browse.auth.plaintext_allowed": "Ваш сервер Nuvio у гэтай сетцы недаступны праз HTTPS. Націсніце «Паспрабаваць зноў» для злучэння без шыфравання.",
@@ -497,5 +497,11 @@
   "browse.list.remove": "Выдаліць",
   "browse.list.saving": "Чакаем…",
   "browse.list.retry": "Паўтарыць",
-  "browse.list.signin": "Увайсці"
+  "browse.list.signin": "Увайсці",
+  "browse.action.use_another_account": "Use another account",
+  "browse.chrome.search": "Search",
+  "browse.kind.episode": "Episode",
+  "browse.detail.specials": "Specials",
+  "browse.collection.films": "Films",
+  "browse.collection.shows": "Shows"
 }

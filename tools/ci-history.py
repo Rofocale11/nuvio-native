@@ -60,11 +60,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import os
 import re
 import statistics
 import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -385,7 +387,7 @@ def dump(doc: dict) -> str:
             f'"cancelled":{cancelled},\n"daily":{block(doc["daily"])}}}\n')
 
 
-def main(argv=None, api=gh_api, now=None) -> int:
+def main(argv=None, api=gh_api, now=None, blob=gh_blob) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--in", dest="src", required=True, help="existing ci-history.json (missing or empty = start fresh)")
     ap.add_argument("--out", help="where to write the merged file")

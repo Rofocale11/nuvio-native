@@ -17,7 +17,7 @@ All endpoints below were verified live on 2026-07-03 with read-only GETs, **exce
 
 **JSON instead of XML:** send `Accept: application/json`. Every response is wrapped in a top-level `MediaContainer` object.
 
-**Paging:** either headers `X-Plex-Container-Start` / `X-Plex-Container-Size` or same-named query params. Response carries `size`, `totalSize`, `offset`.
+**Paging:** either headers `X-Plex-Container-Start` / `X-Plex-Container-Size` or same-named query params. A paged response carries `size`, `totalSize`, `offset`; an unpaged one carries neither total nor offset (see [Paging, observed](#paging-observed)).
 
 ---
 
@@ -137,6 +137,14 @@ spec's "Media Queries" section documents the full query language.
   tag id, while its `guid` is shared with search hits and member `Collection[]` tags. Adding
   `includeCollections=1` to `/hubs/search` yields full collection `Metadata[]` rows rather than
   tag-shaped `Directory[]` hits.
+- **Collections count (the Library header's "Collections · N"):** `GET
+  /library/sections/{key}/all?type=18` with `X-Plex-Container-Start=0` and `X-Plex-Container-Size=0`
+  returns no rows and the section's collection count as `totalSize` (the same count the
+  `/collections` listing and `firstCharacter?type=18` total to). The client reads three answers apart:
+  a number (a real `0` included), a refusal (401/403 — an unshared section, as the listing above),
+  and unknown (404, transport failure, malformed body). Collection rows also carry `subtype` (`movie`, `show`, …), `smart`
+  (`"1"` for a smart collection — a saved filter whose `childCount` is its current match count, not a
+  hand-picked set), `childCount` and `addedAt`; a show row's `childCount` is its season count.
 - **Collection routes and hubs:** `/library/collections/{rk}/children` and `/items` return the same
   paged members. A promoted `custom.collection.*` hub embeds the members and carries the collection
   ratingKey in its identifier; a member's `collection.related.*` hub lists the whole collection.
@@ -216,7 +224,14 @@ the spec but **this server does not emit it on `Role[]`** — treat 0 as unknown
   `/tmp/plxnative-personbio` exists for one step further along — the biography degrades to a blank
   line, the filmography to nothing at all — and it is why `/tmp/plxnative-personcredits` had to be
   written. Reaching either with real data needs a signed-in account (`make sim` with a real
-  session, or the debug install with `--no-token`).
+  session, or the debug install with `--no-token`). A `devtriggers` build does not even ask on such
+  a boot, by decision (fail closed; the cost is accepted): with no Discover stand-in armed
+  (`plxnative-discover`, or a `plxnative-plextv` redirect that Discover follows) the person store
+  settles both reads as an empty answer without spawning a worker, `AccountClient::person_profile` /
+  `person_credits` refuse the same read if anything else calls them, and `discover: GET … refused` is
+  logged once. Such a boot shows no biography and no filmography credits; with a stand-in armed,
+  `tests/mock_pms.py` answers both routes with synthetic data (the credits 401 without a token there
+  too).
 - **The person's titles:** `GET /library/people/{personId}/media` → `Metadata[]`, everything the
   person appears in **across EVERY library section in one request** (person 161 → 3 items;
   person 6059 → 6). This is the right call for a person page; `?actor=<id>` below is the right
@@ -233,6 +248,42 @@ the spec but **this server does not emit it on `Role[]`** — treat 0 as unknown
   the PMS photo transcoder rather than through the app's PMS-origin HTTP client: `image_transcode_path`
   passes the whole URL as `url=` to `/photo/:/transcode` and **the server does the TLS** — the
   same path posters take. Never invent another image route for them.
+
+---
+
+## 2d. Which of these guids does this server hold? — `GET /library/all?type=T&guid=a,b,c`
+
+(Measured 2026-10 on PMS 1.43.4 with a per-server token, read-only. The Watchlist's join from a
+Discover guid to a server's own ratingKey; `docs/watchlist.md`.)
+
+- **One request answers many guids.** `guid=<a>,<b>,<c>` in a SINGLE parameter returns every row whose
+  `guid` is listed; a guid the server does not hold is silently absent, there is no error row.
+  Repeated `guid=a&guid=b` keeps only the last. The separator is a literal `,`; each guid is
+  percent-encoded on its own first.
+- **Only the primary `plex://` guid matches.** `plex://movie/<24 hex>` and `plex://show/<24 hex>`.
+  `imdb://`, `tmdb://` and `tvdb://` (which the items carry in `Guid[]` with `includeGuids=1`) answer
+  size 0, so a title with no `plex://` guid cannot be looked up this way.
+- **An episode's `grandparentGuid` is the show's catalog id.** Measured 2026-10-21 on the local PMS: it
+  is `plex://show/<24 hex>` even for an episode whose own `guid` is `local://N`, and it is the global
+  agent id, the same on every server using the Plex agent. Continue Watching groups on it
+  (`docs/shared-servers.md`, "One tile per show in Continue Watching").
+- **A scrobble restamps `lastViewedAt` and moves the deck.** `/:/scrobble` on a never-watched episode
+  set `viewCount=1` and `lastViewedAt` to now, and `/hubs/continueWatching/items` then listed the show's
+  next episode first with that same `lastViewedAt`; `/:/unscrobble` restored both. Every row of that
+  hub carried `Media[0].Part[0]` (the hub parse fills `PmsMovie::part` from it).
+- **`type` narrows and must be right.** `type=1` movies, `type=2` shows. A wrong `type` answers
+  size 0, which is indistinguishable from "not held", so the call is made once per kind and the kind
+  comes from the guid's own prefix. Rows carry `librarySectionID` and, when the server has them,
+  `UltraBlurColors`.
+- **The client chunks at 40 guids** (`GUIDS_PER_REQUEST`) to keep the URL short; PMS's own URL limit
+  was not measured, so 40 is a conservative choice rather than a found ceiling. Cost is
+  servers x kinds x ceil(N/40) requests (about 10 to 12 for 200 titles on two servers).
+- **Absence is only proof when the server answered.** `Client::find_by_guids` returns `Err` when any
+  chunk got no readable answer, and the caller must not read that as "absent": a silent share would
+  otherwise turn a playable title into "Not on your servers".
+- The same guid in two libraries is reported once, with the first row's key.
+- A single-guid form `GET /library/all?guid=plex://movie/<hex>[&type=1]` also works and is what
+  "Also available" uses one guid at a time.
 
 ---
 
@@ -296,11 +347,12 @@ Verified Continue Watching item (movie, trimmed):
 per-string translation coverage for a tag is partial, which this app now papers over for every
 STANDARD hub rather than forwarding it as-is** (issue #12, investigated 2026-09-28: a Belarusian
 UI showed some hub titles in Belarusian and others in Russian/English on one Home screen).
-`plex::client::headers`/`pms_headers` still send the literal selected UI tag (`en`/`es`/`be` —
+`plex::client::headers`/`pms_headers` still send the literal selected UI tag (`Language::tag()` of each language in
+`i18n::SHIPPED` —
 `identity::language()` → `i18n::current().language().tag()`) on **every** PMS operation, hubs
 included (`rust-modules/plex/src/plex/client.rs`'s
-`pms_headers_carry_the_literal_selected_ui_language_be_included` test pins that for all three
-shipped tags) — that part of the earlier record stands. What changed is that neither
+`pms_headers_carry_the_literal_selected_ui_language_be_included` test pins that for every
+shipped tag) — that part of the earlier record stands. What changed is that neither
 `screens/home/mod.rs` nor a library's own browse grid renders `hub.title` unconditionally:
 `plex::hub_title::localized_hub_title` sits between a PMS `Hub` and the row the screen draws, at
 BOTH call sites — Home's whole-catalog merge (`pms.rs::project`, one row per source, `/hubs`) and
@@ -382,11 +434,13 @@ Measured on this server, and every one of these is a thing the OpenAPI spec does
   hub is required, not a nicety.
 * **`count` defaults to 6** and is honoured up to at least 24. It is items-per-hub; it never
   changes how many hubs come back.
-* **There is no paging of hubs** (the route's parameters are `count`, `onlyTransient` and
-  `identifier`), so a server with many promoted collections answers with all of them at once. The
-  Library takes every hub the server sends, at most `MAX_SHELF_ITEMS` (24) cards each, and bounds
-  only the section's total: `section_hubs::SECTION_CARDS_MAX` = `HOME_CARDS_MAX` = 2,048 cards,
-  whole shelves dropped from the tail and logged as `libhubs: card bound 2048 reached`.
+* **The spec gives the hub list no paging** (the route's parameters are `count`, `onlyTransient` and
+  `identifier`); a windowed request pages it on a live server (see [Paging, observed](#paging-observed)).
+  The Library reads it in windows of `HUB_WINDOW` hubs (`paging::read_hub_list`; `library_hubs` remains the
+  whole-list fallback for a server that ignores the window), so a server with many promoted collections never
+  answers with all of them at once. The Library keeps a descriptor for every hub the windows
+  bring; cards are held for at most `HOLD_ROWS` (16) rows, each a window of at most
+  `MAX_SHELF_ITEMS` (24) cards that pages through the hub's own key.
 * **`onlyTransient` is a no-op on this server** — `0`, `1` and absent all returned the same nine
   hubs. Do not send it and do not rely on it.
 * **`Accept: */*` returns XML here too**, like every other PMS route. The client's explicit
@@ -911,7 +965,7 @@ Byte-range serving works, so seek-by-range is available to the player.
 |---|---|---|
 | `container` | `mkv`, `mp4` | demuxer support check |
 | `videoCodec` | `h264`, `hevc` | webOS decoder check |
-| `audioCodec` | `ac3`, `eac3`, `aac` | audio passthrough/decode check |
+| `audioCodec` | `ac3`, `eac3`, `aac`, `dca` | audio passthrough/decode check. PMS spells DTS `dca` (every DTS entry in its shipped profiles does), the pipeline and the device table say `dts`: `devcaps::audio_codec_id` is the one canonicaliser, and the client profile names it `dca` too |
 | `width` / `height` | 1920/858, 3840/1920 | ≤ panel/decoder max (4K HEVC ok on most webOS) |
 | `bitrate` | 16248 (kbps) | LAN is fine; cap for Wi-Fi profiles |
 | `videoResolution` | `1080`, `4k` | coarse version picker among multiple `Media[]` |
@@ -975,8 +1029,9 @@ for the raw captures behind this table.
 | M4 | Enhanced remux plus `subtitleStreamID` for an embedded SRT | `subtitles=embedded` or `=sidecar`: video copy, subtitle decision `unavailable` — PMS refuses to carry a text subtitle into the progressive MKV the enhancement produces. `subtitles=auto`: the server instead re-encodes the video and burns it. Either way a subtitle and the enhancement cannot share a route, which is I6. |
 | M5 | Part GET (`Range: bytes=0-1023`) on a transcode session, after MDE, after MDE followed by an enhanced-remux decision on the same session, and after only an enhanced decision | 206 Partial Content in every case from a host, including with the remux encoder still live, stopped physically, stopped with `closeResourceSession=1`, or abandoned. PR 4's device run nonetheless met a **503** on the Part right after releasing an enhanced remux; what PMS keyed it on did not reproduce off the television, so a release asks for the Part before it trials it and falls to the plain remux on a refusal (`route::decision::admit_original_part`). |
 | M6 | MDE `/decision` on a session whose transcoder is live | The MDE ENDS that transcoder: an HLS session's later segments answer 404 (200 without the MDE) and its stop 404; a progressive session's `start.mkv` at an offset on the same id answers 400 until it is re-decided. Re-issuing MDE is harmless only when nothing is live — never before a Part GET whose rollback needs the encoder still running. |
-| M7 | Enhanced remux plus an explicit `subtitleStreamID=<id>&subtitles=burn` for an embedded subtitle, instead of the `=embedded`/`=sidecar`/`=auto` shapes M4 measured | **Verified live (PMS 1.43.4, host, Guest identity, 2026-09-29)**, against our own transcode query shape plus `normalizeLoudness=1`. Enhanced remux + `subtitles=embedded`: video copy, the text subtitle is absent from the decision entirely, and a PGS one decides `unavailable` — confirming M4's refusal generalizes past SRT. Enhanced + `subtitles=burn` at a re-encode flavour (`videoResolution=3840x2160&maxVideoBitrate=60000`) on HDR10 4K sources, both SRT and PGS: video transcodes to HEVC 10-bit with `colorTrc` kept at `smpte2084` (confirmed by `ffprobe` on the output: `yuv420p10le`/`smpte2084`), the hardware encoder runs it, throughput measured 2.0–2.6× realtime, source resolution is kept (no downscale), and the PGS case's own decision reads `burn`. The SRT case lists no subtitle Stream in the decision at all even though the video is re-encoded — the burn happens, but the decision body gives no wire signal of it for a text track; a visual (on-screen) confirmation that the burned text actually appears is still pending the device run. The SAME sources with the enhancement OFF cost the identical video transcode — the burn itself is the cost, not the DSP params riding along with it. A Dolby Vision Profile 8 source asked to burn: PMS copies the video (`DOVIPresent=1` in the decision, matching `EnhancementRoute::RemuxDropsDolbyVision`'s "video copy" half) and silently drops the subtitle — confirming `DisabledReason::DolbyVisionSubtitle`'s refusal is not just this app being conservative; the server itself cannot do both. Official Plex clients ask for `subtitles=burn` explicitly rather than relying on `=auto`'s refuse-then-decide path M4 found; this app now does the same: an embedded subtitle forces `remux: false` (a real re-encode, `EnhancementRoute::Burn`) carrying both the DSP params and the burn request in the one decision, so the subtitle is never silently dropped (superseding I6's "cannot share a route" for the embedded case). An external sidecar stays on the ordinary enhanced remux and is drawn by the app over it: a remux contract never names a subtitle (see M8), and picking or clearing a sidecar on a live remux rebuilds nothing. |
+| M7 | Enhanced remux plus an explicit `subtitleStreamID=<id>&subtitles=burn` for an embedded subtitle, instead of the `=embedded`/`=sidecar`/`=auto` shapes M4 measured | **Verified live (PMS 1.43.4, host, Guest identity, 2026-09-29)**, against our own transcode query shape plus `normalizeLoudness=1`. Enhanced remux + `subtitles=embedded`: video copy, the text subtitle is absent from the decision entirely, and a PGS one decides `unavailable` — confirming M4's refusal generalizes past SRT. Enhanced + `subtitles=burn` at a re-encode flavour (`videoResolution=3840x2160&maxVideoBitrate=60000`) on HDR10 4K sources, both SRT and PGS: video transcodes to HEVC 10-bit with `colorTrc` kept at `smpte2084` (confirmed by `ffprobe` on the output: `yuv420p10le`/`smpte2084`), the hardware encoder runs it, throughput measured 2.0–2.6× realtime, source resolution is kept (no downscale), and the PGS case's own decision reads `burn`. The SRT case lists no subtitle Stream in the decision at all even though the video is re-encoded — the burn happens, but the decision body gives no wire signal of it for a text track; a visual (on-screen) confirmation that the burned text actually appears is still pending the device run. The SAME sources with the enhancement OFF cost the identical video transcode — the burn itself is the cost, not the DSP params riding along with it. A Dolby Vision Profile 8 source asked to burn: PMS copies the video (`DOVIPresent=1` in the decision, matching the enhanced remux's video copy) and silently drops the subtitle — confirming `DisabledReason::DolbyVisionSubtitle`'s refusal is not just this app being conservative; the server itself cannot do both. Official Plex clients ask for `subtitles=burn` explicitly rather than relying on `=auto`'s refuse-then-decide path M4 found; this app now does the same: an embedded subtitle forces `remux: false` (a real re-encode, `EnhancementRoute::Burn`) carrying both the DSP params and the burn request in the one decision, so the subtitle is never silently dropped (superseding I6's "cannot share a route" for the embedded case). An external sidecar stays on the ordinary enhanced remux and is drawn by the app over it: a remux contract never names a subtitle (see M8), and picking or clearing a sidecar on a live remux rebuilds nothing. |
 | M8 | **UNMEASURED** — a remux (plain or enhanced) whose subtitle the app draws sends `subtitleStreamID=0&subtitles=none` on the transcode leg (`route::plan::transcode_spec`, `TranscodeSpec::client_subtitles`) | The spelling is the MDE handshake's client-rendered mode (`Client::mde_decision`), which PMS has accepted before; it has not been sent on a `/video/:/transcode/universal/decision` or `start.mkv` request. Expected: video copy, subtitle absent from the decision, no re-encode. A TV or host run must confirm PMS does not answer `auto`'s refuse-then-decide path or burn the part's own selected subtitle instead. **A TV run on 2026-10-06** showed PMS serving the Part to a fresh session id (`<live>-subs`) during a live remux, which is what the side reader (`player::subside`, `route::side_reader_target`) reads for an embedded subtitle. **Measured on the same TV (2026-10-06):** a Part `Range` read during a live remux answers 503 when it carries that remux session id and 206 with a fresh or absent session id; so a release from a remux (or burn) back to Direct Play (`route::decision::OriginalRecoveryPlan::direct_session`) probes and opens the Part on a freshly minted session id and stops the old remux once decoded frames confirm, while a release from a live hls encoder keeps that encoder's id (the Part shares its Streaming Resource). Whether `subtitles=none` on the start leg keeps the video a copy is still UNMEASURED: that run sent the dev trigger's remux with no subtitle selected. |
+| M9 | Enhanced remux (`directStream=1&directStreamAudio=1&boostDialog=1&subtitles=none`, `start.mkv`) of a Dolby Vision Profile 8 and a Profile 7 FEL source | **Measured 2026-10-19 (PMS 1.43.4.10903, host, Guest identity; the dev TV for the picture).** Both `/decision` answers copied the video (`decision=copy`), the decision Stream carrying `DOVIPresent=1` and the source's `DOVIProfile`. `ffprobe` of the output found the DOVI configuration record intact (P8: profile 8, compat 1; P7: profile 7, `el_present` 1, `bl_present` 1, compat 6), and the P7 output still carried its UNSPEC62 RPUs and UNSPEC63 enhancement-layer NALs. On the dev TV both played with the panel in Dolby Vision (Glasshouse `picture.dynamicRange`), the P7 one with the app's P7→P8.1 conversion armed on the remuxed stream. So a video copy keeps the declaration the file would have made as a direct play, and `route::plan::copied_video_dv` declares it. With an embedded subtitle selected the server instead re-encoded the video to burn it (`decision=transcode`), and no declaration is made. |
 
 **Known device-only gap on M5 (`audio_enhancement_normalize_reset`, `tests/manifest.json`, 2026-09-29).**
 Admitting the Part before the trial (`admit_original_part`) does not close the 503 in every case (the admission and the trial now read the Part on a fresh session id rather than the remux's, per M8, which this entry predates; whether that closes the case below is unmeasured):
@@ -994,7 +1049,7 @@ understood or worked around; a release from a session that has posted playing ti
 Direct Play only when PMS admits the Part, otherwise it returns to the plain Original remux.
 
 **Client-side reading.** `route::plan::enhancement_availability` (I1-I7, M7) gates the ASK and its
-flavour (`EnhancementRoute::Remux` / `RemuxDropsDolbyVision` / `Burn`, or a `DisabledReason` for
+flavour (`EnhancementRoute::Remux` / `Burn`, or a `DisabledReason` for
 every gate but "no Plex Pass" — see M7); the wire params are never sent outside a Direct/Remux
 target even when the viewer's preference is on (M3, I5).
 `route::EnhancementOutcome` grades the ANSWER from the params' own observability in the table above:
@@ -1217,6 +1272,22 @@ names the real selected id and "do not burn" is carried only by the transcode de
 sent `0` at every transcode start until 2026-10-06, which is how a freshly searched subtitle was
 lost at the next playback.
 
+**The track-memory write-back follows that rule and is UNMEASURED against a real server.** When a
+viewer's fresh play of an episode applied a remembered audio or subtitle on a DIRECT PLAY, the app
+sends one `PUT /library/parts/<part>?allParts=1[&audioStreamID=<A>][&subtitleStreamID=<S>]` on the
+landing's first decoded frame (`route::send_parked_write_back`), so the selection the server holds
+matches the screen. Nothing else changes: no watch state, no show- or account-level preference, no
+stream offset. `<S>` is the remembered track, `0` only for a remembered Off over a Part that has a
+subtitle selected; an audio-only write names the Part's own selected subtitle unchanged (which keeps
+a download alive) and omits the field when none is selected, so it never creates an explicit Off.
+Nothing is written for a declined memory, a fall-through pick, a retry or preview, a refused direct
+play, a transcode (its start PUT is the write) or a pick not on screen, and the subtitle selection
+is never moved for a Part that carries a downloaded or external subtitle. That the write lands on the VIEWER's
+own selection (not a household-wide one), that it spares another user's download, and that
+omitting `subtitleStreamID` leaves the subtitle selection alone all rest on the OpenAPI spec and
+the in-tree fake (`selection_pms`) alone; `tests/mock_pms.py`'s selection is global. A real-server
+Guest check is still owed.
+
 The same loss, second sequence (2026-10-06): a download installed and selected mid-playback, playback
 stopped and restarted two seconds later, and the start's `PUT .../parts/<part>?allParts=1&subtitleStreamID=<E>&audioStreamID=<A>`
 named the part's EMBEDDED English track `<E>` (re-picked from the page's pre-playback copy of the
@@ -1232,9 +1303,211 @@ it is a 400).
 
 ---
 
+## 9. Notifications (SSE) — `/:/eventsource/notifications` (measured on PMS 1.43.4, Guest token; ON for owned servers)
+
+The server pushes what other clients are doing. The app reads it with `plex::notify` (the protocol)
+and `stores::notify` (the policy); both ship on (`NOTIFY_ENABLED = true`) and the feed opens
+only to a server the account OWNS. Notifications are hints about a stranger's playback: they never
+reach a timeline, a stop, an end-of-stream candidate or a resume point.
+
+```
+GET /:/eventsource/notifications?filters=playing%2Ctimeline   (Accept: text/event-stream; X-Plex-Token in the query)
+```
+
+Measured against a local server with a Guest token:
+
+- **The query parameter is `filters`, and the path is `/:/eventsource/`.** `plex-openapi.json`
+  documents the path as `/:/eventsource/notifications` but the parameter as `filter`; the WebSocket
+  twin is `/:/websockets/notifications` on the server and `/:/websocket/notifications` in the spec.
+  The measurements win.
+- **A Guest token receives only `playing` events** (session key, the playing client's
+  `clientIdentifier`, `ratingKey`, `viewOffset`, `state`). The app requests `filters=playing,timeline`
+  (the comma sent percent-encoded). The idle measurements below used `filters=playing` alone; a later
+  capture on the owner's own server shows the server **accepts both `filters=playing,timeline` and
+  `filters=playing%2Ctimeline` and then sends `timeline` frames** (the fallback, no `filters`, is not
+  wired and is not needed).
+- **An owner token, watched read-only from the host over loopback HTTP** (one stream at a time, the
+  app's identity headers' client identifier, token in a header, no other request): with
+  `filters=playing`, 601 s: HTTP 200 `text/event-stream`, 60 frames, every one an SSE `ping`
+  (6.0 per minute, about 10 s apart), largest frame 20 bytes, 1320 bytes in all; no `playing` and no
+  other type arrived. Without `filters`, 180 s: 18 frames, again only `ping` (6.0 per minute, largest
+  frame 20 bytes). The server was idle for both windows, so this shows the owner token is accepted,
+  the stream is quiet at rest and no unfiltered type (activity, timeline, status, update) arrived
+  unprompted. It does NOT show whether `filters` suppresses anything, or whether the parser sees a
+  non-`playing` type, because nothing but pings was ever sent; that needs library activity.
+- **A ping about every 10 seconds**, and **no replay**: events missed while disconnected are gone,
+  so a reconnect after a live stream must re-read what the screens show (`resync_epoch`).
+- **Scrobble and unscrobble emit nothing.** The feed does not tell a client that an item became
+  watched; the re-read backstop does.
+- **No `ETag`** on any related read.
+- **One persisted client identifier.** Every new `X-Plex-Client-Identifier` the server sees raises
+  a new-device alert on the account, so the feed sends the same identifier the rest of the app does
+  and never mints one per connection. It sends the identity headers (`Client-Identifier`, `Product`,
+  `Version`, `Platform`, `Platform-Version`, `Device`, `Device-Name`) and no `X-Plex-Provides`: this
+  client is not a controllable player.
+
+What the parser accepts, leniently: a `data` JSON whose `NotificationContainer.type` is `playing`
+(or absent) and whose `PlaySessionStateNotification` array lists the sessions, or whose type is
+`timeline` (below); every field optional,
+ids as strings or numbers, unknown fields and unknown types ignored. A session whose
+`clientIdentifier` is this device's own is dropped before anything else sees it. The envelope's field
+names are the parser's reading and are not yet confirmed by a capture committed here: a verbatim
+frame would carry the session's key, client id and rating key, so it stays out of the repository
+(scrubbed captures hold only the ping cadence).
+
+**`timeline` frames: CAPTURED** (passive, read-only streams on the owner's own server while its library
+scanned; the raw captures hold titles and paths and stay out of the repository). One frame is
+`event: timeline` + `data: {"TimelineEntry":{...}}`: a single OBJECT, not an array, and no
+`NotificationContainer`. Scrubbed shape (synthetic values):
+`{"TimelineEntry":{"identifier":"com.plexapp.plugins.library","sectionID":"1","itemID":"1001","type":1,
+"title":"Movie A","state":5,"metadataState":"processing","updatedAt":1760000001}}`. `sectionID` and
+`itemID` are STRINGS; `type` and `state` are integers; `metadataState` ("queued", "matching",
+"processing", "loading") and `mediaState` ("analyzing") appear on some frames only. `type`: 1 movie, 2
+show, 3 season, 4 episode, 10 track. `state` values seen: 2, 3, 4, 5.
+
+The sequence of one movie or show is `state` 5 + `metadataState` "processing", then 4 + "loading", then
+**5 with no `metadataState`: the finished frame, the last of its sequence**. So state 5 opens AND closes a
+sequence (the first, before the item has metadata, is not "finished"). A season runs 2 ("matching"), 5, 3
+("queued"), 3 ("processing"), 4 ("loading") and a final 5, with its episodes (5, 4, 4, 5 each)
+interleaved; a music track is two state-5 frames, the first with `mediaState` "analyzing". The sequence
+is the same whether the item is new or only refreshed (the captures cannot tell them apart), so a
+"create" is "the item finished processing". **Deletion has NOT been observed** (no delete happened in any
+capture): the community-documented state 9 is kept as the delete value and is UNVERIFIED, as is the rest
+of the delete frame.
+
+The parser keeps an entry only when `itemID`, `type` and `state` are present (numbers as numbers or
+numeric strings), `type` is 1 or 2, the `identifier`, when present, is the library plugin's and
+`state` is 5 with neither `metadataState` nor `mediaState` (created) or 9 (deleted, UNVERIFIED); every
+other frame is dropped. The community `NotificationContainer` envelope with an array is still read.
+An `itemID` is the item's `ratingKey` on that server, not a guid. The fixtures
+(`rust-modules/plex/src/plex/notify/fixtures.rs`) are this shape with synthetic titles and ids.
+
+**Frame rates (measured, owner's server, 12 h).** `timeline`: 53 frames in 720 min = 0.07 per minute
+over the window, 7.6 per minute over the 7 minutes that had any; a scan arrives in bursts, the peak
+60 s window held 20 frames (all within one second, a 10-track music add) and a 36-frame season add held
+18 in its busiest minute. Idle is pings only: 6 per minute (4319 in 720 min), 2 bytes of data each.
+`filters=playing,timeline` costs 53 timeline + 4319 ping frames, 19 KB, in 12 h. **Without `filters`**
+the same 12 h held 27 990 frames and 6.8 MB: `activity` 22 004 frames, mean 30.6 per minute over the
+window, 66.9 over its 329 active minutes, peak 215 in one minute and 62 in one second (437 bytes at most),
+plus `progress` 1 401, `status` 106, `account` 59, `reachability` 47 and `preference` 1. Filtering is what
+keeps the feed quiet; an unfiltered subscription is not an option.
+
+What a hint does (`stores::notify_map`): a session that is new or changed state on an item a page
+HOLDS owes that item a read-back of OUR state. A page holds what its store enumerates while the page
+is on the navigation stack, visible or covered: Home's, the Library page's and Search's rows only
+while those pages are on it (a popped page holds nothing), the Watchlist page's matched copies
+on reachable servers inside its hold window (the same rule), a Person, Filmography or Collection page's
+rows, and a Detail page's own item, plus, while it is the loaded Detail, the episodes of its current
+season window (read the owing way) and its related and collection tiles (read quiet). A steady
+`playing` ping owes nothing, `buffering` counts as `playing` and an unknown state is ignored, and two
+clients without a session key are told apart by client id. A `stopped` session also owes its server one
+quiet Home refetch (`RefetchSourceQuiet`, coalesced per server), and, when no page holds the item, one
+`HubsInvalidateServer` for that server only: its section shelves are re-read, behind its failure
+backoff (a hint does not reset it) and at most once per quiet-refetch spacing per section. An item a
+Detail page shows is read the owing way, so the landed row (and, for an episode, its season and show)
+reaches the page through `DetailReconcile` (in place, no focus or scroll move); any other held card is
+read quiet and a Detail on screen is not re-fetched for it. Nothing is spent under the player or while
+a recording or replay is armed: it stays queued. A feed that comes back after a gap forgets what it had
+seen and owes the covered pages their re-read. A hint is never a playback event: it does not queue a
+stop, an end-of-stream candidate or a resume point, so a stranger's `stopped` cannot scrobble our
+other servers.
+
+What a hint does for the Watchlist: a session on a matched title that the page holds owes a read-back like
+any held card. A `timeline` create or delete does not read the item: it owes the Watchlist store ONE re-match
+of that server and kind (a delete of the item a tile is matched to asks again about that guid, a create asks
+again about the kind's titles the server was not seen to hold, `/library/all?type=T&guid=…` at 40 guids to a
+request), deduplicated per pump, at most once per quiet-refetch spacing (5 s) per server and kind, only once
+the Watchlist has loaded and only when `reread_allowed`; it stays queued otherwise. A feed that came back
+after a gap re-asks the server's titles whole. The tile flips when the answer lands (`docs/watchlist.md`,
+*Live-update gaps*); Home, Library and Search are not touched. A watched toggle on another client emits
+nothing, and the plex.tv membership itself has no PMS signal at all.
+
+Connection policy: idle 25 s ends a stream as `Silent`; `Silent`, `Closed`, a transport failure and a
+5xx retry after 2, 4, 8 ... 60 s counted in frames; a 401 parks the server until its token changes; any
+other 4xx and a build that cannot stream (libcurl unbound or only serialised HTTPS) park it for the
+session, while a request the credential gate refused (status 0, a state of the moment) backs off; a background cancels every stream and a foreground reopens them.
+
+TV checks (debug install signed in through `tests/mock_pms.py`'s own plex.tv, so the mock's server
+arrives OWNED and the owned-only rule runs unmodified; `tools/tv-session.sh up --mock-plextv`):
+connects and goes live on an owned server (passed); ten idle minutes with no churn (0 reconnects, 0
+ends in 600 s; passed); the mock stopped and restarted: `Transport` end, escalating Backoff, reconnect,
+exactly one resync (passed); another client's `playing` then `stopped` refetches Continue Watching
+once, and an open Detail re-reads in place with its layout and focus unchanged (passed). Background and foreground
+on the set (2026-10-16; `tv-session.sh background` launches a full-screen app over ours, `foreground`
+launches ours again with the pid unchanged): two WILL/DID background edges each logged one `notify:
+suspend conns=1`; the foreground logged `network changed conns=1`, `resume conns=1`, then ONE
+`connecting` and `live`, with no `resync`, no `ended` and no park line (the page re-read comes from
+`reread.resume`, not from a feed gap) (passed, twice). A profile switch through the who's-watching
+picker on a three-profile mock household: `auth: switch ... ok (per-user server token)`, `plex: 1
+server(s) revoked - profile changed`, then `roster`, `connecting`, `live`: the feed reopened on the
+new profile with no `ended` and no refused-credential line; the empty-token and old-mailbox rules are
+pinned by `notify_tests` (`empty_token_never_connects`, `token_change_reconnects_and_drops_old_mailbox`),
+and the log cannot show which token the stream carried (the mock accepts any non-empty one), so the
+on-set evidence is that it reconnected, not what it sent. Roster rebuilds right after a switch can
+show a second `connecting` before the first `live` (the first connection is cancelled by the new
+key). A silent peer (the mock process SIGSTOPped for 60 s with its socket open, nothing sent):
+two `ended Silent -> Backoff` with their reconnects in 60 s, then on SIGCONT one `resync` and `live`
+(passed). A REAL-LOOKING network loss (2026-10-16; `tools/netloss-proxy.py`, a host-side TCP proxy between the set and the mock, no
+root and no change to the set's network: the mock was started with `--advertise-ip <host LAN IPv4>
+--advertise-port <proxy port>` so every PMS connection the app opened, the feed included, crossed
+it; `tv-session.sh up --mock-plextv` for the owned sign-in, then `POST /_proxy/mode`): the proxy's
+`blackhole` keeps existing connections open and stops forwarding in both directions (no FIN, no
+RST; new connections are accepted and never answered), `reset` RSTs everything and resets each new
+connection on accept. Heartbeat counts are `loop=` lines (about one a second) and every one read
+`dropped=0`. (1) Blackhole 60 s on the idle picker: `ended Silent -> Backoff` twice (the stream was
+silent 25 s each time), two reconnects accepted by the proxy and never answered (+24 s, +54 s), no
+park; 62 heartbeat lines in the 62 s window, so the loop never stalled; on restore ONE `resync epoch=1`
+and `live` (passed). (2) Reset, restored after 30 s: `ended Transport` four times with reconnects at
++2.4, +6.9, +16.7 s (each reset on accept) and +36 s (the first after restore), one `resync`, `live`
+(passed; 33 heartbeat lines in the 32 s of reset). (3) Blackhole 300 s: six `ended Silent` and six reconnects, the gaps
+between connects 29.7, 33.7, 41.6, 59.4, 89.7 s (the 25 s silence plus the 2, 4, 8, 16 ... up to
+60 s backoff), no park; the sixth connection, held since +279 s, went `live` when the link came
+back, with ONE `resync` (passed; 299 heartbeat lines in the 302 s window). (4) Normal requests during a 60 s blackhole
+(re-picking a profile through the who's-watching picker, which re-reads the server): `pms: server 0
+info unavailable (GET / failed)`, `browse: source 0 ... did not answer`, `hubs: source 0 FAILED
+(attempt 1) - retrying in 2s`, `auth: ... probe timed out`; the page showed its "Couldn't load
+libraries / Try again" read-out, BACK and OK were still handled during the loss, and 81 heartbeat
+lines in the 82 s window all read `dropped=0`, with `fps=60` while the spinner ran (passed). A restore that releases
+many held connections at once can overrun the mock's small accept queue (six of 24 were reset by
+it once); the proxy retries its upstream connect, so that is the mock's artefact, not the link's.
+NOT determined: the cases a lit Home would add (only the picker and the library-choice page carry
+PMS traffic without pressing *Start watching*, which this run did not), a loss on the set's own
+route (the proxy is a userland analogue: the TCP stack on the set still sees an ordinary peer that
+went quiet or reset), and a lossy rather than dead link (no partial loss, latency or reordering).
+Also not determined: whether Home focus stays put under a tile update (only the Detail page
+was captured).
+
+---
+
+## Paging, observed
+
+Observed on PMS 1.43.4 with a small library, by read-only GETs. Only the endpoints in the table were
+probed; the other listings this file describes are not covered by this section.
+
+A request pages when it carries the window's start (`X-Plex-Container-Start`, as a query parameter or
+a header; see the paging gotcha in §2b). A paged answer echoes `offset`, carries the listing's
+`totalSize`, and `size` is the number of rows returned. An unpaged answer carries no `totalSize` and
+no `offset`: a `similar` listing without a window has none, and a library search without one carries
+only `size`.
+
+| Endpoint | Pages? | Carries `totalSize` and `offset` when paged | Notes |
+|---|---|---|---|
+| `/hubs/continueWatching/items` (the key of the Continue Watching hub) | yes | yes | Windows (0,3) and (3,3) are contiguous; rows are sorted by `lastViewedAt`, descending. The library held six items, so nothing past twelve was seen. |
+| `/library/metadata/{id}/similar` (the key of `movie.similar`) | yes | yes | `totalSize` 24 to 26 across calls; windows are contiguous; the related hub's preview is the exact head of the listing; order is stable. |
+| `/library/sections/{id}/all` with a `title=` filter | yes | yes | Pages as an unfiltered section listing does. |
+| `/library/sections/{id}/collections?title=`, `/library/sections/{id}/all?type=18&title=`, `/library/all?type=18&title=` | yes | yes | Matches collections by title. For the same three-letter prefix, the collection hub of `/hubs/search` returned no rows, so the two match sets are not known to be equal. |
+| `/library/search?searchTypes=movies`, `tv`, `people`, `music` | yes | yes | Each row is `{Metadata, score}`; a people row is `{Directory, score}`, with `tagKey` and `count`. `totalSize` is capped by `limit` (`tv` gave 30 at `limit=30`). `searchTypes=movies,tv` returns one mixed list, movies first, then shows, then episodes. |
+| `/library/search` with a kind the server does not know (`shows`, `episodes`, `actors`, `bogus`) | not applicable | `totalSize=0` | Empty, with no error: an unsupported kind looks like no hits. |
+| `/hubs?count=…` (the hub list) | yes, by hub | yes | A window of three over ten hubs returned three hubs, `totalSize=10`, `offset` echoed. |
+| `/hubs/sections/{id}?count=…` (one library's hub list) | yes, by hub | yes | Windows (0,3) and (3,3) over nine hubs; order is stable across two calls. |
+| `/hubs/search` with a window | no | not per hub | Not a per-hub offset: seven hubs shrank to one hub with two rows, with `size=7`, `totalSize=17`, `offset=10`. Search hubs carry no key, and `more` is false even on a hub cut at its limit. |
+| Key of `movie.topunwatched` and `movie.by.actor.or.director` (random hubs) | yes | not recorded | The listing came back in the same order on two calls; the windows (0,6) and (6,50) together equal the whole listing; every preview card is in it. The library held only 13 items, so large lists are not covered. |
+| `/playlists/all` (the key of the playlists hub in the Home hub list, `/hubs` and `/hubs/promoted`) | yes | yes | Measured on PMS 1.43: `X-Plex-Container-Start=2&X-Plex-Container-Size=2` answered `size` 2, `totalSize` 5, `offset` 2, items of type `playlist`. The app does not page it and no row shows it: a hub of type `playlist` is not listed (`pms::listable`), so it never reaches a shelf, and `is_pageable_hub_key` does not admit the key. |
+
+
 ## App data-layer summary
 
-- 3 startup requests: `/library/sections` (find movie/show keys), `/hubs/promoted` (home shelves, items include Media for instant resume), then lazy `/library/sections/{key}/all` pages of 50.
+- 3 startup requests: `/library/sections` (find movie/show keys), `/hubs/promoted` (home shelves, items include Media for instant resume), then lazy `/library/sections/{key}/all` pages of `stores::page_cache::PAGE` (60).
 - One JSON shape covers movie/show/season/episode; parse the field table in §2 with all-optional semantics.
 - Every image through `/photo/:/transcode` at exact card size; never raw `thumb`.
 - Direct play = `Media[].Part[].key` + token; server supports byte ranges.

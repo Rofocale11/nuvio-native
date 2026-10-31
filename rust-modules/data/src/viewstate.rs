@@ -1485,3 +1485,19 @@ mod tests {
         assert_eq!(state.take_detail_refresh(), Some(target));
     }
 }
+
+/// What a finished playback tells the view state: the position its `stopped` timeline POST carried,
+/// and whether the item was already watched when the play began. Built by the media layer when that
+/// POST is attempted or abandoned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopRecord {
+    pub sid: plx_plex::plex::ServerId,
+    pub rk: String,
+    pub pos_ms: i64,
+    pub dur_ms: i64,
+    /// The server took the POST. A refused or abandoned one still patched the tile (the viewer did
+    /// watch up to there) but asks for no read-back, which would undo it.
+    pub ok: bool,
+    /// Watched when the play began (read off the play queue, fetched at play start).
+    pub was_watched: bool,
+}

@@ -726,7 +726,11 @@ impl SessionAdapter {
 
     pub(crate) fn publish_profile(&mut self, publication: plx_session::auth::owner::ProfilePublication) {
         match &mut self.resources {
-            Resources::Live { publisher } => publisher.publish(publication.profile, publication.scope.0),
+            // The stamp names the sign-in the profile belongs to (the seat's account key); an
+            // empty one is left off the wire.
+            Resources::Live { publisher } => {
+                publisher.publish(publication.profile, publication.scope.0, publication.stamp)
+            }
             #[cfg(test)]
             Resources::Fixture(resources) => resources.profile = Some(publication),
         }
@@ -759,7 +763,10 @@ impl SessionAdapter {
         if pending.ticket.is_some() || now.wrapping_sub(pending.retry_at) >= u32::MAX / 2 { return; }
         let (diagnostics, all_local, language) = (pending.diagnostics, pending.all_local, pending.language);
         pending.ticket = plx_base::storage_worker::submit(move || {
-            let erasure = plx_plex::plex::session::clear_for_erase(all_local, language);
+            // A retry carries the language the first attempt read; a first attempt retains what
+            // the live session holds (`None` = read it here).
+            let kept = language.map(plx_plex::plex::session::Retained::with_language);
+            let erasure = plx_plex::plex::session::clear_for_erase(all_local, kept);
             let cleared = matches!(erasure.outcome,
                 plx_plex::plex::session::ClearOutcome::Durable { legacy_swept: true });
             // A sign-out that could not retain the language retries, carrying it; delete-all
@@ -780,7 +787,7 @@ impl SessionAdapter {
             if all_local { failures.extend(erasure.preference_failures); }
             plx_machine::idle::wake();
             plx_machine::present::wake_from_worker();
-            EraseWorkerOutcome { complete, failures, language: erasure.retained_language }
+            EraseWorkerOutcome { complete, failures, language: erasure.retained.language() }
         }).ok();
         pending.retry_at = now.wrapping_add(STORAGE_RETRY_MS);
     }

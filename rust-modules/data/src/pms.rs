@@ -76,6 +76,11 @@ const HUB_FETCH_COUNT: i64 = 12;
 
 /// A catalog row — owned strings (the old C-ABI fixed `[u8; N]` buffers are gone; no C
 /// consumer remains). Fields pub so the UI / route / player read them directly.
+/// `PmsMovie::season_index` of an EPISODE whose server sent no `parentIndex`. Distinct from `0`
+/// (Specials), so an "open season 0" change does not reach a row whose season is merely unknown.
+/// Every reader that shows or opens by season already tests `> 0`.
+pub const SEASON_UNKNOWN: c_int = -1;
+
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PmsMovie {
@@ -327,7 +332,7 @@ pub fn parse_item(it: &plx_plex::plex::Metadata, sid: ServerId) -> PmsMovie {
         3 => {
             // episode: parent show = grandparent, season number = parentIndex
             m.show_rk = clean(&it.grandparent_rating_key);
-            m.season_index = it.parent_index as c_int;
+            m.season_index = it.parent_index.map_or(SEASON_UNKNOWN, |i| i as c_int);
             m.show_title = clean(&it.grandparent_title);
             m.ep_index = it.index as c_int;
         }

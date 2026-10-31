@@ -167,6 +167,7 @@
       "warmup_s": 5,
       "triggers": {
         "plxnative-library": true,
+        "plxnative-libtype": "recommended",
         "plxnative-framedrop": 25,
         "plxnative-focus": true
       },
@@ -179,15 +180,85 @@
         "landed": "library",
         "key_gap_s": 0.33,
         "max_rows": 220,
-        "extra_rows": 6,
+        "extra_rows": 0,
         "min_landed": 150,
-        "fingerprint_region": "grid",
+        "fingerprint_region": "shelf",
         "land_wait_s": 15,
         "settle_s": 3,
         "rest_s": 4,
         "tail_s": 5
       },
-      "comment": "The Library with a hundred and seventy recommended shelves, forty of them promoted collections (#412), against the SYNTHETIC mock only: `./tests/run.py --fps --mock --filter library-shelves-deep` starts tests/mock_pms.py --section-hubs 170 --section-hubs-linked 40 itself. This is the INSTRUMENT for #412: the section's shelf count has no cap, so all 170 land, and the scene FAILS if fewer than `walk.min_landed` (150) do (a build that bounds the Library at twelve shelves lands 12, and its shorter walk would otherwise pass on those 12). The walk length derives from what LANDED, as home-grid-deep's does: the shelf count is the seated section's `libhubs: section N landed M shelves` line (`plxnative-library` with no value seats the preferred Movies library, index 0), then one Down per shelf, a second for each linked shelf (its heading is a stop of its own, then its row) and `extra_rows` more to cross the toolbar into the grid, at ~3 keys/s, a rest, and Up back; keys are only ever down/up. Graded: synthetic identity, keys sent == the expected count, a `focus route=library ... region=grid` fingerprint (`plxnative-focus`, armed here) inside the walk window, a `region=shelf row=R` fingerprint there with R >= min_landed - 1 (the SCREEN must show a deep shelf, not only the store having landed 170, or a screen that capped its rows again would pass), loop_floor 50 and fps_floor 30 (library-scroll's) on that window. frame_gt33, the worst frame and p99 are printed, NOT graded (plxnative-framedrop is armed so the heartbeat carries them). max_rows >= 170 + 40 + extra_rows; run_secs covers it plus the launch wait (tests hold it to that). NOT yet run on a device."
+      "comment": "The Library's Recommended page (`plxnative-libtype: recommended` presses the header's Recommended control; the Library page itself mounts no shelves) with a hundred and seventy recommended shelves, forty of them promoted collections (#412), against the SYNTHETIC mock only: `./tests/run.py --fps --mock --filter library-shelves-deep` starts tests/mock_pms.py --section-hubs 170 --section-hubs-linked 40 itself. This is the INSTRUMENT for #412: the section's shelf count has no cap, so all 170 land, and the scene FAILS if fewer than `walk.min_landed` (150) do (a build that bounds the Library at twelve shelves lands 12, and its shorter walk would otherwise pass on those 12). The walk length derives from what LANDED, as home-grid-deep's does: the shelf count is the seated section's `libhubs: section N landed M shelves` line (`plxnative-library` with no value seats the preferred Movies library, index 0), then one Down per shelf, a second for each linked shelf (its heading is a stop of its own, then its row) and `extra_rows` more (0: the page seats its first shelf on arrival and has no toolbar to cross; the Recommended page prints the Library's `focus route=library ... region=` fingerprint, `region=shelf row=R col=C` on a card, `heading`/`crumb`/`strip` elsewhere), at ~3 keys/s, a rest, and Up back; keys are only ever down/up. Graded: synthetic identity, keys sent == the expected count, a `focus route=library ... region=shelf` fingerprint (`plxnative-focus`, armed here) inside the walk window, a `region=shelf row=R` fingerprint there with R >= min_landed - 1 (the SCREEN must show a deep shelf, not only the store having landed 170, or a screen that capped its rows again would pass), loop_floor 50 and fps_floor 30 (library-scroll's) on that window. frame_gt33, the worst frame and p99 are printed, NOT graded (plxnative-framedrop is armed so the heartbeat carries them). max_rows >= 170 + 40 + extra_rows; run_secs covers it plus the launch wait (tests hold it to that). Run on the television (2026-10-20, ARM release build, panel on and muted, its own mock): PASS, 60 fps median over 8408 walk frames and 420 keys; the store's every-frame step (dstep) median 0.6 ms, p99 1.3 ms; no key press landed a late frame (frames of 25 ms or more are 0.30% of the window: the clear-stall waits, and the one landing frame of the 170th shelf)."
+    },
+    {
+      "name": "library-burst",
+      "tier": "ui",
+      "route": "library",
+      "run_secs": 90,
+      "warmup_s": 5,
+      "triggers": {
+        "plxnative-library": true,
+        "plxnative-framedrop": 25,
+        "plxnative-focus": true,
+        "plxnative-phcount": true
+      },
+      "mock": {
+        "movies": 1000,
+        "only": true
+      },
+      "walk": {
+        "reach": {
+          "route": "library",
+          "region": "grid",
+          "min_global": 0
+        },
+        "burst": 4,
+        "bursts": 8,
+        "key_ms": 125,
+        "rest_ms": 1500,
+        "max_rows": 40,
+        "extra_rows": 2,
+        "fingerprint_region": "grid",
+        "land_wait_s": 15,
+        "settle_s": 3,
+        "tail_s": 5
+      },
+      "comment": "An INSTRUMENT, not a regression gate: how many LOADING (placeholder) poster tiles a viewer sees scrolling the Library grid in short bursts with rests between them, against the SYNTHETIC mock only (`./tests/run.py --fps --mock --filter library-burst`, a 1000-movie library). library-scroll's oscillator reverses every 350 ms and never rests, so it cannot show what a strategy that warms upcoming rows while the grid is AT REST buys; this does. The walk (tests/mock_fps.py `burst_plan`, the same KeyWalk machinery as the deep scenes, one ssh paced from the Mac, keys only down/up): `extra_rows` (2) Downs from the page header into the grid (the Library page mounts no shelves and logs no `libhubs` landing, so `walk.reach` lands the walk on its first `focus route=library` fingerprint), a rest, then 8 bursts of 4 Downs 125 ms apart each followed by 1.5 s of rest, then the same 8 bursts of Up back. The placeholder count is the `phcount: frames=F ph_frames=P draws=D ph=N` line the app writes once a second when `plxnative-phcount` is armed (rust-modules/src/dev/scenarios/phcount.rs, from ui::card_motion_metrics, which counts at the card primitive whether a card resolved a texture): ph is the card draws that showed a skeleton, i.e. placeholder tile-frames. PRINTED: ph in total, in the prelude, in the bursts and per burst (a sample belongs to the burst of the last key before it, so a burst owns the rest after it; good to about one line either side of a boundary), the share of card frames that showed one, median fps (and min/max), the usual frame_gt33/worst/p99 drops (plxnative-framedrop is armed so the heartbeat carries them) and the pupf/pupf_ge22/pup poster-upload tally; the generic loop= median is printed too. GRADED: only the synthetic identity line, keys sent == the expected count, and a `focus route=library ... region=grid` fingerprint (`plxnative-focus`) inside the walk window (plus the generic guard of at least 5 post-warmup loop samples). No floor, no ceiling: a candidate is compared by running the scene on both builds. Measured on the television (1000-movie mock, two runs each, placeholder tile-frames): 28,969 / 28,080 with no lookahead and the old moving-card decline (`lookahead=0 cardspeed=120`), 6,668 / 6,605 with 3 rows of lookahead, 3,552 / 2,948 with the decline off alone, 1,349 / 1,285 with both, which is the shipping default. Dev triggers pass through. The shipping defaults are 3 rows of at-rest poster lookahead and NO moving-card decline; `--extra-trigger plxnative-lookahead=0` measures the baseline without the lookahead (`=1`..`=4` another depth) and `--extra-trigger plxnative-cardspeed=120` brings the old moving-card decline back (it also takes any other px/s limit). `mock.movies` is 1000 (mock_pms.py's maximum) where library-scroll takes the default 48, so 32 grid rows of the walk exist. run_secs covers the walk's worst case plus the 10 s launch wait (tests hold it to that)."
+    },
+    {
+      "name": "library-hold",
+      "tier": "ui",
+      "route": "library",
+      "run_secs": 90,
+      "warmup_s": 5,
+      "triggers": {
+        "plxnative-library": true,
+        "plxnative-framedrop": 25,
+        "plxnative-focus": true,
+        "plxnative-phcount": true
+      },
+      "mock": {
+        "movies": 1000,
+        "only": true
+      },
+      "walk": {
+        "reach": {
+          "route": "library",
+          "region": "grid",
+          "min_global": 0
+        },
+        "burst": 16,
+        "bursts": 3,
+        "key_ms": 125,
+        "rest_ms": 2000,
+        "max_rows": 40,
+        "extra_rows": 2,
+        "fingerprint_region": "grid",
+        "land_wait_s": 15,
+        "settle_s": 3,
+        "tail_s": 5
+      },
+      "comment": "An INSTRUMENT, not a regression gate: library-burst's sibling for a LONG held scroll. Same mock block (1000 movies, synthetic only), triggers, printing and grading as library-burst (see its comment; `./tests/run.py --fps --mock --filter library-hold`), but the walk is 3 bursts of 16 Downs 125 ms apart (2 s of held-key scroll, 16 rows deep per burst, 48 rows down in all of the 166-row grid) each followed by 2 s of rest, then 3 bursts of 16 Ups back. It shows how many LOADING (placeholder) poster tiles a viewer sees when a held Down key outruns the posters, and what the rest after each hold recovers. The prelude is unchanged (`extra_rows` (2) Downs from the page header into the grid (the Library page mounts no shelves and logs no `libhubs` landing, so `walk.reach` lands the walk on its first `focus route=library` fingerprint), a rest); the walk is 3 + 96 keys, about 23.5 s from first press to last. Measured on the television (two runs each): 35,850 / 35,592 placeholder tile-frames with no lookahead and the old decline, 31,478 / 32,299 with lookahead alone, 4,168 / 4,362 with both (the shipping default). The placeholder tally, grading and dev triggers are library-burst's (`--extra-trigger plxnative-lookahead=0` and `--extra-trigger plxnative-cardspeed=120` pass through: the baseline without the lookahead, and the old moving-card decline). run_secs covers the walk's worst case plus the 10 s launch wait (tests hold it to that)."
     },
     {
       "name": "library-burst",
@@ -437,7 +508,7 @@
       "run_secs": 18,
       "warmup_s": 6,
       "item": "collection",
-      "comment": "The Movies library listed as its collections (TYPE menu > Collections, `all?type=18`): `libtype` switches the listing through the TYPE menu's own edit, then `libosc` sweeps the collection grid, whose cards mix posters and the neutral glyph-and-name tile. `plxnative-library` enters the server's preferred MOVIES library and no trigger names a section, so the scene declares the `collection` item for its REQUIREMENT, not its ratingKey (no trigger reads `$rk`): an installation that maps no collection skips it instead of sweeping an empty grid, and the mapped collection must live in that same Movies library. MEASURED on the dev set 2026-09-28 (main c468aaf8, panel off): loop/s median 60; fps median 60, min 58-59, max 61, over a 3-card collections grid.",
+      "comment": "The Movies library's Collections page (the header's Collections control, `all?type=18`): `libtype` presses that control, which pushes the page over the grid, then `libosc` sweeps the Collections page, which lists the library's collections (the page that replaced the grid's collection-type listing). `plxnative-library` enters the server's preferred MOVIES library and no trigger names a section, so the scene declares the `collection` item for its REQUIREMENT, not its ratingKey (no trigger reads `$rk`): an installation that maps no collection skips it instead of sweeping an empty grid, and the mapped collection must live in that same Movies library. MEASURED on the dev set 2026-09-28 (main c468aaf8, panel off): loop/s median 60; fps median 60, min 58-59, max 61, over a 3-card collections grid.",
       "triggers": {
         "plxnative-library": true,
         "plxnative-libtype": "collections",
@@ -445,6 +516,24 @@
       },
       "fps_floor": 30,
       "_fps_floor_note": "MEASURED on the dev set 2026-09-28: flat ~60 fps (median 60, min 58-59, max 61) against this floor of 30, the same frozen/alive separator library-scroll keeps for its own flat 60. Kept at 30 rather than raised: the test identity's mapped collection is a tiny 3-card grid, well short of library-scroll's twelve-shelf library, and a bigger collections grid may spend more of the sweep filling tiles the way library-scroll's larger library does — so 30 stays the frozen/alive line here rather than a tight bound on this one grid's size."
+    },
+    {
+      "name": "library-recommended",
+      "tier": "ui",
+      "route": "library",
+      "loop_floor": 50,
+      "run_secs": 18,
+      "warmup_s": 6,
+      "comment": "The Movies library's Recommended page (the header's Recommended control): `libtype: recommended` presses that control, which pushes the page over the grid, then `libosc` sweeps it. The page mounts RecommendedScreen (the library's hub shelves stacked down the page), so this scene sweeps those shelves. Floors are the library-collections ones, NOT yet measured on the television for this scene. Under --mock the mock is started with `--section-hubs 3` (the default mock serves one shelf, so the sweep had nothing to move through and stalled).",
+      "triggers": {
+        "plxnative-library": true,
+        "plxnative-libtype": "recommended",
+        "plxnative-libosc": true
+      },
+      "mock": {
+        "section_hubs": 3
+      },
+      "fps_floor": 30
     },
     {
       "name": "library-switch",
@@ -457,8 +546,10 @@
         "plxnative-library": true,
         "plxnative-libswitch": true
       },
-      "fps_floor": 8,
-      "_fps_floor_note": "Measured healthy median 18 fps on device 2026-07-31 (this scene's oscillator steps focus every 350ms and the spring now settles inside that period, so the gaps are real idle — the drop from ~60 is the settle predicate working, not a regression). A FROZEN animator reads ~0.5/s, the keepalive alone, so 8 separates them by a wide margin without gating on the exact duty cycle. Fill-rate regressions stay on `loop_floor`, which grades loop= and falls with the render rate while presenting."
+      "fps_floor": 4,
+      "fps_floor_stat": "live",
+      "fps_floor_windows": 6,
+      "_fps_floor_note": "Graded as a COUNT OF LIVE WINDOWS (`fps_floor_stat` live, tests/run.py `fps_floor_verdict`): at least `fps_floor_windows` (6) of the post-warmup 1 s `fps=` windows must each draw at least `fps_floor` (4) frames. Not the median, which flips on the phase of the switch cycle, and not the mean, which a freeze cannot move enough. The oscillator steps one switch every 1.4 s through a 14-step cycle that has idle steps with the two-library mock, and the graded windows (the harness drops the first 6) are the back of that cycle, about eight live seconds, followed by the spent-cycle tail `0 1 0 1 0 1`, the keepalive. Measured on the television 2026-10-19, phase H builds H3 H5 H7 H9: graded windows `21 30 11 11 33 18 11 10 | 0 1 0 1 0 1` (H3; H5 the same with one 50 at the very end, H7 `21 35 12 5 32 22 7 10`, H9 `21 32 12 8 32 19 10 9`), so the MEDIAN read 7 to 12 for one animation and failed the old floor 8 on H7 (7), while the live-window count is 8 on all four (9 with H5's tail burst) and 8 or 9 on all six recorded series in tests/test_harness.py. A frozen animator reads ~0.5/s, the keepalive alone: 0 live windows. The MEAN was tried and rejected: an animator that freezes after two graded seconds still averages 4.07 (H3), 4.43 (H7), 4.21 (H9), and a frozen run with one 50-60 fps window 3.8-4.7, both above any floor that also passes the healthy 10.4-10.6; those two have 2 and 1 live windows. What this does not catch is a freeze after the first six live seconds, which reads as a cycle that ended early. Fill-rate regressions stay on `loop_floor`, which grades loop= and falls with the render rate while presenting. (Before #843 the same scene read a healthy median 18 on device 2026-07-31 and its floor was 8 on the median.)"
     },
     {
       "name": "library-idle",
@@ -473,6 +564,34 @@
         "plxnative-library": true
       },
       "comment": "The Library's half of home-idle, and it did not exist before the one-scroll rewrite: a settled library must STOP presenting. It is the only scene that can catch either of this screen's two new perpetual animators — the page/grid fade coordinator and the A–Z rail's alpha spring — repainting forever, because every other library scene drives motion on purpose and an fps FLOOR is blind to a frame rate that is too high. loop_floor still grades loop=, which counts loop iterations: the loop must stay responsive at >=30Hz while presenting nothing. warmup_s is 10, longer than home-idle's 8, because this page settles last: its posters, its section hubs and the shelf reveal springs those land into all have to finish."
+    },
+    {
+      "name": "watchlist-idle",
+      "tier": "ui",
+      "route": "watchlist",
+      "loop_floor": 30,
+      "fps_ceiling": 5,
+      "run_secs": 22,
+      "warmup_s": 8,
+      "triggers": {
+        "plxnative-watchlist": true
+      },
+      "mock": {},
+      "comment": "The Watchlist page settled: plxnative-watchlist boots onto it. The page reads the discover host, not the PMS, so this scene only sees the synthetic watchlist when the television is booted with `tools/tv-session.sh up --guest --mock --mock-plextv=PORT` (which arms plxnative-discover at the mock too); without that tunnel the page settles on its unavailable read-out, which is also a still screen. It never reads a household's list while the mock is armed. search-idle's twin for this page: a landed list with its posters in is a still screen and must take ui::idle's present gate to the keepalive, while loop_floor keeps a wedged loop from passing by presenting nothing. No fps_floor and no key walk yet; the page's own ceiling is a first reading and is to be MEASURED on the television under the TV lock (`./tests/run.py --fps --mock --filter watchlist-idle`, after `make ARM_PROFILE=release deploy`) before it is trusted."
+    },
+    {
+      "name": "catalog-idle",
+      "tier": "ui",
+      "route": "catalog",
+      "loop_floor": 30,
+      "fps_ceiling": 5,
+      "run_secs": 22,
+      "warmup_s": 8,
+      "triggers": {
+        "plxnative-catalog": "5d776808f016bcd974c5a74e"
+      },
+      "mock": {},
+      "comment": "The catalog page settled: plxnative-catalog boots onto the page of the mock Discover fixture's ComingSoon title (index 8, a show no server holds). Like watchlist-idle it reads the discover host, so it only sees that record when the set is booted with `--mock-plextv=PORT` (which arms plxnative-discover at the mock); without it the page settles on its unavailable read-out, also a still screen. MOCK ONLY: the page's pill is a write to the account's list, and the mock is the only account this scene may ever press on. A landed catalog page with its art in is a still screen and must take ui::idle's present gate to the keepalive, while loop_floor keeps a wedged loop from passing by presenting nothing. No fps_floor and no key walk; the ceiling is a first reading, to be MEASURED on the television under the TV lock before it is trusted."
     },
     {
       "name": "search-type",
@@ -894,6 +1013,66 @@
       "require_log": ["moreosc: depth=1"]
     },
     {
+      "name": "fixed-480p-reencode-declaration",
+      "tier": "player",
+      "route": "player",
+      "run_secs": 40,
+      "warmup_s": 9,
+      "quality": "480p_720_kbps",
+      "comment": "Issue #665, second bug, against the SYNTHETIC mock only: a FIXED playback quality (480p) on a 3840x2160 H.264 source that the ceiling denies direct play and remux, so the app re-encodes over progressive start.mkv (TranscodeDelivery::ProgressiveMkv). Before 4f11c1aff `route::sink_max_raster` returned the SOURCE raster on that delivery and ignored the session's ceiling, so the Starfish Load declared `load: v=H264 a=\"AAC\" ... max=3840x2160@60` for a stream that is 854x480; now it is min(source, ceiling) = 854x480, whose H.264 envelope is `max=1920x1080@60`. The dev TV plays the old declaration without complaint, so this scene grades the DECLARATION (expect.load_max, and the set's own `smp_cb type=5` echo of it), not whether playback survives. Run it with `tools/tv-lock.sh with --why \"fixed 480p declaration\" -- ./tests/run.py --fps-player --mock --filter fixed-480p-reencode-declaration` (guest boot, synthetic mock, panel and sound off; never an account). tests/mock_pms.py is started with `--extra-media <src> --transcode-fixture <clip>`; plxnative-quality=480p_720_kbps (the same word `quality: switch -> ...` prints) pins the rung, an in-memory override that never touches a saved preference. The two files are generated, NOT in the repo, and live under $FIXTURES_OUT (default ~/plxnative-fixtures) in bug665/; the scene is skipped with this reason until they exist. SOURCE (rk 990001, ~10 Mbps, 30 s): `ffmpeg -f lavfi -i testsrc2=size=3840x2160:rate=30 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 30 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -profile:v high -level 5.1 -b:v 10M -minrate 10M -maxrate 10M -bufsize 10M -x264-params nal-hrd=cbr:keyint=60 -c:a aac -b:a 128k -ac 2 src-4k-h264-aac.mkv`. SERVED TRANSCODE (what start.mkv returns, 30 s): `ffmpeg -f lavfi -i testsrc2=size=854x480:rate=30 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 30 -c:v libx264 -preset veryfast -pix_fmt yuv420p -profile:v main -b:v 700k -maxrate 700k -bufsize 1400k -g 60 -c:a aac -b:a 96k -ac 2 transcode-480p-h264-aac.mkv`. Both carry AAC so the mock's (unmodified, 'direct play OK / copy') /decision answer and the real output agree on the codecs the Load declares. The scene has no loop_floor on purpose: it grades the log, and only needs five post-warmup player heartbeats to prove it reached the player. NOT yet run on a device.",
+      "mock": {
+        "only": true,
+        "rk": 990001,
+        "extra_media": ["bug665/src-4k-h264-aac.mkv"],
+        "transcode_fixture": "bug665/transcode-480p-h264-aac.mkv"
+      },
+      "triggers": {
+        "plxnative-play": "$rk"
+      },
+      "require_log": ["route: quality ceiling P480"],
+      "expect": {
+        "decision": "transcode",
+        "codec": "h264",
+        "video_size": "854x480",
+        "load_video": "H264",
+        "load_audio": "AAC",
+        "load_max": "1920x1080@60",
+        "sink_echo": "1920x1080@60",
+        "min_timeline_climb_s": 10
+      }
+    },
+    {
+      "name": "boost-remux-declares-source-rate",
+      "tier": "player",
+      "route": "player",
+      "run_secs": 40,
+      "warmup_s": 9,
+      "comment": "Issue #832, against the SYNTHETIC mock only: with Boost Dialog ON a direct-playable 4K H.264 24p file plays as an ENHANCED REMUX (PMS start.mkv, video COPY, audio re-encoded to AC3). The app used to declare `load: v=H264 a=\"AC3\" fps=0.000 ... max=3840x2160@60` for it (a remux declared no source rate) and the TV presented ~16 fps of a 24p stream; now a remux declares the source rate: `fps=24.000 ... max=3840x2160@24`. This scene grades the DECLARATION (expect.load_fps / load_max, and the set's own `smp_cb type=5` echo of it) and the sink's PRESENTED rate against it (expect.presented_rate, run.py a_presented_rate; it SKIPS a declared fps=0.000, so the pre-fix build cannot pass it). plxnative-audioenh=boost forces Boost Dialog on at boot (dev::scenarios::arm_audio_enhancements; in memory only for the dev-token boot, which never seats a profile, and run_fps_scene clears every plxnative-* trigger before each scene, so no later scene inherits it); fps scenes write no default plxnative-audioenh, so this value is the only one. The mock answers /decision with boostDialog=1 as Part decision transcode, video copy, audio transcode ac3, and `--transcode-fixture` serves the remux bytes. Run it with `tools/tv-lock.sh with --why \"boost remux declaration\" -- ./tests/run.py --fps-player --mock --filter boost-remux-declares-source-rate` (guest boot, synthetic mock; never an account). The two files are generated, NOT in the repo, and live under $FIXTURES_OUT (default ~/plxnative-fixtures) in boost-remux/; the scene is skipped with this reason until they exist. SOURCE (rk 990001, ~10 Mbps, 30 s): `ffmpeg -f lavfi -i testsrc2=size=3840x2160:rate=24 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 30 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -profile:v high -level 5.1 -b:v 10M -maxrate 10M -bufsize 10M -g 48 -c:a ac3 -b:a 192k -ac 2 src-4k24-h264-ac3.mkv`. SERVED REMUX (what start.mkv returns; video stream-copied from the source, audio re-encoded): `ffmpeg -i src-4k24-h264-ac3.mkv -c:v copy -c:a ac3 -b:a 192k -ac 2 remux-4k24-h264-ac3.mkv`. Both carry AC3 so the mock's /decision answer and the real output agree on the codecs the Load declares; ffprobe reports avg_frame_rate 24/1 for both. NOT yet run on a device.",
+      "mock": {
+        "only": true,
+        "rk": 990001,
+        "extra_media": ["boost-remux/src-4k24-h264-ac3.mkv"],
+        "transcode_fixture": "boost-remux/remux-4k24-h264-ac3.mkv"
+      },
+      "triggers": {
+        "plxnative-play": "$rk",
+        "plxnative-audioenh": "boost"
+      },
+      "require_log": ["becomes an enhanced remux"],
+      "expect": {
+        "decision": "transcode",
+        "codec": "h264",
+        "video_size": "3840x2160",
+        "load_video": "H264",
+        "load_audio": "AC3",
+        "load_fps": 24.0,
+        "load_max": "3840x2160@24",
+        "sink_echo": "3840x2160@24",
+        "presented_rate": true,
+        "min_timeline_climb_s": 10
+      }
+    },
+    {
       "name": "timing-capsule",
       "tier": "player",
       "route": "player",
@@ -1057,7 +1236,7 @@
       "warmup_s": 5,
       "fps_ceiling": 5,
       "worst_ceiling_ms": 40,
-      "comment": "The biography sheet (plxnative-bio) over the person page. Same gates as about-panel and page-panel. It was the app's only DYNAMIC_BACKDROP glass, re-sourcing its blur every changed present, until 2026-09-19: like every panel it now stands on the latched underlay field (`widgets::panel_ground`), so a ceiling that fails here and holds for the other two is this sheet's own foreground (the paged prose, the rail, the feather), not a refresh cadence. It needs plxnative-personbio to have any prose at all on a headless boot: the bio comes from plex.tv, which answers an injected server token 401. NOT YET MEASURED on the television; the ceilings are page-panel's, inherited rather than baselined.",
+      "comment": "The biography sheet (plxnative-bio) over the person page. Same gates as about-panel and page-panel. It was the app's only DYNAMIC_BACKDROP glass, re-sourcing its blur every changed present, until 2026-09-19: like every panel it now stands on the latched underlay field (`widgets::panel_ground`), so a ceiling that fails here and holds for the other two is this sheet's own foreground (the paged prose, the rail, the feather), not a refresh cadence. It needs plxnative-personbio to have any prose at all on a headless boot: the bio comes from the Discover provider, and a dev-token boot with no stand-in armed has the app refuse that read itself (a standing decision, so such a boot shows no biography). NOT YET MEASURED on the television; the ceilings are page-panel's, inherited rather than baselined.",
       "triggers": {
         "plxnative-detail": "$rk",
         "plxnative-detailsec": 1,
@@ -2192,7 +2371,7 @@
       "item": "episode_h264_aac",
       "kind": "episode",
       "title": "episode · h264/aac · 1080p · no subtitle — boots with Normalize Loudness forced ON, then releases it back to Original (issue #266)",
-      "comment": "Retargeted off movie_h264_ac3_1080p (PR4 device run, 2026-09-29) for the same reason as audio_enhancement_normalize above: Guest has a server-selected SRT subtitle on that item, and a shown subtitle withholds the enhancement rows by design, so the case never reached the toggle it exists to exercise. episode_h264_aac has no subtitle selected for Guest. Boost Dialog / Normalize Loudness is a PERSISTED preference (plex/session.rs's Session::audio_enhancements), not an in-memory-only override like plxnative-quality — so a harness that ever turns it on must guarantee every later case starts clean regardless of whether its own pick lands. `audio_enhancements_boot: \"loudness\"` forces the preference ON at boot through dev::scenarios::arm_audio_enhancements (the SAME persisting player::set_audio_enhancements call a real pick makes), which also proves the cold-start path: route/plan.rs's cold-start audio branch turns an otherwise direct-playable candidate into an enhanced remux before the first frame, hence expect.decision here is \"transcode\". Picking the SAME derived row again (`settle: \"released\"` selects the release grader) TOGGLES the preference back to NONE through the ordinary commit path — not a second boot trigger — so it re-persists as OFF for real and this case is its own cleanup: no second op, no dependency on run order. Releases straight back to Direct Play since this item's candidate direct-plays (route/decision.rs's EnhancementStep::ReleaseToDirect), and op_audio_enhancement_release grades where it LANDED: `released to Original direct play`, the next stream line is the /library/parts/ Part, no later start.mkv/start.m3u8 stream line (a failed trial rolls back to the enhanced remux) and no status=503 stream line (PR4's first device run met exactly that refusal; the Part is now admitted before the trial, and a refused one becomes the plain remux, which this case fails). The picked row is still the named `loudness` target (this item carries 2 audio tracks, but the trigger names the row rather than deriving a number from that count) — never hardcoded. **Known gap (device, TV, live PMS 1.43.4, Guest, 2026-09-29):** admitting the Part before the trial did not close this case — with the enhanced start.mkv actually playing first (timelines posted on this same session id), the admission's own Part GET still meets HTTP 503, so the release still lands on the plain codec-copy Original remux, not Direct Play; `enhancement: server refused the Original Part (HTTP 503); restoring Original as a remux` is the honest, expected line, and op_audio_enhancement_release fails the case on it exactly as designed — the grader is not weakened, and this stays XFAIL until the server side of the 503 is understood or worked around. Host probes as Guest against the same server and Part identity could not reproduce it (every Part GET came back 200/206, with the remux encoder live, stopped, or abandoned, same session id, identical header keys) — the difference a host cannot create is the posted timelines, so the leading untested hypothesis is that PMS refuses a raw Part on a session it has already seen post `state=playing` timelines (a `session lacking permission to direct play` style refusal), which is untestable from a host because timelines are real watch-history writes.",
+      "comment": "Retargeted off movie_h264_ac3_1080p (PR4 device run, 2026-09-29) for the same reason as audio_enhancement_normalize above: Guest has a server-selected SRT subtitle on that item, and a shown subtitle withholds the enhancement rows by design, so the case never reached the toggle it exists to exercise. episode_h264_aac has no subtitle selected for Guest. Boost Dialog / Normalize Loudness is a PERSISTED preference (a per-profile setting: a pick is stored in the seated profile's `profile_prefs` record, plex/session/prefs/profile_prefs.rs, with Session::audio_enhancements as the frozen top-level fallback that no pick writes), not an in-memory-only override like plxnative-quality — so a harness that ever turns it on must guarantee every later case starts clean regardless of whether its own pick lands. `audio_enhancements_boot: \"loudness\"` forces the preference ON at boot through dev::scenarios::arm_audio_enhancements (the SAME player::set_audio_enhancements call a real pick makes; the harness boots with an injected dev token, which never seats a profile, so this sets the LIVE preference and saves nothing), which also proves the cold-start path: route/plan.rs's cold-start audio branch turns an otherwise direct-playable candidate into an enhanced remux before the first frame, hence expect.decision here is \"transcode\". Picking the SAME derived row again (`settle: \"released\"` selects the release grader) TOGGLES the preference back to NONE through the ordinary commit path — not a second boot trigger — so the live preference goes back to OFF for real (nothing is saved under the dev token) and this case is its own cleanup: no second op, no dependency on run order. Releases straight back to Direct Play since this item's candidate direct-plays (route/decision.rs's EnhancementStep::ReleaseToDirect), and op_audio_enhancement_release grades where it LANDED: `released to Original direct play`, the next stream line is the /library/parts/ Part, no later start.mkv/start.m3u8 stream line (a failed trial rolls back to the enhanced remux) and no status=503 stream line (PR4's first device run met exactly that refusal; the Part is now admitted before the trial, and a refused one becomes the plain remux, which this case fails). The picked row is still the named `loudness` target (this item carries 2 audio tracks, but the trigger names the row rather than deriving a number from that count) — never hardcoded. **Known gap (device, TV, live PMS 1.43.4, Guest, 2026-09-29):** admitting the Part before the trial did not close this case — with the enhanced start.mkv actually playing first (timelines posted on this same session id), the admission's own Part GET still meets HTTP 503, so the release still lands on the plain codec-copy Original remux, not Direct Play; `enhancement: server refused the Original Part (HTTP 503); restoring Original as a remux` is the honest, expected line, and op_audio_enhancement_release fails the case on it exactly as designed — the grader is not weakened, and this stays XFAIL until the server side of the 503 is understood or worked around. Host probes as Guest against the same server and Part identity could not reproduce it (every Part GET came back 200/206, with the remux encoder live, stopped, or abandoned, same session id, identical header keys) — the difference a host cannot create is the posted timelines, so the leading untested hypothesis is that PMS refuses a raw Part on a session it has already seen post `state=playing` timelines (a `session lacking permission to direct play` style refusal), which is untestable from a host because timelines are real watch-history writes.",
       "covers": [
         "audio-enhancement-cleanup",
         "audio-enhancement-cold-start-remux"
@@ -2223,7 +2402,7 @@
       "item": "movie_h264_ac3_1080p",
       "kind": "movie",
       "title": "movie · h264/ac3 · 1080p · server-selected subtitle — the enhancement burns it in from the first frame instead of withholding the offer (issue #266 M7)",
-      "comment": "Formerly `audio_enhancement_withheld_under_subtitle`, retargeted by M7's 'do it the Plex way' decision: Guest's PMS pre-selects an EMBEDDED subtitle on movie_h264_ac3_1080p (`server-selected subtitle: sid=2698 render_idx=2` — render_idx is non-negative, i.e. an in-container demuxer ordinal per `route/plan.rs`'s `subtitle_effect_of`, not an external sidecar), so this is exactly the shape the old I6 gate used to withhold the enhancement over. `route::plan::enhancement_availability` no longer answers Hidden or Disabled for an embedded subtitle — it answers `Offered(EnhancementRoute::Burn)` — so `audio_enhancements_boot: \"loudness\"` forcing the PERSISTED preference ON at boot (`dev::scenarios::arm_audio_enhancements`, reset back to \"off\" by the same per-case `plxnative-audioenh` trigger run.py writes for every case, so this case needs no cleanup op of its own) now produces a Burn before the first frame rather than a refusal: one `enhancement: applied boost=0 loudness=1` line, and a stream carrying `subtitleStreamID=2698&subtitles=burn` instead of the ordinary `start.mkv` remux. There is still no menu row to pick — the route decides this at cold start, same as before — so the only operation is `play`, and `op_audio_enhancement_burn` grades the boot log and the resulting stream directly. **This is the one case in this file that actually exercises the M7 burn path against the public synthetic fixture** (`movie_h264_ac3_1080p` already ships 4 embedded SRT tracks in `tests/fixtures/make_fixtures.py`); the newer `audio_enhancement_burns_embedded_subtitle` case below covers the live-pick reconcile instead, but is not runnable yet for want of a subtitle track on its own item. `expect.codec` is `hevc`, not the source's own `h264`: a Burn is a real re-encode (`transcoder.rs`'s cap fields, never `directStreamAudio=1`), and PMS's transcode target list is `hevc,h264` — HEVC first — so the output the demuxer actually opens is HEVC on any server that can encode it. `a_codec` checks one literal string, not a list, so this names the common case rather than accepting either.",
+      "comment": "Formerly `audio_enhancement_withheld_under_subtitle`, retargeted by M7's 'do it the Plex way' decision: Guest's PMS pre-selects an EMBEDDED subtitle on movie_h264_ac3_1080p (`server-selected subtitle: sid=2698 render_idx=2` — render_idx is non-negative, i.e. an in-container demuxer ordinal per `route/plan.rs`'s `subtitle_effect_of`, not an external sidecar), so this is exactly the shape the old I6 gate used to withhold the enhancement over. `route::plan::enhancement_availability` no longer answers Hidden or Disabled for an embedded subtitle — it answers `Offered(EnhancementRoute::Burn)` — so `audio_enhancements_boot: \"loudness\"` forcing the preference ON at boot (`dev::scenarios::arm_audio_enhancements`, which under the harness's dev token sets the live preference and saves nothing, reset back to \"off\" by the same per-case `plxnative-audioenh` trigger run.py writes for every case, so this case needs no cleanup op of its own) now produces a Burn before the first frame rather than a refusal: one `enhancement: applied boost=0 loudness=1` line, and a stream carrying `subtitleStreamID=2698&subtitles=burn` instead of the ordinary `start.mkv` remux. There is still no menu row to pick — the route decides this at cold start, same as before — so the only operation is `play`, and `op_audio_enhancement_burn` grades the boot log and the resulting stream directly. **This is the one case in this file that actually exercises the M7 burn path against the public synthetic fixture** (`movie_h264_ac3_1080p` already ships 4 embedded SRT tracks in `tests/fixtures/make_fixtures.py`); the newer `audio_enhancement_burns_embedded_subtitle` case below covers the live-pick reconcile instead, but is not runnable yet for want of a subtitle track on its own item. `expect.codec` is `hevc`, not the source's own `h264`: a Burn is a real re-encode (`transcoder.rs`'s cap fields, never `directStreamAudio=1`), and PMS's transcode target list is `hevc,h264` — HEVC first — so the output the demuxer actually opens is HEVC on any server that can encode it. `a_codec` checks one literal string, not a list, so this names the common case rather than accepting either.",
       "covers": [
         "audio-enhancement-subtitle-gate",
         "audio-enhancement-burn"
@@ -2628,6 +2807,51 @@
       }
     },
     {
+      "name": "pipe_late_audio_eac3",
+      "fixture": "pipe_h264_eac3_late_audio.mkv",
+      "title": "E-AC-3 that starts 11 s after the video — the clock must still start and climb",
+      "covers": [
+        "late-audio-start",
+        "aq video-lane headroom",
+        "feed_audio_lane stale drop",
+        "feed-ahead throttle",
+        "ff.rs demux"
+      ],
+      "declare": {
+        "vcodec": "h264",
+        "acodec": "eac3",
+        "fps": 24.0,
+        "source_raster": [
+          1920,
+          1080
+        ]
+      },
+      "run_secs": 45,
+      "operations": [
+        {
+          "op": "play"
+        }
+      ],
+      "expect": {
+        "codec": "h264",
+        "video_size": "1920x1080",
+        "load_video": "H264",
+        "load_audio": "AC3 PLUS",
+        "load_dovi": "none",
+        "load_atmos": false,
+        "audio_stream_index": 1,
+        "min_pos_climb_s": 15,
+        "require_video_bound": true,
+        "require_audio_feed_ready": true,
+        "no_reload": true,
+        "no_playing_error": true,
+        "server_opens_min": 1,
+        "load_max": "1920x1080@24",
+        "sink_echo": "1920x1080@24"
+      },
+      "_note": "The fixture carries NO audio packet for its first 11.008 s and ~16 MB of 12 Mbit/s video ahead of the first one (make_fixtures.py reads both back out of the finished file), which is more than the 10 MiB video lane. Two stalls stood behind each other: the demuxer parked on the full video lane before reaching the first audio packet, and then `feed_audio_lane` dropped the late audio as stale / the feed-ahead throttle held it, so no `feed a#` ever reached Starfish and the clock sat at 0. `min_pos_climb_s` is the whole-path symptom (a stalled clock climbs 0 s); `require_audio_feed_ready` (a `feed a#… reply=O` line) is the second stall on its own, so a fix for only the first cannot pass. `no_reload` keeps the stuck-clock watchdog's recovery reload from masking a stall as a late success. The 45 s cap leaves ~34 s of play after the audio exists and cannot reach this 60 s clip's EOS. Run on a television (webOS 4.10.2 family, debug flavour): it FAILED on the broken builds (main plus these tests: audio_feed, video_bound, pos_climb and presented_rate; the contributor's #603 as merged: audio_feed passed, the rest failed because the headroom was withdrawn too early) and PASSED on the build with the headroom held until the audio lead-in is pushed (all 11 assertions, 24.1 fps, 0 dropped)."
+    },
+    {
       "name": "pipe_res_h264_sd",
       "fixture": "pipe_h264_ac3_480p.mkv",
       "title": "SD 720x480 h264 + AC-3 — the smallest raster in the matrix",
@@ -2742,6 +2966,45 @@
         "sink_echo": "3840x2160@24"
       },
       "_note": "4K H.264 exists in no real library the maintainer has (every 4K item there is HEVC or AV1 — `library_gaps.video` lists it), so before this fixture the combination had never been played at all. The device's own capability table claims H.264 to 4096x2304@60, so this is inside the envelope, not at its edge."
+    },
+    {
+      "name": "pipe_h264_uhd_30p_ms_timebase",
+      "fixture": "pipe_h264_ac3_2160p30.mkv",
+      "title": "UHD 3840x2160 30p h264 + AC-3, fps 30.303 (1 ms MKV timebase) — issue #665",
+      "covers": [
+        "uhd-2160",
+        "h264-3840x2160",
+        "fps-class-ms-timebase"
+      ],
+      "declare": {
+        "vcodec": "h264",
+        "acodec": "ac3",
+        "fps": 30.303,
+        "source_raster": [
+          3840,
+          2160
+        ]
+      },
+      "run_secs": 40,
+      "operations": [
+        {
+          "op": "play"
+        }
+      ],
+      "expect": {
+        "codec": "h264",
+        "video_size": "3840x2160",
+        "load_video": "H264",
+        "load_audio": "AC3",
+        "load_dovi": "none",
+        "min_pos_climb_s": 8,
+        "require_video_bound": true,
+        "no_playing_error": true,
+        "server_opens_min": 1,
+        "load_max": "3840x2160@30",
+        "sink_echo": "3840x2160@30"
+      },
+      "_note": "Issue #665 (LG 60UN7310, webOS 5): a 4K H.264 High@5.1 MKV whose 1 ms timebase makes PMS report 30.303 fps. The fps class rounded that up to 50 and the pipeline refused the Load with type=18 num=601; LG's own app direct-plays the file. The declaration must be the 30 class."
     },
     {
       "name": "pipe_res_hevc_sd",
@@ -2890,8 +3153,46 @@
         "server_opens_min": 1,
         "reaches_eos": true
       },
-      "_eof_note": "One of the TWO cases in either tier that are supposed to run out — the other is `pipe_replay_after_eos` — and between them the only two allowed to name `pipe_h264_ac3_short.mkv`. Every other clip in both packs is sized so it CANNOT hit EOF inside a case's window (make_fixtures.py trap 9's second half), because a finish tears the session down under assertions that were only ever about playing; the rule is not \"one case\" but \"a case graded through a teardown has to have declared `reaches_eos`\", which tests/test_harness.py pins. run_secs is 60 against a 20 s clip: _resolve_fixtures SKIPS a `reaches_eos` case when the fixture is longer than 0.6 * run_secs PER VIEWING, so a pack regenerated with --secs/--quick skips it instead of failing it as a player regression.",
+      "_eof_note": "One of the THREE cases in either tier that are supposed to run out — the others are `pipe_replay_after_eos` and `pipe_finish_audio_tail`, whose clip has an audio track that outlasts its picture — and with `pipe_replay_after_eos` the only two allowed to name `pipe_h264_ac3_short.mkv`. Every other clip in both packs is sized so it CANNOT hit EOF inside a case's window (make_fixtures.py trap 9's second half), because a finish tears the session down under assertions that were only ever about playing; the rule is not \"one case\" but \"a case graded through a teardown has to have declared `reaches_eos`\", which tests/test_harness.py pins. run_secs is 60 against a 20 s clip: _resolve_fixtures SKIPS a `reaches_eos` case when the fixture is longer than 0.6 * run_secs PER VIEWING, so a pack regenerated with --secs/--quick skips it instead of failing it as a player regression.",
       "_replay_note": "#46's REPLAY half is `pipe_replay_after_eos` below, which plays this same clip, lets it end, and starts it again. This case stays separate and grades the FINISH alone: the two failures are different — a stream that never ends, and a stream that ends and cannot be restarted — and collapsing them into one case would report either as the other."
+    },
+    {
+      "name": "pipe_finish_audio_tail",
+      "fixture": "pipe_h264_ac3_audio_tail.mkv",
+      "title": "a clip whose audio runs 3 s past its last frame played to its END — #865",
+      "covers": [
+        "end-of-stream",
+        "finish_playback",
+        "clean teardown",
+        "audio outlasting video",
+        "pipeline end-of-stream (type=28)"
+      ],
+      "declare": {
+        "vcodec": "h264",
+        "acodec": "ac3",
+        "fps": 24.0
+      },
+      "run_secs": 60,
+      "operations": [
+        {
+          "op": "play"
+        }
+      ],
+      "expect": {
+        "codec": "h264",
+        "video_size": "720x480",
+        "load_video": "H264",
+        "load_audio": "AC3",
+        "load_dovi": "none",
+        "min_pos_climb_s": 8,
+        "require_video_bound": true,
+        "no_playing_error": true,
+        "server_opens_min": 1,
+        "reaches_eos": true
+      },
+      "_note": "A film whose AUDIO runs past its last VIDEO frame has to end all the same (#865). The clip is 20 s of picture and 23 s of audio (`audio_tail_s: 3` in make_fixtures.py, which reads both streams' ends back out of the finished file). The engine pushes the EOS when the video lane drains; the pipeline then refuses the audio that is left, its clock stops at the last frame (`pos=19s` here), and the container's duration — the longest track's — is never within the pump's one second of the playhead. What ends the film is the pipeline's own word, `smp_cb type=28 num=1 str=true` after a picture, logged as `smp: the pipeline reached end-of-stream`, and `EOS reached: playpos=19s/23s → ended` then reads a playhead 4 s short of the duration, which is the point. On the dev TV (webOS 4.10.2) a hand-made clip of this shape under another fixture's name FAILED on the build before #865 (`EOS pushed at true EOF`, `feed a#800 … reply=e`, the clock stuck at `pos=19s`, `type=28`, then nothing: no `EOS reached` line, max stall 36 s) and PASSED on main (`type=28` → `smp: the pipeline reached end-of-stream` → `EOS reached` → `stop_bufferfeed: torn down`, 33 s).",
+      "_separate_note": "Separate from `pipe_finish_eos` on purpose: that case plays a clip whose picture and audio end together, which the playhead arithmetic (`pos >= dur - 1s`) alone can end, so it cannot see a stream that only the pipeline's own word ends. This one has no other way to end, and the two are different failures — a stream that ends on the playhead and a stream that ends on the pipeline's end-of-stream — that one case would report as each other. Same expectations otherwise, `finished` included: the EOS line followed by the engine's teardown.",
+      "_eof_note": "One of the THREE cases in either tier that are supposed to run out, and the only one allowed to name `pipe_h264_ac3_audio_tail.mkv` (the other two name `pipe_h264_ac3_short.mkv`). tests/test_harness.py pins that a case naming a clip that runs out has to have declared `reaches_eos`, and that every such clip fits the bound below. run_secs is 60 against a 23 s clip: _resolve_fixtures SKIPS a `reaches_eos` case when the fixture is longer than 0.6 * run_secs PER VIEWING, so a pack regenerated with --secs/--quick skips it instead of failing it as a player regression."
     },
     {
       "name": "pipe_replay_after_eos",

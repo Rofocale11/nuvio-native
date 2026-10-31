@@ -1293,7 +1293,7 @@ impl RootPage {
     fn plaintext_inputs(&mut self) -> Vec<PlaintextRowInput> {
         use plx_plex::plex::session::PlaintextChoice;
         let sess = &self.session_snapshot;
-        let answered = plx_plex::plex::grant::choices(&sess.plaintext_consent, &sess.account_token);
+        let answered = plx_plex::plex::grant::choices(&sess.prefs.plaintext_consent, &sess.account_token);
         let mut rows: Vec<(String, bool)> = answered
             .iter()
             .filter(|(_, choice)| *choice != PlaintextChoice::Undecided)
@@ -1611,9 +1611,15 @@ fn preference_name(preference: plx_platform::i18n::Preference) -> &'static str {
     }
 }
 
-const LANGUAGES: [plx_platform::i18n::Preference; 4] = [
+/// The languages this build ships catalogs for (`locales/`), in the order the page lists them:
+/// System first, then the shipped tags. `LangId`'s row key is this array's position, so a new
+/// catalog is one entry here and nothing else.
+const LANGUAGES: [plx_platform::i18n::Preference; 9] = [
     plx_platform::i18n::Preference::System, plx_platform::i18n::Preference::En,
     plx_platform::i18n::Preference::Es, plx_platform::i18n::Preference::Be,
+    plx_platform::i18n::Preference::De, plx_platform::i18n::Preference::Fr,
+    plx_platform::i18n::Preference::Hu, plx_platform::i18n::Preference::It,
+    plx_platform::i18n::Preference::Pt,
 ];
 
 /// A Language row's identity: the preference a `Choice` row saves, or the contribution guide.
@@ -1625,13 +1631,10 @@ enum LangId {
 
 impl FormId for LangId {
     fn key(&self) -> RowKey {
-        use plx_platform::i18n::Preference as P;
+        // Position in `LANGUAGES`, so adding a catalog is one array entry and no key arithmetic.
         RowKey(match self {
-            LangId::Choice(P::System) => 0,
-            LangId::Choice(P::En) => 1,
-            LangId::Choice(P::Es) => 2,
-            LangId::Choice(P::Be) => 3,
-            LangId::Contribute => 4,
+            LangId::Choice(p) => LANGUAGES.iter().position(|q| q == p).unwrap_or(0) as u32,
+            LangId::Contribute => LANGUAGES.len() as u32,
         })
     }
 }

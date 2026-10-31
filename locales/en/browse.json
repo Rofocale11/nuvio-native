@@ -2098,5 +2098,29 @@
   "browse.list.signin": {
     "value": "Sign in for My List",
     "description": "Nuvio account My List action/status."
+  },
+  "browse.action.use_another_account": {
+    "value": "Use another account",
+    "description": "Sign-in read-out primary button when the signed-in Plex account has no server: starts a fresh QR sign-in so a different account can be used."
+  },
+  "browse.chrome.search": {
+    "value": "Search",
+    "description": "browse chrome search"
+  },
+  "browse.kind.episode": {
+    "value": "Episode",
+    "description": "The kind word an episode tile's caption falls back to when the server sent it no number, year or show."
+  },
+  "browse.detail.specials": {
+    "value": "Specials",
+    "description": "A season numbered 0 that the server gave no title: the identity line of its caption (caption_policy)."
+  },
+  "browse.collection.films": {
+    "value": "Films",
+    "description": "Heading over the collection page's member grid when the collection holds films: the noun its count uses (browse.person.films), so '6 films' sits under 'Films'."
+  },
+  "browse.collection.shows": {
+    "value": "Shows",
+    "description": "Heading over the collection page's member grid when the collection holds shows: the noun its count uses (browse.person.shows)."
   }
 }

@@ -53,7 +53,7 @@
 # `file` as the only protocol, same `-plx` suffix, same LGPL flags. A second script would drift,
 # and the drift would be invisible — the host would demux something the television cannot, or
 # stop demuxing something it can, and the simulator would be answering about a different FFmpeg
-# while looking identical. The cross block is the only difference, and it is three lines.
+# while looking identical. The cross block is the only difference, and it is a handful of lines.
 #
 # The output is `vendor/ffmpeg-prefix-host` and `libavformat-plx.63.dylib` — Mach-O naming, so
 # nothing here can be confused with the shipped ELF even by basename, and `make ipk`'s
@@ -68,6 +68,21 @@ SHA256=7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52
 # its own pin. GitHub regenerates tag archives rarely; a deliberate regeneration is a re-pin here.
 SHA256_GITHUB=d97647ace36a307f17ba2bca052d68937487bed8682e1eb9b6737076a9c442b7
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# The pin (version, upstream URL, sha256) is declared once, in ci/dependencies.json; nothing here
+# carries a literal copy of it. ci/deps.py is also what downloads and verifies the tarball.
+DEPS="$ROOT/ci/deps.py"
+# FFMPEG_VERSION + FFMPEG_SHA256 (+ FFMPEG_TARBALL, an absolute or relative path to the tarball) replace the
+# manifest lookup: the copy of this script attached to a release is run from a source checkout or
+# the source bundle with the attached tarball, e.g.
+#   FFMPEG_VERSION=<version> FFMPEG_SHA256=<the sha256 of the tarball> FFMPEG_TARBALL=ffmpeg-<version>.tar.xz ci/build-ffmpeg.sh
+# and needs neither ci/deps.py nor a network. The sha256 is still checked against the tarball.
+if [ -n "${FFMPEG_VERSION-}" ] && [ -n "${FFMPEG_SHA256-}" ]; then
+  VERSION=$FFMPEG_VERSION
+  SHA256=$FFMPEG_SHA256
+else
+  VERSION=$(python3 "$DEPS" get ffmpeg version)
+  SHA256=$(python3 "$DEPS" get ffmpeg sha256)
+fi
 NDK=${WEBOS_SDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
 SYSROOT="$NDK/arm-webos-linux-gnueabi/sysroot"
 HOST=${HOST:-}
@@ -106,7 +121,13 @@ if [ -n "$HOST" ]; then
 else
   PREFIX="$ROOT/vendor/ffmpeg-prefix"
 fi
-TARDIR="$ROOT/vendor/ffmpeg-build"
+if [ -n "${FFMPEG_TARBALL-}" ]; then
+  [ -f "$FFMPEG_TARBALL" ] || { echo "ffmpeg: FFMPEG_TARBALL=$FFMPEG_TARBALL does not exist" >&2; exit 1; }
+  FFMPEG_TARBALL=$(cd "$(dirname "$FFMPEG_TARBALL")" && pwd)/$(basename "$FFMPEG_TARBALL")
+  TARDIR=$(dirname "$FFMPEG_TARBALL")
+else
+  TARDIR=$(python3 "$DEPS" cache-dir)
+fi
 # `--prefix` is the LITERAL /plx, not $PREFIX, and the install is redirected with DESTDIR below.
 #
 # WHY: FFmpeg records its entire configure INVOCATION inside libavutil (`avutil_configuration()`),
@@ -187,9 +208,16 @@ if [ -n "$HOST" ]; then
   # No --arch/--cpu/--target-os: configure detects this Mac, which is the point.
   set -- --prefix=/plx
 else
+  # `--build-id=sha1` gives each shared object the same stable identity the app binary carries
+  # (ci/check-elf.sh), which is what pairs a crash frame inside it with the symbols
+  # `make symbols-libs` extracts. It is an allocated note, so `strip` below leaves it in the shipped
+  # copy; without it the only identity left is a hash of `.text`, and the extracted `.debug`
+  # (`objcopy --only-keep-debug` turns `.text` into NOBITS) could not reproduce it.
+  # Cross builds only: the HOST build links with Apple's ld, which has no such flag.
   set -- --prefix=/plx \
     --enable-cross-compile --cross-prefix="$CROSS" --host-cc=cc --cc=./plx-arm-cc.py \
-    --arch=arm --cpu=cortex-a9 --target-os=linux --sysroot="$SYSROOT"
+    --arch=arm --cpu=cortex-a9 --target-os=linux --sysroot="$SYSROOT" \
+    --extra-ldflags='-Wl,--build-id=sha1'
 fi
 set -- "$@" \
   --build-suffix=-plx \
@@ -538,6 +566,12 @@ if [ -z "$HOST" ]; then
     case "$elf" in *.link.*) continue ;; esac
     [ -f "$elf" ] && [ ! -L "$elf" ] || continue
     target="$PREFIX/lib/$(basename "$elf")"
+    # Keep the unstripped original beside the stripped one. It is the only copy that still has
+    # `.symtab` (the install above strips it, and so do the two lines below): `make symbols-libs`
+    # turns it into the `.debug` that lets Sentry name a frame inside libavformat & co. Same
+    # basename as the SONAME the Makefile stages, in a directory the library globs do not reach.
+    mkdir -p "$PREFIX/lib/unstripped"
+    cp "$elf" "$PREFIX/lib/unstripped/$(basename "$elf")"
     "${CROSS}strip" --strip-unneeded "$target"
     python3 "$ROOT/ci/stage-link-evidence.py" "$elf" "$target" --stripped
   done

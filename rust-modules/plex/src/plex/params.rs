@@ -284,7 +284,7 @@ impl Ceiling {
 /// store; consumed by `library.rs::section_items_query`. Filters are `(param, value)` pairs
 /// appended verbatim (`("genre","150")`, `("unwatched","1")`, shows: `("unwatchedLeaves","1")`)
 /// — tag-id values come from `section_directory` value lists. Paging: Start AND Size are
-/// always sent together — PMS silently ignores a lone `X-Plex-Container-Size` query param
+/// always sent together — PMS silently ignores a lone size parameter
 /// (verified live on PMS 1.43.2, 2026-07-19).
 pub struct SectionQuery<'a> {
     pub section_key: i64,
@@ -305,8 +305,12 @@ pub struct StreamSelection {
     pub part_id: i64,
     /// 0 = keep the server default (the PUT omits audioStreamID).
     pub audio_stream_id: i64,
-    /// Always sent: 0 = subtitles OFF (suppresses a default-selected burn), else burn this id.
-    pub subtitle_stream_id: i64,
+    /// `Some(0)` = subtitles OFF (suppresses a default-selected burn), `Some(id)` = select (burn)
+    /// this id, `None` = the PUT omits `subtitleStreamID` and says nothing about subtitles. The
+    /// spec marks the field optional (docs/plex-openapi.json, `PUT /library/parts/{partId}`); every
+    /// start and manual pick sends `Some`, and only an audio-only write-back on a Part with no
+    /// selected subtitle sends `None`, so it cannot create an explicit Off.
+    pub subtitle_stream_id: Option<i64>,
 }
 
 /// One agent-backed subtitle search (`GET /library/metadata/{rk}/subtitles`, `docs/pms-api.md` §8).

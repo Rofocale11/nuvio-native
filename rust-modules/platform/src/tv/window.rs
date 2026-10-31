@@ -14,8 +14,9 @@ pub fn grab(win: *mut c_void) {
     (super::port().grab_surface)(win)
 }
 
-/// Let go of the surface, without destroying SDL's objects; foreground takes it again.
-pub fn release() {
+/// Let go of the surface, without destroying SDL's objects; foreground takes it again. Answers
+/// whether a surface was held, so the caller can tell a release from a second, idempotent one.
+pub fn release() -> bool {
     (super::port().release_surface)()
 }
 
@@ -43,6 +44,16 @@ pub fn pump_bus() {
 /// Ask for this frame's presentation callback. Call on a PRESENTING frame, before the swap.
 pub fn frame_probe_request() {
     (super::port().frame_probe_request)()
+}
+
+/// `prepare_window` is next: starts the frame's `p` stretch.
+pub fn frame_probe_prepare_begin() {
+    (super::port().frame_probe_prepare_begin)()
+}
+
+/// `prepare_window` has returned: closes the frame's `p` stretch.
+pub fn frame_probe_prepare_end() {
+    (super::port().frame_probe_prepare_end)()
 }
 
 /// The frame's first framebuffer command is next: the wait for a back buffer starts here.

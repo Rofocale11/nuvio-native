@@ -260,12 +260,7 @@ fn dv_decision_survives_reload_recovery_and_rollback() {
         false,
         plx_platform::devcaps::dv::DvCapability::Supported,
     ));
-    clear_output_dv(&mut ps);
-    assert_eq!(
-        stream_dv_decision(&ps),
-        plx_data::metadata::DvDecision::NONE,
-        "the shared remux/transcode output reset clears the declaration",
-    );
+    // The copy rule itself (`copied_video_dv`) is covered in `plan_dolby_vision_tests.rs`.
 
     restore_quality(Quality::Original);
     install_active_encoder("");
@@ -1524,6 +1519,32 @@ fn a_quality_change_survives_an_original_handoff_rollback() {
     crate::player::reset_route_requests_for_test(&ps);
 }
 
+/// **Issue #665: a fixed-quality re-encode keeps `ProgressiveMkv` delivery, and its Load must
+/// declare the quality's ceiling, not the 4K source.** `sink_max_raster` used to return the
+/// source raster for the whole progressive arm, so a 4K H.264 source forced to 480p declared
+/// 4K@60 for a 480p stream and the pipeline refused it (`type=18 num=601`).
+#[test]
+fn a_fixed_quality_progressive_reencode_declares_the_ceiling_not_the_source() {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    { let s = &mut ps; {
+        s.cur_src.1 = 3840;
+        s.cur_src.2 = 2160;
+        s.cur_contract.delivery = plx_plex::plex::TranscodeDelivery::ProgressiveMkv;
+        s.cur_contract.ceiling = Quality::P480.ceiling();
+    } };
+    assert_eq!(sink_max_raster(&ps), (854, 480), "the smaller of source and ceiling");
+    // Direct play / remux (Original has no ceiling) still declares the source.
+    { let s = &mut ps; s.cur_contract.ceiling = Quality::Original.ceiling() };
+    assert_eq!(sink_max_raster(&ps), (3840, 2160));
+    // PMS never upscales: a source smaller than the ceiling wins.
+    { let s = &mut ps; {
+        s.cur_src.1 = 640;
+        s.cur_src.2 = 360;
+        s.cur_contract.ceiling = Quality::P480.ceiling();
+    } };
+    assert_eq!(sink_max_raster(&ps), (640, 360));
+}
+
 #[test]
 fn a_failed_rollback_load_discards_trial_effects_before_the_next_trial() {
     let mut ps = crate::route::PlaybackSession::IDLE;
@@ -2416,6 +2437,82 @@ fn local_auto_keeps_hls_when_original_is_infeasible() {
     plx_plex::plex::reset_servers_for_test();
 }
 
+/// **A manual fixed-rung switch notes the delivery it asks for.** `set_quality` to a rung the
+/// playing route cannot satisfy re-transcodes through `request_transcode_refresh`, which noted no
+/// `DeliveryRequested`: the open that follows was not marked as a new attempt, so a failure of it
+/// read the route the playback HAD as `attempted_delivery` and `attempt_started = true` from the
+/// picture that route had shown (S5a's leftover). The pick now notes the route it requests, which
+/// starts a new attempt, and says the viewer asked for it.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_manual_fixed_rung_switch_notes_its_requested_delivery_and_its_origin() {
+    use plx_telemetry::telemetry::consent::{self, Consent};
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let previous = consent::current();
+    let mut enabled = Consent::default();
+    enabled.errors = true;
+    enabled.asked_version = consent::POLICY_VERSION;
+    consent::install(enabled);
+    restore_quality(Quality::P720);
+    let sid = plx_plex::plex::register_for_test(
+        "machine-fixed-rung-switch",
+        "<peer-host-1>.example.invalid",
+        32400,
+        "token",
+        "test-client-id",
+    );
+    apply_plan(&mut ps,
+        Plan {
+            sid,
+            tsession: "encoder-fixed".into(),
+            contract: plx_plex::plex::EncodeContract {
+                delivery: plx_plex::plex::TranscodeDelivery::ProgressiveMkv,
+                ceiling: Some(Quality::P720.ceiling().expect("fixed rung")),
+                ..Default::default()
+            },
+            src_measure: (16_357, 3_840, 1_608),
+            auto_original: None,
+            ..Default::default()
+        },
+        "rk-fixed-rung-switch",
+    );
+    install_active_encoder("encoder-fixed");
+    let generation = crate::player::report::requested(
+        &ps,
+        sid,
+        crate::player::report::AttemptOrigin::Fresh,
+    );
+    ACTIVE_TRACE_GENERATION.store(generation, Ordering::SeqCst);
+    // The playback is up: a picture is on screen.
+    crate::player::report::note_presented_for_test(&ps);
+    let before = crate::player::report::error_context_for_test(&ps);
+    assert!(before.attempt_started, "the playing route showed a picture");
+    assert_eq!(before.attempted_delivery, before.delivery, "nothing was switched yet");
+
+    set_quality(&mut ps, Quality::P480);
+
+    assert!(crate::player::pending_transcode_refresh(), "the switch re-transcodes");
+    let after = crate::player::report::error_context_for_test(&ps);
+    assert_eq!(
+        after.attempted_delivery.code(),
+        "progressive_transcode",
+        "the route the pick asks for is the attempt, not the installed one",
+    );
+    assert!(!after.attempt_started, "the new route's open has shown nothing yet");
+    assert_eq!(after.attempt_origin.code(), "quality_change");
+    assert_eq!(after.attempt_ordinal.code(), "2");
+
+    crate::player::report::reset_latches_for_test();
+    ACTIVE_TRACE_GENERATION.store(0, Ordering::SeqCst);
+    consent::install(previous.unwrap_or_default());
+    reset_session(&mut ps);
+    restore_quality(Quality::Original);
+    install_active_encoder("");
+    crate::player::reset_route_requests_for_test(&ps);
+    plx_plex::plex::reset_servers_for_test();
+}
+
 /// The exact remote-control sequence from a 4K Original session: Manual 1080p replaces it
 /// with a capped encoder, and Manual Original must use the preserved source candidate to
 /// return to direct play. The bad old route kept the progressive-transcode flavor and asked
@@ -2736,8 +2833,8 @@ fn manual_original_after_a_fixed_rung_with_a_subtitle_returns_to_direct_play() {
     crate::player::reset_subtitle();
 }
 
-/// A video-copy progressive remux is still the source HEVC stream; its frozen declaration must
-/// survive the server-output reset used by real video encodes.
+/// A video-copy progressive remux is still the source HEVC stream: the rule every server-built
+/// route asks (`plan::copied_video_dv`, #839) hands the frozen declaration on.
 #[test]
 fn a_video_copy_remux_keeps_its_frozen_dolby_vision_declaration() {
     let mut ps = PlaybackSession::IDLE;
@@ -2751,13 +2848,40 @@ fn a_video_copy_remux_keeps_its_frozen_dolby_vision_declaration() {
         false,
         plx_platform::devcaps::dv::DvCapability::Supported,
     ));
-    let frozen = stream_dv_decision(&ps);
-    ps.cur_contract = plx_plex::plex::EncodeContract::original(
+    let frozen = (stream_dovi(&ps), stream_dv_decision(&ps));
+    let remux = plx_plex::plex::EncodeContract::original(
         true,
         plx_plex::plex::AudioEnhancements::NONE,
     );
-    clear_output_dv(&mut ps);
-    assert_eq!(stream_dv_decision(&ps), frozen);
-    assert_eq!(stream_dovi(&ps).profile, 8);
+    assert_eq!(copied_video_dv(None, &remux, frozen.0, frozen.1), frozen);
+    assert_eq!(copied_video_dv(None, &remux, frozen.0, frozen.1).0.profile, 8);
+    reset_session(&mut ps);
+}
+
+/// FORK (RichiL10): the knob `remux_dv=off` turns the remux declaration off: the video-copy remux
+/// then declares nothing, as upstream did before #839.
+#[test]
+fn fork_knob_remux_dv_off_declares_nothing_on_a_video_copy_remux() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    assert!(set_stream_declaration_for_test(
+        &mut ps,
+        "hevc",
+        "ac3",
+        23.976,
+        p8(),
+        false,
+        plx_platform::devcaps::dv::DvCapability::Supported,
+    ));
+    let frozen = (stream_dovi(&ps), stream_dv_decision(&ps));
+    let remux = plx_plex::plex::EncodeContract::original(
+        true,
+        plx_plex::plex::AudioEnhancements::NONE,
+    );
+    let (dovi, decision) = plx_base::forkknobs::with_conf_for_test(Some("remux_dv=off\n"), || {
+        copied_video_dv(None, &remux, frozen.0, frozen.1)
+    });
+    assert_eq!(decision, plx_data::metadata::DvDecision::NONE);
+    assert!(!dovi.present);
     reset_session(&mut ps);
 }

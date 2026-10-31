@@ -39,6 +39,7 @@
 //! before this module. Misreading the table must degrade to yesterday's behavior, not invent a
 //! weaker television: the issue-#22 lesson cuts both ways, and a client that suddenly transcodes
 //! everything on a healthy 4K panel is as wrong as one that direct-plays HEVC to a SoC without it.
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 pub mod dv;
@@ -59,7 +60,7 @@ pub mod dv;
 /// the app and leaves it as PCM, native PCM tracks are converted to the declared sample width,
 /// and Opus is fed as-is with its `opusInfo` (`player::engine::with_audio_info`). Each is admitted
 /// only with a MEASURED channel row in the device table, like DTS.
-pub const DP_AUDIO_CODECS: &str = "aac,ac3,eac3,dts,flac,pcm,opus,truehd,mlp";
+pub const DP_AUDIO_CODECS: &str = "aac,ac3,eac3,dts,flac,pcm,opus";
 
 /// FORK (RichiL10): the lanes that are admitted only with a measured channel ceiling.
 const MEASURED_ONLY: [&str; 4] = ["dts", "flac", "pcm", "opus"];
@@ -108,15 +109,13 @@ pub enum AudioLane {
     Ac3Encode,
 }
 
-/// The key [`DP_AUDIO_CODECS`] and [`Caps::audio`] know a codec by. PMS reports every DTS
-/// flavour as `dca` (libavcodec's old decoder name) — `dca-ma`, `dca-hra` and friends on a Media
-/// whose track is DTS-HD — while this set, the television's codec table ("DTS") and the bundled
-/// FFmpeg (`dts`) all say `dts`. Without the fold a DTS track off a real server never matched the
-/// set and was always converted by the server. Anything else passes through unchanged.
+/// FORK (RichiL10): the key [`DP_AUDIO_CODECS`] and [`Caps::audio`] know a codec by. PMS reports
+/// every DTS flavour as `dca` (libavcodec's old decoder name), `dca-ma`, `dca-hra` and friends on
+/// a Media whose track is DTS-HD, while this set, the television's codec table ("DTS") and the
+/// bundled FFmpeg (`dts`) all say `dts`. Without the fold a DTS track off a real server never
+/// matched the set and was always converted by the server. Anything else passes through unchanged.
 pub fn dp_audio_key(codec: &str) -> &str {
-    if codec.eq_ignore_ascii_case("dca")
-        || codec.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("dca-"))
-    {
+    if codec.eq_ignore_ascii_case("dca") || codec.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("dca-")) {
         "dts"
     } else {
         codec
@@ -161,6 +160,12 @@ pub struct Caps {
     /// The VP9 row's (max width, max height, ceil max frame rate), MIN-merged across duplicate
     /// rows; 0 = not stated. Read only when `vp9`.
     pub vp9_row: (u32, u32, u32),
+    /// The deepest VP9 bit depth the profile claims: 10 where a 10-bit VP9 stream has been measured
+    /// to decode with the right levels AND to reach HDR when its container says PQ, 8 everywhere
+    /// else (the table has no bit-depth axis, so this is device evidence, not table data). Only the
+    /// webOS 4 family (ACB video path) is measured, so [`vp9_bit_depth_for`] is the one place the
+    /// 10 comes from; the assumed profile and a table read on any other set say 8.
+    pub vp9_bit_depth: u32,
     /// The device table lists an AV1 decoder row. False in `assumed()` and on every table without
     /// the row, which keeps AV1 a server transcode there. Issue #593.
     pub av1: bool,
@@ -170,7 +175,8 @@ pub struct Caps {
     /// The direct-playable AUDIO subset: [`DP_AUDIO_CODECS`] (what the pipeline decodes)
     /// intersected with the table's audio rows, in `DP_AUDIO_CODECS`'s own URL form/order.
     /// Normal routing reads this and the channel ceilings through `plex::is_dp_audio_track`,
-    /// as does its PMS profile. Forced mode uses the software feed set independently.
+    /// as does its PMS profile. Forced mode starts from the pipeline's feed set with no channel
+    /// ceiling and admits DTS only with a DTS row in `audio_channels` (`Caps::forced_feeds_audio`).
     pub audio: String,
     /// Nonzero, per-codec channel ceilings from the device table, duplicate rows MIN-merged.
     /// Missing legacy limits remain unknown; DTS is admitted only with a measured limit.
@@ -189,6 +195,7 @@ impl Caps {
             hevc_row: (0, 0, 0),
             vp9: false,
             vp9_row: (0, 0, 0),
+            vp9_bit_depth: 8,
             av1: false,
             av1_row: (0, 0, 0),
             audio: "aac,ac3,eac3".to_string(),
@@ -196,10 +203,11 @@ impl Caps {
         }
     }
 
-    /// Membership test on [`Caps::audio`] — `codec` already lowercase (PMS codec ids are).
+    /// Membership test on [`Caps::audio`]. `codec` is any spelling of the name
+    /// ([`audio_codec_id`]): PMS says `dca` where the table and the pipeline say `dts`.
     pub fn audio_has(&self, codec: &str) -> bool {
-        let codec = dp_audio_key(codec);
-        self.audio.split(',').any(|c| c == codec)
+        let id = audio_codec_id(codec);
+        self.audio.split(',').any(|c| c == id)
     }
 
     /// Local counterpart of the profile's codec-scoped audio.channels limitations.
@@ -266,24 +274,9 @@ impl Caps {
     /// | FLAC/PCM inside the PCM lane's admitted channel counts | PCM lane (lossless) |
     /// | FLAC/PCM with 3 to 8 channels the PCM lane does not admit | encode lane |
     /// | TrueHD/MLP, any channel count | encode lane |
-    /// | DTS, any channel count, WHETHER OR NOT the table has a `dts` row | encode lane |
     ///
     /// FLAC/PCM follow their own admission (`flac=off` hands them back to the server too); TrueHD
     /// and MLP are not in any television's table and need only the AC3 sink.
-    ///
-    /// DTS is deliberately unconditional, and this is the ONE arm that does not test the table.
-    /// Every other arm says "the television cannot take this, so we convert it"; DTS says "we
-    /// convert it either way", because the two sets in this fork have opposite DTS problems and
-    /// the lane is the only answer that works for both. A set WITH a `dts` row plays the core —
-    /// `ff::dts_core_packet` drops the DTS-HD extension, so a 7.1 MA arrives as 5.1 core at
-    /// 1.5 Mbps, and anything above the row's channel ceiling is refused outright. A set WITHOUT
-    /// one has no DTS decoder at all, so the same core reaches the pipeline as silence. Folding to
-    /// AC3 5.1 gives both the same 5.1 output from the full lossless stream (`dca` decodes the
-    /// extension, so nothing is discarded), which is what this fork ships.
-    ///
-    /// Consequence to keep in step: [`Caps::enc_lane_profile_codecs`] must list `dts` whenever
-    /// this arm can answer true, or the profile will refuse to direct-play a track the lane would
-    /// have taken and the server will convert it instead.
     pub fn enc_lane_candidate(&self, codec: &str, channels: i64, encode: bool) -> bool {
         if !encode || !self.enc_sink_ok() {
             return false;
@@ -293,7 +286,6 @@ impl Caps {
             c @ ("flac" | "pcm") => {
                 self.audio_has(c) && (3..=8).contains(&channels) && !self.pcm_lane_admits(c, channels)
             }
-            "dts" => true,
             _ => false,
         }
     }
@@ -302,10 +294,7 @@ impl Caps {
     /// codec the television decodes itself or a track no lane takes. Pure; `encode` is the knob.
     pub fn audio_lane(&self, codec: &str, channels: i64, rate: i64, encode: bool) -> Option<AudioLane> {
         if self.enc_lane_candidate(codec, channels, encode) {
-            // FORK (RichiL10): Only force the lane if it's 48kHz (or unknown)
-            if rate == 0 || rate == ENC_LANE_RATE {
-                return Some(AudioLane::Ac3Encode);
-            }
+            return (rate == 0 || rate == ENC_LANE_RATE).then_some(AudioLane::Ac3Encode);
         }
         let codec = dp_audio_key(codec);
         (matches!(codec, "flac" | "pcm") && self.pcm_lane_admits(codec, channels)).then_some(AudioLane::Pcm)
@@ -315,7 +304,7 @@ impl Caps {
     /// [`Caps::audio`] (TrueHD and MLP, which no television table lists). Empty when it is off.
     pub fn enc_lane_profile_codecs(&self, encode: bool) -> &'static [&'static str] {
         if encode && self.enc_sink_ok() {
-            &["truehd", "mlp", "dts"]
+            &["truehd", "mlp"]
         } else {
             &[]
         }
@@ -335,7 +324,7 @@ impl Caps {
     pub fn profile_channel_limit_with(&self, codec: &str, encode: bool) -> Option<u32> {
         let codec = dp_audio_key(codec);
         if encode && self.enc_sink_ok() {
-            if matches!(codec, "truehd" | "mlp" | "dts") || (matches!(codec, "flac" | "pcm") && self.audio_has(codec)) {
+            if matches!(codec, "truehd" | "mlp") || (matches!(codec, "flac" | "pcm") && self.audio_has(codec)) {
                 return Some(8);
             }
         }
@@ -345,6 +334,24 @@ impl Caps {
         } else {
             Some(limit)
         }
+    }
+
+    /// Force Direct Play's audio gate: the pipeline's feed formats ([`DP_AUDIO_CODECS`]), with
+    /// no channel ceiling. DTS additionally needs the evidence Auto asks for
+    /// ([`Caps::forced_admits_dts`]). The planner and the forced profile both read this.
+    pub fn forced_feeds_audio(&self, codec: &str) -> bool {
+        let id = audio_codec_id(codec);
+        if id == "dts" {
+            return self.forced_admits_dts();
+        }
+        DP_AUDIO_CODECS.split(',').any(|c| c == id)
+    }
+
+    /// The Forced-mode DTS rule, one predicate so the owner can flip it: the table has a DTS
+    /// row with a stated channel count (an absent decoder would hang the Load like #584 instead
+    /// of refusing). The channel ceiling itself is not applied.
+    pub fn forced_admits_dts(&self) -> bool {
+        self.audio_channels.contains_key("dts")
     }
 
     /// The transcode-target chain's HEAD — the codec the profile asks PMS to ENCODE when a
@@ -383,7 +390,53 @@ static MEASURED: OnceLock<bool> = OnceLock::new();
 /// What this device decodes. Falls back to [`Caps::assumed`] if [`probe`] has not run — the
 /// boot calls it first, so that path exists for host tests, not the TV.
 pub fn caps() -> &'static Caps {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(caps) = THREAD_CAPS.with(std::cell::Cell::get) {
+        return caps;
+    }
     CAPS.get_or_init(Caps::assumed)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static THREAD_CAPS: std::cell::Cell<Option<&'static Caps>> = const { std::cell::Cell::new(None) };
+}
+
+/// Make [`caps`] answer `caps` on THIS test thread until the guard drops (the
+/// `i18n::language_on_this_thread_for_test` precedent). Tests run in parallel and the
+/// process-wide snapshot is write-once, so a thread-local door is how one test plays a set whose
+/// table lists a DTS decoder. The snapshot is leaked: a test-only cost.
+#[cfg(any(test, feature = "test-support"))]
+pub fn caps_on_this_thread_for_test(caps: Caps) -> CapsGuard {
+    let caps: &'static Caps = Box::leak(Box::new(caps));
+    CapsGuard(THREAD_CAPS.with(|slot| slot.replace(Some(caps))))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub struct CapsGuard(Option<&'static Caps>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for CapsGuard {
+    fn drop(&mut self) {
+        THREAD_CAPS.with(|slot| slot.set(self.0));
+    }
+}
+
+/// The one canonical spelling of an AUDIO codec name, for every comparison between vocabularies:
+/// lowercase, PMS's `dca` is the pipeline's `dts`, and `ec-3` is `eac3`. Applied at membership
+/// ([`Caps::audio_has`]) and at the Load payload; inbound data stays raw (track memory compares
+/// the raw string).
+pub fn audio_codec_id(codec: &str) -> Cow<'_, str> {
+    if codec.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Cow::Owned(audio_codec_id(&codec.to_ascii_lowercase()).into_owned());
+    }
+    match codec {
+        "dca" => Cow::Borrowed("dts"),
+        // FORK (RichiL10): DTS-HD flavours (`dca-ma`, `dca-hra`, ...) are DTS too (`dp_audio_key`).
+        c if c.starts_with("dca-") => Cow::Borrowed("dts"),
+        "ec-3" => Cow::Borrowed("eac3"),
+        _ => Cow::Borrowed(codec),
+    }
 }
 
 /// One codec name, canonicalized: the table writes `"H.264"`, `"H.265"`, `"HEVC"`, `"EAC3"`;
@@ -559,11 +612,26 @@ fn parse(s: &str) -> Option<Caps> {
         },
         vp9,
         vp9_row: (vp9_wh.0, vp9_wh.1, vp9_fps),
+        vp9_bit_depth: 8,
         av1,
         av1_row: (av1_wh.0, av1_wh.1, av1_fps),
         audio,
         audio_channels,
     })
+}
+
+/// The VP9 bit depth to claim on a set running webOS `major` (0 = unknown). 10 on webOS 1 to 4, the
+/// ACB video path, where the dev set (4.x) decoded a 10-bit Profile 2 stream with correct levels and a
+/// PQ-tagged one switched the panel to HDR through `player::vp9_hdr`. 8 on every other set: on webOS 5+
+/// there is no ACB, so `vp9_hdr` sends nothing, and whether a PQ VP9 stream reaches HDR there is
+/// unknown, which means a 10-bit file might direct-play with washed-out colour where the server
+/// would have converted it correctly.
+pub fn vp9_bit_depth_for(major: u32) -> u32 {
+    if (1..=4).contains(&major) {
+        10
+    } else {
+        8
+    }
 }
 
 /// Read the table once and log what was derived. Called at boot right after `webos::probe`,
@@ -584,8 +652,10 @@ pub fn probe() {
                 } else {
                     String::new()
                 };
+                let mut c = c;
+                c.vp9_bit_depth = vp9_bit_depth_for(crate::tv::device::info().major);
                 plx_base::eventlog::log(&format!(
-                    "devcaps: hevc={} {}x{} vp9={} av1={} audio={} rows: h264={}x{}@{} hevc={}x{}@{}{vp9_row}{av1_row} (device table)",
+                    "devcaps: hevc={} {}x{} vp9={} av1={} audio={} rows: h264={}x{}@{} hevc={}x{}@{}{vp9_row}{av1_row} vp9bits={} (device table)",
                     c.hevc,
                     c.hevc_max.0,
                     c.hevc_max.1,
@@ -597,7 +667,8 @@ pub fn probe() {
                     c.h264_row.2,
                     c.hevc_row.0,
                     c.hevc_row.1,
-                    c.hevc_row.2
+                    c.hevc_row.2,
+                    c.vp9_bit_depth
                 ));
                 c
             }
@@ -635,15 +706,6 @@ fn with_fork_knobs(mut caps: Caps, flac: Option<&str>, opus: Option<&str>) -> Ca
     let lane = |c: &str| caps.audio_channels.get(c).map_or(0, |v| *v);
     let enc = encode_lane_on() && !caps.enc_lane_profile_codecs(true).is_empty();
     if caps.audio_has("flac") || caps.audio_has("pcm") || caps.audio_has("opus") || enc {
-        // FORK (RichiL10): the AC3 encode lane (`ff_enc.rs`). The codec list is the lane's own
-        // (`enc_lane_profile_codecs`), never a second hand-written copy: when DTS joined it the
-        // literal here still read "flac,pcm,truehd" and the boot line named every lane except the
-        // one the set was actually using.
-        let enc_row = if enc {
-            format!("enc ac3<=8 ({})", caps.enc_lane_profile_codecs(true).join(","))
-        } else {
-            "enc off".to_string()
-        };
         plx_base::eventlog::log(&format!(
             "devcaps: fork lanes flac<={} pcm<={} opus<={} dts<={} (dts above it: {}) {}",
             lane("flac"),
@@ -651,7 +713,8 @@ fn with_fork_knobs(mut caps: Caps, flac: Option<&str>, opus: Option<&str>) -> Ca
             lane("opus"),
             lane("dts"),
             if dts_over_ceiling_admitted() { "core" } else { "server" },
-            enc_row,
+            // FORK (RichiL10): the AC3 encode lane (`ff_enc.rs`).
+            if enc { "enc ac3<=8 (flac,pcm,truehd)" } else { "enc off" },
         ));
     }
     caps
@@ -777,6 +840,42 @@ mod tests {
         assert_eq!(c.audio, "aac,ac3,eac3,dts");
     }
 
+    /// PMS names DTS `dca` (every DTS entry in the profiles shipped with PMS spells it so); the
+    /// pipeline and the device table say `dts`. Both spellings must reach the same answer.
+    #[test]
+    fn pms_spelling_dca_is_dts_for_membership_and_channel_bounds() {
+        let caps = parse(REAL).unwrap();
+        assert!(caps.audio_supports("dca", 6));
+        // FORK (RichiL10): above the 6-channel row only with `dts_core=never`; the fork's
+        // default plays the DTS core of a 7.1 DTS-HD track (`dts_over_ceiling_for`).
+        assert!(!caps.audio_supports_with("dca", 8, false));
+        assert!(caps.audio_supports_with("dca", 8, true));
+        assert!(!caps.audio_supports("dca", 0));
+        assert!(caps.audio_supports("DCA", 6), "case folds too");
+        assert!(caps.audio_supports("ec-3", 8), "ec-3 is eac3");
+        assert!(!Caps::assumed().audio_has("dca"));
+        assert_eq!(audio_codec_id("DCA"), "dts");
+        assert_eq!(audio_codec_id("AC3"), "ac3");
+    }
+
+    /// Forced mode admits DTS only on table evidence (a DTS row with channels), but skips the
+    /// channel ceiling: 7.1 DTS-HD MA is refused in Auto and admitted in Forced.
+    #[test]
+    fn forced_dts_needs_a_table_row_but_no_channel_ceiling() {
+        let caps = parse(REAL).unwrap();
+        assert!(caps.forced_feeds_audio("dca"));
+        assert!(caps.forced_feeds_audio("dts"));
+        assert!(!caps.audio_supports_with("dca", 8, false), "FORK: Auto without the dts_core lane");
+        assert!(!Caps::assumed().forced_feeds_audio("dca"));
+        assert!(!Caps::assumed().forced_feeds_audio("dts"));
+        let no_row = parse(&REAL.replace("DTS", "WMA")).unwrap();
+        assert!(!no_row.forced_feeds_audio("dca"));
+        for c in ["aac", "ac3", "eac3", "EAC3"] {
+            assert!(Caps::assumed().forced_feeds_audio(c), "{c}");
+        }
+        assert!(!Caps::assumed().forced_feeds_audio("truehd"));
+    }
+
     #[test]
     fn dts_requires_an_explicit_device_row() {
         assert!(parse(REAL).unwrap().audio_has("dts"));
@@ -815,12 +914,7 @@ mod tests {
         assert!(caps.audio_supports("dts", 6));
         assert!(!caps.audio_supports_with("dts", 8, false));
         assert!(caps.audio_supports_with("dts", 8, true));
-        // DTS is the one codec whose admission no longer comes from the table: the AC3 encode
-        // lane takes it whatever the row says, so even an unknown channel count is admitted and
-        // the lane folds what the stream actually carries (`enc_lane_candidate`).
-        assert!(caps.audio_supports("dts", 0));
-        // Every other MEASURED_ONLY codec still needs a positive channel count.
-        assert!(!caps.audio_supports("flac", 0));
+        assert!(!caps.audio_supports("dts", 0));
         assert!(caps.audio_supports("aac", 2));
         assert!(caps.audio_supports("aac", 6));
         assert!(!caps.audio_supports("aac", 8));
@@ -830,6 +924,32 @@ mod tests {
         let unbounded = parse(&REAL.replace("\"channels\" : 6", "\"channels\" : 0")).unwrap();
         assert!(!unbounded.audio_has("dts"));
         assert!(!Caps::assumed().audio_supports("truehd", 6));
+    }
+
+    /// FORK (RichiL10): PMS names every DTS track `dca` (`dca-ma` on DTS-HD MA). The gate must
+    /// give it exactly the answer it gives `dts`, channel bound included, or a real server's DTS
+    /// is never direct-played.
+    #[test]
+    fn pms_spells_dts_dca_and_the_gate_folds_it() {
+        assert_eq!(dp_audio_key("dca"), "dts");
+        assert_eq!(dp_audio_key("dca-ma"), "dts");
+        assert_eq!(dp_audio_key("DCA"), "dts");
+        assert_eq!(dp_audio_key("dts"), "dts");
+        for other in ["ac3", "eac3", "aac", "truehd", "dcafoo", ""] {
+            assert_eq!(dp_audio_key(other), other);
+        }
+        let caps = parse(REAL).unwrap();
+        for codec in ["dca", "dca-ma"] {
+            assert!(caps.audio_has(codec), "{codec}");
+            assert!(caps.audio_supports(codec, 6), "{codec}");
+            assert!(
+                !caps.audio_supports_with(codec, 8, false),
+                "{codec}: with dts_core=never the device's 6-channel bound holds"
+            );
+            assert!(caps.audio_supports_with(codec, 8, true), "{codec}: FORK: above it, the core plays");
+            assert!(!caps.audio_supports(codec, 0), "{codec}: DTS needs a known channel count");
+        }
+        assert!(!Caps::assumed().audio_has("dca"), "no DTS row, no DTS under any spelling");
     }
 
     /// The merge is per-AXIS min, not a pick of the smaller row: a table whose duplicate rows
@@ -956,171 +1076,6 @@ mod tests {
         assert_eq!(c.audio, "aac,ac3,eac3");
     }
 
-    /// FORK (RichiL10): the LG OLED B4's audio rows (webOS 10.3.1, read off the set 2026-10-15),
-    /// formatting trimmed. FLAC is bounded by the PCM/LPCM rows it leaves the app through.
-    const B4: &str = r#"{
-  "videoCodecs" : [
-    { "name" : "H.264", "maxWidth" : 4096, "maxHeight" : 2176, "maxFrameRate" : 30 },
-    { "name" : "HEVC", "maxWidth" : 4096, "maxHeight" : 2176, "maxFrameRate" : 60 }
-  ],
-  "audioCodecs" : [
-    { "name" : "MPEG", "channels" : 2 }, { "name" : "AAC", "channels" : 6 },
-    { "name" : "WMA", "channels" : 6 }, { "name" : "PCM", "channels" : 2 },
-    { "name" : "LPCM", "channels" : 2 }, { "name" : "AC3", "channels" : 6 },
-    { "name" : "EAC3", "channels" : 8 }, { "name" : "DTH", "channels" : 2 },
-    { "name" : "DTS", "channels" : 6 }, { "name" : "DTSH", "channels" : 6 },
-    { "name" : "DTSE", "channels" : 6 }, { "name" : "DRA", "channels" : 8 },
-    { "name" : "Vorbis", "channels" : 6 }, { "name" : "RA6", "channels" : 6 },
-    { "name" : "AMR", "channels" : 2 }, { "name" : "FLAC", "channels" : 2 },
-    { "name" : "OPUS", "channels" : 6 }
-  ]
-}"#;
-
-    #[test]
-    fn the_b4_table_admits_the_fork_lanes_at_their_measured_ceilings() {
-        let c = parse(B4).expect("the B4 table parses");
-        assert_eq!(c.audio, "aac,ac3,eac3,dts,flac,pcm,opus");
-        for (codec, ch, ok) in [
-            ("flac", 1, true), ("flac", 2, true), ("flac", 6, false), ("flac", 8, false),
-            ("flac", 0, false), ("pcm", 2, true), ("pcm", 6, false), ("opus", 2, true),
-            ("opus", 6, true), ("opus", 8, false), ("opus", 0, false), ("truehd", 8, false),
-            ("eac3", 8, true), ("ac3", 6, true),
-        ] {
-            assert_eq!(c.audio_supports_with(codec, ch, true), ok, "{codec} {ch}ch");
-        }
-        // DTS-HD 6.1 / 7.1: the core plays unless the knob says never.
-        assert!(c.audio_supports_with("dca-ma", 7, true));
-        assert!(c.audio_supports_with("dca", 8, true));
-        assert!(!c.audio_supports_with("dca-ma", 7, false));
-        assert_eq!(c.profile_channel_limit_with("flac", false), Some(2));
-        assert_eq!(c.profile_channel_limit_with("pcm", false), Some(2));
-        assert_eq!(c.profile_channel_limit_with("opus", false), Some(6));
-        assert_eq!(c.profile_channel_limit_with("truehd", false), None);
-        assert_eq!(c.profile_channel_limit_with("dts", true), Some(8));
-    }
-
-    /// FORK (RichiL10): the AC3 encode lane on the B4. FLAC/PCM the PCM lane cannot declare and
-    /// TrueHD/MLP become direct-playable at 48 kHz; any other rate, and `encode=off`, keep the
-    /// answers above.
-    #[test]
-    fn the_b4_table_admits_the_encode_lane_at_48_khz_only() {
-        let c = parse(B4).unwrap();
-        let on = |codec: &str, ch: i64, rate: i64| c.audio_supports_lanes(codec, ch, rate, true, true);
-        let off = |codec: &str, ch: i64, rate: i64| c.audio_supports_lanes(codec, ch, rate, true, false);
-        for (codec, ch) in [("flac", 8), ("flac", 6), ("flac", 3), ("pcm", 8), ("pcm", 6), ("truehd", 8), ("truehd", 6), ("mlp", 2)] {
-            assert!(on(codec, ch, 48_000), "{codec} {ch}ch at 48 kHz: encode lane");
-            assert!(on(codec, ch, 0), "{codec} {ch}ch, rate not said: admitted, the Load decides");
-            assert!(!on(codec, ch, 96_000), "{codec} {ch}ch at 96 kHz stays with the server");
-            assert!(!on(codec, ch, 44_100), "{codec} {ch}ch at 44.1 kHz: no resampler");
-            assert!(!off(codec, ch, 48_000), "{codec} {ch}ch with encode=off: the server, as in build 3");
-        }
-        // inside the PCM lane nothing changes, whatever the rate
-        assert!(on("flac", 2, 96_000) && on("flac", 1, 44_100) && on("pcm", 2, 48_000));
-        assert_eq!(c.audio_lane("flac", 2, 96_000, true), Some(AudioLane::Pcm));
-        assert_eq!(c.audio_lane("flac", 8, 48_000, true), Some(AudioLane::Ac3Encode));
-        assert_eq!(c.audio_lane("truehd", 8, 48_000, true), Some(AudioLane::Ac3Encode));
-        assert_eq!(c.audio_lane("truehd", 8, 96_000, true), None);
-        assert_eq!(c.audio_lane("flac", 8, 48_000, false), None);
-        assert_eq!(c.audio_lane("ac3", 6, 48_000, true), None);
-        assert_eq!(c.audio_lane("dca-ma", 8, 48_000, true), Some(AudioLane::Ac3Encode));
-        // more than 8 channels is no lane at all; neither is a codec the TV decodes itself
-        assert!(!on("flac", 9, 48_000) && !on("vorbis", 6, 48_000));
-        assert!(on("eac3", 8, 48_000) && on("ac3", 6, 48_000));
-        // the profile states 8 for the lane's codecs while it is on, the old rows when it is off
-        for codec in ["flac", "pcm", "truehd", "mlp"] {
-            assert_eq!(c.profile_channel_limit_with(codec, true), Some(8), "{codec}");
-        }
-        assert_eq!(c.profile_channel_limit_with("opus", true), Some(6));
-        assert_eq!(c.enc_lane_profile_codecs(true), ["truehd", "mlp", "dts"]);
-        assert!(c.enc_lane_profile_codecs(false).is_empty());
-        // flac=off hands FLAC back to the server in both lanes
-        let no_flac = with_fork_knobs(c.clone(), Some("off"), None);
-        assert!(!no_flac.audio_supports_lanes("flac", 8, 48_000, true, true));
-        assert!(no_flac.audio_supports_lanes("truehd", 8, 48_000, true, true));
-        assert!(encode_lane_for(None) && encode_lane_for(Some("ac3")) && !encode_lane_for(Some("off")));
-    }
-
-    /// FORK (RichiL10): DTS takes the AC3 encode lane even on a set whose table has NO `dts` row.
-    ///
-    /// The arm used to read `self.audio_has("dts")`, i.e. "encode DTS when the television can
-    /// decode DTS" — the opposite of every other arm in [`Caps::enc_lane_candidate`]. On a set
-    /// with a `dts` row (the dev set) it took the lane, which is why the bug never showed there;
-    /// on a set without one (a 2020 CX) no lane opened, `enc_lane_profile_codecs` still told PMS
-    /// the track direct-plays, and the demuxer's DTS core reached a pipeline with no DTS decoder:
-    /// silence. This pins both halves — the lane opens, and the profile keeps direct-playing it.
-    #[test]
-    fn dts_takes_the_encode_lane_without_a_dts_row() {
-        let with_row = parse(B4).unwrap();
-        assert!(with_row.audio_has("dts"));
-        assert!(with_row.enc_lane_candidate("dts", 6, true));
-        assert!(
-            with_row.enc_lane_candidate("dca-ma", 8, true),
-            "PMS names the track dca-ma; the fold maps it to dts"
-        );
-
-        let no_dts = parse(&B4
-            .replace(r#""DTS""#, r#""DTSX1""#)
-            .replace(r#""DTSH""#, r#""DTSX2""#)
-            .replace(r#""DTSE""#, r#""DTSX3""#))
-        .unwrap();
-        assert!(!no_dts.audio_has("dts"), "the fixture really has no dts row");
-        assert!(
-            no_dts.enc_lane_candidate("dts", 6, true),
-            "no DTS decoder is exactly the case the lane exists for"
-        );
-        assert!(
-            no_dts.audio_supports_at("dts", 6, 48_000),
-            "and the profile must still direct-play it, or the server converts it instead"
-        );
-        assert_eq!(no_dts.profile_channel_limit_with("dts", true), Some(8));
-
-        // The AC3 sink is still the gate for every lane, DTS included.
-        assert!(!Caps::assumed().enc_lane_candidate("dts", 6, true));
-        // ...and `encode=off` still hands DTS back to the core-extraction path.
-        assert!(!with_row.enc_lane_candidate("dts", 6, false));
-    }
-
-    /// FORK (RichiL10): the encode lane needs a MEASURED AC3 5.1 sink, like every fork lane.
-    #[test]
-    fn the_encode_lane_needs_a_measured_ac3_sink() {
-        let assumed = Caps::assumed();
-        assert!(!assumed.audio_supports_lanes("truehd", 8, 48_000, true, true), "no AC3 row: no lane");
-        assert!(assumed.enc_lane_profile_codecs(true).is_empty());
-        let stereo_ac3 = parse(&B4.replace(r#""AC3", "channels" : 6"#, r#""AC3", "channels" : 2"#)).unwrap();
-        assert!(!stereo_ac3.audio_supports_lanes("flac", 8, 48_000, true, true));
-        // a wider PCM row moves 6-channel FLAC/PCM back into the lossless lane
-        let wide = parse(&B4.replace(r#""PCM", "channels" : 2"#, r#""PCM", "channels" : 6"#)
-            .replace(r#""LPCM", "channels" : 2"#, r#""LPCM", "channels" : 6"#))
-            .unwrap();
-        assert_eq!(wide.audio_lane("pcm", 6, 96_000, true), Some(AudioLane::Pcm));
-        assert_eq!(wide.audio_lane("pcm", 8, 48_000, true), Some(AudioLane::Ac3Encode));
-    }
-
-    #[test]
-    fn a_flac_row_without_a_pcm_row_is_not_a_lane() {
-        let c = parse(&B4.replace(r#"{ "name" : "PCM", "channels" : 2 },"#, "")
-            .replace(r#"{ "name" : "LPCM", "channels" : 2 },"#, ""))
-            .unwrap();
-        assert_eq!(c.audio, "aac,ac3,eac3,dts,opus");
-        // A six-channel PCM row lets FLAC follow FLAC's own row, not more.
-        let wide = parse(&B4.replace(r#""PCM", "channels" : 2"#, r#""PCM", "channels" : 6"#)
-            .replace(r#""LPCM", "channels" : 2"#, r#""LPCM", "channels" : 6"#))
-            .unwrap();
-        assert_eq!(wide.audio_channels.get("flac"), Some(&2));
-        assert_eq!(wide.audio_channels.get("pcm"), Some(&6));
-    }
-
-    #[test]
-    fn fork_knobs_hand_flac_and_opus_back_to_the_server() {
-        let c = parse(B4).unwrap();
-        assert_eq!(with_fork_knobs(c.clone(), None, None).audio, "aac,ac3,eac3,dts,flac,pcm,opus");
-        assert_eq!(with_fork_knobs(c.clone(), Some("off"), None).audio, "aac,ac3,eac3,dts,pcm,opus");
-        assert_eq!(with_fork_knobs(c, Some("pcm"), Some("off")).audio, "aac,ac3,eac3,dts,flac,pcm");
-        assert!(dts_over_ceiling_for(None));
-        assert!(dts_over_ceiling_for(Some("auto")));
-        assert!(!dts_over_ceiling_for(Some("never")));
-    }
-
     /// An AV1 row is a capability bit with its own bound, and it does not move the shared
     /// bound: `hevc_max` is what the table says without the AV1 row. The row's nested
     /// `restrictions` array and `maxBitRate` are unknown fields to this parser and must parse
@@ -1204,5 +1159,144 @@ mod tests {
         let c = Caps::assumed();
         assert!(!c.vp9);
         assert_eq!(c.vp9_row, (0, 0, 0));
+    }
+
+    /// 10-bit VP9 is claimed only on the webOS 4 family (the ACB path it was measured on); an unknown
+    /// release, webOS 5+ and the assumed profile all say 8.
+    #[test]
+    fn vp9_bit_depth_is_ten_only_where_it_was_measured() {
+        assert_eq!(vp9_bit_depth_for(0), 8, "unknown release");
+        for major in 1..=4 {
+            assert_eq!(vp9_bit_depth_for(major), 10, "webOS {major}");
+        }
+        for major in [5, 6, 7, 8, 9, 10, 11, 25] {
+            assert_eq!(vp9_bit_depth_for(major), 8, "webOS {major}");
+        }
+        assert_eq!(Caps::assumed().vp9_bit_depth, 8);
+        assert_eq!(parse(REAL).unwrap().vp9_bit_depth, 8, "parse() alone never claims it; probe() sets it");
+    }
+
+    /// FORK (RichiL10): the LG OLED B4's audio rows (webOS 10.3.1, read off the set 2026-10-15),
+    /// formatting trimmed. FLAC is bounded by the PCM/LPCM rows it leaves the app through.
+    const B4: &str = r#"{
+  "videoCodecs" : [
+    { "name" : "H.264", "maxWidth" : 4096, "maxHeight" : 2176, "maxFrameRate" : 30 },
+    { "name" : "HEVC", "maxWidth" : 4096, "maxHeight" : 2176, "maxFrameRate" : 60 }
+  ],
+  "audioCodecs" : [
+    { "name" : "MPEG", "channels" : 2 }, { "name" : "AAC", "channels" : 6 },
+    { "name" : "WMA", "channels" : 6 }, { "name" : "PCM", "channels" : 2 },
+    { "name" : "LPCM", "channels" : 2 }, { "name" : "AC3", "channels" : 6 },
+    { "name" : "EAC3", "channels" : 8 }, { "name" : "DTH", "channels" : 2 },
+    { "name" : "DTS", "channels" : 6 }, { "name" : "DTSH", "channels" : 6 },
+    { "name" : "DTSE", "channels" : 6 }, { "name" : "DRA", "channels" : 8 },
+    { "name" : "Vorbis", "channels" : 6 }, { "name" : "RA6", "channels" : 6 },
+    { "name" : "AMR", "channels" : 2 }, { "name" : "FLAC", "channels" : 2 },
+    { "name" : "OPUS", "channels" : 6 }
+  ]
+}"#;
+
+    #[test]
+    fn the_b4_table_admits_the_fork_lanes_at_their_measured_ceilings() {
+        let c = parse(B4).expect("the B4 table parses");
+        assert_eq!(c.audio, "aac,ac3,eac3,dts,flac,pcm,opus");
+        for (codec, ch, ok) in [
+            ("flac", 1, true), ("flac", 2, true), ("flac", 6, false), ("flac", 8, false),
+            ("flac", 0, false), ("pcm", 2, true), ("pcm", 6, false), ("opus", 2, true),
+            ("opus", 6, true), ("opus", 8, false), ("opus", 0, false), ("truehd", 8, false),
+            ("eac3", 8, true), ("ac3", 6, true),
+        ] {
+            assert_eq!(c.audio_supports_with(codec, ch, true), ok, "{codec} {ch}ch");
+        }
+        // DTS-HD 6.1 / 7.1: the core plays unless the knob says never.
+        assert!(c.audio_supports_with("dca-ma", 7, true));
+        assert!(c.audio_supports_with("dca", 8, true));
+        assert!(!c.audio_supports_with("dca-ma", 7, false));
+        assert_eq!(c.profile_channel_limit_with("flac", false), Some(2));
+        assert_eq!(c.profile_channel_limit_with("pcm", false), Some(2));
+        assert_eq!(c.profile_channel_limit_with("opus", false), Some(6));
+        assert_eq!(c.profile_channel_limit_with("truehd", false), None);
+    }
+
+    /// FORK (RichiL10): the AC3 encode lane on the B4. FLAC/PCM the PCM lane cannot declare and
+    /// TrueHD/MLP become direct-playable at 48 kHz; any other rate, and `encode=off`, keep the
+    /// answers above.
+    #[test]
+    fn the_b4_table_admits_the_encode_lane_at_48_khz_only() {
+        let c = parse(B4).unwrap();
+        let on = |codec: &str, ch: i64, rate: i64| c.audio_supports_lanes(codec, ch, rate, true, true);
+        let off = |codec: &str, ch: i64, rate: i64| c.audio_supports_lanes(codec, ch, rate, true, false);
+        for (codec, ch) in [("flac", 8), ("flac", 6), ("flac", 3), ("pcm", 8), ("pcm", 6), ("truehd", 8), ("truehd", 6), ("mlp", 2)] {
+            assert!(on(codec, ch, 48_000), "{codec} {ch}ch at 48 kHz: encode lane");
+            assert!(on(codec, ch, 0), "{codec} {ch}ch, rate not said: admitted, the Load decides");
+            assert!(!on(codec, ch, 96_000), "{codec} {ch}ch at 96 kHz stays with the server");
+            assert!(!on(codec, ch, 44_100), "{codec} {ch}ch at 44.1 kHz: no resampler");
+            assert!(!off(codec, ch, 48_000), "{codec} {ch}ch with encode=off: the server, as in build 3");
+        }
+        // inside the PCM lane nothing changes, whatever the rate
+        assert!(on("flac", 2, 96_000) && on("flac", 1, 44_100) && on("pcm", 2, 48_000));
+        assert_eq!(c.audio_lane("flac", 2, 96_000, true), Some(AudioLane::Pcm));
+        assert_eq!(c.audio_lane("flac", 8, 48_000, true), Some(AudioLane::Ac3Encode));
+        assert_eq!(c.audio_lane("truehd", 8, 48_000, true), Some(AudioLane::Ac3Encode));
+        assert_eq!(c.audio_lane("truehd", 8, 96_000, true), None);
+        assert_eq!(c.audio_lane("flac", 8, 48_000, false), None);
+        assert_eq!(c.audio_lane("ac3", 6, 48_000, true), None);
+        assert_eq!(c.audio_lane("dca-ma", 8, 48_000, true), None, "DTS-HD keeps its core lane");
+        // more than 8 channels is no lane at all; neither is a codec the TV decodes itself
+        assert!(!on("flac", 9, 48_000) && !on("vorbis", 6, 48_000));
+        assert!(on("eac3", 8, 48_000) && on("ac3", 6, 48_000));
+        // the profile states 8 for the lane's codecs while it is on, the old rows when it is off
+        for codec in ["flac", "pcm", "truehd", "mlp"] {
+            assert_eq!(c.profile_channel_limit_with(codec, true), Some(8), "{codec}");
+        }
+        assert_eq!(c.profile_channel_limit_with("opus", true), Some(6));
+        assert_eq!(c.enc_lane_profile_codecs(true), ["truehd", "mlp"]);
+        assert!(c.enc_lane_profile_codecs(false).is_empty());
+        // flac=off hands FLAC back to the server in both lanes
+        let no_flac = with_fork_knobs(c.clone(), Some("off"), None);
+        assert!(!no_flac.audio_supports_lanes("flac", 8, 48_000, true, true));
+        assert!(no_flac.audio_supports_lanes("truehd", 8, 48_000, true, true));
+        assert!(encode_lane_for(None) && encode_lane_for(Some("ac3")) && !encode_lane_for(Some("off")));
+    }
+
+    /// FORK (RichiL10): the encode lane needs a MEASURED AC3 5.1 sink, like every fork lane.
+    #[test]
+    fn the_encode_lane_needs_a_measured_ac3_sink() {
+        let assumed = Caps::assumed();
+        assert!(!assumed.audio_supports_lanes("truehd", 8, 48_000, true, true), "no AC3 row: no lane");
+        assert!(assumed.enc_lane_profile_codecs(true).is_empty());
+        let stereo_ac3 = parse(&B4.replace(r#""AC3", "channels" : 6"#, r#""AC3", "channels" : 2"#)).unwrap();
+        assert!(!stereo_ac3.audio_supports_lanes("flac", 8, 48_000, true, true));
+        // a wider PCM row moves 6-channel FLAC/PCM back into the lossless lane
+        let wide = parse(&B4.replace(r#""PCM", "channels" : 2"#, r#""PCM", "channels" : 6"#)
+            .replace(r#""LPCM", "channels" : 2"#, r#""LPCM", "channels" : 6"#))
+            .unwrap();
+        assert_eq!(wide.audio_lane("pcm", 6, 96_000, true), Some(AudioLane::Pcm));
+        assert_eq!(wide.audio_lane("pcm", 8, 48_000, true), Some(AudioLane::Ac3Encode));
+    }
+
+    #[test]
+    fn a_flac_row_without_a_pcm_row_is_not_a_lane() {
+        let c = parse(&B4.replace(r#"{ "name" : "PCM", "channels" : 2 },"#, "")
+            .replace(r#"{ "name" : "LPCM", "channels" : 2 },"#, ""))
+            .unwrap();
+        assert_eq!(c.audio, "aac,ac3,eac3,dts,opus");
+        // A six-channel PCM row lets FLAC follow FLAC's own row, not more.
+        let wide = parse(&B4.replace(r#""PCM", "channels" : 2"#, r#""PCM", "channels" : 6"#)
+            .replace(r#""LPCM", "channels" : 2"#, r#""LPCM", "channels" : 6"#))
+            .unwrap();
+        assert_eq!(wide.audio_channels.get("flac"), Some(&2));
+        assert_eq!(wide.audio_channels.get("pcm"), Some(&6));
+    }
+
+    #[test]
+    fn fork_knobs_hand_flac_and_opus_back_to_the_server() {
+        let c = parse(B4).unwrap();
+        assert_eq!(with_fork_knobs(c.clone(), None, None).audio, "aac,ac3,eac3,dts,flac,pcm,opus");
+        assert_eq!(with_fork_knobs(c.clone(), Some("off"), None).audio, "aac,ac3,eac3,dts,pcm,opus");
+        assert_eq!(with_fork_knobs(c, Some("pcm"), Some("off")).audio, "aac,ac3,eac3,dts,flac,pcm");
+        assert!(dts_over_ceiling_for(None));
+        assert!(dts_over_ceiling_for(Some("auto")));
+        assert!(!dts_over_ceiling_for(Some("never")));
     }
 }

@@ -22,7 +22,7 @@ answers what a QA pass would find.
 | Question | Answer |
 | --- | --- |
 | Ship via **webOS Homebrew Channel**? | **Yes** — it is a real, current, native-app-friendly path. ~1 day of packaging work plus the licence fixes below. |
-| Ship via **LG Content Store**? | **Submittable — this was a "no" here until 2026-08-23 and the "no" was wrong.** Seller Lounge parses this project's ipk as **File Type: Native** and asks for the native SDK version, chipset and resolution. The old verdict rested on a `develop/*` **web-runtime** page (*"Only `web` is allowed currently"*), which is not authority over a native app. What remains is a QA problem, not a permission problem — §2, and `docs/lg-self-checklist.md` for the four items that genuinely fail. |
+| Ship via **LG Content Store**? | **No — not through Seller Lounge.** LG Seller Lounge answered in writing on 2026-10-20 that its registration and Functional QA support **Web Type applications only**, that Native Type applications are "not eligible for submission or review", and that it gives no information on any native program, NDK access or partnership. The 2026-08-23 "submittable" verdict (the portal parsing our ipk as `File Type: Native`) is superseded — §2. Distribution is Developer Mode or Homebrew Channel. |
 | Runs on **newer webOS**? | 32-bit armv7 is *not* the problem — it stays the native userland through webOS 26. **ACB is the problem**: `libAcbAPI` exists on webOS 4.x only. Today's binary does not reach `main()` on 5.0+. |
 | Is **private data** in the repo? | Git history is clean of credentials. Release CI has no `config.local.h`, remaps host paths, compiles out the trigger/FIFO/capture surfaces, and verifies the shipped bytes. The event log scrubs tokens, server addresses, household names and media text before writing, and the three runtime logs (events, crash, stderr) are mode 0640 — group read for a Dev Mode user's file tool, never world-readable; §4 records the remaining diagnostic surface and the residual risk. |
 | Needs a **rooted** TV? | **No** — the unprivileged Dev Mode jail is device-proven in §3.5. Homebrew and retail layouts now use probed writable paths; Key Manager permission is capability-tested and denial keeps the mode-0600 fallback. A real LG Content Store entitlement/install is still an acceptance test, not something the rooted development set can prove. |
@@ -190,7 +190,23 @@ factory webOS 10.0 is vulnerable) — but **webOS 4.5, our own target, is unpatc
 
 ---
 
-## 2. LG Content Store — a native ipk IS submittable
+## 2. LG Content Store — native apps are not accepted through Seller Lounge
+
+**[corrected 2026-10-20 — supersedes the 2026-08-23 verdict below]** LG Seller Lounge support
+answered a direct written question on 2026-10-20 (after a first reply on 2026-10-19 saying the same):
+*"According to the current LG webOS TV App Service policy, the standard Seller Lounge registration
+and Functional QA process support Web Type applications only. Therefore, Native Type applications
+are not eligible for submission or review through Seller Lounge."* It also declined to say whether
+third-party developers can publish native apps at all, whether any separate native program exists,
+or what its qualifications would be. The portal classifying our ipk as `File Type: Native` showed
+that LG's tooling recognises native packages; it did not show that LG will review one from us, and
+the 2026-08-23 reading drew that second conclusion from the first. **Treat Store distribution as
+unavailable**: the shipping routes are LG Developer Mode (each user signs in with their own LG
+account, and the session needs renewal) and Homebrew Channel (§1, §1.7). Everything below this
+paragraph is the superseded 2026-08-23 analysis, kept as dated history; its QA findings
+(`docs/lg-self-checklist.md`) remain true statements about the app, not a submission plan.
+
+### Superseded 2026-08-23 analysis
 
 **[corrected 2026-08-23]** This section used to be headed *"LG Content Store — no"* and to argue
 that native eligibility was **unsettled**, on the strength of one sentence in LG's `appinfo.json`
@@ -665,7 +681,9 @@ world-readable `/tmp` on the TV across many runs.
   and the C-side
   `fprintf(elogf, …)` lines in `src/starfish.c` bypass the scrubber (they carry
   pointers, library paths, Starfish pipeline ids and Starfish JSON replies, no credential); the
-  crash log is a signal, a faulting PC, one `/proc/self/maps` line, the build id and panic text; the
+  crash log is a signal, a faulting PC, the crash's wall-clock second (a `time:` line, also written
+  under the panic text by the Rust hook), the `/proc/self/maps` lines holding the pc, the lr and
+  our own binary, the build id and panic text; the
   stderr log is whatever aborts, panics, GL info logs and the television's own libraries print,
   and **the stderr log does not go through `scrub_local`, nor do the C tracer's records in the
   crash log** (the panic text the Rust hook appends to it does, since the follow-up of the same day).
@@ -854,12 +872,11 @@ Inter if you're willing to re-tune the size ladder.
 | `libgcc_s` | GPL-3 + Runtime Library Exception 3.1 | None (exception covers it, dynamically linked). |
 | SDL2, SDL2_ttf | Zlib *(SDL_ttf since **2.0.11**, not 2.20)* | None — clause 3 is a source-distribution clause. Listing is courtesy. |
 | FreeType | FTL / GPLv2 | **Not triggered** — not in `DT_NEEDED`; it's transitive inside the TV's SDL2_ttf. Include the credit line anyway, it's one line. |
-| nanosvg (vendored) | **Zlib**, Mikko Mononen | Keep the header intact (it is). **`src/svg.c:1` mislabels it "public domain" — wrong**, and a NOTICES file generated from that comment would omit Mononen and the AGG/Shemanarev credit. |
+| nanosvg (fetched at a pinned commit by `ci/deps.py`; not in the repository) | **Zlib**, Mikko Mononen | The fetched header is sha256-pinned, so its notice stays intact. `src/svg.c:1` once mislabelled it "public domain" (fixed); a NOTICES file generated from that comment would have omitted Mononen and the AGG/Shemanarev credit. |
 | libjpeg-turbo 2.1.4 | IJG + BSD-3 + Zlib | Currently **not** in the ipk (only `make deploy`-ed). The moment it ships: IJG attribution + the complete Modified BSD text. |
-| jsmpeg (`tools/jsmpeg.min.js`) | MIT, Dominic Szablewski | **Live breach** — the minifier stripped the banner; 138 KB with no notice, and it's served over HTTP by two tools. Two-line fix. |
+| jsmpeg (fetched by `ci/deps.py` for `tools/stream-screen.py`) | MIT, Dominic Szablewski | Not in the repository (it was a banner-less copy at `tools/jsmpeg.min.js`); upstream licence text is `licenses/jsmpeg.txt`. |
 | Rust crates (30 third-party) | 100% permissive, **zero copyleft** | Standard MIT/Apache notices. `moxcms` and `pxfm` are `BSD-3-Clause OR Apache-2.0` — elect Apache to avoid BSD-3's binary-reproduction clause. |
-| Rust std via `-Z build-std` | MIT OR Apache-2.0 | One notices entry. **Plus `compiler_builtins 0.1.160`, whose licence is a *conjunction*: `MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)`** — the LLVM-exception text must be reproduced. This is the most-missed entry in Rust NOTICES files. |
-| `include/SDL2/*` | Zlib (stock upstream 2.0.4, **not** an LG fork) + Mesa MIT + Khronos MIT/Apache | Notices. |
+| Rust std (the pinned stable toolchain's prebuilt armv7 std) | MIT OR Apache-2.0 | One notices entry. **Plus `compiler_builtins 0.1.160`, whose licence is a *conjunction*: `MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)`** — the LLVM-exception text must be reproduced. This is the most-missed entry in Rust NOTICES files. |
 | webosbrew NDK | n/a | A compiler doesn't licence its output. Just never add `-static` (that would pull LGPL §6(a) in for glibc). |
 
 ### 5.5 Trademarks — the part with real teeth
@@ -1112,8 +1129,8 @@ between here and a release, and none of them is code:
 - **Make the repo public**, for the same reason: that raw URL must return 200.
 - ~~Set the `RUST_NIGHTLY` repo variable~~ **DONE 2026-08-02** — `nightly-2026-07-02`, the toolchain
   the device-verified builds actually used. Unset, both workflows fell back to floating `nightly`,
-  which defeats the pin `-Z build-std` needs (and a `rust-toolchain.toml` cannot substitute — see
-  the Makefile).
+  which defeats the pin `-Z build-std` needs. (Superseded: the pin is now `rust-modules/rust-toolchain.toml`,
+  see "Toolchain pinning" below.)
 - **Run `ci.yml` by `workflow_dispatch` before ever cutting a tag.** Nothing in `.github/` has ever
   executed: no CI run, no Release, no tag. The NDK action's cache and relocate step, the toolbox
   `.deb` download, the pip install, the arm64 runner — all unexecuted. The first run should not be
@@ -1385,11 +1402,15 @@ Verified on the device, not just by binary size: the release build deployed to t
 Makefile derives `IPK_VERSION` and the ipk filename from it, `check-package.py` asserts
 `ipkroot/ctl/control` agrees, and `release.yml`'s `guard` asserts the git tag does too.
 
-**Nightly pinning.** A `rust-toolchain.toml` would **not** work: `cargo +nightly` on the command
-line outranks the file. The pin therefore comes through a new `RUST_NIGHTLY ?= nightly` Makefile
-variable — dev machines behave exactly as before, and CI passes `RUST_NIGHTLY=nightly-YYYY-MM-DD`
-(set the `RUST_NIGHTLY` repo variable). `-Z build-std` recompiles std from source, which is the
-most drift-sensitive thing this build does.
+**Toolchain pinning.** (Superseded: this section described pinning a nightly through a `RUST_NIGHTLY`
+repo variable, because `-Z build-std` recompiled std from source and that was the most
+drift-sensitive thing the build did.) The build now runs on ONE stable release, written once as the
+`channel` of `rust-modules/rust-toolchain.toml`. The Makefile reads that line into `RUST_TOOLCHAIN`
+and passes `+$(RUST_TOOLCHAIN)` to every cargo call, because a `cargo +toolchain` on the command line
+outranks the file; CI reads it through `.github/actions/rust-toolchain`; `ci/rust_toolchain.py`
+serves the Python gates; the notices generator and the GPL source bundle name the same release. There
+is no repo variable and no nightly. The ARM build uses `armv7-unknown-linux-gnueabi`'s prebuilt std,
+so `rust-src` is bundled in the source release only as the corresponding source of that std.
 
 **Two traps encoded in `release.yml`, both of which fail silently:**
 1. `gen-manifest` writes a **bare filename** into `ipkUrl`, resolved relative to the manifest URL —
@@ -1871,7 +1892,7 @@ section closed anything at all.
 **Superseded: the UI is localized now.** When this section was written the UI was English-only,
 with ~203 display literals across 45 files and no string ownership story, and the native UI was
 locale-blind apart from a best-effort `X-Plex-Language` read from the POSIX locale environment.
-Both are gone. The app's own text comes from bundled catalogs (English, Spanish, Belarusian), the
+Both are gone. The app's own text comes from bundled catalogs (every language `locales/languages.json` registers), the
 UI language resolves from a saved Settings → Language override, then the TV UI language reported
 by the native Settings Service, then the process locale, then English, and
 `plex::identity::language` now sends that resolved language as `X-Plex-Language`.
