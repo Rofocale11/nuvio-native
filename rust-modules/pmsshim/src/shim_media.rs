@@ -110,43 +110,101 @@ pub struct SubRef {
     pub id: i64,
     pub lang: String,
     /// Plex's `default`/`selected` for this track: the one the viewer's account language asks for
-    /// (see [`mark_preferred_subtitle`]). A sidecar carries no container ordinal, so this pair is
+    /// (see [`apply_subtitle_preference`]). A sidecar carries no container ordinal, so this pair is
     /// the ONLY way the app can start with it on — `metadata::server_selected_sidecar` reads it.
     pub selected: bool,
 }
 
 /// Marks which of `subs` the viewer's account language picks, if any. `pref` is the account's
-/// `defaultSubtitleLanguage` (the 2-letter picker code); with none set the app's long-standing
-/// fallback is English. Addons label a track `en`, `eng`, `en-US` or `English`, so the comparison
-/// is on the language's OWN code, with the ISO-639-2/B spellings that do not begin with it folded
-/// to their 639-1 form (`ger`→`de`, `fre`→`fr`, …). Every other track is cleared, so a preference
-/// changed between plays cannot leave two selected.
-pub fn mark_preferred_subtitle(subs: &mut [SubRef], pref: Option<&str>) {
-    let want = lang_key(pref.unwrap_or("en"));
-    let hit = subs
-        .iter()
-        .position(|s| !want.is_empty() && lang_key(&s.lang) == want);
+/// `defaultSubtitleLanguage` (the picker's code). An exact tag wins over a folded one, so a
+/// `pt-BR` preference takes the `pt-BR` track rather than the first `pt` one. With no preference
+/// at all the first sidecar is selected (a signed-out install still shows subtitles); a preference
+/// that matches nothing claims nothing, leaving the file's own order alone.
+///
+/// Forced tracks cannot be ranked on: Stremio subtitle objects carry no forced flag and [`SubRef`]
+/// has nowhere to keep one. `defaultSubtitleForced` is a mode, not a per-track attribute.
+pub fn apply_subtitle_preference(subs: &mut [SubRef], pref: Option<&str>) {
+    let hit = match pref.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => subs
+            .iter()
+            .position(|s| s.lang.trim().eq_ignore_ascii_case(p))
+            .or_else(|| {
+                let want = lang_key(p);
+                subs.iter().position(|s| !want.is_empty() && lang_key(&s.lang) == want)
+            }),
+        None => (!subs.is_empty()).then_some(0),
+    };
     for (i, s) in subs.iter_mut().enumerate() {
         s.selected = hit == Some(i);
     }
 }
 
-/// Mirrors `plx_data::metadata::lang_key`'s folding of the one language a tag names (the shim does
-/// not depend on the data crate). Only the primary subtag counts.
+/// ISO-639-2/B and /T codes → the 639-1 code the picker uses. **A table, never a truncation**:
+/// `kan` is Kannada (`kn`), not Georgian (`ka`); `spa` is Spanish (`es`), not `sp`; `jpn` is
+/// Japanese (`ja`), not `jp`. A code this table does not name is compared verbatim, so an
+/// unknown tag is a false negative and never a false match.
+const CODE3: &[(&str, &str)] = &[
+    ("afr", "af"), ("alb", "sq"), ("amh", "am"), ("ara", "ar"), ("arm", "hy"), ("aze", "az"),
+    ("baq", "eu"), ("bel", "be"), ("ben", "bn"), ("bos", "bs"), ("bul", "bg"), ("bur", "my"),
+    ("cat", "ca"), ("chi", "zh"), ("cze", "cs"), ("dan", "da"), ("dut", "nl"), ("ell", "el"),
+    ("eng", "en"), ("est", "et"), ("eus", "eu"), ("fas", "fa"), ("fin", "fi"), ("fra", "fr"),
+    ("fre", "fr"), ("geo", "ka"), ("ger", "de"), ("gle", "ga"), ("glg", "gl"), ("gre", "el"),
+    ("guj", "gu"), ("heb", "he"), ("hin", "hi"), ("hrv", "hr"), ("hun", "hu"), ("hye", "hy"),
+    ("ice", "is"), ("ind", "id"), ("isl", "is"), ("ita", "it"), ("jav", "jv"), ("jpn", "ja"),
+    ("kan", "kn"), ("kat", "ka"), ("kaz", "kk"), ("khm", "km"), ("kor", "ko"), ("kur", "ku"),
+    ("lao", "lo"), ("lat", "la"), ("lav", "lv"), ("lit", "lt"), ("mac", "mk"), ("mal", "ml"),
+    ("mao", "mi"), ("mar", "mr"), ("may", "ms"), ("mkd", "mk"), ("mlt", "mt"), ("mon", "mn"),
+    ("mri", "mi"), ("msa", "ms"), ("mya", "my"), ("nep", "ne"), ("nld", "nl"), ("nor", "no"),
+    ("oci", "oc"), ("orm", "om"), ("pan", "pa"), ("per", "fa"), ("pol", "pl"), ("por", "pt"),
+    ("pus", "ps"), ("ron", "ro"), ("rum", "ro"), ("rus", "ru"), ("san", "sa"), ("sin", "si"),
+    ("slo", "sk"), ("slk", "sk"), ("slv", "sl"), ("snd", "sd"), ("som", "so"), ("spa", "es"),
+    ("sqi", "sq"), ("srp", "sr"), ("sun", "su"), ("swa", "sw"), ("swe", "sv"), ("tam", "ta"),
+    ("tel", "te"), ("tgk", "tg"), ("tgl", "tl"), ("tha", "th"), ("tib", "bo"), ("tur", "tr"),
+    ("tuk", "tk"), ("ukr", "uk"), ("urd", "ur"), ("uzb", "uz"), ("vie", "vi"), ("wel", "cy"),
+    ("yid", "yi"), ("yor", "yo"), ("zho", "zh"), ("zul", "zu"),
+    // The /T (terminology) spellings of the same languages, plus a few common ones the first
+    // block did not name.
+    ("bod", "bo"), ("cym", "cy"), ("deu", "de"), ("epo", "eo"), ("ewe", "ee"), ("kal", "kl"),
+    ("kir", "ky"), ("lug", "lg"), ("nde", "nd"), ("nno", "nn"), ("nob", "nb"), ("nya", "ny"),
+    ("ori", "or"), ("oss", "os"), ("pli", "pi"), ("sag", "sg"), ("smo", "sm"), ("sot", "st"),
+    ("ssw", "ss"), ("tsn", "tn"), ("tso", "ts"), ("xho", "xh"), ("zap", "za"), ("zha", "za"),
+];
+
+/// Full display names an addon may use instead of a code (`"Indonesian"`, `"English"`). Only the
+/// languages the picker offers are listed; anything else is compared verbatim.
+const NAMES: &[(&str, &str)] = &[
+    ("arabic", "ar"), ("bahasa indonesia", "id"), ("bahasa melayu", "ms"), ("bengali", "bn"), ("bulgarian", "bg"), ("cantonese", "zh"),
+    ("chinese", "zh"), ("croatian", "hr"), ("czech", "cs"), ("danish", "da"),
+    ("dutch", "nl"), ("english", "en"), ("farsi", "fa"), ("filipino", "fil"),
+    ("finnish", "fi"), ("french", "fr"), ("german", "de"), ("greek", "el"),
+    ("hebrew", "he"), ("hindi", "hi"), ("hungarian", "hu"), ("indonesian", "id"),
+    ("italian", "it"), ("japanese", "ja"), ("korean", "ko"), ("malay", "ms"),
+    ("norwegian", "no"), ("persian", "fa"), ("polish", "pl"), ("portuguese", "pt"),
+    ("romanian", "ro"), ("russian", "ru"), ("serbian", "sr"), ("slovak", "sk"),
+    ("slovenian", "sl"), ("spanish", "es"), ("swedish", "sv"), ("tagalog", "tl"),
+    ("tamil", "ta"), ("telugu", "te"), ("thai", "th"), ("turkish", "tr"),
+    ("ukrainian", "uk"), ("urdu", "ur"), ("vietnamese", "vi"),
+];
+
+/// The language one tag names, folded to the picker's code. Mirrors `plx_data::metadata::lang_key`
+/// (the shim does not depend on the data crate). Only the primary subtag counts.
 fn lang_key(lang: &str) -> String {
-    // The 639-2/B (library) codes whose first two letters are not the 639-1 code.
-    const ALIAS: [(&str, &str); 20] = [
-        ("alb", "sq"), ("arm", "hy"), ("baq", "eu"), ("bur", "my"), ("chi", "zh"),
-        ("cze", "cs"), ("dut", "nl"), ("fre", "fr"), ("geo", "ka"), ("ger", "de"),
-        ("gre", "el"), ("ice", "is"), ("mac", "mk"), ("mao", "mi"), ("may", "ms"),
-        ("per", "fa"), ("rum", "ro"), ("slo", "sk"), ("tib", "bo"), ("wel", "cy"),
-    ];
     let s = lang.trim().to_ascii_lowercase();
-    let code = s.split(['-', '_', ' ']).next().unwrap_or("");
-    match ALIAS.iter().find(|(from, _)| *from == code) {
-        Some((_, to)) => (*to).to_string(),
-        None => code.chars().take(2).collect(),
+    // A display name may contain a space ("Bahasa Indonesia"), so it is checked WHOLE before the
+    // primary-subtag split below.
+    if let Some((_, to)) = NAMES.iter().find(|(name, _)| *name == s) {
+        return (*to).to_string();
     }
+    let code = s.split(['-', '_', ' ']).next().unwrap_or("");
+    if code.is_empty() {
+        return String::new();
+    }
+    let folded = if code.len() > 3 {
+        NAMES.iter().find(|(name, _)| *name == code).map(|(_, to)| *to)
+    } else {
+        CODE3.iter().find(|(from, _)| *from == code).map(|(_, to)| *to)
+    };
+    folded.unwrap_or(code).to_string()
 }
 
 /// The Media block for stream `idx` of item `rk`.
@@ -303,24 +361,47 @@ mod tests {
             SubRef { id: 2, lang: "English".into(), selected: false },
             SubRef { id: 3, lang: "ger".into(), selected: false },
         ];
-        mark_preferred_subtitle(&mut subs, Some("de"));
+        apply_subtitle_preference(&mut subs, Some("de"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, true]);
-        // No preference at all: English, as before the preference existed.
-        mark_preferred_subtitle(&mut subs, None);
-        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true, false]);
+        // No preference at all: the first sidecar is forced on.
+        apply_subtitle_preference(&mut subs, None);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false, false]);
         // No match: nothing is claimed, so the file's own order stands.
-        mark_preferred_subtitle(&mut subs, Some("pt-BR"));
+        apply_subtitle_preference(&mut subs, Some("pt-BR"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, false]);
     }
 
+    /// The 639-2 spellings an addon actually uses. The old rule truncated any unknown code to two
+    /// letters, which turned `spa` into `sp` (never Spanish, `es`), `jpn` into `jp`, and — worst —
+    /// `kan` (Kannada) into `ka` (Georgian).
     #[test]
     fn language_codes_compare_across_the_three_spellings_addons_use() {
         for (lang, pref) in [
             ("eng", "en"), ("en", "eng"), ("en-US", "en"), ("English", "en"),
             ("deu", "de"), ("ger", "de"), ("de", "ger"), ("pt-BR", "pt"),
+            ("spa", "es"), ("jpn", "ja"), ("swe", "sv"), ("bul", "bg"), ("jav", "jv"),
+            ("ind", "id"), ("Indonesian", "id"), ("Bahasa Indonesia", "id"),
+            ("may", "ms"), ("msa", "ms"),
         ] {
             assert_eq!(lang_key(lang), lang_key(pref), "{lang} vs {pref}");
         }
-        assert_ne!(lang_key("spa"), lang_key("en"), "Spanish is not English");
+        // A false MATCH is the dangerous direction: these must stay apart.
+        for (a, b) in [("kan", "ka"), ("fil", "fi"), ("haw", "ha"), ("spa", "en"), ("jav", "ja")] {
+            assert_ne!(lang_key(a), lang_key(b), "{a} must not fold onto {b}");
+        }
+    }
+
+    /// An exact tag beats the folded one: a `pt-BR` preference takes the regional track, not
+    /// whichever Portuguese track happens to be first.
+    #[test]
+    fn an_exact_language_tag_outranks_a_folded_one() {
+        let mut subs = [
+            SubRef { id: 1, lang: "pt".into(), selected: false },
+            SubRef { id: 2, lang: "pt-BR".into(), selected: false },
+        ];
+        apply_subtitle_preference(&mut subs, Some("pt-BR"));
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);
+        apply_subtitle_preference(&mut subs, Some("pt"));
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false]);
     }
 }

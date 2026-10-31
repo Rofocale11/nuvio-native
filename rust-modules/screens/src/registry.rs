@@ -2108,7 +2108,9 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // The Streams picker became a two-level menu (addon pages over `/nuvio/select`) and the player's
 // Source page lost its quality ladder — so both screens' state changed. Previous pin:
 // 0xb9582887de5b0626.
-const SCREEN_SHAPES_PIN: u64 = 0xb3ba4cb5fc1287f2;
+// Library's pending grid action gained the catalog selector (`Catalog{key:Option<str>}`).
+// Previous pin: 0xb3ba4cb5fc1287f2.
+const SCREEN_SHAPES_PIN: u64 = 0xadfe5d7f11fc67f5;
 
 #[cfg(test)]
 mod arg_tests {

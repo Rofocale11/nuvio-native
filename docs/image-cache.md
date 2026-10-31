@@ -31,7 +31,7 @@ suppress retry storms. Refresh validates decoding before replacing a file and af
 load; it never holds the source-store lock while accessing the network. A failed refresh keeps
 the old image. Changed versioned source paths miss immediately rather than waiting for expiry.
 
-RAM residency remains independent of library size: 64 source slots and a 44 MiB GPU texture
+RAM residency remains independent of library size: 96 source slots and a 44 MiB GPU texture
 budget. Demand workers stop claiming requests when combined decoded and pending-upload pixels
 reach 8 MiB; already active decodes can temporarily exceed this admission threshold. If the GPU evicts an image while its source slot survives, the next draw requests its
 pixels again through the same disk-first path, subject to the source's residency backoff (a card is

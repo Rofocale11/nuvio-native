@@ -16,6 +16,18 @@ design detail.
 - Catalogs → PMS library sections and Home hubs; metas → movie/show/season/episode; search →
   `/hubs/search`; streams → an item's `Media[]` (one Media per stream, with resolution/codec/HDR/
   size/bitrate from `plx_stremio::classify`).
+- **Library Type menu as a catalog selector.** `includeMeta=1` advertises every browseable catalog
+  of the section (with the shim-only `catalogKey`); choosing one sends `?catalog=<key>` and the
+  shim lists that catalog only. Genre is filtered through the addon when declared and in memory
+  when not; Title/Rating/Release Date sorts are computed in memory and Popularity is the catalog's
+  own order. Real PMS servers and failed addon loads omit `catalogKey`, so the client keeps its
+  original hardcoded Type menu as the fallback.
+- **The Library tab is grid-only.** It does not fetch or draw the section's horizontal hub rows;
+  Movies/TV Shows open with Type/Sort/Filter directly above the grid. Home shelves are unaffected.
+- **TMDB baseline for the Filter and Sort menus.** The genre list merges the catalog's declared
+  genres with TMDB's standard movie/TV list, and the Sort menu always offers Popularity, Rating,
+  Release Date and Title. A genre the addon does not support is matched in memory against the
+  rows' `Genre[]` (alias-aware: `Sci-Fi` = `Science Fiction`, `Action` matches `Action & Adventure`).
 - Two-level stream pickers (addons → that addon's streams) shared by the player `…` popover, the
   Detail page **Streams** pill, and the Home hero **Play**, with BACK walking one level at a time.
 - Addon configuration stored as an opaque JSON record in the app's private DB8 kind (separate records
@@ -46,7 +58,12 @@ design detail.
   a webOS service (node child spawned from `js-service/`).
 - Buffer tuning for low-RAM TVs (50 MB video / 4 MB audio; later 15/2), skip disk cache when
   caching disabled.
-- Subtitle language preference respected; audio/subtitle preferences persist across cold boot.
+- Subtitle and audio preferences: `defaultAudioLanguage`, `defaultSubtitleLanguage`,
+  `autoSelectSubtitle` and `defaultSubtitleForced` are written to `nuvio-session.json` whether or
+  not a Nuvio session is signed in, through one atomic writer; they survive a cold boot and are
+  wiped on sign-out. Playback reads that same file — for a Nuvio profile it is the only account
+  surface — so the first launch of the day starts on the saved language without a network round
+  trip.
 
 ## TMDB enrichment & discovery
 
@@ -70,7 +87,8 @@ design detail.
   Home after a confirmed reply.
 - Watch progress mirrored to the Nuvio account (push on timeline, pull/merge on boot or profile
   switch); Continue Watching becomes the account's, not the device's.
-- TMDB↔IMDb ID translation for My List sync and related items.
+- TMDB↔IMDb ID translation for My List sync, related items, and every addon-facing stream/subtitle
+  request whose title is TMDB-only (`tmdb:<id>` → `tt…`, episode tails preserved).
 
 ## UI polish
 

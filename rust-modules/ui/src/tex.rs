@@ -140,7 +140,7 @@ fn mutate_cache<R>(f: impl FnOnce(&mut TexCache<PosterKey>) -> R) -> R {
 /// LRU, so the cache never evicts on its own below this — **but see [`TEX_RESIDENT_BYTES_MAX`]**,
 /// the second ceiling that fires long before 64 slots do whenever the resident mix skews toward
 /// backdrops and hero logos rather than posters.
-const CACHE_CAP: usize = 64;
+const CACHE_CAP: usize = 96;
 
 /// **The cache's own residency ceiling — the tex pool's share of `RenderSet` rule (c)'s
 /// `RENDER_BYTES_MAX` (§8.3, `ui/frame/render_set.rs`).** Here is the arithmetic, so a future
@@ -179,7 +179,7 @@ const CACHE_CAP: usize = 64;
 /// rounding `RENDER_BYTES_MAX` itself uses (68.8 MiB rounded to 64, ≈7% margin) and for the same
 /// reason: a number that is wrong should be wrong SMALL, on the side that asserts early rather
 /// than the side that ships a breach.
-pub const TEX_RESIDENT_BYTES_MAX: usize = 44 << 20;
+pub const TEX_RESIDENT_BYTES_MAX: usize = 32 << 20;
 
 /// How many texels one authored pixel costs: 1 on a television, `n²` under the simulator's
 /// supersampled rendering (`surface::render_scale`), whose images are requested at `n`x per axis.

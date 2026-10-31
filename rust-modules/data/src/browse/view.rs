@@ -28,6 +28,8 @@ struct ListingData {
     items: SecItems,
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
+    catalogs: Arc<Vec<super::CatalogEntry>>,
+    catalog: Option<String>,
     letters: Arc<Vec<(String, i64)>>,
     sort_idx: usize,
     sort_desc: bool,
@@ -140,6 +142,8 @@ impl ListingSnapshot {
                     default_desc: false,
                 }]),
                 genres: Arc::new(Vec::new()),
+                catalogs: Arc::new(Vec::new()),
+                catalog: None,
                 letters: Arc::new(letters),
                 sort_idx: 0,
                 sort_desc: false,
@@ -210,6 +214,14 @@ impl<'a> ListingView<'a> {
     }
     pub fn genres(self) -> &'a [GenreEntry] {
         self.0.data.as_ref().map_or(&[], |s| s.genres.as_slice())
+    }
+    /// Server-advertised catalogs for this section. Empty means the caller must fall back to the
+    /// client's hardcoded `LibraryType` menu.
+    pub fn catalogs(self) -> &'a [super::CatalogEntry] {
+        self.0.data.as_ref().map_or(&[], |s| s.catalogs.as_slice())
+    }
+    pub fn catalog(self) -> Option<&'a str> {
+        self.0.data.as_ref()?.catalog.as_deref()
     }
     pub fn letters(self) -> &'a [(String, i64)] {
         self.0.data.as_ref().map_or(&[], |s| s.letters.as_slice())
@@ -309,6 +321,8 @@ impl super::BrowseState {
                     items: state.items.clone(),
                     sorts: state.sorts.clone(),
                     genres: state.genres.clone(),
+                    catalogs: state.catalogs.clone(),
+                    catalog: state.catalog.clone(),
                     letters: state.letters.clone(),
                     sort_idx: state.sort_idx,
                     sort_desc: state.sort_desc,

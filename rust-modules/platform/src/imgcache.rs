@@ -19,8 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const REFRESH_AFTER: Duration = Duration::from_secs(24 * 3600);
 const TOUCH_AFTER: Duration = Duration::from_secs(3600);
 const MAX_FILE: usize = 4 * 1024 * 1024;
-const MAX_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_ENTRIES: usize = 8192;
+const MAX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ENTRIES: usize = 4096;
 const MAGIC: &[u8; 8] = b"PLXIMG02";
 const HEADER_LEN: usize = 24;
 

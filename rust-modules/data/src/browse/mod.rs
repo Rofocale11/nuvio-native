@@ -457,6 +457,15 @@ pub struct GenreEntry {
     pub title: String,
 }
 
+/// One catalog the shim is exposing as a "Type" entry for a section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogEntry {
+    pub key: String,
+    pub title: String,
+    /// The server marked this catalog as the one the current listing came from.
+    pub active: bool,
+}
+
 /// What the last page fetch for a section produced — Loading / Ready / **Failed**, per SECTION
 /// because that is the grain this store's state already has.
 ///
@@ -527,6 +536,10 @@ struct SecState {
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
     genres_done: bool, // a genre fetch LANDED (even empty) — kick_genres won't re-spawn
+    // server-advertised catalogs for this section (the "Type" dropdown). Empty = fall back to
+    // the client's hardcoded LibraryType list.
+    catalogs: Arc<Vec<CatalogEntry>>,
+    catalog: Option<String>,
     /// Is the live sort the viewer's CHOICE rather than merely what a failed restore left? False
     /// only after a first page that was asked to restore the saved sort and could not tell
     /// whether it had (the re-ask failed, or no menu came back): the library then shows the
@@ -674,6 +687,8 @@ impl Default for SecState {
             sorts: Arc::default(),
             genres: Arc::default(),
             genres_done: false,
+            catalogs: Arc::default(),
+            catalog: None,
             sort_resolved: true,
             genre_resolved: true,
             letters: Arc::default(),
@@ -705,6 +720,9 @@ impl SecState {
         }
         if let Some(genre) = &self.genre {
             filters.push(("genre".into(), genre.id.clone()));
+        }
+        if let Some(catalog) = &self.catalog {
+            filters.push(("catalog".into(), catalog.clone()));
         }
         filters
     }
@@ -1064,7 +1082,38 @@ impl BrowseState {
         state.genre = None;
         state.genres = Arc::default();
         state.genres_done = false;
+        state.catalogs = Arc::default();
+        state.catalog = None;
         // A new listing starts a new restore, and the viewer just chose it.
+        state.sort_resolved = true;
+        state.genre_resolved = true;
+        state.letters = Arc::default();
+        state.letters_done = false;
+        self.requery();
+        true
+    }
+    fn set_catalog(&mut self, key: Option<String>) -> bool {
+        let current = self.cur();
+        let Some(state) = self.states.get_mut(current) else { return false; };
+        if state.catalog == key {
+            return true;
+        }
+        // Only accept keys the server actually advertised (or None to reset to default).
+        if let Some(k) = &key {
+            if !state.catalogs.iter().any(|c| c.key == *k) {
+                return false;
+            }
+        }
+        state.catalog = key;
+        // A catalog selector replaces the Type menu; the listing keeps the section's primary
+        // metadata type so the Unwatched/Genre filters still apply.
+        state.library_type = LibraryType::Primary;
+        state.sorts = Arc::default();
+        state.sort_idx = 0;
+        state.sort_desc = false;
+        state.genre = None;
+        state.genres = Arc::default();
+        state.genres_done = false;
         state.sort_resolved = true;
         state.genre_resolved = true;
         state.letters = Arc::default();
@@ -1346,12 +1395,15 @@ impl BrowseState {
         let key = self.sections[current].key;
         let library_type = self.states[current].library_type;
         let metadata_type = library_type.plex_type(self.sections[current].kind);
+        let catalog = self.states[current].catalog.clone();
         let epoch = self.table_epoch();
         let worker_adapter = Arc::clone(&adapter);
         let spawned = plx_base::task::spawn_small("directory", move || {
             let list = catch_unwind(|| {
                 let mut values = Vec::new();
-                if let Some(container) = client.section_directory(key, dir, metadata_type) {
+                if let Some(container) = client.section_directory_with_catalog(
+                    key, dir, metadata_type, catalog.as_deref(),
+                ) {
                     values.extend(container.directory.iter().filter_map(project));
                 }
                 values
@@ -1458,6 +1510,7 @@ impl BrowseState {
                         }
                         landed
                     }
+                    Some(QueryEdit::Catalog(key)) => self.set_catalog(key),
                     None => true,
                 }
             }
@@ -2393,7 +2446,7 @@ impl BrowseState {
                 Some(PageResult {
                     client, token_gen, gen, sec: current, start, items: page.items,
                     total: page.total, sorts: page.sorts, restored: page.restored,
-                    genres: page.genres, genre: page.genre, resolved: page.resolved,
+                    genres: page.genres, genre: page.genre, catalogs: page.catalogs, resolved: page.resolved,
                 });
         });
         if !spawned {
@@ -2492,9 +2545,25 @@ impl BrowseState {
                                 if let Some(genre) = result.genre {
                                     state.genre = Some(Arc::new(genre));
                                 }
+                                if let Some(catalogs) = result.catalogs {
+                                    if !catalogs.is_empty() {
+                                        state.catalogs = Arc::new(catalogs);
+                                        state.library_type = LibraryType::Primary;
+                                        if state.catalog.as_ref().is_none_or(|key| {
+                                            !state.catalogs.iter().any(|c| &c.key == key)
+                                        }) {
+                                            state.catalog = state.catalogs.iter()
+                                                .find(|c| c.active)
+                                                .or_else(|| state.catalogs.first())
+                                                .map(|c| c.key.clone());
+                                        }
+                                    }
+                                }
                                 if let Some(sorts) = result.sorts {
                                     if state.sorts.is_empty() {
-                                        let sorts = if state.library_type == LibraryType::Primary {
+                                        let sorts = if state.library_type == LibraryType::Primary
+                                            && state.catalogs.is_empty()
+                                        {
                                             match kind {
                                                 Some(kind) => with_plays_sort(sorts, kind),
                                                 None => sorts,
@@ -2566,6 +2635,7 @@ struct ListingPage {
     restored: Option<(String, bool)>,
     /// The library's genre list, when the saved genre was checked against it.
     genres: Option<Vec<GenreEntry>>,
+    catalogs: Option<Vec<CatalogEntry>>,
     /// The remembered genre this page was filtered by, once the list proved it still exists.
     genre: Option<GenreEntry>,
     /// Whether each saved choice this page was asked to restore was settled one way or the other.
@@ -2593,7 +2663,7 @@ impl ListingPage {
     fn failed() -> Self {
         Self {
             items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
-            resolved: Resolved::default(),
+            catalogs: None, resolved: Resolved::default(),
         }
     }
 }
@@ -2668,6 +2738,13 @@ fn fetch_listing_page(
                     default_desc: sort.default_direction == "desc",
                 }).collect())
     });
+    let catalogs: Option<Vec<CatalogEntry>> = container.meta.as_ref().map(|meta| {
+        meta.types.iter().filter(|kind| !kind.catalog_key.is_empty()).map(|kind| {
+            let key = kind.catalog_key.clone();
+            let title = if kind.title.is_empty() { key.clone() } else { kind.title.clone() };
+            CatalogEntry { key, title, active: kind.active != 0 }
+        }).collect()
+    }).filter(|v: &Vec<CatalogEntry>| !v.is_empty());
     // **The order of the first page is ONE decision**, made against the menu it has just brought
     // back, and the page is re-asked in that order before anything is published — the unsorted
     // page never reaches the grid, so nothing reorders on screen:
@@ -2719,7 +2796,7 @@ fn fetch_listing_page(
     let total = if container.total_size > 0 { container.total_size }
         else { query.start + container.metadata.len() as i64 };
     let items = container.metadata.iter().map(|item| parse_item(item, sid)).collect();
-    ListingPage { items, total, sorts, restored, genres, genre, resolved }
+    ListingPage { items, total, sorts, restored, genres, genre, catalogs, resolved }
 }
 
 /// Bumped whenever the section table's SHAPE changes — a source's sections appended, or the whole
@@ -2753,6 +2830,7 @@ struct PageResult {
     /// See [`ListingPage::genres`] and [`ListingPage::genre`].
     genres: Option<Vec<GenreEntry>>,
     genre: Option<GenreEntry>,
+    catalogs: Option<Vec<CatalogEntry>>,
     /// See [`ListingPage::resolved`].
     resolved: Resolved,
 }
@@ -3623,7 +3701,7 @@ pub fn queue_page_failure_for_owner_test(
     *adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()) = Some(PageResult {
         client, token_gen: client.token_gen(), gen: state.query_gen(), sec, start: 0,
         items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     });
 }
 
@@ -3655,7 +3733,7 @@ pub fn spawn_owned_page_for_test(
             Some(PageResult {
                 client, token_gen, gen, sec, start: 0,
                 items: vec![PmsMovie { sid, title, ..Default::default() }],
-                total: 1, sorts: None, restored: None, genres: None, genre: None,
+                total: 1, sorts: None, restored: None, genres: None, genre: None, catalogs: None,
                 resolved: Default::default(),
             });
         done_tx.send(()).expect("test receives worker completion");

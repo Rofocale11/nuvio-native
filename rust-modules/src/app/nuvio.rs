@@ -191,6 +191,12 @@ pub(crate) fn boot() {
         data_dir: Some(data.join("shim")),
         ..Default::default()
     };
+    // Register the preferences file BEFORE the shim starts. The route reads it through
+    // `plex::account::local_preferences()`, and the path is known here, one step before
+    // `plx_pmsshim::start` binds the listener and `Account::new` would have been able to do it.
+    if plx_base::local_server::set_session_file(data.join("shim").join("nuvio-session.json")) {
+        log("nuvio: preferences file registered before shim start");
+    }
     let backend = Arc::new(plx_pmsshim::AddonBackend::new(set));
     let started = plx_pmsshim::start(backend.clone(), cfg.clone(), PORT)
         .or_else(|_| plx_pmsshim::start(backend.clone(), cfg, 0));
@@ -223,10 +229,10 @@ pub(crate) fn boot() {
         plx_pmsshim::MACHINE_ID.to_string(),
     );
 
-    // FORK: register the shim's session file with plx_base so plx_plex can read
-    // account preferences (audio/subtitle) straight off disk instead of HTTP.
-    if let Some(p) = handle.shim.account.session_file() {
-        plx_base::local_server::set_session_file(p.to_path_buf());
+    // The session file was registered before `start`; a second call here would be a no-op. Assert
+    // the answer the shim actually opened, so a data-dir mismatch is visible rather than silent.
+    if handle.shim.account.session_file() != plx_base::local_server::session_file().as_deref() {
+        log("nuvio: the shim's session file differs from the registered preferences path");
     }
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();

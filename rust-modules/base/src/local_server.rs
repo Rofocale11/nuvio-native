@@ -28,13 +28,43 @@ pub fn get() -> Option<&'static LocalServer> {
 }
 
 
-/// Path to the shim's on-disk session (nuvio-session.json), registered by Account::new.
-static SESSION_FILE: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// Path to the shim's on-disk session (`nuvio-session.json`). Registered by `Account::new`, which
+/// runs inside `Shim::new` **before** the shim binds its listener, so the first play can read
+/// preferences without waiting for app wiring. Replaceable rather than `OnceLock`: a host run or a
+/// test may start a second shim with its own data directory.
+static SESSION_FILE: std::sync::RwLock<Option<std::path::PathBuf>> =
+    std::sync::RwLock::new(None);
 
+/// Install (or re-point) the session file. Returns whether this changed the registered path.
 pub fn set_session_file(p: std::path::PathBuf) -> bool {
-    SESSION_FILE.set(p).is_ok()
+    let mut slot = SESSION_FILE.write().unwrap_or_else(|e| e.into_inner());
+    let changed = slot.as_deref() != Some(p.as_path());
+    *slot = Some(p);
+    changed
 }
 
-pub fn session_file() -> Option<&'static std::path::Path> {
-    SESSION_FILE.get().map(|p| p.as_path())
+pub fn session_file() -> Option<std::path::PathBuf> {
+    SESSION_FILE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The slot used to be a `OnceLock`: the first shim's path stuck for the life of the process,
+    /// so a host run or a test that started a second shim read the first one's preferences.
+    #[test]
+    fn the_session_file_can_be_repointed() {
+        let _serial = crate::testlock::serial();
+        let first = std::path::PathBuf::from("/tmp/nuvio-a/nuvio-session.json");
+        let second = std::path::PathBuf::from("/tmp/nuvio-b/nuvio-session.json");
+        assert!(set_session_file(first.clone()));
+        assert_eq!(session_file(), Some(first.clone()));
+        assert!(!set_session_file(first.clone()), "the same path is not a change");
+        assert!(set_session_file(second.clone()));
+        assert_eq!(session_file(), Some(second));
+    }
 }

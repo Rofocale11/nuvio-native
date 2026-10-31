@@ -192,6 +192,18 @@ unverified on the CX; see the TV checklist.
   `<key>?encoding=utf-8`, `<key>`, over the control plane, which does **not** follow redirects —
   the shim must fetch the addon URL itself and answer **200 with UTF-8 text** (gunzip, transcode
   cp1252/etc. to UTF-8). SRT and WebVTT both parse; ASS goes to libass.
+- Auto-selection: the shim marks the sidecar whose language matches the account's
+  `defaultSubtitleLanguage` as `selected` (`shim_media::mark_preferred_subtitle`), so the app's
+  `restore_server_selection` enables it on direct play. An exact tag (`pt-BR`) outranks a folded
+  one (`pt`). 639-2/B and /T spellings (`ind`, `spa`, `ger`) and display names (`Indonesian`,
+  `Bahasa Indonesia`) fold to the picker's code through a curated table — **never by truncating to
+  two letters**, which mapped Kannada (`kan`) onto Georgian (`ka`) and Spanish (`spa`) onto `sp`.
+  With no preference set the first sidecar is selected; a preference that matches nothing claims
+  nothing, so the file's own order stands. Forced tracks cannot be ranked: Stremio subtitle objects
+  carry no forced flag, and `defaultSubtitleForced` is a mode, not a per-track attribute. The
+  decision waits (up to the 2.5 s stream grace) for subtitle addons to report before publishing the
+  part, but only when a preferred language is set; a slow or absent addon never blocks playback and
+  an empty result is handled without panicking.
 
 ## What the shim must answer during playback
 

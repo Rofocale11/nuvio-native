@@ -1354,7 +1354,7 @@ mod tests {
         )
     }
     fn addon_record(rev: u64, payload: &str) -> Value {
-        json!({"returnValue":true,"results":[{"_id":"nvaddons.stable",
+        json!({"returnValue":true,"results":[{"_id":"nvaddons.nuvio",
             "_kind":"com.nuvionative.app.storage:1","_rev":rev,"nuvio":payload}]})
     }
     #[test]
@@ -1366,7 +1366,7 @@ mod tests {
             Ok(Response::Nuvio {payload:Some(p)}) if p.0 == payload));
         let saved = &writer.rpc.calls[1].1["objects"][0];
         assert!(saved["nuvio"].is_string(), "DB8 must not rewrite addon array objects");
-        assert_eq!(saved["_id"], "nvaddons.stable");
+        assert_eq!(saved["_id"], "nvaddons.nuvio");
         let mut restarted = backend(vec![Ok(addon_record(1,payload))]);
         assert!(matches!(restarted.try_dispatch(Request::LoadNuvio {}),
             Ok(Response::Nuvio {payload:Some(p)}) if p.0 == payload));
