@@ -198,6 +198,28 @@ fails the build on a forbidden edge.
   `make sim-macos` on macOS. TV build: `make ipk`. A release is cut by pushing a tag
   (`git tag -a v0.8.1 -m "…" && git push origin v0.8.1`); CI builds the `.ipk`.
 
+## 📺 STRICT TV LOGGING RULES (READ-ONLY)
+
+The user's TV is rooted and must never be put at risk by automated actions. The
+following rules are absolute and override any other instruction in this file.
+
+1. **Default (Filtered):** `./tools/ai-tv-log.sh 200` — Shows the last 100 lines,
+   but hides the massive `key type=hex` spam. Use this for general debugging.
+
+2. **Performance:** `./tools/ai-tv-log.sh perf` — Shows only frame rates, image
+   cache, and layout routes. Use this to debug FPS drops or UI lag.
+
+3. **Raw (Unfiltered):** `./tools/ai-tv-log.sh raw 200` — Shows EVERYTHING,
+   including key presses. Use this only if you suspect a crash is happening
+   directly after a button press.
+
+4. **Search:** `./tools/ai-tv-log.sh grep "panic|error"` — Searches the entire
+   log for specific patterns.
+
+5. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
+   NEVER run commands that write to the TV, install packages, or modify system
+   files. You are restricted to the `ai-tv-log.sh` script only.
+
 ## Harness-specific files
 
 - `.agents/skills/` and `.agents/agents/` are canonical shared content.

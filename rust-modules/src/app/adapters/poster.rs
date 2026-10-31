@@ -69,7 +69,7 @@ pub(crate) fn take_upload_stats() -> (u32, u64) {
     )
 }
 
-const PT_CAP: usize = 64;
+const PT_CAP: usize = 96;
 /// Decoded pixels waiting for upload, independent of the persistent and GPU cache budgets.
 /// Existing active decodes can exceed this threshold; no further demand work starts until
 /// the upload queue drains. This prevents a fast disk from queuing 64 large backdrops.
