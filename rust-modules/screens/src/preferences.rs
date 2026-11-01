@@ -265,6 +265,12 @@ impl Txn {
             Value::SkipInterval(interval) => PreferenceCmd::Choose(Choice::SkipInterval(interval), reply),
             // Install-wide, not a seated profile's live setting, so it has no `Choice`.
             Value::UiResolution(mode) => PreferenceCmd::UiResolution { mode, reply },
+            // **FORK (nuvio):** the account file's own settings, which the media route's
+            // `Choice` does not carry — the ratings source and the two P2P rows. They write
+            // through the shim's live policy, not through a Plex preference.
+            Value::RatingSource(source) => PreferenceCmd::RatingSource { source, reply },
+            Value::P2pEnabled(on) => PreferenceCmd::P2pEnabled { on, reply },
+            Value::P2pServer(url) => PreferenceCmd::P2pServer { url, reply },
             _ => return,
         };
         self.pending = Some(Pending::Local(rx)); io.busy = true; self.saving = true;

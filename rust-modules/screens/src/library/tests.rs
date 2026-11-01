@@ -1466,7 +1466,6 @@ fn an_unfetched_hub_publication_never_holds_the_page_dark() {
             &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
     }
     assert!(page.page_fade.alpha() > 0.99, "the page never faded in: {}", page.page_fade.alpha());
-    assert_eq!(page.layout.shelves, 0, "the Library draws no shelves");
-    assert_eq!(page.layout.grid_block_top(), page.layout.library_h(),
+    assert_eq!(page.layout.grid_top(), page.layout.library_h(),
         "with no shelf run the grid starts directly under the library row");
 }

@@ -24,8 +24,7 @@ use plx_ui::screen::By;
 fn a_page_keyboard_request_survives_forward_addressed_to_the_surface() {
     let _g = plx_base::testlock::serial();
     let _sess = scratch_session("surface-keyboard-forward");
-    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Playback,
-        plx_data::pms::HubsSnapshot::empty_for_test().view());
+    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Playback);
     step(&mut s, ScreenEvent::Mount, None);
     let page = s.inner.top().unwrap().inst.as_ref().unwrap().id;
     assert_ne!(page, s.id, "the harness is pointless if the page is the surface");

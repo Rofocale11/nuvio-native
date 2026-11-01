@@ -124,6 +124,8 @@ fn library_switch_menu_steps_drive_the_input_owning_menu_and_genre_return() {
                 sid: plx_plex::plex::ServerId::from_raw(0),
                 section: 1,
             },
+            folded: vec![],
+            opener: None,
         })),
     );
     for i in 1..80 {

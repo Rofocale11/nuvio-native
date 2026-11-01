@@ -2728,7 +2728,6 @@ impl PlayingItem {
             hdr: false,
             markers: Vec::new(),
             chapters: Vec::new(),
-            hdr: false,
         }
     }
 }

@@ -4290,7 +4290,7 @@ impl DetailScreen {
         // `!hero_set().trailer` and then drive `ELEM_TRAILER` directly to prove `activate_hero`'s
         // handling stays correct even though the disc itself is never shown.)
         hero::HeroSet {
-            watchlist: self.detail(meta).is_some_and(|d| d.guid.starts_with("nuvio://movie/") || d.guid.starts_with("nuvio://series/")),
+            watchlist: self.detail(meta).is_some_and(|d| plx_plex::plex::catalog_hex_of_guid(&d.guid).is_some()),
             restart,
             trailer: false,
             alt: self.alt_available(meta),

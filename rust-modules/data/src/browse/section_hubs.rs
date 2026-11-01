@@ -1253,15 +1253,6 @@ pub(super) fn read_shelf(sid: ServerId, window: &Shelf, ask: &RowAsk,
         shown: 0, ..window.clone() })
 }
 
-#[cfg(test)]
-impl HubResult {
-    /// A FAILED fetch for `sec` on `client`, as a worker posts it.
-    pub(super) fn failed_for_test(epoch: u32, sec: usize, client: &'static plx_plex::plex::Client,
-        token_gen: u32) -> Self {
-        Self { epoch, sec, client, token_gen, shelves: None }
-    }
-}
-
 // ---- the pure half --------------------------------------------------------------------------
 
 /// One response into published shelves. **Pure**, so every rule below is host-graded against the

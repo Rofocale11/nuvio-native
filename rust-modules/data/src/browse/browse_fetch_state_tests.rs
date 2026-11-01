@@ -53,7 +53,7 @@ fn a_seeded_listing_is_not_overwritten_by_the_request_that_was_out_when_it_was_s
         start: 0,
         items: Vec::new(),
         total: -1,
-        sorts: None, restored: None, genres: None, genre: None,
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None,
         resolved: Default::default(),
     });
     seed_items_for_owner_test(&mut browse.state, 37);

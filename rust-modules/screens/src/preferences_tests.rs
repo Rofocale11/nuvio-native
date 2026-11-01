@@ -2,7 +2,7 @@
 //! (`preferences/picker_tests.rs`); this file also owns the fixtures both share.
 use super::*;
 use plx_plex::plex::account::PreferenceRequest;
-use plx_machine::machine::{FocusRead, InputOwner, PressRead, Source, Stamped, Tick};
+use plx_machine::machine::{FocusRead, InputOwner, PressRead, Stamped, Tick};
 use plx_machine::present::Present;
 use plx_ui::fixture::FixtureMeasure;
 
@@ -192,13 +192,13 @@ fn every_field_reports_the_page_whose_list_shows_it() {
     let prefs = AudioPreferences::default();
     for kind in [Kind::Playback, Kind::AudioSubtitles] {
         let inputs = FieldListInputs { kind, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-            prefs: Some(&prefs), busy: false, show_retry: false, read_only: false };
+            prefs: Some(&prefs), busy: false, show_retry: false, read_only: false, p2p: (false, None), p2p_draft: None };
         for &field in fields_of(&inputs) {
             assert_eq!(field.kind(), Some(kind), "{field:?} is listed by {kind:?}");
         }
     }
     let audio = FieldListInputs { kind: Kind::AudioSubtitles, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs: Some(&prefs), busy: false, show_retry: false, read_only: false };
+        prefs: Some(&prefs), busy: false, show_retry: false, read_only: false, p2p: (false, None), p2p_draft: None };
     assert_eq!(fields_of(&audio), &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles]);
 }
 

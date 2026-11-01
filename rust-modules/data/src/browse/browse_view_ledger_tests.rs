@@ -55,7 +55,7 @@ fn a_page_read_in_flight_across_a_watched_edit_lands_watched() {
         start: 0,
         items: vec![row(sid, "6"), row(sid, "7"), row(sid, "8")],
         total: 3,
-        sorts: None, restored: None, genres: None, genre: None,
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None,
         resolved: Default::default(),
     };
     *browse.adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()) = Some(r); // the refused worker's answer, replaced

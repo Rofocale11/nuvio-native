@@ -114,13 +114,7 @@ fn a_section_switch_settles(items: usize, restore: Option<f32>) -> LibraryScreen
     let mut page = fixture.screen();
     page.initial = false;
     let mut engine = FocusEngine::new();
-    let elem = page.pair.detail.elem_at(focus - before.start).unwrap();
-    let key = page.key(elem);
-    engine.set(OWNER, key, Some(page.pair.groups_config().detail), By::Restore);
-    deliver(&mut page, &mut engine, &fixture, ScreenEvent::FocusMoved { from: None, to: key, by: By::Restore });
     settle(&mut page, &mut engine, &fixture, 0);
-    (fixture, page, engine, elem)
-}
 
     let stores = fixture.stores.take().unwrap();
     stores.browse_run(BrowseCmd::SetCur(1));

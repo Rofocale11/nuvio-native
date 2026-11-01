@@ -2717,7 +2717,7 @@ mod tests {
     /// the 1920px canvas. The old 44px hit box also could not contain two BODY lines.
     #[test]
     fn translated_waiting_status_wraps_completely_inside_the_qr_column() {
-        use plx_platform::i18n::{LocaleContext, Preference, SHIPPED};
+        use plx_platform::i18n::{LocaleContext, Preference};
         struct UnicodeMeasure;
         impl Measure for UnicodeMeasure {
             fn width(&self, text: &CStr, size: i32, _bold: bool) -> f32 {

@@ -1415,7 +1415,6 @@ fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
     for unfurl in [0.2, 0.6, 1.0] {
         let disc = hero::disc_caps_at(set, 230.0, 0.0, [0.0, 0.0, unfurl], [201.0, 0.0, 267.0]);
         let widths = hero::HeroWidths {
-            list: 0.0,
             pill: 230.0,
             alt: 0.0,
             disc,

@@ -443,7 +443,7 @@ mod activate_card_tests {
         for (card, expect, season_index) in [(&show, "show-1", None), (&season, "show-1", Some(4))] {
             let mut menu_play_await = None;
             let req = |act, item| plx_screens::registry::ItemMenuReq {
-                act, sid, item, loaded_episode: false, from_home: false };
+                act, sid, item, season: None, loaded_episode: false, from_home: false };
             // a key that is not the captured row's: nothing happens
             unsafe { apply_item_action(&mut ps, &mut pa, req(Action::Play("other".into()), Some(card.clone())),
                 &mut pages, &mut bridge, &mut crate::app::playback::LivePlaybackResources,

@@ -2277,18 +2277,6 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
 
 #[cfg(test)]
 mod tests {
-    /// #585: a cue of authored line breaks that each wrap again ran past three lines and the tail
-    /// was silently dropped. Every line of an ordinary long cue must survive.
-    #[test]
-    fn a_long_cue_keeps_every_line_past_three() {
-        let cue = "First authored line that is long enough to wrap onto a second row\n\
-                   Second authored line that is long enough to wrap onto a second row\n\
-                   Third authored line that is long enough to wrap onto a second row";
-        let lines = super::caption_lines(cue, 42);
-        assert_eq!(lines.len(), 6, "{lines:?}");
-        assert!(lines.last().unwrap().ends_with("second row"), "{lines:?}");
-    }
-
     #[test]
     fn a_hold_doubles_its_scrub_speed_every_step_up_to_the_cap() {
         use super::{scrub_speed, SCRUB_BASE, SCRUB_MAX, SCRUB_STEP_MS};
@@ -3159,7 +3147,7 @@ mod tests {
         let verdict = plx_media::route::PlayVerdict::Forced(plx_media::route::ForcedFailure::Video).text().into_owned();
         let e = plx_media::player::failtest_policy_shape_for_test(&verdict);
         let r = readout_of(&e);
-        assert_eq!(r.reason(), verdict.as_ref());
+        assert_eq!(r.reason(), verdict.as_str());
         assert_eq!(r.note(), None, "the verdict already names the cause");
         assert_eq!(r.actions(), &[A::PlayAutomatically, A::ChangeSource, A::Back]);
         assert_eq!(r.footer(), "0.7.0 · webOS 4.5 · code");

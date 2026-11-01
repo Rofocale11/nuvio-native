@@ -85,6 +85,7 @@ fn trailer_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_tra
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeroCtl {
     /// Save/remove this Nuvio title in the active account profile.
+    #[allow(dead_code)]
     MyList,
     /// the Play/Resume pill — always present, always first
     Play,
@@ -124,7 +125,7 @@ impl HeroCtl {
     /// their own disjoint range, per the module doc).
     pub fn of_elem(e: u32) -> Option<Self> {
         match e {
-            ELEM_WATCHLIST => Some(HeroCtl::MyList),
+            ELEM_WATCHLIST => Some(HeroCtl::Watchlist),
             ELEM_PLAY => Some(HeroCtl::Play),
             ELEM_RESTART => Some(HeroCtl::Restart),
             ELEM_TRAILER => Some(HeroCtl::Trailer),
@@ -175,7 +176,6 @@ pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; MAX_CTLS], usize) {
         v[n] = HeroCtl::Alt;
         n += 1;
     }
-    if set.watchlist { v[n] = HeroCtl::MyList; n += 1; }
     v[n] = if set.mark == PosterMark::Watched {
         HeroCtl::MarkUnwatched
     } else {
@@ -1080,7 +1080,7 @@ mod tests {
                                     HeroCtl::Alt => cw.alt,
                                     HeroCtl::Restart => cw.disc[0],
                                     HeroCtl::Trailer => cw.disc[1],
-                                    HeroCtl::Watchlist => CD,
+                                    HeroCtl::Watchlist | HeroCtl::MyList => CD,
                                     HeroCtl::MarkWatched | HeroCtl::MarkUnwatched => cw.disc[2],
                                 };
                                 if k >= i {

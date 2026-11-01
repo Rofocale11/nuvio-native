@@ -118,6 +118,15 @@ pub enum PreferenceCmd {
     /// The Interface resolution picked in its picker: install-wide, applied at the next launch. The
     /// app writes it through the session; `reply` learns whether the write was durable.
     UiResolution { mode: plx_plex::plex::session::UiResolution, reply: std::sync::mpsc::Sender<bool> },
+    /// **FORK (nuvio): which addon supplies the ratings a card shows.** Not a `Choice`: the media
+    /// route has no notion of it, and the write is the account file's `ratingSource`.
+    RatingSource { source: plx_plex::plex::session::RatingSource, reply: std::sync::mpsc::Sender<bool> },
+    /// **FORK (nuvio): Settings > Playback's P2P switch** — whether the Source Picker may offer
+    /// torrent streams. The shim's policy is live, so a successful write is pushed to it at once.
+    P2pEnabled { on: bool, reply: std::sync::mpsc::Sender<bool> },
+    /// **FORK (nuvio): the streaming server those streams play through** (`None` probes the
+    /// default local ports).
+    P2pServer { url: Option<String>, reply: std::sync::mpsc::Sender<bool> },
 }
 
 /// Whether an item has a context menu to open (`item_menu::has_actions`): the one predicate the
@@ -2580,7 +2589,7 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // `(row:u32,sp:..,card:Option<u32>)`, in write order; the Collection and Watchlist grids name
 // `bands` symbolically, so their shape strings did not change. One bump; the three replay fixtures
 // were re-recorded against it; the previous pin was 0x0803_2f8d_c828_6d70.
-const SCREEN_SHAPES_PIN: u64 = 0x6b71_df9e_04db_2b76;
+const SCREEN_SHAPES_PIN: u64 = 0xf760_51ab_b9c8_95ac;
 
 #[cfg(test)]
 mod arg_tests {

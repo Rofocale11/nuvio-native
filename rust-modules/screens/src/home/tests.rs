@@ -2027,7 +2027,7 @@ fn a_stream_picked_for_the_hero_starts_it_and_ignores_a_stale_latch() {
     s.streams_item = Some((hero.sid, hero.rk.clone()));
     let (_, played, _) = step(&mut s, snapshot.view(), None, &ScreenEvent::App(AppMsg::NuvioStreamSelected));
     assert!(played.iter().any(|stamped| matches!(&stamped.fx,
-        Fx::App(AppFx::Content(ContentReq::Play { play: PlayIntent::Item { rk, .. }, .. }))
+        Fx::App(AppFx::Content(ContentReq::Play { play: crate::registry::PlayIntent::Item { rk, .. }, .. }))
             if *rk == hero.rk)), "the picked stream starts the billboard's film");
     assert!(played.iter().any(|stamped| matches!(&stamped.fx,
         Fx::App(AppFx::Store(StoreId::Metadata, StoreCmd::Metadata(

@@ -227,6 +227,8 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
                 kind,
                 anchor,
                 target,
+                folded: _,
+                control: _,
             } => Some((kind, anchor, target)),
             _ => None,
         })
@@ -241,6 +243,8 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
                 kind,
                 anchor,
                 target,
+                folded: vec![],
+                opener: None,
             },
         )),
     );

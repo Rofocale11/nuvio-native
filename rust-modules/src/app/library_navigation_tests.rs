@@ -197,6 +197,8 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
                     sid: id.sid,
                     section: id.section,
                 },
+                folded: vec![],
+                opener: None,
             },
         )),
     );
