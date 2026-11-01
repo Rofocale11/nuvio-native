@@ -2990,7 +2990,7 @@ impl Shim {
         json!({"title": "Continue Watching", "type": "mixed", "hubIdentifier": "home.continue",
                "key": "/hubs/continueWatching", "size": rows.len(), "more": false, "Metadata": rows})
     }
-
+    #[allow(dead_code)]
     fn saved_hub(&self, count: usize) -> Option<Value> {
         let items = self.account.saved_library(false).ok()?;
         let rows: Vec<_> = items
@@ -3433,9 +3433,8 @@ impl Shim {
                 if req.q("excludeContinueWatching") == Some("1") {
                     hubs.clear();
                 }
-                if let Some(list) = self.saved_hub(count) {
-                    hubs.push(list);
-                }
+                // My List is surfaced through the Watchlist tab, not a home hub row.
+                let _ = (count, &mut hubs);
                 hubs.extend(self.catalog_hubs(|_| true, count, true, HUBS_BUDGET));
                 Response::json(&container(json!({"Hub": hubs})))
             }
