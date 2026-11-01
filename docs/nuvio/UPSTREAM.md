@@ -510,6 +510,21 @@ Revisit deliberately, in this file, if:
 - the DTS delta is accepted upstream, removing the fork's only audio divergence;
 - the edited-file count falls far enough (say, under ~40) that a merge stops being expensive.
 
+### 2026-11-01 — tier C ported in a separate worktree (`tier-c/ui`)
+
+Tier C (`screens`, `ui`, `data`, `appkit`, `gfx`) is ported as a git-checkout port rather than a
+merge, on branch `tier-c/ui` (`/home/kungpow/nuvio-tier-c`), so the TV branch keeps building.
+The port overlays upstream's tier-C crates on the fork's tree, re-applies the fork's deltas, and
+gets the simulator booting the new UI (`make -j10 sim-linux` links and boots, `route=login`, no
+panic). Commit `741def78`, pushed as `origin/tier-c/ui`.
+
+Honest status: many fork-specific features are stubbed to get the port compiling — the More menu
+reverted to the fork's source-lead version (upstream's quality UI not yet merged), P2P/RatingSource
+preference writes fall through to `_ => return` (no persistence this slice), the detail-refresh-
+after-playback machinery is dropped, and several methods are `#[allow(dead_code)]`. The P2P
+streaming server, addon backend, and DTS/TrueHD lanes are untouched (still the fork's). Before
+merging `tier-c/ui` onto the trunk the stubs need filling in and the TV needs to see the new UI.
+
 ## Recomputing
 
 ```sh
