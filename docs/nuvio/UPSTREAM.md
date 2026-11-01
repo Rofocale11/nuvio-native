@@ -518,12 +518,20 @@ The port overlays upstream's tier-C crates on the fork's tree, re-applies the fo
 gets the simulator booting the new UI (`make -j10 sim-linux` links and boots, `route=login`, no
 panic). Commit `741def78`, pushed as `origin/tier-c/ui`.
 
-Honest status: many fork-specific features are stubbed to get the port compiling — the More menu
-reverted to the fork's source-lead version (upstream's quality UI not yet merged), P2P/RatingSource
-preference writes fall through to `_ => return` (no persistence this slice), the detail-refresh-
-after-playback machinery is dropped, and several methods are `#[allow(dead_code)]`. The P2P
-streaming server, addon backend, and DTS/TrueHD lanes are untouched (still the fork's). Before
-merging `tier-c/ui` onto the trunk the stubs need filling in and the TV needs to see the new UI.
+Status after the `tier-c/ui` fixes (this branch plus the port worktree): the fork's
+preference persistence is restored (RatingSource, P2pEnabled, P2pServer write through
+`Account::write_prefs` and push the P2P policy to the shim), `super::nuvio::restore_p2p(...)` is
+back in the boot path, and the post-playback detail reconciliation is handled by the ported
+`viewreconcile`/`Scope` machinery rather than the dropped `DetailRefresh`. The More menu stays
+the fork's source-lead version by deliberate design: under the Stremio shim a playback's quality
+is a property of the stream picked, so the quality ladder belongs only in Settings > Playback
+(see `appkit/src/more_menu.rs`'s module doc) — upstream's quality page would be a second,
+contradictory answer. The remaining `#[allow(dead_code)]` sites are upstream's own module-level
+allowance, not port stubs. `ui/src/value_chip.rs` was removed (orphaned; `page_header` replaced
+it). The P2P streaming server, addon backend, and DTS/TrueHD lanes are untouched (still the
+fork's). `plx_ui`, `plx_screens`, `plx_appkit` and the full workspace (`--all-targets`) compile
+clean; the simulator (`make -j10 sim-linux`) links and boots. TV verification of the new UI is
+still outstanding.
 
 ## Recomputing
 
