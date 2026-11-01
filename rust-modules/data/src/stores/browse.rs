@@ -82,16 +82,13 @@ pub enum BrowseCmd {
     /// The profile/account switch: wipe everything and supersede everything in flight.
     Reset,
     HubsInvalidateAll,
-    /// The optimistic half of a view-state write, on the grid and the shelves.
-    SetWatchedLocal {
-        sid: ServerId,
-        rk: String,
-        on: bool,
-    },
-    LeftTheDeck {
-        sid: ServerId,
-        rk: String,
-    },
+    /// One server's section shelves may have moved (a notification, never a press): only its
+    /// sections are re-read, behind its failure ladder and spaced like the quiet Home refetch.
+    HubsInvalidateServer { sid: ServerId },
+    /// The optimistic half of a view-state change (`viewstate::publish_view`), on the grid and the
+    /// shelves: a watched edit reaches the listing and the section shelves, a deck removal the
+    /// section shelves' Continue Watching.
+    ApplyView { at: crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit },
 }
 
 /// The production owner of Browse's main-thread state, worker transport and notice generation.
@@ -100,6 +97,8 @@ pub struct BrowseStore {
     adapter: Arc<crate::browse::BrowseAdapter>,
     notice_gen: AtomicU32,
     notice_dirty: AtomicBool,
+    /// Endpoint refreshes a pump had no room to emit in its step; the next pump sends them first.
+    endpoint_carry: super::EndpointRefreshSet,
 }
 
 impl Default for BrowseStore {
@@ -109,11 +108,17 @@ impl Default for BrowseStore {
             adapter: Arc::new(Default::default()),
             notice_gen: AtomicU32::new(0),
             notice_dirty: AtomicBool::new(false),
+            endpoint_carry: Default::default(),
         }
     }
 }
 
 impl BrowseStore {
+    /// Join the owner's view-state publish order (`Stores::view_ledger`).
+    pub(crate) fn share_ledger(&mut self, ledger: &crate::viewledger::ViewLedger) {
+        self.state.ledger = ledger.clone();
+    }
+
     fn bump(&self) -> u32 {
         self.notice_dirty.store(true, Ordering::Relaxed);
         self.notice_gen.fetch_add(1, Ordering::Relaxed) + 1
@@ -128,11 +133,13 @@ impl BrowseStore {
     }
 
     pub fn run(&mut self, cmd: BrowseCmd) -> bool {
+        use crate::viewstate::ViewEdit;
         let change_sensitive = matches!(&cmd, BrowseCmd::Discovery(_) | BrowseCmd::Addressed {
-            work: LibraryWork::SaveCursor { .. } | LibraryWork::Hubs { .. }, ..
-        });
+            work: LibraryWork::SaveCursor { .. } | LibraryWork::Hubs { .. } | LibraryWork::HubHold { .. }
+                | LibraryWork::Requery, ..
+        }) || matches!(&cmd, BrowseCmd::ApplyView { edit: ViewEdit::Facts { .. } | ViewEdit::Offset { .. }, .. });
         let quiet = matches!(&cmd, BrowseCmd::Addressed {
-            work: LibraryWork::Want { .. } | LibraryWork::Letters | LibraryWork::Genres, ..
+            work: LibraryWork::Want { .. } | LibraryWork::Letters | LibraryWork::Genres | LibraryWork::HubPage { .. } | LibraryWork::HubPageCancel { .. }, ..
         });
         let roster_changed = if matches!(&cmd, BrowseCmd::RecheckShares) {
             self.sync_roster()
@@ -181,6 +188,22 @@ impl BrowseStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn discover_pump(&mut self) -> super::StoreOutcome {
         self.discover_pump_with_gate(plx_machine::landgate::fixture_gate())
+    }
+
+    /// The items the addressed Library page holds (see [`BrowseState::held_keys`]).
+    pub fn held_keys(&self, target: SectionAddress) -> super::HeldKeys {
+        self.state.held_keys(target)
+    }
+
+    /// Is any shelf of the addressed section committed (see [`BrowseState::hubs_committed`])?
+    pub fn hubs_committed(&self, target: SectionAddress) -> bool {
+        self.state.hubs_committed(target)
+    }
+
+    /// Is a membership re-query's first page still out with no Library page on top to pump it? The
+    /// application pumps this store itself while it holds (`Bridge::reconcile_pump`).
+    pub fn requery_owed(&self) -> bool {
+        self.state.requery_owed()
     }
 
     pub fn listing_snapshot(&mut self) -> ListingSnapshot {
@@ -249,6 +272,37 @@ impl BrowseStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn seed_items_for_test(&mut self, count: usize) {
         crate::browse::seed_items_for_owner_test(&mut self.state, count);
+    }
+
+    /// [`seed_items_for_test`](Self::seed_items_for_test) with `count` collections: the listing a
+    /// section answers on `type=18`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_collections_for_test(&mut self, count: usize) {
+        crate::browse::seed_collections_for_owner_test(&mut self.state, count);
+    }
+
+    /// [`seed_items_for_test`](Self::seed_items_for_test) with `count` numbered episodes: the
+    /// listing a show section answers on `type=4`, the library type already `Episodes`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_episodes_for_test(&mut self, count: usize) {
+        crate::browse::seed_episodes_for_owner_test(&mut self.state, count);
+    }
+
+    /// **Hold the listing's fetch**: the single-flight flag stays taken, so the page the section is
+    /// waiting for is never asked for and nothing lands. A host test's server is a closed port, whose
+    /// fetch fails at once; a page that wants to be read while its listing is LOADING needs the
+    /// listing to stay so. A seeded listing ([`seed_items_for_test`](Self::seed_items_for_test)) still
+    /// lands over the hold.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_listing_for_test(&mut self) {
+        crate::browse::hold_listing_for_owner_test(&self.adapter);
+    }
+
+    /// [`seed_collections_for_test`](Self::seed_collections_for_test) with each collection's
+    /// `(title, thumb)` stated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_named_collections_for_test(&mut self, rows: &[(&str, &str)]) {
+        crate::browse::seed_named_collections_for_owner_test(&mut self.state, rows);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -321,6 +375,20 @@ impl BrowseStore {
         );
     }
 
+    /// A landing held behind the publication gate, as the worker leaves one: staged, not drawn.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stage_shelves_for_test(&mut self, section: usize) {
+        crate::browse::section_hubs::stage_shelves_for_owner_test(&mut self.state, section);
+    }
+
+    /// Edit every card of section `section`'s published shelves
+    /// ([`seed_named_shelves_for_test`](Self::seed_named_shelves_for_test)'s cards carry only a key
+    /// and a title).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn edit_shelf_items_for_test(&mut self, section: usize, edit: &dyn Fn(&mut crate::pms::PmsMovie)) {
+        crate::browse::section_hubs::edit_shelf_items_for_owner_test(&mut self.state, section, edit);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn seed_named_shelves_for_test(
         &mut self,
@@ -334,6 +402,29 @@ impl BrowseStore {
             rows,
             per_row,
         );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn land_held_rows_for_test(&mut self, section: usize) {
+        crate::browse::section_hubs::land_held_rows_for_owner_test(&mut self.state, section);
+    }
+
+    /// The rows of `section` the ring gave up (placeholders) and the band the store holds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn released_rows_for_test(&self, section: usize) -> (Vec<usize>, (usize, usize)) {
+        crate::browse::section_hubs::released_rows_for_owner_test(&self.state, section)
+    }
+
+    /// One row of `section` takes a fresh window of `count` cards through the store's own landing
+    /// (`section_hubs::land_row`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn land_row_for_test(&mut self, section: usize, row: usize, count: usize) -> bool {
+        crate::browse::section_hubs::land_row_for_owner_test(&mut self.state, section, row, count)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_paging_for_test(&mut self, section: usize, total: usize) {
+        crate::browse::section_hubs::seed_paging_for_owner_test(&mut self.state, section, total);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -459,13 +550,48 @@ pub enum LibraryWork {
     Want {
         lo: usize,
         hi: usize,
+        /// The focused slot, when focus is on the grid: its page stays loaded (`Keep::focus`)
+        /// however far the wanted window has moved from it.
+        focus: Option<usize>,
     },
     Letters,
     Genres,
     Hubs {
         may_publish: bool,
     },
+    /// Move one section hub row's window a page toward its end or its start; the row is named by
+    /// its hub identifier and key. `seen` is the revision of the hub view the ask was computed
+    /// from (`HubsView::revision`): a frame captures its views before its landings are delivered,
+    /// so the ask can come from a window the store has since replaced, and such an ask is refused
+    /// (the publication it missed re-arms every row of the page, changed or not, and the row asks
+    /// again on its next tick from the window that stands if the ask is still due).
+    HubPage {
+        id: String,
+        key: String,
+        before: bool,
+        seen: u64,
+    },
+    /// Withdraw the page ask for row `id`: focus left the edge it was sent from, and a landing now
+    /// would slide the window from under it. A read already out is discarded when it lands; an ask
+    /// that has landed, or never was, makes this a no-op.
+    HubPageCancel {
+        id: String,
+        key: String,
+    },
+    /// The rows (hub order, inclusive) the page holds cards for. The store keeps those and gives
+    /// the cards of the rest up to descriptors; sent when the range changes.
+    HubHold {
+        lo: usize,
+        hi: usize,
+    },
     Retry,
+    /// Re-fetch the current section's query if a read-back made its membership stale (the Unwatched
+    /// switch, ordering by last viewed). The Library page asks once a PAGE has been pushed over it,
+    /// never while it is visible or under a modal (a compact menu): the reader's ground does not
+    /// move under the cursor, and the listing is fresh when the page is shown again. It is the
+    /// same query refreshed, so [`crate::browse::view::ListingId::query`] does not move and the
+    /// page keeps its scroll and focus.
+    Requery,
 }
 
 impl<H: super::StoreEffectHost> Machine<H> for BrowseStore {
@@ -476,7 +602,9 @@ impl<H: super::StoreEffectHost> Machine<H> for BrowseStore {
                 self.run(c.clone());
             }
             StoreEv::Pump { .. } => {
-                let _ = self.pump_with_gate(&plx_machine::landgate::Gate::default()).endpoints.emit(fx);
+                let mut due = std::mem::take(&mut self.endpoint_carry);
+                due.merge(self.pump_with_gate(&plx_machine::landgate::Gate::default()).endpoints);
+                self.endpoint_carry = due.emit(fx);
             }
         }
         Handled::Yes
@@ -566,6 +694,50 @@ mod contract_tests {
         }
         assert_eq!(stores.browse.borrow().gen(), before);
         assert!(stores.take_notices().is_empty());
+    }
+
+    /// `held_keys` is the Library page's hold: the shelf rows inside the hold window and the grid
+    /// rows inside the wanted window of the current section, deduplicated; a stale address holds nothing.
+    #[test]
+    fn held_keys_match_hold_window() {
+        let _guard = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let mut browse = BrowseStore::default();
+        browse.seed_two_source_table_for_test();
+        browse.seed_items_for_test(30);
+        browse.seed_shelves_for_test(0, &["a", "b"], 2);
+        let id = browse.hubs_snapshot().view().id().unwrap();
+        let target = SectionAddress { epoch: id.epoch, sid: id.sid, section: id.section };
+        let rks = |keys: &super::super::HeldKeys| keys.iter().map(|(_, k)| k.clone()).collect::<Vec<_>>();
+        // No grid window yet: only the shelves (both rows sit inside the default hold).
+        let shelf_only = browse.held_keys(target);
+        assert_eq!(shelf_only.len(), 4, "two shelves of two cards: {:?}", rks(&shelf_only));
+        browse.run(BrowseCmd::Addressed { target, work: LibraryWork::Want { lo: 3, hi: 6, focus: None } });
+        let held = browse.held_keys(target);
+        let grid: Vec<_> = rks(&held).into_iter().filter(|k| k.parse::<usize>().is_ok_and(|n| (4..=6).contains(&n))).collect();
+        assert_eq!(grid, ["4", "5", "6"], "the grid window is items 3..6: {:?}", rks(&held));
+        assert!(shelf_only.iter().all(|k| held.contains(k)), "shelf keys stay held alongside the grid");
+        assert_eq!(held.len(), shelf_only.len() + 3, "the shelves plus the three grid items: {:?}", rks(&held));
+        assert!(!rks(&held).contains(&"7".to_string()), "past the window");
+        assert!(browse.held_keys(SectionAddress { epoch: target.epoch + 1, ..target }).is_empty(), "a stale address holds nothing");
+    }
+
+    /// `hubs_committed` is the drawn set: nothing before the first publication, and still nothing
+    /// while a landing is only staged behind the gate; a stale address has none.
+    #[test]
+    fn hubs_committed_reads_the_drawn_set_not_the_staged_one() {
+        let _guard = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let mut browse = BrowseStore::default();
+        browse.seed_two_source_table_for_test();
+        let id = browse.hubs_snapshot().view().id().unwrap();
+        let target = SectionAddress { epoch: id.epoch, sid: id.sid, section: id.section };
+        assert!(!browse.hubs_committed(target), "nothing has been published");
+        crate::browse::section_hubs::stage_shelves_for_owner_test(&mut browse.state, 0);
+        assert!(!browse.hubs_committed(target), "a staged set is not drawn");
+        assert!(browse.run(BrowseCmd::Addressed { target, work: LibraryWork::Hubs { may_publish: true } }));
+        assert!(browse.hubs_committed(target), "the committed set is drawn");
+        assert!(!browse.hubs_committed(SectionAddress { epoch: target.epoch + 1, ..target }), "a stale address names no section");
     }
 
     #[test]

@@ -677,9 +677,9 @@ fn two_bridges_keep_their_own_captured_profile_and_labels_for_a_scrim_lift() {
         ..Default::default()
     }), 41);
 
-    let ar = <Bridge as plx_ui::dispatch::Rig<AppHost>>::scrim_chrome_read(&a)
+    let ar = a.scrim_chrome_read()
         .expect("a bar-wearing bridge publishes lift chrome");
-    let br = <Bridge as plx_ui::dispatch::Rig<AppHost>>::scrim_chrome_read(&b)
+    let br = b.scrim_chrome_read()
         .expect("the second bridge publishes its own lift chrome");
     assert_eq!(ar.profile.name.to_bytes(), b"Owner A");
     assert_eq!(ar.profile.initial.to_bytes(), b"A");

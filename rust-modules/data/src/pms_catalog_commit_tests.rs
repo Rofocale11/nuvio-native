@@ -20,8 +20,8 @@ fn collection_rows_have_their_own_kind_and_unknown_types_are_not_listable() {
     }
 }
 
-/// A collection row keeps its member count (the Library caption's "N items"); no other kind reads
-/// `childCount` into it, so a show's season count never masquerades as one.
+/// A collection row keeps its member count (the Library caption's "N items") and a show its season
+/// count; a season or episode reads no `childCount`, so the field never means something else there.
 #[test]
 fn a_collection_row_carries_its_member_count() {
     let row = |kind: &str, child_count: i64| plx_plex::plex::Metadata {
@@ -30,7 +30,8 @@ fn a_collection_row_carries_its_member_count() {
     };
     assert_eq!(parse_item(&row("collection", 3), sid(0)).child_count, 3);
     assert_eq!(parse_item(&row("collection", -1), sid(0)).child_count, 0, "a nonsense count reads as none");
-    assert_eq!(parse_item(&row("show", 5), sid(0)).child_count, 0);
+    assert_eq!(parse_item(&row("show", 5), sid(0)).child_count, 5, "a show's season count");
+    assert_eq!(parse_item(&row("season", 5), sid(0)).child_count, 0);
 }
 
 /// A collection has no watch or resume state of its own, whatever counters the server sends with
@@ -105,7 +106,7 @@ fn retained_home_publication_survives_commit_and_reset_without_copying_items() {
 fn home_group_falls_back_to_provider_key_not_label_or_position() {
     let items = vec![row(0, "a"), row(1, "b")];
     let mut hub = HubRow { title: "Display title".into(), hub_id: String::new(),
-        key: "/library/collections/7/children".into(), source: String::new(), total: 0, offset: 0, more: false, start: 0, len: 1 };
+        key: "/library/collections/7/children".into(), source: String::new(), total: 0, offset: 0, more: false, start: 0, len: 1, epoch: 0 };
     let key = "/library/collections/7/children";
     assert_eq!(stable_hub_identity(&hub, &items), Some(HubIdentity::Key { sid: sid(0), key }));
     hub.title = "Other locale".into();
@@ -208,7 +209,7 @@ fn a_catalog_row_is_found_by_its_server_and_key_never_by_the_key_alone() {
         mk(a, "2", "ours too"),
         mk(b, "1", "the friend's"),
     ];
-    let hubs = vec![HubRow {
+    let hubs = vec![HubRow { epoch: 0,
         title: "Continue Watching".into(),
         hub_id: "home.continue".into(),
         key: String::new(),
@@ -252,4 +253,67 @@ fn reset_wipes_the_catalog_and_re_arms_the_fetch() {
     assert_eq!(hero_pool_len(&o.state), 0);
     assert_eq!(hub_state(&o.state), HubState::Loading);
     assert!(o.state.srcs.is_empty());
+}
+
+/// The Home hub list of a real PMS carries a hub whose key is `/playlists/all` (it honours the
+/// window: measured, see docs/pms-api.md, "Paging, observed"). It never reaches a shelf: the hub's
+/// type is `playlist`, and a playlist is not a type a card shows (`listable`), whether the hub says
+/// `playlist` or `mixed`. So `is_pageable_hub_key` admits nothing for it, and a row that cannot
+/// exist has no preview to keep.
+#[test]
+fn a_playlists_hub_reaches_no_shelf_so_its_key_is_not_admitted() {
+    let body = r#"{"MediaContainer":{"Hub":[
+      {"hubIdentifier":"home.playlists","key":"/playlists/all","type":"playlist","title":"Playlists","size":2,"more":true,
+       "Metadata":[{"ratingKey":"7","type":"playlist","title":"Mix","thumb":"/p","playlistType":"video"},
+                   {"ratingKey":"8","type":"playlist","title":"Mix 2","thumb":"/p","playlistType":"video"}]},
+      {"hubIdentifier":"home.mixed.playlists","key":"/playlists/all","type":"mixed","title":"Mixed","size":1,"more":true,
+       "Metadata":[{"ratingKey":"9","type":"playlist","title":"Mix 3","thumb":"/p"}]}
+    ]}}"#;
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(body).unwrap().media_container;
+    let build = project(&mc, &plx_plex::plex::MediaContainer::default(), sid(0));
+    assert!(build.shelves.is_empty(), "no playlist card reaches a shelf");
+    assert!(!plx_plex::plex::is_pageable_hub_key("/playlists/all"));
+    assert!(!plx_plex::plex::is_pageable_hub_key("/playlists/all?playlistType=video"));
+}
+
+/// An episode whose server sent no `parentIndex` has an UNKNOWN season, which is not Specials
+/// (`parentIndex` 0): a `Scope::Season { index: 0 }` change must not reach it.
+#[test]
+fn an_episode_without_a_parent_index_has_an_unknown_season_not_specials() {
+    let row = |parent_index: Option<i64>| plx_plex::plex::Metadata {
+        kind: "episode".into(), rating_key: "9".into(), parent_index, ..Default::default()
+    };
+    assert_eq!(parse_item(&row(Some(0)), sid(0)).season_index, 0, "Specials");
+    assert_eq!(parse_item(&row(Some(3)), sid(0)).season_index, 3);
+    assert_eq!(parse_item(&row(None), sid(0)).season_index, SEASON_UNKNOWN);
+    let json = r#"{"ratingKey":"9","type":"episode","index":2}"#;
+    let parsed: plx_plex::plex::Metadata = serde_json::from_str(json).expect("lenient parse");
+    assert_eq!(parsed.parent_index, None, "an absent field stays absent through the wire parse");
+}
+
+/// **A card is named by what it IS, not by whether the server titled it.** A real PMS can send an
+/// empty `title` (a season 0 nobody named; the mock's `--caption-edge-cases` does), and that season
+/// is still a poster a household wants to open: its caption says "Specials" itself. Every place a
+/// hub row becomes a card used to drop an item with an empty title (Home's `shelf_card`, the
+/// Library's Recommended `parse_window`, the sliding-window ledger's two reads), so the untitled
+/// season vanished from "Recently Added Seasons" and came back the moment it was titled.
+#[test]
+fn an_untitled_season_is_still_a_card_on_every_hub_path() {
+    let season = r#"{"ratingKey":"982010","type":"season","title":"","index":0,"parentTitle":"Show",
+        "parentRatingKey":"980009","thumb":"/library/metadata/982010/thumb/1"}"#;
+    let body = format!(r#"{{"MediaContainer":{{"Hub":[{{"type":"season","hubIdentifier":"mock.seasons",
+        "title":"Recently Added Seasons","key":"/hubs/mock/seasons","Metadata":[{season}]}}]}}}}"#);
+    let mc = serde_json::from_str::<plx_plex::plex::Envelope>(&body).unwrap().media_container;
+
+    let home = project(&mc, &plx_plex::plex::MediaContainer::default(), sid(0));
+    assert_eq!(home.shelves.len(), 1, "Home's projection keeps the shelf");
+    assert_eq!(home.shelves[0].items.iter().map(|m| m.rk.as_str()).collect::<Vec<_>>(), ["982010"], "Home's shelf holds the untitled season");
+    let kept = &home.shelves[0].items[0];
+    assert_eq!((kept.kind, kept.season_index, kept.title.as_str(), kept.show_title.as_str()), (2, 0, "", "Show"));
+
+    let recommended = crate::browse::section_hubs::parse_hubs(&mc, sid(0), 1).shelves;
+    assert_eq!(recommended.iter().map(|s| s.items.len()).collect::<Vec<_>>(), [1], "the Recommended page's shelf holds it too");
+
+    let row = &mc.hub[0].metadata[0];
+    assert!(crate::stores::paging::card(sid(0), row, &[]).is_some(), "so does the sliding window's per-row read");
 }

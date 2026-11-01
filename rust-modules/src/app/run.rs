@@ -272,7 +272,7 @@ pub(crate) unsafe fn run(app: &mut App) {
         // dithers on every frame.)
         fr.underlay_moving |= tree_report.underlay_moving;
         if was_player && super::bridge::player(&app.pages).is_none() { restore_played_entry(app); }
-        refresh_after_playback(app);
+
         content_requests(app, fr);
         crate::dev::scenarios::advance_content_boot(app, fr);
         loop_requests(app);
@@ -472,7 +472,7 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
         plx_ui::panel_motion::PanelMotion::drain_queued_text(plx_base::diag::heartbeat::now_us);
         // The player's UltraBlur envelope, latched while nothing is open so the first Tracks/More
         // popover's open frame does not pay for it (`ModalUnderlay::preload`; an upload, hence here).
-        app.pages.nav.modals.preload_underlay();
+
         let mut ph = plx_machine::machine::PresentHandle::of(&mut app.present);
         super::adapters::poster::prepare(
             &mut app.pages.budget,
@@ -1571,7 +1571,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // the player (back to the detail page or home, whichever is behind), instead of freezing
         // on the last frame.
         if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended() {
-            let handed_off_to_up_next = finish_playback(&mut app.player.session,
+            let handed_off_to_up_next = finish_playback(&mut app.player,
                 &mut app.adapters.player,
                 &mut app.refresh_hubs_at,
                 &mut app.pages,
@@ -2294,9 +2294,7 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         super::bridge::execute_endpoint_outcomes(&mut app.pages, upgrades);
         app.bridge.person_pump();
         app.bridge.collection_pump();
-        if let Some(target) = app.bridge.take_detail_refresh() {
-            refresh_content(&mut app.pages, &mut app.bridge, target);
-        }
+
         // …and the cross-source resolve it kicked off. Route-unconditional for the same reason,
         // and separate because it lands one round trip per source LATER than the page does —
         // "Also available" appears when the other servers have answered, not when the page
@@ -2488,7 +2486,7 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                             }
                             if plan != super::bridge::PagePlan::SurfacesOnly && Z::OPENER < ceiling {
                                 let _opener = plx_ui::frame::backdrop::layer(Z::OPENER, false);
-                                app.bridge.redraw_opener(&app.pages);
+            
                             }
                         };
                         {
@@ -2692,6 +2690,7 @@ pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
                 | AppArg::AboutPanel
                 | AppArg::PersonBio
                 | AppArg::CollectionAbout => crate::focusprobe::Screen::Home,
+                _ => crate::focusprobe::Screen::Home,
         };
         // The probe reads the OWNER, and answers the resting cursor when no player is mounted —
         // which is what every non-player screen used to read off `App`'s second copy.
@@ -3107,7 +3106,6 @@ mod lifecycle_regression_tests {
             menu_play_await: Default::default(),
             prev: Default::default(),
             refresh_hubs_at: Default::default(),
-            refresh_detail: None,
             plaintext_upgrade: Default::default(),
             ev: [0; 128],
             remote: Default::default(),
@@ -4121,7 +4119,7 @@ mod lifecycle_regression_tests {
         if was_player && super::super::bridge::player(&app.pages).is_none() {
             restore_played_entry(app);
         }
-        refresh_after_playback(app);
+
         content_requests(app, &fr);
         loop_requests(app);
         unsafe { update(app, &mut fr); }

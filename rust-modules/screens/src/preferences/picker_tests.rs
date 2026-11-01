@@ -102,7 +102,7 @@ fn a_local_write_pops_on_its_receipt_and_a_refusal_keeps_the_page() {
         let mut page = PickerPage::new(EntryId(0), PickerKind::Quality);
         let other = plx_media::route::available_quality_ladder().iter().position(|q| *q != Quality::Original).unwrap() as u32;
         let emitted = drive(&mut page, ScreenEvent::Activate(other), other);
-        let Some(Fx::App(AppFx::Preferences(PreferenceCmd::Quality { reply, .. }))) = emitted.into_iter().map(|e| e.fx)
+        let Some(Fx::App(AppFx::Preferences(PreferenceCmd::Choose(plx_media::route::Choice::Quality(_), reply)))) = emitted.into_iter().map(|e| e.fx)
             .find(|f| matches!(f, Fx::App(AppFx::Preferences(_)))) else { panic!("a quality pick saves locally") };
         reply.send(ok).unwrap();
         let emitted = drive(&mut page, tick(), other);
@@ -146,7 +146,7 @@ fn confirming_force_emits_a_preference_effect_without_executing_it() {
     let emitted = drive(&mut page, ScreenEvent::PressCommit(plx_machine::machine::PressId(1)), ALERT + 1);
     assert!(page.state.io.busy);
     assert!(emitted.iter().any(|event| matches!(&event.fx,
-        Fx::App(AppFx::Preferences(PreferenceCmd::DirectPlay { mode: DirectPlayMode::Forced, .. })))));
+        Fx::App(AppFx::Preferences(PreferenceCmd::Choose(plx_media::route::Choice::DirectPlay(DirectPlayMode::Forced), _))))));
     assert_eq!(plx_media::route::direct_play_mode(), DirectPlayMode::Auto,
         "only an admitted app executor can persist and activate Force");
     plx_media::route::restore_direct_play_mode(previous);
@@ -207,8 +207,8 @@ fn the_subtitle_pickers_write_locally_and_pop_on_the_receipt() {
         let emitted = drive(&mut page, ScreenEvent::Activate(other), other);
         assert!(!popped(&emitted), "{field:?}: a write waits for its receipt");
         let reply = emitted.into_iter().find_map(|e| match e.fx {
-            Fx::App(AppFx::Preferences(PreferenceCmd::SubtitleSize { reply, .. }))
-            | Fx::App(AppFx::Preferences(PreferenceCmd::SubtitlePosition { reply, .. })) => Some(reply),
+            Fx::App(AppFx::Preferences(PreferenceCmd::Choose(plx_media::route::Choice::SubtitleSize(_), reply)))
+            | Fx::App(AppFx::Preferences(PreferenceCmd::Choose(plx_media::route::Choice::SubtitlePosition(_), reply))) => Some(reply),
             _ => None,
         }).expect("a local subtitle command");
         reply.send(true).unwrap();
@@ -247,7 +247,7 @@ fn ok_on_the_checked_size_after_a_failed_write_retries_the_write() {
     let other = if page.state.checked == 0 { 1 } else { 0 };
     let emitted = drive(&mut page, ScreenEvent::Activate(other), other);
     let reply = emitted.into_iter().find_map(|e| match e.fx {
-        Fx::App(AppFx::Preferences(PreferenceCmd::SubtitleSize { size, reply })) => {
+        Fx::App(AppFx::Preferences(PreferenceCmd::Choose(plx_media::route::Choice::SubtitleSize(size), reply))) => {
             // what select_subtitle_size does on the main thread before the write lands
             plx_media::route::restore_subtitle_size(size);
             Some(reply)
@@ -264,7 +264,37 @@ fn ok_on_the_checked_size_after_a_failed_write_retries_the_write() {
     plx_media::route::restore_subtitle_position(position);
 }
 
-/// Subtitle size and position are LOCAL per-television settings. Opening their picker must not
+/// **A profile's own pick is durable (M4).** The seated profile's size is Large in its own record
+/// while the frozen legacy install-wide key still says Medium, and the restore put Large in the live
+/// cell. OK on the checked Large row is not a change: it pops without a write. Reading the legacy key
+/// for "stored" would call that pick unsaved and write it again on every OK.
+#[test]
+fn ok_on_checked_profile_size_pops() {
+    use plx_plex::plex::session::{put_own, SubtitleSizePref};
+    let _serial = plx_base::testlock::serial();
+    let session = plx_plex::plex::session::TempSession::new("picker-profile-size-durable");
+    let (size, position) = (plx_media::route::subtitle_size(), plx_media::route::subtitle_position());
+    let stamp = session.seated("kid", "picker-account");
+    assert!(plx_plex::plex::session::update(|cur| {
+        let mut next = cur.clone();
+        put_own::<SubtitleSizePref>(&mut next.prefs.profile_prefs, "kid", &stamp, plx_media::route::SubtitleSize::Large);
+        Some(next)
+    }));
+    assert_eq!(plx_plex::plex::session::peek().subtitle_size(), plx_media::route::SubtitleSize::Medium,
+        "the legacy key says Medium");
+    plx_media::route::restore_subtitle_size(plx_media::route::SubtitleSize::Large);
+
+    let mut page = PickerPage::new(EntryId(0), PickerKind::SubtitleSize);
+    let checked = page.state.checked;
+    let emitted = drive(&mut page, ScreenEvent::Activate(checked), checked);
+    assert!(popped(&emitted), "the profile's own Large is stored: OK on it pops");
+    assert_eq!(preference_commands(&emitted), 0, "and writes nothing");
+    plx_media::route::restore_subtitle_size(size);
+    plx_media::route::restore_subtitle_position(position);
+}
+
+/// Subtitle size and position are LOCAL settings (kept on the television, per profile; not Plex
+/// account preferences). Opening their picker must not
 /// start the Plex account load (whose failure puts the Audio page's Retry row under the cursor),
 /// must not read as the Audio & Subtitles page, and must not carry the account note.
 #[test]
@@ -281,7 +311,54 @@ fn the_local_subtitle_pickers_never_touch_the_plex_account() {
         assert!(page.state.io.status.is_empty(), "{field:?}: no loading status");
         assert!(page.form.index_of_key(RowKey(RETRY_KEY)).is_none(), "{field:?}: no Retry row");
         assert!(!page.copy.contains(plx_platform::i18n::msg::settings_audio_account_note()), "{field:?}: no account note");
-        assert_eq!(field.kind(), Kind::Playback, "{field:?} belongs to the Video & playback page");
-        assert_eq!(field.kind().title(), plx_platform::i18n::msg::settings_playback_title(), "{field:?}: the crumb names the page it opened from");
+        assert_eq!(field.kind(), Some(Kind::Playback), "{field:?} belongs to the Video & playback page");
+        assert_eq!(field.parent_title(), plx_platform::i18n::msg::settings_playback_title(), "{field:?}: the crumb names the page it opened from");
+    }
+}
+
+/// **The Interface resolution picker** lists Automatic and the three smaller windows (no 1920x1080
+/// entry: Automatic is that), opens on the stored one, writes install-wide through its own command
+/// and pops only on a durable receipt. A refused write keeps the page with the failure and leaves
+/// the checkmark on the stored value, so nothing claims a pick that did not land.
+#[test]
+fn the_interface_resolution_picker_writes_install_wide_and_reverts_on_a_refused_write() {
+    use plx_plex::plex::session::UiResolution;
+    let _serial = plx_base::testlock::serial();
+    let _session = plx_plex::plex::session::TempSession::new("picker-resolution");
+    assert_eq!(PickerKind::UiResolution.kind(), None, "listed by the Settings root, not a field list");
+    assert_eq!(PickerKind::UiResolution.parent_title(), plx_platform::i18n::msg::settings_title());
+    let options = field_options(PickerKind::UiResolution, Quality::Original, DirectPlayMode::Auto, None);
+    assert_eq!(options, [
+        (plx_platform::i18n::msg::settings_resolution_auto().to_string(), Value::UiResolution(UiResolution::Auto)),
+        ("1600x900".to_string(), Value::UiResolution(UiResolution::Hd900)),
+        ("1280x720".to_string(), Value::UiResolution(UiResolution::Hd720)),
+        ("960x540".to_string(), Value::UiResolution(UiResolution::Sd540)),
+    ]);
+
+    let mut page = PickerPage::new(EntryId(0), PickerKind::UiResolution);
+    assert_eq!(page.state.checked, 0, "opens on the stored choice, Automatic");
+    let emitted = drive(&mut page, ScreenEvent::Enter(Enter::Fresh { focus: FocusTarget::ContainerGroup(GroupId(0)) }), 0);
+    assert_eq!(preference_commands(&emitted), 0, "no Plex account load");
+    let emitted = drive(&mut page, ScreenEvent::Activate(0), 0);
+    assert!(popped(&emitted) && preference_commands(&emitted) == 0, "OK on the checked row writes nothing");
+
+    for ok in [false, true] {
+        let mut page = PickerPage::new(EntryId(0), PickerKind::UiResolution);
+        let other = key_of(&page, &Value::UiResolution(UiResolution::Hd720));
+        let emitted = drive(&mut page, ScreenEvent::Activate(other), other);
+        assert!(!popped(&emitted), "a write waits for its receipt");
+        let (mode, reply) = emitted.into_iter().find_map(|e| match e.fx {
+            Fx::App(AppFx::Preferences(PreferenceCmd::UiResolution { mode, reply })) => Some((mode, reply)),
+            _ => None,
+        }).expect("the pick asks the app to save the resolution");
+        assert_eq!(mode, UiResolution::Hd720);
+        reply.send(ok).unwrap();
+        let emitted = drive(&mut page, tick(), other);
+        assert_eq!(popped(&emitted), ok, "pops only on a durable receipt");
+        assert_eq!(page.state.io.status.is_empty(), ok);
+        if !ok {
+            assert_eq!(page.state.checked, 0, "the checkmark stays on the stored choice");
+            assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_save_failed());
+        }
     }
 }

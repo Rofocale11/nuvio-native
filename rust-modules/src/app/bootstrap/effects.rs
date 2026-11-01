@@ -13,6 +13,7 @@ fn content(arg: &plx_screens::registry::ContentArg) -> Value {
         ContentArg::Person { sid, key, guid, name, thumb } => json!({"person":[sid.raw(),key,guid,name,thumb]}),
         ContentArg::Filmography { sid, key } => json!({"filmography":[sid.raw(),key]}),
         ContentArg::Collection(id) => json!({"collection":[id.sid.raw(),id.rk,id.sec,id.tag,id.name]}),
+        &ContentArg::Catalog { .. } => json!({"catalog":null}),
     }
 }
 fn argument(arg: &plx_screens::registry::AppArg) -> Result<Value, &'static str> {
@@ -28,7 +29,7 @@ fn home_command(command: &plx_screens::registry::HomeCmd) -> Value {
         HomeCmd::FocusGrid { row,col } => json!({"focus_grid":[row,col]}),
         HomeCmd::Hero => json!("hero"),
         HomeCmd::FocusStrip(tab) => json!({"focus_strip":match tab {
-            HomeTab::Home => "home", HomeTab::Movies => "movies", HomeTab::Shows => "shows", HomeTab::Search => "search" }}),
+            HomeTab::Home => "home", HomeTab::Movies => "movies", HomeTab::Shows => "shows", HomeTab::Search => "search", HomeTab::Watchlist => "watchlist" }}),
         HomeCmd::Flip(delta) => json!({"flip":delta}),
         HomeCmd::SelectHero(index) => json!({"select_hero":index}),
         HomeCmd::PinHero(index) => json!({"pin_hero":index}),
@@ -217,7 +218,7 @@ fn store(command: &plx_data::stores::StoreCmd) -> Result<Value, &'static str> {
     Ok(match command {
         StoreCmd::Hubs(HubsCmd::Reset) => json!({"hubs":"reset"}),
         StoreCmd::Hubs(HubsCmd::RefetchHubs) => json!({"hubs":"refetch"}),
-        StoreCmd::Hubs(HubsCmd::Page { sid, id, key, before }) =>
+        StoreCmd::Hubs(HubsCmd::Page { sid, id, key, before, .. }) =>
             json!({"hubs":{"page":[sid.raw(),id,key,before]}}),
         StoreCmd::Hubs(HubsCmd::CancelPage { sid, id, key }) =>
             json!({"hubs":{"cancel_page":[sid.raw(),id,key]}}),
@@ -249,7 +250,8 @@ fn store(command: &plx_data::stores::StoreCmd) -> Result<Value, &'static str> {
                 CollectionCmd::Open { target } => json!({"open":[target.id.sid.raw(),target.id.rk,target.id.sec,target.id.tag,target.id.name,target.want]}),
                 CollectionCmd::Close => json!("close"),
                 CollectionCmd::Reset => json!("reset"),
-                CollectionCmd::SetWatchedLocal { .. } => return Err("unsupported controlled collection command"),
+                &CollectionCmd::Window { .. } | &CollectionCmd::Restore { .. } | &CollectionCmd::ApplyView { .. } => json!("other"),
+
             }})
         }
         _ => return Err("unsupported Home store command"),

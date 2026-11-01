@@ -102,8 +102,10 @@ fn both_language_pickers_offer_the_full_catalog_and_an_empty_preference() {
 #[test]
 fn every_field_row_pushes_its_picker_and_nothing_else() {
     let _serial = plx_base::testlock::serial();
-    let _session = plx_plex::plex::session::TempSession::new("pref-field-rows-push");
+    let session = plx_plex::plex::session::TempSession::new("pref-field-rows-push");
     let account = Account::new("pref-field-rows", 11, AudioPreferences::default());
+    // The Playback rows open only for a seated profile (an unseated page lists them read-only).
+    seat_named(&session, "pref-field-rows", "Maya");
     let mut playback = PreferencesPage::new(EntryId(0), Kind::Playback);
     let mut audio = loaded_audio_page(&account);
     for (page, fields) in [
@@ -190,13 +192,13 @@ fn every_field_reports_the_page_whose_list_shows_it() {
     let prefs = AudioPreferences::default();
     for kind in [Kind::Playback, Kind::AudioSubtitles] {
         let inputs = FieldListInputs { kind, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-            prefs: Some(&prefs), busy: false, show_retry: false, p2p: (false, None), p2p_draft: None };
+            prefs: Some(&prefs), busy: false, show_retry: false, read_only: false };
         for &field in fields_of(&inputs) {
-            assert_eq!(field.kind(), kind, "{field:?} is listed by {kind:?}");
+            assert_eq!(field.kind(), Some(kind), "{field:?} is listed by {kind:?}");
         }
     }
     let audio = FieldListInputs { kind: Kind::AudioSubtitles, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs: Some(&prefs), busy: false, show_retry: false, p2p: (false, None), p2p_draft: None };
+        prefs: Some(&prefs), busy: false, show_retry: false, read_only: false };
     assert_eq!(fields_of(&audio), &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles]);
 }
 
@@ -236,67 +238,84 @@ fn the_continue_watching_row_defaults_to_open_details_and_its_picker_saves_the_p
     let emitted = drive(&mut picker, ScreenEvent::Activate(1), 1);
     plx_media::route::restore_deck_press(prior);
     let saved = emitted.into_iter().find_map(|e| match e.fx {
-        Fx::App(AppFx::Preferences(PreferenceCmd::DeckPress { mode, .. })) => Some(mode),
+        Fx::App(AppFx::Preferences(PreferenceCmd::Choose(plx_media::route::Choice::DeckPress(mode), _))) => Some(mode),
         _ => None,
     });
     assert_eq!(saved, Some(DeckPress::Play));
 }
 
-/// Every keyboard delivery in `emitted`, as its `up` flag.
-fn keyboards(emitted: &[Stamped<InnerHost>]) -> Vec<bool> {
-    emitted.iter().filter_map(|e| match &e.fx {
-        Fx::Deliver(_, Delivery::Keyboard { up }) => Some(*up),
-        _ => None,
-    }).collect()
-}
-fn key_event(key: Key) -> ScreenEvent<InnerHost> {
-    ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
-        kind: InputKind::Key { key, sym: 0, wcode: 0, edge: Edge::Down, at_edge: false } })
+/// Seat a Plex Home profile called `title` on the fixture session. The caller holds
+/// `testlock::serial()`.
+fn seat_named(session: &plx_plex::plex::session::TempSession, uuid: &str, title: &str) {
+    use plx_plex::plex::session::{current_gen, publish_seat_for_test, UserRef};
+    let stamp = session.seated(uuid, "pref-read-only-account");
+    publish_seat_for_test(Some(UserRef { uuid: uuid.into(), title: title.into(), ..Default::default() }),
+        current_gen().wrapping_add(1), stamp);
 }
 
-/// **OK on the Server URL row asks for the keyboard and opens the draft it types into.**
-///
-/// The reported bug ("nothing happens") was NOT here — this page emitted the delivery correctly
-/// and `RouteSurface::forward` dropped it, which `settings_pop_and_remember_tests`'
-/// `a_page_keyboard_request_survives_forward_addressed_to_the_surface` pins from the other side.
-/// The page half is pinned too, so a later refactor cannot quietly stop asking and leave only the
-/// surface test green.
+/// Whether each listed row is drawn dim, in list order.
+fn dims(page: &PreferencesPage) -> Vec<bool> {
+    page.form.table.sections.iter().flat_map(|section| section.rows.iter().map(|row| row.dim)).collect()
+}
+
+fn right_at_edge() -> ScreenEvent<InnerHost> {
+    ScreenEvent::Input(InputEvent { at: Tick::default(), source: plx_machine::machine::Source::Script,
+        kind: InputKind::Key { key: Key::Right, sym: 0, wcode: 0, edge: plx_machine::machine::Edge::Down, at_edge: true } })
+}
+
+/// **While nobody is seated the Playback rows are read-only, and the page says why.** The Profile
+/// settings belong to a seated profile and the data layer refuses a write for nobody, so a row that
+/// opened a picker would offer a pick that cannot land. The rows stay on the page (showing the
+/// values every profile starts from), dimmed (the form's `disabled` idiom: focusable, never activated), and OK / RIGHT on them
+/// opens nothing. Audio & Subtitles (a Plex account preference, not a Profile row) is untouched.
 #[test]
-fn ok_on_the_server_url_row_raises_the_keyboard_and_opens_a_draft() {
+fn playback_rows_are_read_only_while_no_profile_is_seated() {
     let _serial = plx_base::testlock::serial();
-    let _session = plx_plex::plex::session::TempSession::new("pref-url-open");
+    let _session = plx_plex::plex::session::TempSession::new("pref-read-only-unseated");
     let mut page = PreferencesPage::new(EntryId(0), Kind::Playback);
-    let key = RowId::P2pServer.key().0;
-    let emitted = drive(&mut page, ScreenEvent::Activate(key), key);
-    assert_eq!(keyboards(&emitted), [true]);
-    assert!(page.draft.is_some());
+    assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_unseated(), "the page says to choose a profile");
+    for field in [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition,
+        PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval] {
+        let key = RowId::Field(field).key().0;
+        let row = page.form.index_of(&RowId::Field(field)).expect("the row is still listed");
+        assert!(dims(&page)[row], "{field:?}: dimmed");
+        let ok = drive(&mut page, ScreenEvent::Activate(key), key);
+        let right = drive(&mut page, right_at_edge(), key);
+        assert!(pushed(&ok).is_empty() && pushed(&right).is_empty(), "{field:?}: OK and RIGHT open nothing");
+        assert_eq!(preference_commands(&ok) + preference_commands(&right), 0, "{field:?}: and write nothing");
+    }
+    let account = Account::new("pref-read-only-audio", 31, AudioPreferences::default());
+    let audio = loaded_audio_page(&account);
+    assert!(!dims(&audio).is_empty() && dims(&audio).iter().all(|dim| !dim),
+        "the account fields are not read-only");
 }
 
-/// The draft is the read-out while it is live — with the caret that is the ONLY thing on screen
-/// saying keystrokes land here (a `Row` has no text widget of its own) — and OK commits what was
-/// typed while BACK throws it away and leaves the saved address alone.
+/// **The Playback page names the profile whose settings it shows, and follows a seat change.** The
+/// name is the profile chip's (the active profile's title). A change of the published profile moves
+/// its generation, which rebuilds the copy and the rows on the next tick: the page never says "for
+/// Maya" over Noah's values, a seated profile's rows open, and nobody seated is read-only again.
 #[test]
-fn the_caret_shows_the_draft_then_ok_commits_it_and_back_discards_it() {
+fn the_playback_page_names_the_seated_profile_and_follows_the_seat() {
     let _serial = plx_base::testlock::serial();
-    let _session = plx_plex::plex::session::TempSession::new("pref-url-type");
-    let typed = "http://10.0.0.9:2710";
-    for (commit, want) in [(true, Some(typed)), (false, None)] {
-        let mut page = PreferencesPage::new(EntryId(0), Kind::Playback);
-        let key = RowId::P2pServer.key().0;
-        drive(&mut page, ScreenEvent::Activate(key), key);
-        drive(&mut page, ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
-            kind: InputKind::Text(TextEdit::Clear) }), key);
-        drive(&mut page, ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
-            kind: InputKind::Text(TextEdit::Commit(typed.into())) }), key);
-        assert_eq!(page.draft.as_ref().unwrap().text(), typed);
-        assert!(page.state.values.iter().any(|v| v == &format!("{typed}|")), "the caret is drawn");
-        let emitted = drive(&mut page, key_event(if commit { Key::Ok } else { Key::Back }), key);
-        assert_eq!(keyboards(&emitted), [false], "the keyboard goes away either way");
-        assert!(page.draft.is_none());
-        let saved: Vec<_> = emitted.iter().filter_map(|e| match &e.fx {
-            Fx::App(AppFx::Preferences(PreferenceCmd::P2pServer { url, .. })) => Some(url.clone()),
-            _ => None,
-        }).collect();
-        assert_eq!(saved, want.map(|u| Some(u.to_owned())).into_iter().collect::<Vec<_>>());
-    }
+    let session = plx_plex::plex::session::TempSession::new("pref-names-the-profile");
+    let mut page = PreferencesPage::new(EntryId(0), Kind::Playback);
+    assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_unseated());
+
+    seat_named(&session, "maya", "Maya");
+    drive(&mut page, tick(), 0);
+    assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_copy_profile("Maya"));
+    assert!(page.copy.contains("Maya"));
+    let key = RowId::Field(PickerKind::Quality).key().0;
+    assert_eq!(pushed(&drive(&mut page, ScreenEvent::Activate(key), key)), vec![SettingsPage::Picker(PickerKind::Quality)],
+        "a seated profile's rows open");
+
+    seat_named(&session, "noah", "Noah");
+    drive(&mut page, tick(), 0);
+    assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_copy_profile("Noah"), "the next profile is named");
+    assert!(!page.copy.contains("Maya"));
+
+    plx_plex::plex::session::publish_profile_for_test(None, plx_plex::plex::session::current_gen().wrapping_add(1));
+    drive(&mut page, tick(), 0);
+    assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_unseated(), "unseated again: read-only again");
+    assert!(pushed(&drive(&mut page, ScreenEvent::Activate(key), key)).is_empty());
 }

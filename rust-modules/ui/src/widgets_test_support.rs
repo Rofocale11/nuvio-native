@@ -8,10 +8,10 @@ use crate::tile::Resume;
 ///
 /// The copy is the thing to avoid here and there is a measurement to prove it: this test's
 /// predecessor modelled the region inline and left the screen CLAMP out, which priced the tab
-/// track at `(940+176) x 252` = 281k px^2 where the real region is `1116 x 200` = 223k — a 26%
+/// track at `(940+176) x 252` = 281k px^2 where the rising region is `1116 x 200` = 223k — a 26%
 /// over-estimate that sat under a passing assertion for as long as the limit existed, and the
 /// reason the old limit read as if it had only ~7% of headroom when it had far more. Both
-/// surfaces are grown `gfx::BLUR_MARGIN` a side and then clamped to the screen, so the capsule
+/// surfaces are grown `gfx::BLUR_MARGIN` a side (`blur_region` is the rising, upper-bound region; a band that never rises is grabbed only `BLUR_REACH`) and then clamped to the screen, so the capsule
 /// at x=96 puts the union's left edge at 8 (`BAND_REGION_X0`), the band at y=36 puts its top on 0
 /// and makes it 200 tall
 /// rather than 252. That is `blur_region`'s business, and it is now asked rather than restated.
@@ -126,16 +126,18 @@ pub(super) fn home_syn_h() -> f32 {
 
 /// The TOP of home's title band, from the bottom-anchored stack the hero draws (`hero_content`):
 /// the reserved logo band + `space::MD` + a one-line BODY kicker + `space::SM` + the synopsis
-/// block, stacked UP from `HERO_TEXT_BOTTOM` through the screen's own `hero_stack_top`, so the
-/// contract reads the arithmetic the draw uses. Only the KICKER's height is still quoted like
+/// block, stacked UP from `HERO_TEXT_BOTTOM` through the screen's own `hero_stack` (the stack the
+/// draw reads), so the contract reads the arithmetic the draw uses. Only the KICKER's height is still quoted like
 /// [`HERO_CAP_H`], because it is one line of a rung and the host opens no SDL_ttf.
 pub(super) fn home_title_band_top() -> f32 {
     const META_H: f32 = 34.0; // one line of `size::BODY`
-    crate::landing_hero::stack_top(
+    crate::landing_hero::hero_stack(
         crate::hero_logo::band_h(crate::hero_logo::LogoRung::Hero),
         META_H,
-        theme::space::SM + home_syn_h(),
+        Some(home_syn_h()),
     )
+    .title
+    .y
 }
 
 /// …and the cap top of the TEXT it falls back to, which is what the legibility table grades.

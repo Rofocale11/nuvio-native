@@ -1655,7 +1655,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // loaded detail can be a different item (show page / straight-from-Home play)
     // detail already had this item's streams — no GET
     plan.playing = if let Some(mc) = &nuvio_decision {
-        plx_data::metadata::playing_item_from_metadata(env.sid, rk, mc.metadata.first())
+        Some(plx_data::metadata::playing_item_from(env.sid, rk, mc.metadata.first()))
     } else { env
         .cached_item
         .clone()

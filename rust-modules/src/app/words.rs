@@ -52,6 +52,7 @@ pub(crate) fn route_word(route: &AppArg) -> &'static str {
         | AppArg::AboutPanel
         | AppArg::PersonBio
         | AppArg::CollectionAbout => "",
+        _ => "",
     }
 }
 /// **Every PAGE argument, one per heartbeat word** — the domain [`route_word`] is applied over to DERIVE the

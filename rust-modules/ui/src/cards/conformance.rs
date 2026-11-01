@@ -92,6 +92,13 @@ pub trait CardHarness {
     /// Apply a landing, then deliver what the host does on one: the store-changed event and the
     /// engine's `reconcile` of the focused element. `Err` when the harness cannot stage it.
     fn landing(&mut self, l: Landing) -> Result<(), &'static str>;
+    /// `by` new cards arrive before every card shown (a window sliding back, a refetch inserting
+    /// ahead): the store-changed event only, no focus change. `Err` when the harness cannot stage
+    /// it ([`shifted_under_a_focus_change`] is then `Unsupported`).
+    fn shift(&mut self, by: usize) -> Result<(), &'static str> {
+        let _ = by;
+        Err("this harness cannot shift its cards")
+    }
     /// `memory_at(focus)`, a fresh instance, `RestoreMemory`, the content landing, and the
     /// engine's `reconcile` of the old focus: the fresh instance, focused where it re-seated.
     fn memory_roundtrip(&mut self) -> Result<Box<dyn CardHarness>, &'static str>;
@@ -101,9 +108,10 @@ pub trait CardHarness {
 pub type Mount = fn(n: usize) -> Box<dyn CardHarness>;
 
 /// The cases, in the order the suite runs them. The name is the key of the expected-failure list.
-pub const CASES: [(&str, fn(Mount) -> Outcome); 7] = [
+pub const CASES: [(&str, fn(Mount) -> Outcome); 8] = [
     ("walk", walk),
     ("hold_then_move", hold_then_move),
+    ("released_card_lands_at_rest", released_card_lands_at_rest),
     ("pop_rule", pop_rule),
     ("geometry", geometry),
     ("landing", landing),
@@ -202,6 +210,33 @@ pub fn hold_then_move(mount: Mount) -> Outcome {
         return fail(format!("did not settle: new {new} (want {full}), old {old} (want {rest})"));
     }
     Outcome::Pass
+}
+
+/// Released card: a held key walks the focus along the cards, and every card the walk left comes to
+/// EXACT rest (`scale == 1.0`, so its pop factor is `0.0` and it draws with the plain card program and
+/// the resting split), not one ulp above it, whatever the screen. `gfx::spring` never lands a released
+/// spring on its target; `Spring::land` (called by `CardRow::update`) does.
+pub fn released_card_lands_at_rest(mount: Mount) -> Outcome {
+    let (mut h, cards) = match settled_first(mount) {
+        Ok(v) => v,
+        Err(out) => return out,
+    };
+    // five cards of a held walk are plenty to leave four behind; a screen with fewer walks them all
+    let walk = if cards.len() > 5 { 5 } else { cards.len() };
+    for &card in &cards[1..walk] {
+        h.focus(card, By::Dir);
+        h.tick(2);
+    }
+    h.tick(SETTLE);
+    let mut bad = Vec::new();
+    for &card in &cards[..walk - 1] {
+        match h.scale(card) {
+            None => return Outcome::Unsupported("the screen exposes no tile scale read"),
+            Some(s) if s != 1.0 => bad.push(format!("{card} rests at {s}")),
+            Some(_) => {}
+        }
+    }
+    if bad.is_empty() { Outcome::Pass } else { fail(bad.join("; ")) }
 }
 
 /// Pop rule: a Dir or Pointer move grows from rest; a restore or reconcile arrival is adopted whole.
@@ -351,6 +386,49 @@ pub fn landing(mount: Mount) -> Outcome {
     if bad.is_empty() { Outcome::Pass } else { fail(bad.join("; ")) }
 }
 
+/// Removal: when the focused card leaves, focus goes to the card that FOLLOWED it (the one before
+/// only when it was the last), the new focus is placeable, and no card but that one is lifted once
+/// it has settled. Not in [`CASES`]: it is the DS4 contract for sections that play their removals,
+/// run by the Tier-1 suite against the animated mounts.
+pub fn removal_focuses_next(mount: Mount) -> Outcome {
+    let mut bad = Vec::new();
+    for at in [2usize, 7] {
+        let mut h = mount(8);
+        let cards = h.cards();
+        if cards.len() < 8 {
+            return fail("fewer than 8 cards");
+        }
+        h.tick(2);
+        h.focus(cards[at], By::Restore);
+        h.tick(SETTLE);
+        if let Err(why) = h.landing(Landing::RemoveFocused) {
+            return Outcome::Unsupported(why);
+        }
+        let want = cards[if at + 1 < cards.len() { at + 1 } else { at - 1 }];
+        h.tick(1);
+        if h.focused() != Some(want) {
+            bad.push(format!("removing card {at}: focus is {:?}, not the next card {want}", h.focused()));
+        }
+        h.tick(SETTLE);
+        if h.focused() != Some(want) {
+            bad.push(format!("removing card {at}: focus drifted to {:?} while the landing played", h.focused()));
+        }
+        let Some(now) = h.focused() else { continue };
+        if h.place(now, At::Drawn).is_none() {
+            bad.push(format!("removing card {at}: the new focus is unplaceable"));
+        }
+        if h.scale(now).is_some_and(|s| (s - h.focus_scale()).abs() > 0.002) {
+            bad.push(format!("removing card {at}: the next card is not at the focus scale once settled"));
+        }
+        let lifted: Vec<u32> =
+            h.cards().into_iter().filter(|&c| c != now && h.scale(c).is_some_and(|s| (s - 1.0).abs() > 0.001)).collect();
+        if !lifted.is_empty() {
+            bad.push(format!("removing card {at}: cards {lifted:?} are off rest once settled"));
+        }
+    }
+    if bad.is_empty() { Outcome::Pass } else { fail(bad.join("; ")) }
+}
+
 /// Memory: `memory_at` then a fresh instance and `RestoreMemory` gives the same focused identity.
 pub fn memory(mount: Mount) -> Outcome {
     let mut h = mount(14);
@@ -415,6 +493,56 @@ pub fn determinism_idle(mount: Mount) -> Outcome {
         return fail("motion still reported after the pop settled");
     }
     Outcome::Pass
+}
+
+/// The requirement under every landing rule: focus never moves under the user, in any
+/// interleaving. Cards arrive before every card shown ([`CardHarness::shift`]) between the same two
+/// ticks as the engine hands focus on, by every cause (a key, the pointer, a restore, a reconcile
+/// naming another card, a reconcile naming the same card), the focus change first or the shift
+/// first. A card that stayed must stay where it is drawn, and the focused one must end up drawn.
+/// Not one of [`CASES`]: a screen whose harness cannot shift reports `Unsupported`.
+pub fn shifted_under_a_focus_change(mount: Mount) -> Outcome {
+    let mut bad = Vec::new();
+    for (by, same) in [(By::Dir, false), (By::Pointer, false), (By::Restore, false), (By::Reconcile, false), (By::Reconcile, true)] {
+        for focus_first in [true, false] {
+            let mut h = mount(40);
+            h.tick(2);
+            let cards = h.cards();
+            let cols = h.columns().unwrap_or(1);
+            let at = if cols > 1 { 2 * cols + 1 } else { 20 };
+            if cards.len() <= at + 1 {
+                return fail(format!("mounted with 40 items but exposes {} cards", cards.len()));
+            }
+            h.focus(cards[at], By::Restore);
+            h.tick(SETTLE);
+            let (stayed, target) = (cards[at - 1], if same { cards[at] } else { cards[at + 1] });
+            let Some(before) = h.drawn_rect(stayed, 1.0) else {
+                return Outcome::Unsupported("the screen exposes no drawn rect");
+            };
+            let why = format!("{by:?} same={same} focus_first={focus_first}");
+            if focus_first {
+                h.focus(target, by);
+            }
+            // whole rows for a grid (its columns hold), half a window for a strip
+            if let Err(why) = h.shift(if cols > 1 { cols * 3 } else { 12 }) {
+                return Outcome::Unsupported(why);
+            }
+            if !focus_first {
+                h.focus(target, by);
+            }
+            h.tick(1);
+            match h.drawn_rect(stayed, 1.0) {
+                Some(now) if (now.x - before.x).abs() < 100.0 && (now.y - before.y).abs() < 100.0 => {}
+                now => bad.push(format!("{why}: a card that stayed went from {} to {}", show(before), now.map_or("nowhere".into(), show))),
+            }
+            h.tick(SETTLE);
+            let on = h.place(target, At::Drawn).map(|p| p.rect);
+            if !on.is_some_and(|r| r.cx() > 0.0 && r.cx() < crate::consts::SCR_W && r.cy() > 0.0 && r.cy() < crate::consts::SCR_H) {
+                bad.push(format!("{why}: the focused card ended at {}", on.map_or("nowhere".into(), show)));
+            }
+        }
+    }
+    if bad.is_empty() { Outcome::Pass } else { fail(bad.join("; ")) }
 }
 
 /// Run every case on every screen of `table`, return the matrix as `(screen, case, outcome)`.

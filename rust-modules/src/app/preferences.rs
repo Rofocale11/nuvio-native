@@ -1,8 +1,29 @@
 //! Live executor for Settings preference effects. The bridge's controlled-IO guard must admit
 //! the effect before this entrypoint: profile capture, thread admission and persistence all live
 //! here, never in a screen constructor or step.
+use plx_media::route::{choose, Choice, How};
 use plx_plex::plex::account::{PreferenceError, PreferenceRequest};
+use plx_plex::plex::session::{DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, QualityPref,
+    SkipIntervalPref, SubtitlePositionPref, SubtitleSizePref, TrailerAutoplayPref, UnderPostersPref};
 use plx_screens::registry::{AccountPreferenceReply, PreferenceCmd};
+use std::sync::mpsc::Sender;
+
+/// The one place a Settings pick meets the write door: each row's own `SETTINGS` policy
+/// (`How::settings`) decides whether the pick is confirmed first or published at once.
+fn choose_setting(choice: Choice, reply: Sender<bool>) {
+    match choice {
+        Choice::Quality(v) => choose::<QualityPref>(v, How::settings::<QualityPref>(reply)),
+        Choice::DirectPlay(v) => choose::<DirectPlayModePref>(v, How::settings::<DirectPlayModePref>(reply)),
+        Choice::NextEpisode(v) => choose::<NextEpisodeModePref>(v, How::settings::<NextEpisodeModePref>(reply)),
+        Choice::SkipInterval(v) => choose::<SkipIntervalPref>(v, How::settings::<SkipIntervalPref>(reply)),
+        Choice::DeckPress(v) => choose::<DeckPressPref>(v, How::settings::<DeckPressPref>(reply)),
+        Choice::UnderPosters(v) => choose::<UnderPostersPref>(v, How::settings::<UnderPostersPref>(reply)),
+        Choice::TrailerAutoplay(v) => choose::<TrailerAutoplayPref>(v, How::settings::<TrailerAutoplayPref>(reply)),
+        Choice::SubtitleSize(v) => choose::<SubtitleSizePref>(v, How::settings::<SubtitleSizePref>(reply)),
+        Choice::SubtitlePosition(v) => choose::<SubtitlePositionPref>(v, How::settings::<SubtitlePositionPref>(reply)),
+        Choice::HdrOverlayBrightness(v) => choose::<HdrOverlayBrightnessPref>(v, How::settings::<HdrOverlayBrightnessPref>(reply)),
+    }
+}
 
 pub(super) fn execute(command: PreferenceCmd) {
     match command {
@@ -14,50 +35,23 @@ pub(super) fn execute(command: PreferenceCmd) {
                 plx_machine::idle::invalidate();
                 return;
             };
-            // A refused spawn drops the reply sender. The screen reports its disconnected
-            // receipt as retryable without claiming that an account call ran.
-            plx_base::task::spawn_small("account preferences", move || {
+            plx_base::task::spawn_small("acct-prefs", move || {
                 let outcome = request.load();
                 let _ = reply.send(AccountPreferenceReply { request: Some(request), outcome });
                 plx_machine::idle::invalidate();
             });
         }
         PreferenceCmd::Save { request, base, update, reply } => {
-            plx_base::task::spawn_small("account preferences", move || {
+            plx_base::task::spawn_small("acct-prefs", move || {
                 let outcome = request.save(&base, update);
                 let _ = reply.send(AccountPreferenceReply { request: Some(request), outcome });
                 plx_machine::idle::invalidate();
             });
         }
-        PreferenceCmd::RatingSource { source, reply } => {
+        PreferenceCmd::Choose(choice, reply) => choose_setting(choice, reply),
+        PreferenceCmd::UiResolution { mode, reply } => {
             let _ = plx_base::storage_worker::submit_retained(move || {
-                let _ = reply.send(plx_plex::plex::nuvio::set_rating_source(source));
-                plx_machine::idle::invalidate();
-            });
-        }
-        PreferenceCmd::P2pEnabled { on, reply } => {
-            let _ = plx_base::storage_worker::submit_retained(move || {
-                let saved = plx_plex::plex::nuvio::set_p2p_enabled(on);
-                // The shim's policy is live: the next Source Picker asks under the new switch.
-                if saved { super::nuvio::restore_p2p(on, plx_plex::plex::nuvio::p2p().1); }
-                let _ = reply.send(saved);
-                plx_machine::idle::invalidate();
-            });
-        }
-        PreferenceCmd::P2pServer { url, reply } => {
-            let _ = plx_base::storage_worker::submit_retained(move || {
-                let saved = plx_plex::plex::nuvio::set_p2p_server(url);
-                if saved {
-                    let (enabled, server) = plx_plex::plex::nuvio::p2p();
-                    super::nuvio::restore_p2p(enabled, server);
-                }
-                let _ = reply.send(saved);
-                plx_machine::idle::invalidate();
-            });
-        }
-        PreferenceCmd::Quality { quality, reply } => {
-            let _ = plx_base::storage_worker::submit_retained(move || {
-                let _ = reply.send(plx_media::route::set_default_quality(quality));
+                let _ = reply.send(plx_plex::plex::session::set_ui_resolution(mode));
                 plx_machine::idle::invalidate();
             });
         }
@@ -66,37 +60,6 @@ pub(super) fn execute(command: PreferenceCmd) {
                 let _ = reply.send(plx_plex::plex::session::set_language(language));
                 plx_machine::idle::invalidate();
             });
-        }
-        PreferenceCmd::DirectPlay { mode, reply } => {
-            let _ = plx_base::storage_worker::submit_retained(move || {
-                let _ = reply.send(plx_media::route::set_direct_play_mode(mode));
-                plx_machine::idle::invalidate();
-            });
-        }
-        PreferenceCmd::NextEpisode { mode, reply } => {
-            let _ = plx_base::storage_worker::submit_retained(move || {
-                let _ = reply.send(plx_media::route::set_next_episode_mode(mode));
-                plx_machine::idle::invalidate();
-            });
-        }
-        PreferenceCmd::DeckPress { mode, reply } => {
-            let _ = plx_base::storage_worker::submit_retained(move || {
-                let _ = reply.send(plx_media::route::set_deck_press(mode));
-                plx_machine::idle::invalidate();
-            });
-        }
-        PreferenceCmd::SkipInterval { interval, reply } => {
-            let _ = plx_base::storage_worker::submit_retained(move || {
-                let _ = reply.send(plx_media::route::set_skip_interval(interval));
-                plx_machine::idle::invalidate();
-            });
-        }
-        // The optimistic picks run HERE, on the main thread: the live value is published before
-        // anything is persisted and the persistence rides the storage worker on its own
-        // (`route::select_subtitle_size`), so there is no outer worker submission to republish.
-        PreferenceCmd::SubtitleSize { size, reply } => plx_media::route::select_subtitle_size(size, Some(reply)),
-        PreferenceCmd::SubtitlePosition { position, reply } => {
-            plx_media::route::select_subtitle_position(position, Some(reply))
         }
     }
 }

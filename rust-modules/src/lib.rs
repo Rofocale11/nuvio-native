@@ -3,6 +3,7 @@
 //! root, and THIRD-PARTY-NOTICES.md for the components this links or redistributes.
 //! Not affiliated with, endorsed by, or sponsored by Plex GmbH or LG Electronics.
 //!
+#![allow(dead_code, unused_variables, unused_imports)]
 //! plxnative-modules — the Rust app core, built as a staticlib and linked into the C
 //! boot shim. The crate's C surface is tiny: C calls `plex_run` (port.rs), writes the fallback
 //! image marker through `plx_crash_write_image_marker`, re-enters the native-crash spool through

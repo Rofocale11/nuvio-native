@@ -7,25 +7,27 @@ use plx_ui::cards::conformance::{check_expected, run_all, Mount, Outcome};
 
 const EXPECTED: &str = include_str!("../../../ci/allow/cards-conformance.txt");
 
-/// Every in-scope card screen with a harness. Collection, Person, Search, Library grid,
-/// Home and Detail's four shelves (Related is `detail_shelves`) are in scope; the rest are in [`PENDING`].
+/// Every in-scope card screen with a harness. Collection, Person, Search, Library (grid and
+/// shelves), Home and Detail's four shelves (Related is `detail_shelves`) are in scope; the rest are in [`PENDING`].
 fn table() -> Vec<(&'static str, Mount)> {
     vec![
         ("collection", super::collection::cards_harness::mount as Mount),
         ("person", super::person::cards_harness::mount as Mount),
         ("search", super::search::cards_harness::mount as Mount),
         ("library_grid", super::library::cards_harness::mount_grid as Mount),
+        ("library_shelves", super::library::cards_harness::mount_shelves as Mount),
         ("home", super::home::cards_harness::mount as Mount),
         ("detail_shelves", super::detail::cards_harness::mount as Mount),
         ("detail_collection", super::detail::cards_harness::mount_collection as Mount),
         ("detail_extras", super::detail::cards_harness::mount_extras as Mount),
         ("detail_cast", super::detail::cards_harness::mount_cast as Mount),
+        ("watchlist", super::watchlist::cards_harness::mount as Mount),
     ]
 }
 
 /// In-scope screens whose harness is not built yet; the registry test keeps the two lists whole.
 const PENDING: &[&str] = &[];
-const IN_SCOPE: &[&str] = &["collection", "person", "search", "library_grid", "home", "detail_shelves", "detail_collection", "detail_extras", "detail_cast"];
+const IN_SCOPE: &[&str] = &["collection", "person", "search", "library_grid", "library_shelves", "home", "detail_shelves", "detail_collection", "detail_extras", "detail_cast", "watchlist"];
 
 #[test]
 fn every_in_scope_card_screen_is_in_the_table_or_pending() {
@@ -50,4 +52,26 @@ fn card_screens_match_the_expected_failure_list() {
     }
     let complaints = check_expected(&matrix, EXPECTED);
     assert!(complaints.is_empty(), "\n{}", complaints.join("\n"));
+}
+
+/// Focus never moves under the user, in any interleaving: cards arriving before every card shown in
+/// the same tick as a focus change keep the view in place, on every screen whose harness can stage
+/// the arrival (`CardHarness::shift`). The Search result row, the Library section hubs and the
+/// Library All grid must; the rest report `Unsupported` until their harness can shift.
+#[test]
+fn cards_arriving_in_the_tick_of_a_focus_change_keep_the_view_in_place() {
+    use plx_ui::cards::conformance::shifted_under_a_focus_change;
+    let _guard = plx_base::testlock::serial();
+    let mut bad = Vec::new();
+    for (screen, mount) in table() {
+        let outcome = shifted_under_a_focus_change(mount);
+        eprintln!("{screen:18} {outcome:?}");
+        let must = ["search", "library_shelves", "library_grid"].contains(&screen);
+        match outcome {
+            Outcome::Pass => {}
+            Outcome::Unsupported(_) if !must => {}
+            other => bad.push(format!("{screen}: {other:?}")),
+        }
+    }
+    assert!(bad.is_empty(), "\n{}", bad.join("\n"));
 }

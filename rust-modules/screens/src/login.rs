@@ -31,7 +31,8 @@
 //!
 //! **The calm default.** Until somebody acts (or a standing Yes sends one), the failure is the
 //! design system's `StatusOverlay` failed and nothing else: verdict, reason, *Try again* /
-//! *Details*. A report adds at most ONE short status line under the row ([`report_status`]); a
+//! *Details* — except the no-server verdict, whose primary is *Use another account* (a fresh QR
+//! sign-in, since another discovery with the same token cannot end differently). A report adds at most ONE short status line under the row ([`report_status`]); a
 //! helper save warning uses that line for its photographable storage stage. The
 //! Report ID lives only inside the Details card. A report still on its way carries the shared inline
 //! spinner beside plx_platform::i18n::msg::settings_login_report_sending() wherever that line is drawn — the QR screen's stall line keeps
@@ -62,7 +63,9 @@ use plx_ui::screen::{
     Focusable, GroupKind, GroupSpec, HitSource, Hover, Placed, RenderStrategy, Screen, ScreenEvent,
     Seat, Step, Stop,
 };
+use plx_ui::hstack::{Align, HStack, Item};
 use plx_ui::text_view::TextView;
+use plx_ui::vstack::{Anchor, VStack};
 use plx_ui::decision_alert::{Choice, DecisionAlert, Tone};
 use plx_ui::widgets::{Button, CtlPop, Spinner, StatusKind, StatusOverlay};
 use plx_ui::{theme, Env, Painter, Rect, View};
@@ -374,19 +377,33 @@ fn qr_layout(layout: RouteLayout, status: &CStr, measure: &dyn Measure) -> QrLay
     let url_h = theme::size::TITLE as f32 + theme::space::XS;
     let code_h = theme::size::DISPLAY as f32 + theme::space::XS;
     let status_h = theme::size::BODY as f32 + theme::space::SM;
-    let status_top = card.y + card.h + theme::space::LG + code_h + theme::space::MD;
+    // The code hangs one LG under the card and the status one MD under the code: one run.
+    let items = [Item::new(code_h), Item::new(status_h)];
+    let below = VStack::new(
+        &items,
+        theme::space::MD,
+        Anchor::Top(card.y + card.h + theme::space::LG),
+    );
+    let at = |i| below.span(i).map_or(0.0, |(y, _)| y);
+    let code_y = at(0);
+    let status_top = at(1);
     let spinner_extent = STATUS_SPINNER_R + Spinner::dot_r(STATUS_SPINNER_R);
+    // The gutter is the room the text may NOT use (the clamp below); the run itself is placed once.
     let gutter = spinner_extent * 2.0 + theme::space::SM;
     let text_w = measure.width(status, theme::size::BODY, false)
         .min((layout.content.w - gutter).max(1.0));
-    let row_w = text_w + gutter;
-    let row_x = layout.content.cx() - row_w * 0.5;
+    // The status row: the spinner's box, one SM, the text — centred on the content column.
+    let run = Spinner::pair_items(spinner_extent * 2.0, text_w);
+    let run = HStack::new(&run, theme::space::SM, Align::Centre(layout.content.cx()));
+    let row_w = run.width();
+    let row_x = run.span(0).map_or(0.0, |(x, _)| x);
+    let text_x = run.span(1).map_or(0.0, |(x, _)| x);
     // The first line retains the old cap-band anchor. Further lines flow below it, and their
     // complete measured extent also owns the retry hit/focus rectangle.
     let cap_h = measure.cap_h(theme::size::BODY);
     let text_top = status_top + (status_h - cap_h).max(0.0) * 0.5;
     let text_h = waiting_view(status, measure).measure_h(text_w);
-    let status_text = Rect::new(row_x + gutter, text_top, text_w, text_h);
+    let status_text = Rect::new(text_x, text_top, text_w, text_h);
     let status_spinner = Rect::new(row_x, text_top + cap_h * 0.5 - spinner_extent,
         spinner_extent * 2.0, spinner_extent * 2.0);
     let status_frame = Rect::new(row_x, status_top, row_w,
@@ -401,7 +418,7 @@ fn qr_layout(layout: RouteLayout, status: &CStr, measure: &dyn Measure) -> QrLay
         card,
         code: Rect::new(
             layout.content.x,
-            card.y + card.h + theme::space::LG,
+            code_y,
             layout.content.w,
             code_h,
         ),
@@ -479,6 +496,17 @@ fn status_row_rects(
         .action_frames_measured(measure)
 }
 
+/// Where a report note's text column stands in the narrative column `[x, x + w)`: the whole
+/// column, or — with the busy spinner — what is left of it after the shared inline ring and its
+/// `space::XS` gap (the stack `StatusOverlay::busy_note_split` stands, leading-anchored here).
+fn note_column(x: f32, w: f32, busy: bool) -> (f32, f32) {
+    if !busy {
+        return (x, w);
+    }
+    let pair = Spinner::inline_pair_items(w - Spinner::inline_gutter());
+    HStack::new(&pair, theme::space::XS, Align::Leading(x)).span(1).unwrap_or((x, w))
+}
+
 /// The lone action's rect — [`status_row_rects`] for a read-out with one control.
 #[cfg(test)]
 fn status_action_rect(
@@ -510,6 +538,11 @@ enum ControlKind {
     /// the read-out keeps one primary, never a third button. Once answered the primary is *Try
     /// again* ([`ControlKind::Retry`]), and the reason says what it does.
     ConnectPlaintext,
+    /// `Phase::Error`'s no-server verdict (`DiscoveryClass::NoServers`) in place of `Try again`:
+    /// the token that signed in is the account with nothing on it, and every retry would re-run
+    /// discovery with that same token and land on this same read-out. Starts a whole fresh sign-in
+    /// (the same command as [`ControlKind::StartLogin`]) so a different account can be used.
+    UseAnotherAccount,
 }
 
 fn label_for(kind: ControlKind) -> &'static CStr {
@@ -518,6 +551,7 @@ fn label_for(kind: ControlKind) -> &'static CStr {
         ControlKind::StartLogin => plx_platform::i18n::msg::browse_action_sign_in_c(),
         ControlKind::ContinueUnsaved => plx_platform::i18n::msg::settings_login_continue_unsaved_c(),
         ControlKind::ConnectPlaintext => connect(),
+        ControlKind::UseAnotherAccount => plx_platform::i18n::msg::browse_action_use_another_account_c(),
     }
 }
 
@@ -1200,6 +1234,7 @@ impl LoginScreen {
         match self.phase {
             Phase::Deleted => Some(ControlKind::StartLogin),
             Phase::Error if self.plaintext_asks() => Some(ControlKind::ConnectPlaintext),
+            Phase::Error if self.no_servers() => Some(ControlKind::UseAnotherAccount),
             Phase::Error => Some(ControlKind::Retry),
             Phase::Waiting if qr_escape_offered(self.phase_ms) => Some(ControlKind::RestartWait),
             p if working_phase(p) && escape_offered(p, self.phase_ms) => {
@@ -1207,6 +1242,14 @@ impl LoginScreen {
             }
             _ => None,
         }
+    }
+
+    /// Whether the failure on screen is the no-server verdict: the account signed in and has
+    /// nothing on it, so a retry with the same token cannot end differently.
+    fn no_servers(&self) -> bool {
+        self.phase == Phase::Error && self.report.offer.as_ref().is_some_and(|o| o.key.kind ==
+            plx_telemetry::telemetry::incident::IncidentKind::Discovery(
+                plx_telemetry::telemetry::incident::DiscoveryClass::NoServers))
     }
 
     /// Whether the failure on screen is an eligible plaintext-only server — answered or not. Such
@@ -1317,7 +1360,7 @@ impl LoginScreen {
         if !self.details_offered() {
             return None;
         }
-        let w = Button::pill_w_measured(plx_platform::i18n::msg::settings_login_details_c(), theme::size::BODY, false, false, measure);
+        let w = Button::pill_w_measured(plx_platform::i18n::msg::settings_login_details_c(), theme::size::BODY, false, None, measure);
         Some(RouteLayout::screen().action_pair(w, 0.0).0)
     }
 
@@ -1334,6 +1377,7 @@ impl LoginScreen {
             ControlKind::StartLogin => true, // `deleted_readout` always states one
             ControlKind::ContinueUnsaved => true, // the warning sentence is unconditional
             ControlKind::ConnectPlaintext => true, // `auth::insecure_only_copy` always states one
+            ControlKind::UseAnotherAccount => true, // the no-server reason is always stated
         };
         let details = self.details_offered().then_some(plx_platform::i18n::msg::settings_login_details_c());
         ([Some(label_for(kind)), details], has_reason)
@@ -1497,7 +1541,7 @@ impl LoginScreen {
                     )));
                 }
             }
-            Some(ControlKind::StartLogin) => {
+            Some(ControlKind::StartLogin | ControlKind::UseAnotherAccount) => {
                 fx.push(Fx::App(AppFx::Session(auth::SessionCmd::StartLogin)));
             }
             Some(ControlKind::Retry) => {
@@ -1821,8 +1865,8 @@ impl LoginScreen {
         if let Some(note) = self.report_note() {
             // A report on its way: the shared inline spinner in a leading gutter, on the first
             // line's cap band (TextView sets each line cap-top), the text one gutter over.
-            let gutter = if note.busy { Spinner::inline_gutter() } else { 0.0 };
-            let col = Rect::new(layout.narrative.x + gutter, 0.0, layout.narrative.w - gutter, 0.0);
+            let (col_x, col_w) = note_column(layout.narrative.x, layout.narrative.w, note.busy);
+            let col = Rect::new(col_x, 0.0, col_w, 0.0);
             let line = note.text.to_string_lossy();
             let view = TextView::new(&line, theme::size::CAPTION, theme::TEXT_TERTIARY).max_lines(2);
             let h = view.measure_h(col.w);
@@ -2329,6 +2373,16 @@ mod text_fit_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn busy_note_column_is_the_gutter_off_the_narrative_as_before() {
+        for (x, w) in [(0.0f32, 600.0f32), (128.0, 733.5), (96.0, 1024.0)] {
+            let gutter = Spinner::inline_gutter();
+            let (cx, cw) = note_column(x, w, true);
+            assert!((cx - (x + gutter)).abs() < 0.001 && (cw - (w - gutter)).abs() < 0.001, "{cx} {cw}");
+            assert_eq!(note_column(x, w, false), (x, w));
+        }
+    }
     use std::sync::{Arc, LazyLock};
 
     use plx_ui::consts::inside_safe;
@@ -2631,6 +2685,19 @@ mod tests {
         );
     }
 
+    /// The code hangs one LG under the card and the status one MD under the code: the painted gaps
+    /// are the stack's tokens, not whatever the hand-written sums used to leave.
+    #[test]
+    fn the_code_and_status_hang_one_lg_and_one_md_below_the_card() {
+        let route = RouteLayout::screen();
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let q = qr_layout(route, waiting_status(false, false, false), &measure);
+        let code_h = theme::size::DISPLAY as f32 + theme::space::XS;
+        assert_eq!(q.code.y - (q.card.y + q.card.h), theme::space::LG);
+        assert_eq!(q.code.h, code_h);
+        assert_eq!(q.status.y - (q.code.y + q.code.h), theme::space::MD);
+    }
+
     /// Ported verbatim.
     #[test]
     fn qr_is_vertically_centred_and_the_whole_link_stack_stays_in_the_right_column() {
@@ -2668,10 +2735,11 @@ mod tests {
         let old_row_w = old_text_w + 30.0 + theme::space::SM;
         assert!(route.content.cx() + old_row_w * 0.5 > Rect::FULL.w,
             "the actual translated sentence reproduces the former off-canvas row");
-        for locale in SHIPPED
+        for locale in plx_platform::i18n::SHIPPED
             .into_iter()
-            .map(|preference| LocaleContext::resolve(preference, None, None, None, None))
-            .chain([belarusian, LocaleContext::pseudo_for_test()]) {
+            .map(|p| LocaleContext::resolve(p, None, None, None, None))
+            .chain([LocaleContext::pseudo_for_test()])
+        {
             for message in [
                 plx_platform::i18n::msg::settings_login_unreachable_c_in(&locale),
                 plx_platform::i18n::msg::browse_login_stalled_c_in(&locale),
@@ -2902,8 +2970,8 @@ mod tests {
     }
 
     /// **The failed read-out stands on the page read-out's anchor and never grows.** Its verdict
-    /// hangs from `StatusOverlay::FULL_ANCHOR_TOP` and its row — *Try again* / *Details*, nothing
-    /// else — stacks `space::LG` plus the fixed drop under the reserved two-line reason slot; a report's status line, a sendable offer and a
+    /// hangs from `StatusOverlay::FULL_ANCHOR_TOP` and its row — the primary (*Try again*, or
+    /// *Use another account* on the no-server verdict) / *Details*, nothing else — stacks `space::LG` plus the fixed drop under the reserved two-line reason slot; a report's status line, a sendable offer and a
     /// delivered report all leave the row exactly where it was.
     #[test]
     fn the_failed_readout_stands_on_the_page_lines_and_never_grows() {
@@ -3104,6 +3172,25 @@ mod tests {
             (first.phase, first.qr_gen, first.qr_code.as_ref()),
             (Phase::Waiting, 41, "AAAA")
         );
+    }
+
+    /// #694: an account with no server cannot be helped by re-running discovery with the same
+    /// token, so that read-out's one primary starts a whole fresh sign-in instead of `Try again`.
+    /// Every other discovery verdict keeps `Try again`.
+    #[test]
+    fn no_servers_readout_offers_a_fresh_sign_in_and_other_discovery_errors_keep_retry() {
+        use plx_telemetry::telemetry::incident::{DiscoveryClass, IncidentKind};
+        let state = auth::owner::IncidentState::NotNow;
+        let mut none = screen_with(Phase::Error, state.clone(), IncidentKind::Discovery(DiscoveryClass::NoServers));
+        assert_eq!(none.control_kind(), Some(ControlKind::UseAnotherAccount));
+        let (_, fx) = step_ev(&mut none, &ScreenEvent::Activate(CONTROL));
+        assert!(fx.iter().any(|st| matches!(st.fx, Fx::App(AppFx::Session(auth::SessionCmd::StartLogin)))));
+        assert!(!fx.iter().any(|st| matches!(st.fx, Fx::App(AppFx::Session(auth::SessionCmd::Retry)))));
+
+        let mut silent = screen_with(Phase::Error, state, IncidentKind::Discovery(DiscoveryClass::Silent));
+        assert_eq!(silent.control_kind(), Some(ControlKind::Retry));
+        let (_, fx) = step_ev(&mut silent, &ScreenEvent::Activate(CONTROL));
+        assert!(fx.iter().any(|st| matches!(st.fx, Fx::App(AppFx::Session(auth::SessionCmd::Retry)))));
     }
 
     #[test]
@@ -3991,4 +4078,24 @@ mod tests {
         assert_eq!(spin_after_ticks(auth::owner::IncidentState::Delivered { receipt: "r".into() }), 0.0, "delivered: still");
     }
 
+}
+
+#[cfg(test)]
+mod status_row_tests {
+    use super::*;
+
+    /// The QR status row stands where the hand sums put it (centred spinner box, one SM, text),
+    /// to well under a hundredth of a pixel (the stack adds the same terms in another order).
+    #[test]
+    fn the_status_row_stands_the_spinner_one_sm_before_the_text() {
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let route = RouteLayout::screen();
+        let q = qr_layout(route, waiting_status(false, false, false), &measure);
+        let ext = STATUS_SPINNER_R + Spinner::dot_r(STATUS_SPINNER_R);
+        let gutter = ext * 2.0 + theme::space::SM;
+        let row_x = route.content.cx() - (q.status_text.w + gutter) * 0.5;
+        assert!((q.status_spinner.x - row_x).abs() < 0.01);
+        assert!((q.status_text.x - (row_x + gutter)).abs() < 0.01);
+        assert!((q.status.x - row_x).abs() < 0.01 && (q.status.w - (q.status_text.w + gutter)).abs() < 0.01);
+    }
 }

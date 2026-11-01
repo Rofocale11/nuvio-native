@@ -31,10 +31,10 @@
 //!
 //! # What it is made of
 //!
-//! One panel ground and a fixed vertical ladder of runs — no list, no focus, no control, and no
-//! state of its own at all. The only key it answers is BACK (and OK, see [`AboutPanelScreen`]),
-//! because §1E states the family rule: *"only 1D carries a control — the read-only panels close on
-//! BACK."* So the closing `Press [BACK] to return` line is not a hint, it is the whole affordance,
+//! One panel ground and a fixed vertical ladder of runs — no list, no focus and no control. It
+//! answers BACK (and OK, see [`AboutPanelScreen`]), plus UP/DOWN only to page a synopsis too long
+//! for the screen (below). The close is BACK because §1E states the family
+//! rule: *"only 1D carries a control — the read-only panels close on BACK."* So the closing `Press [BACK] to return` line is not a hint, it is the whole affordance,
 //! and it is the shared [`plx_ui::widgets::KeyHint`].
 //!
 //! **A `Style::Alert` surface on the container tree** since restructure phase 10 (§6.2) — the
@@ -44,30 +44,35 @@
 //! (`ModalStack::draw_scrims`, off [`AboutPanelScreen::scrim`]). Nothing on screen changes.
 //!
 //! **It is the panel with the least state in the app, and that is worth stating rather than
-//! reading as an omission**: no cursor, no scroll, no selection — the sheet is one measured
-//! ladder over `metadata::current()`. So its `LogicalState` writes nothing and its whole record in
-//! a recording is the container's: which argument is present, in which phase. There is no UP/DOWN
-//! here for a replay to be blind to, which is exactly what `tracks_panel`'s `page:i32` had to be in
-//! its shape for.
+//! reading as an omission**: no cursor and no selection — the sheet is one measured ladder over
+//! `metadata::current()`. The one exception is a synopsis TOO LONG for the screen (about 1,200
+//! characters at BODY, [`syn_lines`] lines): that body becomes the Person bio panel's paged
+//! viewport ([`plx_ui::prose_scroll`], UP/DOWN pages it five lines at a time, the glyphs dissolve at
+//! an edge with more prose past it, a rail down the right says where you are), so that text is never
+//! cut with no way to read the rest. A synopsis that fits has no such state: [`flow`] is `None`, the
+//! page cursor stays 1 and the sheet is the static ladder it always was.
 //!
 //! # Two things about it that are decisions rather than defaults
 //!
 //! **The height is CONTENT-DRIVEN.** The mock hints 1120×360; that is a canvas placeholder and the
 //! content div under it carries no height at all. A real PMS synopsis runs well past three lines,
 //! and the whole reason this panel exists is that the card CUT one — so a panel that cut it again
-//! at a different width would be pointless. The panel grows, and [`syn_lines`] is the last resort:
-//! it spends whatever is left inside the screen's glass keep-out and never less than one line.
+//! at a different width would be pointless. The panel grows, and [`syn_lines`] is the line budget:
+//! it spends whatever is left inside the screen's glass keep-out and never less than one line. Prose
+//! beyond that budget scrolls (see above) rather than being cut.
 //!
-//! **Its ground is the latched underlay field, not glass** (`widgets::panel_ground`): the page
-//! under it sampled once into the 15×8 field the modal dim already latched, windowed to the
-//! panel's own rect and graded toward the panel material, under the frost. So it reads no
-//! framebuffer, pays no blur region however far it grows, and the page behind it standing still is
-//! a property of the host snapshot rather than a condition of the material. It still clears the
+//! **Its ground is `widgets::panel_ground` with `Ground::Sheet`: NOT glass** (DS6 put glass on
+//! menus only). The latched underlay field: the page under it sampled once into the 15×8 field the
+//! modal dim already latched, windowed to the panel's own rect and graded toward the panel
+//! material, under the frost. It still clears the
 //! design's `--glass-edge-clear` 68 on all four sides ([`EDGE_CLEAR`]) — a layout margin now.
 
 use plx_ui::consts::{SCR_H, SCR_W};
+use plx_ui::hstack::Item;
+use plx_ui::prose_scroll::{self, paging, ProseScroll};
 use plx_ui::text_view::TextView;
 use plx_ui::theme;
+use plx_ui::vstack::{Anchor, VStack};
 use plx_ui::widgets;
 use plx_ui::widgets::KeyHint;
 use plx_ui::{Painter, Rect};
@@ -156,34 +161,34 @@ pub struct Stack {
 /// bracketing a facts grid, with the grid's own two coming and going with it; with the grid gone
 /// there is one block to close and one rule to close it.)
 pub fn stack(b: Blocks) -> Stack {
-    let mut s = Stack::default();
-    let mut y = PAD;
-
-    s.eyebrow = y;
-    y += EYEBROW_LEAD;
-
-    if b.synopsis > 0.0 {
-        s.synopsis = y + G_SYNOPSIS;
-        y = s.synopsis + b.synopsis;
-    }
-
-    if b.tagline > 0.0 {
-        s.tagline = y + G_TAGLINE;
-        y = s.tagline + b.tagline;
-    }
-
-    s.rule = y + G_RULE;
-    y = s.rule + widgets::HAIRLINE_H;
-
-    s.footer = y + G_FOOTER;
-    y = s.footer + KeyHint::height();
+    // Each gap is the block's own `margin-top` ([`Item::before`]), so an absent block takes neither
+    // its height nor the gap above it and the block after it keeps its own. `Blocks` says "absent"
+    // as 0.0 (its callers measure that way); this is the one place that reads it as such.
+    let present = |h: f32, gap: f32| if h > 0.0 { Item::new(h).before(gap) } else { Item::absent() };
+    let items = [
+        Item::new(EYEBROW_LEAD),
+        present(b.synopsis, G_SYNOPSIS),
+        present(b.tagline, G_TAGLINE),
+        Item::new(widgets::HAIRLINE_H).before(G_RULE),
+        Item::new(KeyHint::height()).before(G_FOOTER),
+    ];
+    let v = VStack::new(&items, 0.0, Anchor::Top(PAD));
+    let y_of = |i: usize| v.span(i).map_or(0.0, |(y, _)| y);
+    let footer = v.span(4).map_or(PAD, |(y, h)| y + h);
 
     // …and the footer closes on ITS OWN pad, not the panel's: `KeyHint::pad_below` is `G_FOOTER`'s
     // twin, so the line sits centred in the band the rule opens. `PAD` here made the panel exactly
     // symmetric against its own frame and 24-over/48-under against the hairline, which is the edge
     // this line is actually read from — the argument, with the ink numbers, is on `pad_below`.
-    s.h = y + KeyHint::pad_below();
-    s
+    // (The rule is unconditional: it closes the prose whatever the prose turned out to be.)
+    Stack {
+        eyebrow: y_of(0),
+        synopsis: y_of(1),
+        tagline: y_of(2),
+        rule: y_of(3),
+        footer: y_of(4),
+        h: footer + KeyHint::pad_below(),
+    }
 }
 
 /// The tallest the panel is allowed to be — the screen less the glass keep-out on both edges.
@@ -238,14 +243,60 @@ pub fn panel_rect(content_h: f32) -> Rect {
     )
 }
 
+// ---- the scrolling synopsis ----------------------------------------------------------------------
+
+/// The synopsis's scroll geometry, present only when the prose is TALLER than the room the panel can
+/// give it — a synopsis that fits keeps today's static layout and has none.
+#[derive(Clone, Copy, Debug)]
+struct Flow {
+    /// The viewport's height: the whole line budget ([`syn_lines`]), so the panel is as tall as the
+    /// screen allows.
+    view_h: f32,
+    max_scroll: f32,
+    pages: usize,
+}
+
+/// How far one press of UP/DOWN moves the synopsis: five lines.
+const SYN_STEP: f32 = prose_scroll::step_for(SYN_LEAD);
+
+/// The synopsis view, built in ONE place so the fit test, the static draw and the budget cannot
+/// disagree about the rung, the ink or the leading.
+fn syn_view(summary: &str) -> TextView<'_> {
+    TextView::new(summary, theme::size::BODY, theme::TEXT_READING).h(theme::alert::TEXT_ALIGN).leading(SYN_LEAD)
+}
+
+/// Whether the synopsis overflows the room [`syn_lines`] gives it, and if so how it pages.
+///
+/// The fit test is against the FULL column ([`CONTENT_W`]), because a synopsis that fits is drawn
+/// exactly as it always was; only an overflowing one gives up [`prose_scroll::RAIL_GAP`] and the
+/// rail's width to the scroll rail, so it wraps (and pages) at the narrower [`prose_scroll::text_w`].
+/// Both text measures go through `TextView`'s memoised wrap, so this is laid out once per
+/// content/width change however often the tick and the draw ask.
+fn flow(summary: &str, tagline: &str) -> Option<Flow> {
+    if summary.is_empty() {
+        return None;
+    }
+    let budget = syn_lines(Blocks {
+        synopsis: 0.0,
+        tagline: if tagline.is_empty() { 0.0 } else { FINE_LEAD },
+    });
+    let view_h = budget as f32 * SYN_LEAD;
+    if syn_view(summary).measure_h(CONTENT_W) <= view_h {
+        return None;
+    }
+    let content = prose_scroll::content_h(&[summary], prose_scroll::text_w(CONTENT_W), SYN_LEAD);
+    let (max_scroll, pages) = paging(content, view_h, SYN_STEP);
+    Some(Flow { view_h, max_scroll, pages })
+}
+
 // ---- the surface -------------------------------------------------------------------------------
 
-/// The fields [`AboutPanelScreen`] canonicalises, for the recorder's shape pin (§5.4). It is EMPTY
-/// and that is the honest answer: this sheet has no cursor, no scroll and no selection, so its
-/// whole record in a recording is the container's — which argument is present, in which phase
-/// (`Navigation::write`). A shape with a field in it would be claiming state the panel does not
-/// have, and the pin would then move for a change nothing could observe.
-pub const SHAPE: &str = "AboutPanelScreen{}";
+/// The fields [`AboutPanelScreen`] canonicalises, for the recorder's shape pin (§5.4): the synopsis
+/// viewport's page cursor and spring, the same two fields (and the same shape string) as
+/// `person_bio`. UP/DOWN moves nothing else in the app, so without them a replay would grade the
+/// sheet opening and closing and nothing between. They hold page 1 / offset 0 for a synopsis that
+/// fits. Before the scroll this shape was `AboutPanelScreen{}`.
+pub const SHAPE: &str = "AboutPanelScreen{page:usize,scroll:Spring{pos:f32,vel:f32}}";
 
 /// **How far the sheet rises as it appears, in px** — `Popover::RISE`, the one number the whole
 /// panel family shares so that two surfaces leaving together read as one movement. The container
@@ -268,6 +319,10 @@ enum AboutSource {
 pub struct AboutPanelScreen {
     entry: plx_machine::machine::EntryId,
     source: AboutSource,
+    /// The synopsis's paging cursor and spring, the viewport the Person bio panel shares
+    /// ([`prose_scroll`]). It stays at page 1 / offset 0 for a synopsis that fits ([`flow`] is
+    /// `None`), so a short one carries no scroll state in practice.
+    scroll: ProseScroll,
 }
 
 impl AboutPanelScreen {
@@ -275,6 +330,7 @@ impl AboutPanelScreen {
         Self {
             entry,
             source: AboutSource::Detail,
+            scroll: ProseScroll::new(),
         }
     }
 
@@ -284,6 +340,7 @@ impl AboutPanelScreen {
         Self {
             entry,
             source: AboutSource::Collection,
+            scroll: ProseScroll::new(),
         }
     }
 
@@ -300,8 +357,7 @@ impl AboutPanelScreen {
         measure: &dyn plx_machine::machine::Measure,
         field: Option<&plx_ui::underlay::UnderlayField>,
     ) {
-        let slide = RISE * (1.0 - appear);
-        let p = Painter::root().alpha(appear).translate(0.0, slide);
+        let p = sheet_painter(appear);
 
         // ---- measure ----
         // The tagline first, because the synopsis's line budget is what is LEFT after it.
@@ -309,20 +365,20 @@ impl AboutPanelScreen {
             synopsis: 0.0,
             tagline: if tagline.is_empty() { 0.0 } else { FINE_LEAD },
         };
-        let syn = TextView::new(summary, theme::size::BODY, theme::TEXT_READING)
-            .h(theme::alert::TEXT_ALIGN)
-            .leading(SYN_LEAD)
-            .max_lines(syn_lines(b));
-        b.synopsis = if summary.is_empty() {
-            0.0
-        } else {
-            syn.measure_h(CONTENT_W)
+        // A synopsis that overflows its budget scrolls in a viewport of exactly that budget; one
+        // that fits is the static, content-height block it always was.
+        let flow = flow(summary, tagline);
+        let syn = syn_view(summary).max_lines(syn_lines(b));
+        b.synopsis = match flow {
+            Some(f) => f.view_h,
+            None if summary.is_empty() => 0.0,
+            None => syn.measure_h(CONTENT_W),
         };
         let s = stack(b);
         let r = panel_rect(s.h);
 
         // ---- ground ----
-        plx_ui::widgets::panel_ground(p, r, theme::ALERT_PANEL_RAD, field);
+        plx_ui::widgets::panel_ground(p, r, theme::ALERT_PANEL_RAD, field, plx_ui::widgets::Ground::Sheet);
 
         // ---- content ----
         let cx = r.x + PAD;
@@ -342,7 +398,13 @@ impl AboutPanelScreen {
             theme::TEXT_TERTIARY,
             true,
         );
-        if s.synopsis > 0.0 {
+        if let Some(f) = flow {
+            // The Person bio panel's viewport: UP/DOWN page it, the glyphs dissolve at an edge with
+            // more prose past it, and the rail beside it says where in the text you are.
+            let view = Rect::new(cx, r.y + s.synopsis, prose_scroll::text_w(CONTENT_W), f.view_h);
+            prose_scroll::draw(p, &[summary], SYN_LEAD, view, self.scroll.offset(f.max_scroll), f.max_scroll);
+            prose_scroll::draw_rail(p, view, cx + CONTENT_W, self.scroll.page, f.pages);
+        } else if s.synopsis > 0.0 {
             syn.draw(p, Rect::new(cx, r.y + s.synopsis, CONTENT_W, 0.0));
         }
         if s.tagline > 0.0 {
@@ -373,17 +435,65 @@ impl AboutPanelScreen {
     }
 }
 
-impl<H: crate::registry::AppLike> plx_machine::machine::Machine<H> for AboutPanelScreen {
+impl AboutPanelScreen {
+    /// Whether the end of the synopsis is on screen at the current scroll position: always for a
+    /// synopsis that fits, and for a scrolling one when the viewport has reached the last line
+    /// (the tail's air below it is not required). The reader-facing question the tests ask.
+    #[cfg(test)]
+    pub(crate) fn last_line_in_view<H: crate::registry::AppLike + crate::registry::MetadataLike + crate::registry::CollectionLike>(
+        &self,
+        cx: &plx_machine::machine::Cx<'_, H>,
+    ) -> bool {
+        let Some((summary, tagline)) = self.prose(cx) else { return false };
+        match flow(summary, tagline) {
+            None => true,
+            Some(f) => {
+                let content = prose_scroll::content_h(&[summary], prose_scroll::text_w(CONTENT_W), SYN_LEAD);
+                self.scroll.offset(f.max_scroll) + f.view_h >= content - prose_scroll::BODY_TAIL - 0.5
+            }
+        }
+    }
+
+    /// The prose the sheet reads: `(summary, tagline)` from the store its argument names.
+    fn prose<'a, H: crate::registry::AppLike + crate::registry::MetadataLike + crate::registry::CollectionLike>(
+        &self,
+        cx: &plx_machine::machine::Cx<'a, H>,
+    ) -> Option<(&'a str, &'a str)> {
+        match self.source {
+            AboutSource::Detail => {
+                let d = H::metadata(cx).current()?;
+                Some((d.summary.as_str(), d.tagline.as_str()))
+            }
+            AboutSource::Collection => {
+                let c = H::collection(cx).current()?;
+                Some((c.summary.as_str(), ""))
+            }
+        }
+    }
+}
+
+impl<H: crate::registry::AppLike + crate::registry::MetadataLike + crate::registry::CollectionLike> plx_machine::machine::Machine<H> for AboutPanelScreen {
     type Ev = plx_ui::screen::ScreenEvent<H>;
     fn step(
         &mut self,
         ev: &Self::Ev,
-        _cx: &plx_machine::machine::Cx<'_, H>,
+        cx: &plx_machine::machine::Cx<'_, H>,
         fx: &mut plx_machine::machine::Effects<'_, H>,
     ) -> plx_machine::machine::Handled {
         use plx_machine::machine::{Edge, Fx, Handled, InputKind, Key, NavOp};
         use plx_ui::screen::ScreenEvent;
         match ev {
+            // The spring chases the page cursor, and the page is re-clamped to the prose as it now
+            // stands (the store can land a longer or shorter summary while the sheet is up). A
+            // synopsis that fits has no flow: page 1, no travel, nothing to step.
+            ScreenEvent::Tick(t) => {
+                let (max_scroll, pages) = self
+                    .prose(cx)
+                    .and_then(|(summary, tagline)| flow(summary, tagline))
+                    .map_or((0.0, 1), |f| (f.max_scroll, f.pages));
+                self.scroll.follow(t.dt(), max_scroll, pages, SYN_STEP, "about.scroll");
+                Handled::Yes
+            }
             ScreenEvent::Input(input) => match input.kind {
                 // **BACK and OK both close, and OK is the deliberate half.** The design says only
                 // BACK, and the panel carries no control for OK to commit — but on a remote OK is
@@ -401,7 +511,16 @@ impl<H: crate::registry::AppLike> plx_machine::machine::Machine<H> for AboutPane
                 // Every other key is SWALLOWED rather than passed down: the sheet is modal, and a
                 // D-pad press that walked the page's own ladder under it is the trap the legacy
                 // `is_open()` guard in `detail::key` existed to prevent.
-                InputKind::Key { edge: Edge::Down | Edge::Repeat, .. } => Handled::Yes,
+                // UP/DOWN page the synopsis, as the Person bio panel does. The cursor is not clamped
+                // against the page COUNT here (that means measuring wrapped prose, which from a key
+                // handler is a link error in the host suite): the next tick pulls it back, and for a
+                // synopsis that fits it lands on page 1 again. Every other key is still eaten.
+                InputKind::Key { sym, edge: Edge::Down | Edge::Repeat, .. } => {
+                    if self.scroll.step_page(sym as std::os::raw::c_uint) {
+                        fx.invalidate(plx_machine::present::Provenance::Input);
+                    }
+                    Handled::Yes
+                }
                 // A click does nothing at all — `Style::Alert`'s own `on_miss`, stated here
                 // because the container hands this screen the pointer whatever the miss policy
                 // says (`hit_source` being `Engine` changes nothing: the panel's hit map is
@@ -473,7 +592,9 @@ impl<H: crate::registry::AppLike> plx_ui::screen::Focusable<H> for AboutPanelScr
 }
 
 impl plx_machine::machine::LogicalState for AboutPanelScreen {
-    fn write(&self, _c: &mut plx_machine::machine::Canon) {}
+    fn write(&self, c: &mut plx_machine::machine::Canon) {
+        self.scroll.write(c);
+    }
     fn probe(&self, out: &mut String) {
         out.push_str("about");
     }
@@ -492,14 +613,14 @@ impl<H: crate::registry::AppLike + crate::registry::MetadataLike + crate::regist
     fn prepare(&mut self, _b: &mut plx_ui::frame::Budget, _cx: &plx_machine::machine::Cx<'_, H>) {}
     /// The modal dim, asked for rather than drawn.
     ///
-    /// **Nothing is LIFTED back out of it.** `Scrim::lifting` exists for a panel that is ABOUT an
+    /// **Nothing is LIFTED back out of it.** `Screen::opener` / `Screen::bar_opener` exist for a panel that is ABOUT an
     /// element still on screen; this one is about the card it was opened from and says everything
     /// that card says, at length — lifting it would put a truncated copy of this panel's own first
     /// three runs alongside it. The mock lifts nothing either.
     ///
     /// **The ordering this replaces was load-bearing and is now the container's** (§16.3): the
     /// panel's ground once sampled the framebuffer (`Glass::CACHED`), so the dim had to be down
-    /// before the backdrop was taken; the ground is the latched underlay field now, latched at the
+    /// before the backdrop was taken; the ground is the latched underlay field (a sheet is never glass; DS6 glass is for menus), latched at the
     /// head of the dims from the undimmed page. `ModalStack::draw_scrims` draws it at the end of the PAGE pass — strictly
     /// earlier than the surface pass this `draw` runs in — and multiplies by the appear spring and
     /// by `nav::page_alpha`, which is `Popover::scrim`'s own arithmetic and one factor more than
@@ -554,6 +675,11 @@ impl<H: crate::registry::AppLike + crate::registry::MetadataLike + crate::regist
 /// One full-width hairline across the content column.
 fn rule(p: Painter, r: Rect, y: f32) {
     widgets::hairline(p, r.x + PAD, r.y + y, CONTENT_W);
+}
+
+/// The painter every frame of the sheet draws through: the appear fade and the rise.
+fn sheet_painter(appear: f32) -> Painter {
+    Painter::root().alpha(appear).translate(0.0, RISE * (1.0 - appear))
 }
 
 #[cfg(test)]
@@ -955,6 +1081,110 @@ mod tests {
             (plx_ui::screen::FocusSource::Engine, plx_ui::screen::HitSource::Engine),
             "the conversion this test guards"
         );
+    }
+
+    // ---- the synopsis is READABLE to its last line (a cap on reachable text is a bug) -------------
+
+    use plx_ui::consts::{SDLK_DOWN, SDLK_UP};
+
+    fn store_summary(summary: &str) {
+        plx_data::metadata::set_current_for_test(
+            test_store().state_mut(),
+            Some(plx_data::metadata::Detail {
+                rk: "about".into(),
+                summary: summary.into(),
+                ..Default::default()
+            }),
+        );
+    }
+
+    fn drive(panel: &mut AboutPanelScreen, ev: ScreenEvent<TestHost>) -> (Vec<Stamped<TestHost>>, Handled) {
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let cx = cx(&measure);
+        let (mut out, mut present) = (Vec::new(), Present::new());
+        let mut fx = Effects::new(&mut out, plx_machine::machine::MachineId::Nav, &mut present);
+        let handled = panel.step(&ev, &cx, &mut fx);
+        (out, handled)
+    }
+
+    fn press_sym(panel: &mut AboutPanelScreen, k: Key, sym: u32) -> (Vec<Stamped<TestHost>>, Handled) {
+        let kind = InputKind::Key { key: k, sym, wcode: 0, edge: Edge::Down, at_edge: false };
+        drive(panel, ScreenEvent::Input(InputEvent { kind, at: Tick::default(), source: Source::Sdl }))
+    }
+
+    /// Run the spring to rest: 10 seconds of 60 Hz ticks.
+    fn settle(panel: &mut AboutPanelScreen) {
+        for _ in 0..600 {
+            drive(panel, ScreenEvent::Tick(Tick { ms: 0, dt_us: 16_667 }));
+        }
+    }
+
+    /// **A summary of 2,000 characters can be read to its last word.** DOWN pages the body as the
+    /// Person bio panel does, the end of the prose comes into view, UP walks back, and BACK closes.
+    #[test]
+    fn a_two_thousand_character_synopsis_scrolls_to_its_last_line_and_back() {
+        let _serial = plx_base::testlock::serial();
+        let summary = "word ".repeat(400);
+        store_summary(&summary);
+        let f = flow(&summary, "").expect("2,000 characters overflow the line budget");
+        assert!(f.pages > 1 && f.max_scroll > 0.0);
+
+        let mut panel = AboutPanelScreen::new(ENTRY);
+        settle(&mut panel);
+        assert_eq!(panel.scroll.offset(f.max_scroll), 0.0, "opens at the top");
+        let measure = plx_ui::fixture::FixtureMeasure;
+        assert!(!panel.last_line_in_view(&cx(&measure)), "…with the end of the prose out of view");
+
+        for _ in 0..f.pages + 3 {
+            let (_, handled) = press_sym(&mut panel, Key::Down, SDLK_DOWN);
+            assert_eq!(handled, Handled::Yes);
+        }
+        settle(&mut panel);
+        assert_eq!(panel.scroll.page, f.pages, "DOWN stops at the last page");
+        let end = panel.scroll.offset(f.max_scroll);
+        assert!((end - f.max_scroll).abs() < 0.5, "the travel ends at max_scroll, got {end}");
+        let measure = plx_ui::fixture::FixtureMeasure;
+        assert!(panel.last_line_in_view(&cx(&measure)), "the last line is inside the viewport");
+
+        for _ in 0..f.pages + 3 {
+            press_sym(&mut panel, Key::Up, SDLK_UP);
+        }
+        settle(&mut panel);
+        assert_eq!(panel.scroll.page, 1);
+        assert!(panel.scroll.offset(f.max_scroll) < 0.5, "UP returns to the top");
+
+        let (out, handled) = press(key(Key::Back));
+        assert_eq!(handled, Handled::Yes);
+        assert!(dismissed(&out), "BACK still closes");
+        plx_data::metadata::set_current_for_test(test_store().state_mut(), None);
+    }
+
+    /// A synopsis that fits keeps today's static sheet: no flow, no travel, and DOWN leaves the
+    /// cursor on page 1 once the tick has re-clamped it.
+    #[test]
+    fn a_short_synopsis_has_no_scroll_state() {
+        let _serial = plx_base::testlock::serial();
+        let summary = "A short synopsis. ".repeat(3);
+        store_summary(&summary);
+        assert!(flow(&summary, "").is_none());
+        let mut panel = AboutPanelScreen::new(ENTRY);
+        press_sym(&mut panel, Key::Down, SDLK_DOWN);
+        settle(&mut panel);
+        assert_eq!(panel.scroll.page, 1);
+        assert_eq!(panel.scroll.offset(0.0), 0.0);
+        plx_data::metadata::set_current_for_test(test_store().state_mut(), None);
+    }
+
+    /// An ABSENT synopsis takes neither its height nor its gap, and the tagline keeps its OWN 20
+    /// (not the synopsis's 24); an absent tagline likewise leaves the rule its 32 under the prose.
+    #[test]
+    fn an_absent_block_costs_no_gap_and_the_next_keeps_its_own() {
+        let s = stack(Blocks { synopsis: 0.0, tagline: FINE_LEAD });
+        assert_eq!(s.synopsis, 0.0, "absent reads as y 0");
+        assert_eq!(s.tagline, s.eyebrow + EYEBROW_LEAD + G_TAGLINE);
+        let bare = stack(Blocks::default());
+        assert_eq!((bare.synopsis, bare.tagline), (0.0, 0.0));
+        assert_eq!(bare.rule, bare.eyebrow + EYEBROW_LEAD + G_RULE);
     }
 
 }

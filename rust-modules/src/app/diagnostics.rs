@@ -680,7 +680,7 @@ fn pipeline_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::
             " · Dolby Vision P{}.{} · {} ({})",
             dv.profile,
             dv.bl_compat,
-            decision.presentation.display(),
+            decision.presentation.label(),
             decision.capability.label(),
         ));
     }

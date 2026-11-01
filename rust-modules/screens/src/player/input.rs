@@ -17,6 +17,7 @@
 //! in phase 10 and needs the same cadence, and a screen may not name a sibling family for a shared
 //! word (§2.1).
 
+use plx_appkit::held_key::HeldKey;
 use std::os::raw::c_int;
 
 /// Is the transport HUD on screen? Its timer is live, OR playback is paused, OR the pipeline is
@@ -39,7 +40,7 @@ pub fn hud_visible(ps: &plx_media::route::PlaybackSession, now: u32, until: u32,
     ((now < until || is_paused) && !dismissed) || plx_media::player::loading(ps)
 }
 
-// (`struct HeldKey` stood here — WHICH key the remote is holding, as one value: the sym the
+// (A different `struct HeldKey` stood here, unrelated to `appkit::held_key::HeldKey` — WHICH key the remote is holding, as one value: the sym the
 // CLIENT-SIDE repeat timer was driving, the two instants that timer read, the hardware heartbeat
 // that caught a dropped key-up, and the sym we watched go physically down. Deleted with the timer
 // in restructure phase 10, whose last consumer was the item context menu; every discrete focus
@@ -57,23 +58,24 @@ pub fn hud_visible(ps: &plx_media::route::PlaybackSession, now: u32, until: u32,
 /// Scrub-seek gesture state. This Magic Remote emits a HELD key as auto-repeat keydowns
 /// (state 0x101, ~50ms apart) followed by ONE keyup on release; a TAP is a lone
 /// keydown(0x001)+keyup(0x000). So: a fresh press does the fixed jump; the 0x101 repeats
-/// engage the continuous scrub; the keyup is a reliable release. Taps commit on a short
-/// debounce so quick taps accumulate.
+/// engage the continuous scrub. A held key's keyup is provisional — the driver can bounce `Up`
+/// then `Down` mid-hold — so the hold ends only after `SCRUB_RELEASE_DEBOUNCE_MS` passes without
+/// the same key returning (`appkit::held_key::HeldKey`). **Neither a hold's end nor a tap's keyup
+/// seeks:** the keys only move the TARGET, which stays pending (the film plays on underneath)
+/// until OK / PLAY takes it or BACK drops it — click-to-confirm. Only a pointer drag commits by
+/// itself, on its release.
 pub struct Scrub {
-    pub t: u32,          // last continuous-advance tick
-    pub dir: i32,        // -1 back / +1 forward / 0 = no scrub in progress
-    pub hold: bool,      // a 0x101 repeat arrived → continuous accelerating scrub engaged
-    pub hold_since: u32, // when that hold engaged — the acceleration ramp is measured from here
-    pub alive: u32,      // last held (0x101) event — for the lost-keyup safety commit
-    pub commit_at: u32,  // tap released → commit at this tick (0 = none; a new press cancels)
+    /// The key-hold half — direction, the engaged ramp, the bounce debounce and the lost-keyup net —
+    /// owned once in `appkit::held_key`, which the trailer transport's hold-to-scrub shares.
+    pub key: HeldKey,
     /// This gesture began on a HIDDEN HUD, so its press was spent raising the transport
     /// (`ScrubPress::Reveal`) rather than hopping. It is still a fully armed scrub — a user who
-    /// keeps holding gets the ordinary continuous rewind, and `hold` engaging clears this — but if
+    /// keeps holding gets the ordinary continuous rewind, and the hold engaging clears this — but if
     /// it turns out to have been a TAP, the release must throw the preview away instead of
-    /// committing it: the preview sits on the seed, i.e. exactly where playback already is, and
-    /// committing that is a full reopen+prime to no effect.
+    /// leaving it as a target: it sits on the seed, i.e. exactly where playback already is, and OK
+    /// taking it would be a full reopen+prime to no effect.
     pub reveal: bool,
-    /// **The PREVIEW position, in ns; `-1` = not scrubbing.**
+    /// **The TARGET (the preview position), in ns; `-1` = not scrubbing.**
     ///
     /// This was `player::TX.scrub_ns` and is now the gesture's own field, published back into that
     /// atomic by `PlayerScreen::publish` (§2.3, and the module doc). It sits here rather than
@@ -94,14 +96,9 @@ pub struct Scrub {
     pub drag: bool,
 }
 impl Scrub {
-    /// No scrub in progress and no tap commit pending — where the loop starts.
+    /// No scrub in progress and no target pending — where the loop starts.
     pub const IDLE: Scrub = Scrub {
-        t: 0,
-        dir: 0,
-        hold: false,
-        hold_since: 0,
-        alive: 0,
-        commit_at: 0,
+        key: HeldKey::IDLE,
         reveal: false,
         ns: -1,
         drag: false,
@@ -111,28 +108,33 @@ impl Scrub {
     ///
     /// A gesture can also end without [`disengage`](Self::disengage) — a pointer drag's commit, or
     /// a fresh key press arriving on top of one — and `exit_player` never touches this at all, so
-    /// `hold`/`hold_since` can outlive the gesture that set them and even the playback session.
-    /// Arming only `dir`/`alive` on top of that leaves the per-frame advance reading a `hold_since`
+    /// the hold's clocks can outlive the gesture that set them and even the playback session.
+    /// Arming only the direction on top of that leaves the per-frame advance reading a `since`
     /// from minutes ago: its acceleration ramp is measured from there, so the first frame of a
     /// brand-new press runs at `SCRUB_MAX` and one tap slews the preview tens of seconds.
     pub fn begin(&mut self, now: u32, fwd: bool) {
-        self.dir = if fwd { 1 } else { -1 };
-        self.hold = false;
-        self.hold_since = now;
-        self.t = now;
-        self.alive = now;
-        self.commit_at = 0; // more input → cancel a pending tap commit
+        self.key.begin(now, fwd);
         self.reveal = false;
         self.drag = false; // a key gesture supersedes a pointer one
     }
-    /// End the gesture: no direction, no continuous hold, no drag and no reveal pending.
-    /// `commit_at` is deliberately NOT cleared — most call sites leave a pending tap commit alone,
-    /// and the one that IS that commit clears the field itself right after calling this.
+    /// End the KEY/POINTER gesture — no direction, no continuous hold, no drag and no reveal
+    /// pending — and leave the target ([`ns`](Self::ns)) where it is: a hold's end hands its
+    /// target on to OK, so this is not [`cancel`](Self::cancel).
     pub fn disengage(&mut self) {
-        self.dir = 0;
-        self.hold = false;
+        self.key.disengage();
         self.reveal = false;
         self.drag = false;
+    }
+    /// **Is there a scrub BACK should cancel?** A target exists: a key held (or its release
+    /// waiting out the bounce), a pointer seated on the bar, or a target waiting for OK. Since a
+    /// key never commits by itself, every preview that exists is waiting on something.
+    pub fn is_live(&self) -> bool {
+        self.ns >= 0
+    }
+    /// Throw the whole gesture away: no target, no hold.
+    pub fn cancel(&mut self) {
+        self.ns = -1;
+        self.disengage();
     }
     /// **Where a target may legally land**: never before zero, and never inside the last three
     /// seconds, which is a seek past the point the pipeline can prime from. The one place the two
@@ -140,7 +142,7 @@ impl Scrub {
     /// were three copies of the same four lines in `app/run.rs` and `app/playback.rs`.
     ///
     /// A thin call-through to `appkit::player_hud::scrub_clamp_target` — the shared home for this
-    /// formula and the tuning constants below, since `screens::detail::trailer`'s own hold-to-scrub
+    /// formula (the tuning constants sit beside it), since `screens::detail::trailer`'s own hold-to-scrub
     /// (the trailer transport's LEFT/RIGHT) wants the exact same bound and `ci/check-deps.sh`'s
     /// `sibling` gate forbids that module from naming `crate::player` to reach it here.
     /// Every call site in this file is unchanged.
@@ -304,17 +306,14 @@ impl HudState {
         }
     }
 }
-// scrub tuning: a press jumps scrub_step_ns() (the Skip interval); holding engages a continuous scrub ramping
-// SCRUB_BASE→SCRUB_MAX (playback-seconds per real-second). Defined in `appkit::player_hud` and
-// re-exported here — the trailer transport's own hold-to-scrub (`screens::detail::trailer`) wants
-// the identical feel and cannot name this module directly (`ci/check-deps.sh`'s `sibling` gate).
-// Long enough that a rapid tap burst coalesces into ONE seek (`TAP_COMMIT_MS`) — each
-// separate commit is a full reopen+prime on the engine, and back-to-back in-flight seeks are what
-// race the demux (the stale-audio silence incident); short enough that a single tap still feels
-// immediate.
-pub use plx_appkit::player_hud::{
-    scrub_step_ns, SCRUB_ACCEL, SCRUB_BASE, SCRUB_LOST_MS, SCRUB_MAX, TAP_COMMIT_MS,
-};
+// scrub tuning: a press jumps scrub_step_ns() (the Skip interval); holding engages a continuous scrub stepping
+// up via `appkit::player_hud::scrub_speed` (playback-seconds per real-second, doubling every
+// `SCRUB_STEP_MS`). Only the press hop is re-exported here; the ramp and the key-bounce constants
+// are reached through `plx_appkit` — the trailer transport's own hold-to-scrub
+// (`screens::detail::trailer`) shares them and cannot name this module (`ci/check-deps.sh`'s `sibling` gate).
+// (There is no tap debounce here: the keys only move the target and OK commits it, so a burst of
+// taps is one seek because the viewer confirmed one, not because a timer coalesced them.)
+pub use plx_appkit::player_hud::scrub_step_ns;
 // HUD auto-hide: how long the HUD lingers after the input that raised it.
 pub const HUD_LINGER_MS: u32 = plx_appkit::player_hud::LINGER_MS; // plain transport/nav input
 pub const HUD_MENU_MS: u32 = 8000; // a modal menu is up (track/chapter nav) — longer read time
@@ -502,14 +501,23 @@ mod hud_visibility_tests {
         });
     }
 
-    /// End every live gesture owner while preserving the independently pending tap debounce.
+    /// Disengaging ends every live gesture owner and leaves the TARGET: a hold's end hands it on
+    /// to OK. Cancelling is what throws the target away too.
     #[test]
-    fn disengaging_ends_every_part_of_the_gesture() {
-        let mut scrub = Scrub { t: 11, dir: 1, hold: true, hold_since: 12, alive: 13,
-            commit_at: 14, reveal: true, ns: 15, drag: true };
+    fn disengaging_ends_every_part_of_the_gesture_but_keeps_the_target() {
+        let mut key = HeldKey::IDLE;
+        key.press(11, true);
+        key.repeat(12);
+        key.release(13);
+        let mut scrub = Scrub { key, reveal: true, ns: 15, drag: true };
         scrub.disengage();
-        assert_eq!((scrub.dir, scrub.hold, scrub.reveal, scrub.drag), (0, false, false, false));
-        assert_eq!(scrub.commit_at, 14, "disengage must preserve the released tap's commit");
+        assert_eq!((scrub.key.dir, scrub.key.engaged, scrub.reveal, scrub.drag), (0, false, false, false));
+        assert!(!scrub.key.release_pending(), "…nor a release still waiting out the bounce window");
+        assert_eq!(scrub.ns, 15, "disengage must preserve the target");
+        assert!(scrub.is_live(), "…which BACK can still cancel");
+        scrub.cancel();
+        assert_eq!(scrub.ns, -1);
+        assert!(!scrub.is_live());
     }
 
     /// Dismissal outranks healthy playback, but never the stalled pipeline read-out.

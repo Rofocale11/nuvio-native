@@ -10,7 +10,7 @@ use super::test_support::land;
 fn home_group_identity_uses_provider_and_server_not_title_or_position() {
     let id = "home.movies.recent";
     let mut hub = HubRow { title: "Recent movies".into(), hub_id: id.into(),
-        key: String::new(), source: "Alice".into(), total: 0, offset: 0, more: false, start: 0, len: 1 };
+        key: String::new(), source: "Alice".into(), total: 0, offset: 0, more: false, start: 0, len: 1, epoch: 0 };
     let items = vec![row(0, "a"), row(1, "b"), row(0, "c")];
     let want = |slot| Some(HubIdentity::Identifier { sid: sid(slot), id, key: "" });
     assert_eq!(stable_hub_identity(&hub, &items), want(0));
@@ -213,7 +213,7 @@ fn a_mixed_section_hub_keeps_its_identity_when_the_leading_library_changes() {
 #[test]
 fn merged_home_deck_identity_survives_a_different_leading_server() {
     let mut hub = HubRow { title: "Continue Watching".into(), hub_id: "home.continue".into(),
-        key: String::new(), source: String::new(), total: 0, offset: 0, more: false, start: 0, len: 1 };
+        key: String::new(), source: String::new(), total: 0, offset: 0, more: false, start: 0, len: 1, epoch: 0 };
     let items = vec![row(0, "a"), row(1, "b")];
     assert_eq!(stable_hub_identity(&hub, &items), Some(HubIdentity::ContinueWatching));
     hub.start = 1;
@@ -784,26 +784,22 @@ fn the_reporters_seventeen_rows_all_reach_home() {
     assert!(hubs.iter().all(|h| h.len == 12), "each row whole");
 }
 
-/// A shelf is published whole or not at all: when the card budget runs out mid-shelf the shelf and
-/// everything after it are left off, never a truncated tail row.
+/// No card budget leaves a shelf off: every shelf with something to show publishes a row, whole.
 #[test]
-fn no_shelf_is_published_partially() {
-    let whole = (HOME_CARDS_MAX - 24) / 12;
+fn every_shelf_is_published_whole() {
     let (items, hubs, _) = merge(&[src(
-        0, "", HubState::Ready, Some(built_with_deck(24, shelves_in(0, 1, whole + 1, 12))),
+        0, "", HubState::Ready, Some(built_with_deck(24, shelves_in(0, 1, 400, 12))),
     )]);
-    assert_eq!(hubs[0].len, 24);
+    assert_eq!(hubs.len(), 1 + 400, "the deck and every shelf");
     assert!(hubs[1..].iter().all(|h| h.len == 12), "no shelf is cut short");
-    assert_eq!(hubs.len(), 1 + whole, "the deck and every shelf that fits whole; one more would not");
-    assert_eq!(items.len(), 24 + whole * 12);
-    assert!(items.len() + 12 > HOME_CARDS_MAX, "the next shelf would have crossed the bound");
+    assert_eq!(items.len(), 24 + 400 * 12);
 }
 
 /// The budget is split, not raced for. Whoever is asked first used to spend it — and `/hubs`
 /// promotes several rows per library, so one four-library server can spend the whole card
 /// budget and the share behind it drew nothing.
 #[test]
-fn the_budget_is_shared_so_neither_source_starves_the_other() {
+fn allot_shares_a_budget_so_neither_source_starves_the_other() {
     assert_eq!(
         allot(10, &[4, 4]),
         [4, 4],
@@ -830,39 +826,6 @@ fn the_budget_is_shared_so_neither_source_starves_the_other() {
         "a budget below one each reaches as many as it can"
     );
     assert_eq!(allot(10, &[]), Vec::<usize>::new());
-
-    let _g = plx_base::testlock::serial();
-    let mut o = Owner::default();
-    reset(&mut o.state, &o.adapter);
-    let many = |slot: u16, tag: &str| {
-        (0..HOME_CARDS_MAX + 100)
-            .map(|i| shelf(slot, &format!("{tag}{i}"), "x", &["r"]))
-            .collect::<Vec<_>>()
-    };
-    seed(&mut o.state, vec![
-        src(0, "", HubState::Ready, Some(built(0, &[], many(0, "a")))),
-        src(
-            1,
-            "friend",
-            HubState::Ready,
-            Some(built(1, &[], many(1, "b"))),
-        ),
-    ]);
-    // one-card shelves, so the card budget is what binds: no shelf cap, half the bound (= shelves) each
-    assert_eq!(
-        hub_count(&o.state),
-        HOME_CARDS_MAX,
-        "the card cap is the only ceiling"
-    );
-    let theirs = (0..hub_count(&o.state))
-        .filter(|&i| hub_source(&o.state, i) == "friend")
-        .count();
-    assert_eq!(
-        theirs,
-        HOME_CARDS_MAX / 2,
-        "and the share gets its half rather than the leftovers"
-    );
-    reset(&mut o.state, &o.adapter);
 }
 
 /// **A corrected credit re-stamps the shelves Home has ALREADY built**, with no fetch landing.
@@ -933,10 +896,9 @@ fn shelves_in(slot: u16, sec: i64, n: usize, per: usize) -> Vec<Shelf> {
         .collect()
 }
 
-/// Issue #395: demand was counted from every item, so a library the user unpinned (whose items are
-/// filtered out and never drawn) held half of the card budget back from the visible one.
+/// An unpinned library publishes no row at all, however many shelves it has.
 #[test]
-fn an_unpinned_library_spends_no_card_budget() {
+fn an_unpinned_library_publishes_nothing() {
     let srcs = [
         src(0, "", HubState::Ready, Some(built(0, &[], shelves_in(0, 1, 200, 12)))),
         src(1, "friend", HubState::Ready, Some(built(1, &[], shelves_in(1, 1, 200, 12)))),
@@ -947,68 +909,19 @@ fn an_unpinned_library_spends_no_card_budget() {
     };
     let (items, hubs, _) = merge_with_scope(&srcs, &scope);
     assert!(hubs.iter().all(|h| h.source.is_empty()), "nothing of the unpinned library is drawn");
-    assert_eq!(
-        items.len(),
-        HOME_CARDS_MAX / 12 * 12,
-        "source 0 fills the budget alone, in whole shelves of 12"
-    );
+    assert_eq!((hubs.len(), items.len()), (200, 200 * 12));
 }
 
-/// A shelf longer than the per-shelf ceiling only ever publishes `MAX_SHELF_ITEMS`, so that is all
-/// the demand it may claim.
+/// Both sources publish every shelf, in roster order, however many there are.
 #[test]
-fn a_long_shelf_claims_only_what_it_can_publish() {
-    let long = shelves_in(0, 1, 1, 200);
+fn two_sources_publish_every_shelf() {
     let srcs = [
-        src(0, "", HubState::Ready, Some(built(0, &[], long))),
-        src(1, "friend", HubState::Ready, Some(built(1, &[], shelves_in(1, 1, 200, 12)))),
-    ];
-    let (_, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone());
-    let theirs: usize = hubs.iter().filter(|h| h.source == "friend").map(|h| h.len).sum();
-    assert_eq!(
-        theirs,
-        (HOME_CARDS_MAX - MAX_SHELF_ITEMS) / 12 * 12,
-        "what the long shelf leaves goes to the friend, in whole shelves, not the half"
-    );
-}
-
-/// Two sources that each want more than the WHOLE bound get equal whole-shelf shares of it, and
-/// the total never crosses it.
-#[test]
-fn the_card_bound_is_shared_between_sources() {
-    let shelves = HOME_CARDS_MAX / 12 + 30; // each source alone wants more than the bound
-    let srcs = [
-        src(0, "", HubState::Ready, Some(built(0, &[], shelves_in(0, 1, shelves, 12)))),
-        src(1, "friend", HubState::Ready, Some(built(1, &[], shelves_in(1, 1, shelves, 12)))),
+        src(0, "", HubState::Ready, Some(built(0, &[], shelves_in(0, 1, 300, 12)))),
+        src(1, "friend", HubState::Ready, Some(built(1, &[], shelves_in(1, 1, 300, 12)))),
     ];
     let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone());
-    let per = |who: &str| -> usize { hubs.iter().filter(|h| h.source == who).map(|h| h.len).sum() };
-    let share = HOME_CARDS_MAX / 2 / 12 * 12;
-    assert_eq!((per(""), per("friend")), (share, share), "equal whole-shelf shares");
-    assert!(items.len() <= HOME_CARDS_MAX);
-    assert_eq!(items.len(), 2 * share);
-}
-
-/// Issue #395 at its distant bound: 170 shelves of 12 from one server all publish, so the reporter's
-/// Home no longer loses rows from the tail. With a 12-card deck in front the 170th no longer fits
-/// (12 + 170 x 12 = 2,052 > 2,048): exactly 169 shelves and the deck land, the 170th is left off
-/// whole, and the overflow reports it.
-#[test]
-fn a_hundred_and_seventy_shelves_reach_home() {
-    let no_deck = [src(0, "", HubState::Ready, Some(built(0, &[], shelves_in(0, 1, 170, 12))))];
-    let (items, hubs, _) = merge_with_scope(&no_deck, &BrowseScope::standalone());
-    assert_eq!((hubs.len(), items.len()), (170, 2040), "all 170 shelves fit alone: 2,040 cards");
-    assert_eq!(bound_overflow(&no_deck, &BrowseScope::standalone(), &(items, hubs, vec![])), (0, 0));
-
-    let with_deck = [src(0, "", HubState::Ready, Some(built_with_deck(12, shelves_in(0, 1, 170, 12))))];
-    let build = merge_with_scope(&with_deck, &BrowseScope::standalone());
-    assert_eq!(build.1.len(), 1 + 169, "the deck and 169 shelves");
-    assert_eq!(build.0.len(), 12 + 169 * 12, "2,040 cards, 8 under the bound");
-    assert_eq!(
-        bound_overflow(&with_deck, &BrowseScope::standalone(), &build),
-        (1, 12),
-        "the 170th shelf, whole"
-    );
+    assert_eq!((hubs.len(), items.len()), (600, 600 * 12));
+    assert!(hubs[..300].iter().all(|h| h.source.is_empty()) && hubs[300..].iter().all(|h| h.source == "friend"));
 }
 
 /// The approximate-bytes figure the landed line carries: the struct plus each string's capacity.
@@ -1021,53 +934,6 @@ fn catalog_bytes_counts_the_struct_and_its_strings() {
     assert_eq!(catalog_bytes(&[]), 0);
     assert_eq!(catalog_bytes(&[Arc::new(PmsMovie::default())]), one);
     assert_eq!(catalog_bytes(&[Arc::new(m)]), one + 100 + 50);
-}
-
-/// The same split over catalog CARDS, the budget the shelves' items come out of.
-#[test]
-fn the_row_budget_is_shared_too() {
-    let _g = plx_base::testlock::serial();
-    let mut o = Owner::default();
-    reset(&mut o.state, &o.adapter);
-    // enough shelves, each already at the per-shelf ceiling, that the card budget is what binds
-    let fat = |slot: u16, tag: &str| {
-        (0..HOME_CARDS_MAX / MAX_SHELF_ITEMS + 5)
-            .map(|s| {
-                let keys: Vec<String> = (0..MAX_SHELF_ITEMS)
-                    .map(|i| format!("{tag}-{s}-{i}"))
-                    .collect();
-                shelf(
-                    slot,
-                    &format!("{tag}{s}"),
-                    "x.recent",
-                    &keys.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    seed(&mut o.state, vec![
-        src(0, "", HubState::Ready, Some(built(0, &[], fat(0, "a")))),
-        src(
-            1,
-            "friend",
-            HubState::Ready,
-            Some(built(1, &[], fat(1, "b"))),
-        ),
-    ]);
-    // each source's share is half the bound, and a shelf is whole or absent
-    let per_source = |who: &str| -> usize {
-        (0..hub_count(&o.state))
-            .filter(|&i| hub_source(&o.state, i) == who)
-            .map(|i| hub_len(&o.state, i))
-            .sum()
-    };
-    let (ours, theirs) = (per_source(""), per_source("friend"));
-    assert_eq!(ours, theirs, "equal shares, not the leftovers");
-    assert_eq!(theirs, (HOME_CARDS_MAX / 2 / MAX_SHELF_ITEMS) * MAX_SHELF_ITEMS);
-    assert_eq!(theirs, 42 * MAX_SHELF_ITEMS, "1,024 / 24 = 42 whole shelves");
-    assert!(catalog(&o.state).len() <= HOME_CARDS_MAX, "the total cap still holds");
-    assert_eq!(catalog(&o.state).len(), ours + theirs);
-    reset(&mut o.state, &o.adapter);
 }
 
 /// The merged deck is capped at what the grid can ADDRESS. Three sources' Continue Watching is
@@ -1112,4 +978,375 @@ fn paging_a_recent_row_does_not_remove_other_home_rows() {
     let (_, hubs, _) = merge(&[source]);
     assert_eq!(hubs.len(), 170);
     assert_eq!(hubs[0].len, 24);
+}
+
+
+// ---- one tile per show across servers (#892) -------------------------------------------------------
+
+/// One card of a source's Continue Watching: an episode of `show` (None: a movie) with its own title.
+fn card(s: ServerId, rk: &str, title: &str, show: Option<u8>, sec: i64, media: bool, viewed: i64) -> CwItem {
+    CwItem {
+        last_viewed_at: viewed,
+        position: 0,
+        m: Arc::new(PmsMovie {
+            sid: s, sec, rk: rk.into(), title: title.into(), thumb: "/t.jpg".into(), art: "/a.jpg".into(),
+            kind: if show.is_some() { 3 } else { 0 },
+            show_guid: show.map(|b| [b; 12]),
+            part: if media { format!("/library/parts/{rk}/file.mkv") } else { String::new() },
+            ..Default::default()
+        }),
+    }
+}
+
+fn deck_of(cards: Vec<CwItem>) -> SourceBuild {
+    SourceBuild { lane: Default::default(), cw: cards, shelves: Vec::new() }
+}
+
+/// `n` servers in the registry (the first is our own, the rest are credited), `(slot, handle)` each.
+fn household(n: usize) -> Vec<(ServerId, String)> {
+    plx_plex::plex::reset_servers_for_test();
+    (0..n).map(|i| {
+        let s = plx_plex::plex::register_for_test(&format!("group-{i}"), "127.0.0.1", 20 + i as i32, "synthetic", "fixture");
+        (s, if i == 0 { String::new() } else { "friend".into() })
+    }).collect()
+}
+
+fn owner_with(sources: Vec<Src>) -> Owner {
+    let mut o = Owner::default();
+    reset(&mut o.state, &o.adapter);
+    seed(&mut o.state, sources);
+    o
+}
+
+fn ready(s: ServerId, handle: &str, cards: Vec<CwItem>) -> Src {
+    let mut source = Src::new(s, handle.into());
+    source.state = HubState::Ready;
+    source.deck_read = DeckRead::Answered;
+    source.last = Some(deck_of(cards));
+    source
+}
+
+/// The #884 regression: the friend's "Social Studies" and our own "Estudios sociales" are one show.
+#[test]
+fn one_show_on_two_servers_is_one_tile() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100)]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]),
+    ]);
+    assert_eq!(rks(&o.state, 0), ["own"], "one tile, from the roster-first server");
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// `lastViewedAt` only sorts: the tile sits where its winning copy sorts, not where the newer one does.
+#[test]
+fn the_tile_sits_at_the_winners_position() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100)]),
+        ready(h[1].0, "friend", vec![
+            card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900),
+            card(h[1].0, "film", "Film", None, 0, true, 500),
+        ]),
+    ]);
+    assert_eq!(rks(&o.state, 0), ["film", "own"]);
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// Plex Web never groups movies: the same film on two servers is two tiles.
+#[test]
+fn the_same_movie_on_two_servers_stays_two_tiles() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own-film", "Film", None, 0, true, 100)]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "their-film", "Film", None, 0, true, 900)]),
+    ]);
+    assert_eq!(rks(&o.state, 0), ["their-film", "own-film"]);
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// Remove acts on the pressed copy only: the other server's copy is the tile afterwards, as in Plex Web.
+#[test]
+fn removing_a_merged_tile_shows_the_other_servers_copy() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100)]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]),
+    ]);
+    assert_eq!(rks(&o.state, 0), ["own"]);
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[0].0, "own"), ViewEdit::LeftDeck));
+    assert_eq!(rks(&o.state, 0), ["theirs"]);
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// Marking the tile watched flags the copies in place (nothing leaves the deck until the refetch),
+/// so the tile stays the winner and never flips to the other server's copy meanwhile.
+#[test]
+fn mark_watched_on_a_merged_tile_does_not_flip_to_the_other_copy() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100)]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]),
+    ]);
+    // the press, then the origin write's landing flagging the other copy (`Done::also`)
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[0].0, "own"), ViewEdit::Watched(true)));
+    assert_eq!(rks(&o.state, 0), ["own"], "after the press");
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[1].0, "theirs"), ViewEdit::Watched(true)));
+    assert_eq!(rks(&o.state, 0), ["own"], "between Done and the refetch");
+    assert!(hub_item(&o.state, 0, 0).is_some_and(|m| m.watched));
+    // a refused origin write: the refetch's answer puts the facts back
+    let back = ViewEdit::Facts { watched: false, unwatched: false, resume_ms: 0 };
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[0].0, "own"), back));
+    assert_eq!(rks(&o.state, 0), ["own"], "a failed origin write leaves the tile where it was");
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A press on a tile with no other copy, or on a movie, changes only that card.
+#[test]
+fn mark_watched_on_a_single_copy_tile_or_a_movie_leaves_the_copies_alone() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![
+            card(h[0].0, "solo", "Solo", Some(5), 0, true, 300),
+            card(h[0].0, "film", "Film", None, 0, true, 200),
+            card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100),
+        ]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]),
+    ]);
+    let held: Vec<_> = o.state.srcs.iter().map(|s| s.copies.rks()).collect();
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[0].0, "solo"), ViewEdit::Watched(true)));
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[0].0, "film"), ViewEdit::Watched(true)));
+    let after: Vec<_> = o.state.srcs.iter().map(|s| s.copies.rks()).collect();
+    assert_eq!(held, after, "the same copies are held");
+    assert_eq!(rks(&o.state, 0), ["solo", "film", "own"]);
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A friend's server that never answers (still loading, its cards stale) never wins and never hides.
+#[test]
+fn a_friend_who_never_answers_never_hides_the_own_copy() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut friend = ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]);
+    friend.state = HubState::Loading;
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100)]),
+        friend,
+    ]);
+    assert_eq!(rks(&o.state, 0), ["own"]);
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A roster-first copy from a server that is failing (or restored from earlier) cannot win: the copy
+/// of the server that answered is the tile.
+#[test]
+fn a_cached_only_or_failing_roster_first_copy_does_not_win() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    for read in [DeckRead::Failed, DeckRead::Cached] {
+        let mut own = ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100)]);
+        own.deck_read = read;
+        own.state = if read == DeckRead::Failed { HubState::Failed } else { HubState::Loading };
+        let mut o = owner_with(vec![
+            own,
+            ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]),
+        ]);
+        assert_eq!(rks(&o.state, 0), ["theirs"], "{read:?}: the copy that can play");
+        reset(&mut o.state, &o.adapter);
+    }
+    // a deck read that is failing and retrying counts the same
+    let mut own = ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 100)]);
+    (own.retry_n, own.deck_read) = (1, DeckRead::Failed);
+    let mut o = owner_with(vec![
+        own,
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]),
+    ]);
+    assert_eq!(rks(&o.state, 0), ["theirs"], "a retrying server");
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// The winner must be a copy that would be SHOWN: a roster-first copy in a library unpinned from Home
+/// is dropped by the pin filter, so it must not hide the pinned one.
+#[test]
+fn an_unpinned_roster_first_copy_does_not_hide_the_pinned_one() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 2, true, 100)]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 1, true, 900)]),
+    ]);
+    let scope = BrowseScope { sections_gen: 1, pins: vec![(h[0].0, 2, false), (h[1].0, 1, true)] };
+    let (cat, hubs, _) = merge_with_scope(&o.state.srcs, &scope);
+    let deck: Vec<_> = cat[hubs[0].start..hubs[0].start + hubs[0].len].iter().map(|m| m.rk.clone()).collect();
+    assert_eq!(deck, ["theirs"], "the show does not vanish");
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A copy without Media yields to one with Media; the hero pool's attribution follows the tile that
+/// was published, not the pre-grouping card list.
+#[test]
+fn row_handles_stay_parallel_after_grouping() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![
+            card(h[0].0, "own", "Estudios sociales", Some(4), 0, false, 800),
+            card(h[0].0, "own-film", "Film", None, 0, true, 300),
+        ]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 900)]),
+    ]);
+    assert_eq!(rks(&o.state, 0), ["theirs", "own-film"], "the copy with Media wins");
+    let handles: Vec<(String, String)> = (0..hero_pool_len(&o.state))
+        .map(|i| (hero_pool_item(&o.state, i).unwrap().rk.clone(), hero_pool_source(&o.state, i).to_string()))
+        .collect();
+    for (rk, source) in &handles {
+        match rk.as_str() {
+            "theirs" => assert_eq!(source, "friend"),
+            "own-film" => assert_eq!(source, ""),
+            _ => {}
+        }
+    }
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// Removing the lane's NEWEST row leaves the held copy outside the span of the rows the lane still
+/// holds; it must not stay the winner and keep hiding the other server's copy.
+#[test]
+fn removing_the_edge_row_shows_the_other_servers_copy() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![
+            card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 900),
+            card(h[0].0, "film", "Film", None, 0, true, 500),
+        ]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 100)]),
+    ]);
+    assert_eq!(rks(&o.state, 0), ["own", "film"]);
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[0].0, "own"), ViewEdit::LeftDeck));
+    assert_eq!(rks(&o.state, 0), ["film", "theirs"], "the pressed copy is gone, the other server's copy is the tile");
+    // and the oldest edge: remove the friend's copy's neighbour at the other end of a lane
+    let mut o2 = owner_with(vec![
+        ready(h[0].0, "", vec![
+            card(h[0].0, "film", "Film", None, 0, true, 900),
+            card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 500),
+        ]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 100)]),
+    ]);
+    assert!(edit_item(&mut o2.state, &ViewAt::leaf(h[0].0, "own"), ViewEdit::LeftDeck));
+    assert_eq!(rks(&o2.state, 0), ["film", "theirs"]);
+    reset(&mut o.state, &o.adapter);
+    reset(&mut o2.state, &o2.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// Two servers that both hold a show 4 copy, a film behind each, and a full refresh under way.
+fn refreshing(h: &[(ServerId, String)]) -> (Owner, Vec<HubRequest>) {
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![
+            card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 900),
+            card(h[0].0, "own-film", "Film", None, 0, true, 500),
+        ]),
+        ready(h[1].0, "friend", vec![
+            card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 800),
+            card(h[1].0, "their-film", "Film", None, 0, true, 400),
+        ]),
+    ]);
+    settle_deck(&mut o.state.srcs, false); // the deck has been placed, as after any answer
+    assert_eq!(rks(&o.state, 0), ["own", "own-film", "their-film"], "premise");
+    let mut held = Vec::new();
+    let _ = request_refetch_hubs_with_scope(&mut o.state, &o.adapter, &BrowseScope::standalone(),
+        &mut |request| { held.push(request); true });
+    assert_eq!(held.len(), 2, "premise: both sources read again");
+    (o, held)
+}
+
+/// A landing of the worker `request` started: the deck rows carry the listing positions a projection gives them.
+fn answer(o: &mut Owner, request: HubRequest, mut build: SourceBuild) {
+    for (at, row) in build.cw.iter_mut().enumerate() { row.position = at; }
+    let key = |at: Option<&CwItem>| at.map_or(String::new(), |row| row.m.rk.clone());
+    build.lane = deck::Lane::preview(&key(build.cw.first()), &key(build.cw.last()), build.cw.len(), build.cw.len(), true);
+    // a refreshed lane comes back seated where the deck stood (`deck::reload`)
+    deck::place(std::slice::from_mut(&mut build.lane), &[build.cw.as_slice()]);
+    let landing = request.complete(Some(build));
+    let _ = super::land(&mut o.state, &o.adapter, &landing);
+}
+
+/// The friend's answer lands before ours: our copy stays the tile all along (a refresh in flight is
+/// not a reason to stop being eligible), so the row never shows the friend's copy and flips back.
+#[test]
+fn a_refresh_where_the_friend_lands_first_does_not_flip_the_tile() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let (mut o, mut held) = refreshing(&h);
+    let friend = held.pop().unwrap();
+    answer(&mut o, friend, deck_of(vec![
+        card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 800),
+        card(h[1].0, "their-film", "Film", None, 0, true, 400),
+    ]));
+    assert_eq!(rks(&o.state, 0), ["own", "own-film", "their-film"], "friend landed, ours not yet");
+    let own = held.pop().unwrap();
+    answer(&mut o, own, deck_of(vec![
+        card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 900),
+        card(h[0].0, "own-film", "Film", None, 0, true, 500),
+    ]));
+    assert_eq!(rks(&o.state, 0), ["own", "own-film", "their-film"], "both landed");
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A commit while both sources are reading must not publish the show twice.
+#[test]
+fn a_commit_while_both_sources_refresh_shows_the_show_once() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let (mut o, _held) = refreshing(&h);
+    assert!(edit_item(&mut o.state, &ViewAt::leaf(h[0].0, "own-film"), ViewEdit::Watched(true)));
+    let shows = rks(&o.state, 0).into_iter().filter(|rk| rk == "own" || rk == "theirs").count();
+    assert_eq!(shows, 1, "one tile: {:?}", rks(&o.state, 0));
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// Another shelf's failing page is not a failing deck: it must not make our copies ineligible. A
+/// failing deck read still does.
+#[test]
+fn only_a_failing_deck_read_makes_a_source_ineligible() {
+    let _g = plx_base::testlock::serial();
+    let h = household(2);
+    let mut o = owner_with(vec![
+        ready(h[0].0, "", vec![card(h[0].0, "own", "Estudios sociales", Some(4), 0, true, 900)]),
+        ready(h[1].0, "friend", vec![card(h[1].0, "theirs", "Social Studies", Some(4), 0, true, 100)]),
+    ]);
+    // a Recently Added page that fails
+    o.state.srcs[0].page = Some(PageQuery { id: "home.movies.recent".into(), key: "/hubs/x".into(), start: 12, before: false,
+        hidden: Vec::new(), reload: false });
+    let _ = landed_fail(&mut o.state.srcs[0]);
+    let (cat, hubs, _) = merge_with_scope(&o.state.srcs, &BrowseScope::standalone());
+    let deck: Vec<_> = cat[hubs[0].start..hubs[0].start + hubs[0].len].iter().map(|m| m.rk.clone()).collect();
+    assert_eq!(deck, ["own"], "a failing shelf page leaves the deck copy eligible");
+    // the deck's own page failing
+    o.state.srcs[0].page = Some(PageQuery { id: DECK_ID.into(), key: String::new(), start: 0, before: false,
+        hidden: Vec::new(), reload: false });
+    let _ = landed_fail(&mut o.state.srcs[0]);
+    let (cat, hubs, _) = merge_with_scope(&o.state.srcs, &BrowseScope::standalone());
+    let deck: Vec<_> = cat[hubs[0].start..hubs[0].start + hubs[0].len].iter().map(|m| m.rk.clone()).collect();
+    assert_eq!(deck, ["theirs"], "a failing deck read yields to the server that answered");
+    reset(&mut o.state, &o.adapter);
+    plx_plex::plex::reset_servers_for_test();
 }

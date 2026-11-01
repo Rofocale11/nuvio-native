@@ -32,29 +32,28 @@ fn collections_fixture(total: usize) -> Fixture {
 }
 
 #[test]
-fn every_library_kind_offers_the_type_selector_and_it_opens_its_own_menu() {
+fn every_library_kind_offers_the_header_controls_and_sort_filter_opens_its_menu() {
     let _guard = plx_base::testlock::serial();
     let movies = Fixture::new();
     let movie_page = movies.screen();
-    assert_eq!(movie_page.toolbar_elems(), [TYPE, SORT, FILTER], "Movies / Collections is a real choice");
-    assert!(<LibraryScreen as Focusable<HostFixture>>::place(&movie_page, &TYPE, &movies.cx(None), At::Drawn).is_some());
-    assert_eq!(movie_page.toolbar_chip(TYPE, &movies.cx(None)).value.to_str().unwrap(), " · Movies");
+    assert_eq!(movie_page.toolbar_elems(), [COLLECTIONS, RECOMMENDED, SORTFILTER]);
+    assert!(<LibraryScreen as Focusable<HostFixture>>::place(&movie_page, &SORTFILTER, &movies.cx(None), At::Drawn).is_some());
     let fixture = tv_fixture(LibraryType::Primary, 36);
     let mut page = tv_page(&fixture);
-    assert_eq!(page.toolbar_elems(), [TYPE, SORT, FILTER]);
+    assert_eq!(page.toolbar_elems(), [COLLECTIONS, RECOMMENDED, SORTFILTER]);
     let mut right = MARGIN_X;
     for &elem in page.toolbar_elems() {
-        let rect = page.toolbar_chip_rect(elem, &fixture.cx(None), At::Drawn);
+        let rect = <LibraryScreen as Focusable<HostFixture>>::place(&page, &elem, &fixture.cx(None), At::Drawn).unwrap().rect;
         assert!(rect.x >= right);
         right = rect.x + rect.w;
     }
-    assert!(right < layout::GRID_RIGHT);
+    assert!(right < layout::GRID_RIGHT + plx_ui::page_header::OVERHANG);
     let mut output = Vec::new();
     let mut present = plx_machine::present::Present::new();
-    page.activate(TYPE, false, &fixture.cx(Some(page.key(TYPE))),
+    page.activate(SORTFILTER, false, &fixture.cx(Some(page.key(SORTFILTER))),
         &mut Effects::new(&mut output, MachineId::Instance(InstanceId(19)), &mut present));
     assert!(output.iter().any(|effect| matches!(effect.fx,
-        Fx::App(AppFx::Library(LibraryReq::Menu { kind: crate::registry::LibraryMenuKind::Type, .. })))));
+        Fx::App(AppFx::Library(LibraryReq::Menu { kind: crate::registry::LibraryMenuKind::SortFilter, .. })))));
 }
 
 #[test]
@@ -65,11 +64,11 @@ fn episode_navigation_and_page_jumps_follow_four_columns() {
     page.initial = false;
     assert_eq!(page.layout.cols(), 4);
     let mut engine = FocusEngine::new();
-    let first = page.key(page.pair.detail.elems[0]);
+    let first = page.key(page.pair.detail.elem_at(0).unwrap());
     engine.set(OWNER, first, Some(page.pair.groups_config().detail), By::Restore);
     direction(&mut page, &mut engine, &fixture, Dir::Down);
     assert_eq!(page.grid_position(engine.current(OWNER)), Some((1, 0)));
-    assert_eq!(engine.current(OWNER).unwrap().elem, page.pair.detail.elems[4]);
+    assert_eq!(engine.current(OWNER).unwrap().elem, page.pair.detail.elem_at(4).unwrap());
     let focused = engine.current(OWNER).unwrap();
     let rect = <LibraryScreen as Focusable<HostFixture>>::place(&page, &focused.elem, &fixture.cx(Some(focused)), At::SpringTarget).unwrap().rect;
     assert!((rect.w / rect.h - 16.0 / 9.0).abs() < 0.01);
@@ -79,7 +78,7 @@ fn episode_navigation_and_page_jumps_follow_four_columns() {
         &mut Effects::new(&mut output, MachineId::Instance(InstanceId(19)), &mut present));
     assert!(output.iter().any(|effect| matches!(&effect.fx,
         Fx::Deliver(_, Delivery::Screen(ScreenEvent::Enter(Enter::Fresh { focus: FocusTarget::Elem(key) })))
-            if key.elem == page.pair.detail.elems[12])));
+            if key.elem == page.pair.detail.elem_at(12).unwrap())));
 }
 
 #[test]
@@ -91,16 +90,14 @@ fn empty_episode_results_keep_type_selector_available() {
     page.page_fade = Xfade::new();
     page.relayout(None);
     assert_eq!(page.readout, Readout::Empty);
-    assert!(page.layout.grid_head);
-    assert!(<LibraryScreen as Focusable<HostFixture>>::place(&page, &TYPE, &fixture.cx(None), At::Drawn).is_some());
-    assert_eq!(page.toolbar_chip(TYPE, &fixture.cx(None)).value.to_str().unwrap(), " · Episodes");
+    assert!(<LibraryScreen as Focusable<HostFixture>>::place(&page, &SORTFILTER, &fixture.cx(None), At::Drawn).is_some());
 }
 
 #[test]
 fn type_menu_command_preserves_plaintext_alert_control_keys() {
     let _guard = plx_base::testlock::serial();
-    assert_ne!(TYPE, PLAINTEXT_CANCEL);
-    assert_ne!(TYPE, PLAINTEXT_CONNECT);
+    assert_ne!(SORTFILTER, PLAINTEXT_CANCEL);
+    assert_ne!(SORTFILTER, PLAINTEXT_CONNECT);
     let fixture = tv_fixture(LibraryType::Primary, 36);
     let mut page = tv_page(&fixture);
     let mut output = Vec::new();
@@ -134,14 +131,12 @@ fn empty_tv_library_names_the_selected_listing_type() {
 /// filter, so the heading row drops FILTER rather than offering a control that changes nothing,
 /// and the TYPE chip names what is listed.
 #[test]
-fn a_collections_listing_hides_the_filter_control() {
+fn a_collections_listing_keeps_the_header_controls() {
     let _guard = plx_base::testlock::serial();
     let fixture = collections_fixture(36);
     let page = fixture.screen();
     assert_eq!(page.listed(), LibraryType::Collections);
-    assert_eq!(page.toolbar_elems(), [TYPE, SORT]);
-    assert!(<LibraryScreen as Focusable<HostFixture>>::place(&page, &FILTER, &fixture.cx(None), At::Drawn).is_none());
-    assert_eq!(page.toolbar_chip(TYPE, &fixture.cx(None)).value.to_str().unwrap(), " · Collections");
+    assert_eq!(page.toolbar_elems(), [COLLECTIONS, RECOMMENDED, SORTFILTER]);
 }
 
 /// An empty Collections answer is the ordinary empty read-out, worded for what was asked for, and
@@ -155,8 +150,7 @@ fn an_empty_collections_listing_says_so_and_keeps_the_type_selector() {
     page.page_fade = Xfade::new();
     page.relayout(None);
     assert_eq!(page.readout, Readout::Empty);
-    assert!(page.layout.grid_head);
-    assert!(<LibraryScreen as Focusable<HostFixture>>::place(&page, &TYPE, &fixture.cx(None), At::Drawn).is_some());
+    assert!(<LibraryScreen as Focusable<HostFixture>>::place(&page, &SORTFILTER, &fixture.cx(None), At::Drawn).is_some());
     let (caption, reason) = page.status_text(&fixture.cx(None));
     assert_eq!(caption.to_str().unwrap(), "No collections in Cinema");
     assert!(reason.is_none());
@@ -170,7 +164,7 @@ fn ok_on_a_collection_card_requests_its_page() {
     let fixture = collections_fixture(36);
     let mut page = fixture.screen();
     page.initial = false;
-    let elem = page.pair.detail.elems[1];
+    let elem = page.pair.detail.elem_at(1).unwrap();
     let mut output = Vec::new();
     let mut present = plx_machine::present::Present::new();
     assert_eq!(page.activate(elem, false, &fixture.cx(Some(page.key(elem))),
@@ -193,7 +187,7 @@ fn the_hold_hint_does_not_stand_on_a_collection_card() {
     page.initial = false;
     page.live = true;
     page.page_fade.mount();
-    let key = page.key(page.pair.detail.elems[1]);
+    let key = page.key(page.pair.detail.elem_at(1).unwrap());
     let mut ms = 0;
     for _ in 0..(6.0 * 60.0) as u32 {
         ms += 17;
@@ -205,7 +199,7 @@ fn the_hold_hint_does_not_stand_on_a_collection_card() {
             &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
     }
     assert!(!page.hold_hint.visible(), "a hold on a collection opens no menu, so no hint");
-    assert!(!plx_ui::hold_hint::shown_this_run(plx_ui::hold_hint::Kind::Library), "and nothing is spent");
+    assert!(!plx_ui::hold_hint::shown_this_run(), "and nothing is spent");
 }
 
 /// The dev/scenario path to a listing type: `SetType` is the menu row's own edit, addressed to the
