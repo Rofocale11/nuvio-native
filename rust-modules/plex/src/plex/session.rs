@@ -248,6 +248,12 @@ pub fn plex_tv_credential(snapshot_user: &UserRef) -> Option<String> {
         return Some(token.clone());
     }
     let stored = peek();
+    // NuvioNative speaks to the in-process shim, whose account token is synthesized
+    // ("nuvio-local") and is not a real plex.tv credential — plex.tv's Watchlist would
+    // reject it with 401. Treat such accounts as having no plex.tv Watchlist to read.
+    if stored.user.uuid == "nuvio-local" {
+        return None;
+    }
     let same_profile = if snapshot_user.uuid.is_empty() {
         stored.user.uuid.is_empty() && snapshot_user.id == stored.user.id
     } else {
