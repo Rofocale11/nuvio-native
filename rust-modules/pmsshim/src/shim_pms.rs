@@ -3389,13 +3389,26 @@ impl Shim {
     }
 
     fn continue_hub(&self, count: usize, section: Option<i64>) -> Value {
-        let rows: Vec<Value> = self
-            .continue_rows(section)
-            .into_iter()
-            .take(count)
-            .collect();
+        let all = self.continue_rows(section);
+        let total = all.len();
+        let rows: Vec<Value> = all.into_iter().take(count).collect();
         json!({"title": "Continue Watching", "type": "mixed", "hubIdentifier": "home.continue",
-               "key": "/hubs/continueWatching", "size": rows.len(), "more": false, "Metadata": rows})
+               "key": "/hubs/continueWatching", "size": rows.len(), "more": total > rows.len(),
+               "totalSize": total, "Metadata": rows})
+    }
+
+    /// The listing behind the Continue Watching hub: the same rows the preview shows, paged.
+    /// `data`'s deck reads this (one window per server) and requires the echoed `offset` to equal
+    /// the requested start; `totalSize` is the whole listing, not a page cap.
+    fn continue_watching_items(&self, start: usize, size: usize) -> Response {
+        let rows = self.continue_rows(None);
+        let total = rows.len();
+        let page: Vec<Value> = rows.into_iter().skip(start).take(size.min(200)).collect();
+        Response::json(&container(json!({
+            "Metadata": page,
+            "offset": start,
+            "totalSize": total,
+        })))
     }
     /// The account's My List, keyed by the shim's numeric ratingKeys. `refresh` forces a network
     /// pull on the first page; the account caches the answer for a minute otherwise.
@@ -3897,6 +3910,10 @@ impl Shim {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(12usize);
                 Response::json(&container(json!({"Hub": [self.continue_hub(count, None)]})))
+            }
+            (_, ["hubs", "continueWatching", "items"]) => {
+                let (start, size) = page_params(req);
+                self.continue_watching_items(start, size.unwrap_or(12))
             }
             (_, ["hubs", "home", "recentlyAdded"]) => {
                 let section = if req.q("type") == Some("2") || req.q("type") == Some("4") {
@@ -5296,5 +5313,102 @@ mod my_list_removal_tests {
         assert!(Shim::write_meta(None, "movie", "tt0133093", true).is_none(), "an add still needs metadata");
         let cached = Arc::new(Meta { id: "tt1".into(), type_: "movie".into(), name: "Matrix".into(), ..Default::default() });
         assert_eq!(Shim::write_meta(Some(cached), "movie", "tt1", false).expect("cached").name, "Matrix");
+    }
+}
+
+#[cfg(test)]
+mod continue_watching_paging_tests {
+    use super::*;
+
+    fn request(path: &str, query: &[(&str, &str)]) -> Request {
+        Request {
+            method: "GET".into(),
+            path: path.into(),
+            query: query.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    fn json_of(response: Response) -> Value {
+        assert_eq!(response.status, 200, "the deck's listing must not refuse");
+        serde_json::from_slice(&response.body).unwrap()
+    }
+
+    /// Five in-progress rows, most recent first by insertion order (same second is fine: the
+    /// assertion below compares sets, not order).
+    fn seeded(shim: &Arc<Shim>) -> Vec<i64> {
+        (0..5)
+            .map(|i| {
+                let rk = shim.keys.key_of(&Ident::Title {
+                    type_: "movie".into(),
+                    id: format!("tt90{i}"),
+                });
+                shim.watch.progress(
+                    rk,
+                    60_000,
+                    7_200_000,
+                    Some(json!({
+                        "ratingKey": rk.to_string(),
+                        "type": "movie",
+                        "title": format!("Film {i}"),
+                        "librarySectionID": 1,
+                    })),
+                );
+                rk
+            })
+            .collect()
+    }
+
+    /// `data/src/stores/deck.rs` reads each server's listing a window at a time and rejects a page
+    /// whose echoed `offset` is not the start it asked for. The shim answered only the hub preview,
+    /// so every paged read fell through to the unhandled route and the deck never read past it.
+    #[test]
+    fn the_deck_listing_pages_contiguously_and_states_its_total() {
+        let shim = Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()));
+        let mut want = seeded(&shim);
+
+        let first = json_of(shim.handle(&request(
+            "/hubs/continueWatching/items",
+            &[("X-Plex-Container-Start", "0"), ("X-Plex-Container-Size", "2")],
+        )));
+        assert_eq!(first["MediaContainer"]["offset"], 0);
+        assert_eq!(first["MediaContainer"]["totalSize"], 5);
+        assert_eq!(first["MediaContainer"]["size"], 2);
+
+        let second = json_of(shim.handle(&request(
+            "/hubs/continueWatching/items",
+            &[("X-Plex-Container-Start", "2"), ("X-Plex-Container-Size", "2")],
+        )));
+        assert_eq!(second["MediaContainer"]["offset"], 2, "the deck re-anchors on this echo");
+        assert_eq!(second["MediaContainer"]["totalSize"], 5);
+
+        let last = json_of(shim.handle(&request(
+            "/hubs/continueWatching/items",
+            &[("X-Plex-Container-Start", "4"), ("X-Plex-Container-Size", "2")],
+        )));
+        assert_eq!(last["MediaContainer"]["size"], 1, "the last page is what is left");
+
+        let mut seen: Vec<i64> = [first, second, last]
+            .iter()
+            .flat_map(|p| p["MediaContainer"]["Metadata"].as_array().unwrap().iter())
+            .map(|row| row["ratingKey"].as_str().unwrap().parse().unwrap())
+            .collect();
+        seen.sort();
+        want.sort();
+        assert_eq!(seen, want, "one page each, no gap and no repeat");
+    }
+
+    /// The preview is the head of the same listing, so it must say how long the whole thing is:
+    /// `data`'s `project_deck` uses `more`/`totalSize` to decide whether the deck has more to read.
+    #[test]
+    fn the_preview_hub_states_the_whole_listing_and_its_more_flag() {
+        let shim = Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()));
+        seeded(&shim);
+        let body = json_of(shim.handle(&request("/hubs/continueWatching", &[("count", "2")])));
+        let hub = &body["MediaContainer"]["Hub"][0];
+        assert_eq!(hub["size"], 2);
+        assert_eq!(hub["totalSize"], 5);
+        assert_eq!(hub["more"], true);
     }
 }

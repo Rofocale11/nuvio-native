@@ -657,10 +657,10 @@ but has three commits of its own that `c2138acb` does not (an encode-lane borrow
 remux test, and multichannel FLAC/PCM tests). Treat `-hq` as the reference, and check a p12
 commit against it before taking it.
 
-The cheap picks against the fork's playback tier are `da8424b7` and `007696c0`; the HUD rework
-and the A-Z rail are a project, not a pick. The television still has not seen tier C, so verify
-the ported UI on the set first, then take this span as one tier-C-shaped port — or cherry-pick
-the playback fixes while the UI is being verified.
+The cheap picks against the fork's playback tier were `da8424b7` and `007696c0`; `da8424b7` was
+taken on 2026-11-02 (the follow-up entry below), so `007696c0` is the one left. The HUD rework
+and the A-Z rail are a project, not a pick. Tier C has run on the set (the 2026-11-02 passes
+below), so the remaining work in this span is that project, not another port.
 
 ### 2026-11-02 — the first tier C television pass: four defects and their fixes
 
@@ -714,9 +714,9 @@ and the cold row is first-fill latency rather than loss.
 60 px now (`media/src/player/text_style.rs`), the pick the viewer already saves is unchanged, and
 the two assertions that pinned the old lift (`text_style`, `text_ass`) moved with it.
 
-Slow-torrent seeks still stutter. This build predates `da8424b7` (an H.264 non-IDR I-slice as
-a keyframe) and the P2P engine's own buffering dominates; that is a candidate for the next
-upstream pick, not a defect found here.
+Slow-torrent seeks still stutter. That build predated `da8424b7` (an H.264 non-IDR I-slice as
+a keyframe), which was taken on 2026-11-02 (the follow-up entry below). The P2P engine's own
+buffering still dominates a cold torrent, so this was not a defect found here.
 
 **Full-suite state on this branch:** `make test-crate C=plxnative-modules` reports 831 passed,
 18 failed. The isolated failure is a stale tier-C expectation — `library_query_tests` expects
@@ -787,14 +787,27 @@ shelves 46/29; Emily Blunt: `bio=2302B`, roles `Actor, Producer`, 3 groups, shel
 - **Frame pacing:** every `perf` heartbeat reads `dropped=0 carried=0`; the 12–20 fps entries are
   mount spikes around detail/person with a `1/1` or `5/3` budget, not dropped frames.
 - **One pre-existing gap, not from this line:** `pmsshim: unhandled GET /hubs/continueWatching/items`
-  (12×). The shim answers `/hubs/continueWatching` — the Home preview — but not the paged
+  (12×). The shim answered `/hubs/continueWatching` — the Home preview — but not the paged
   `/items` listing the deck paging path reads (`data/src/stores/deck.rs`), so a paged/see-all CW
-  surface would come up empty. Home's row is unaffected. Filed as a follow-up.
+  surface would have come up empty. Home's row was unaffected. Closed on 2026-11-02 (below).
 
 **Merged.** `forward-port/v0.9-hq` was fast-forwarded into `nuvio-native` on 2026-11-02 (the trunk
 had not moved since the merge-base `ac0443bc`, 394 commits ahead, 0 behind), so the trunk is the
 product with tier C, the playback lanes, the actor page and every fix above. `forward-port/v0.9-hq`
 stays the branch the stable `.ipk` is built from and has the same tip.
+
+### 2026-11-02 — two follow-ups closed: the paged deck listing and non-IDR keyframes
+
+`da8424b7` was taken. `ff::packet_to_annexb` now counts an H.264 non-IDR I-slice as a keyframe
+when the demuxer flagged the packet `AV_PKT_FLAG_KEY` or an SPS precedes the slice in the AU, so a
+seek into a Blu-ray remux no longer waits for an IDR that never comes. The rule is upstream's
+(`media/src/ff.rs`, tests in `ff_packet_framing_tests.rs`); the host suite cannot see the Starfish
+decoder restart, so the device check is one seek into a remux on the set.
+
+The shim now answers `/hubs/continueWatching/items`: the same rows as the preview, paged by
+`X-Plex-Container-Start`/`Size`, echoing `offset` and carrying the listing's `totalSize`. The hub
+itself reports `totalSize` and a truthful `more`. That closes the unhandled-request gap without
+changing Home, whose row reads the preview (`docs/pms-api.md`).
 
 ## Recomputing
 

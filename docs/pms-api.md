@@ -271,6 +271,14 @@ shim's own base rather than on `discover.provider.plex.tv`:
 - An unknown guid (including an empty one) is a `200` with an empty `Metadata` / `CreditGroup`,
   exactly the provider's "never heard of them" answer the page settles on.
 
+**The shim's Continue Watching hub also answers its paged listing.** `/hubs/continueWatching`
+returns the preview (the rows `continue_hub` shows); `/hubs/continueWatching/items` returns those
+same rows by `X-Plex-Container-Start` / `X-Plex-Container-Size`, echoing `offset`, carrying the
+whole listing's `totalSize`, and leaving out the rows past the end. That echo is load-bearing:
+`data/src/stores/deck.rs` rejects a page whose `offset` is not the start it asked for, so without
+this route every paged deck read fell through to the unhandled-request answer and the deck never
+read past its preview. The hub itself now also states `totalSize` and `more`.
+
 ---
 
 ## 2d. Which of these guids does this server hold? — `GET /library/all?type=T&guid=a,b,c`
