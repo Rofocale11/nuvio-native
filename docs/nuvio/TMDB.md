@@ -11,6 +11,11 @@ Both kinds use a **single HTTP request** with
 `append_to_response=credits,recommendations,images`, so cast, related titles and the title logo
 arrive together. Do not add separate `/credits`, `/recommendations` or `/images` calls.
 
+The IMDb→TMDB id resolution is a **second** request only when the meta does not already carry one:
+Cinemeta returns `moviedb_id` (verified for movies and series), so `/find` is the fallback, not the
+default. `DETAIL-LATENCY.md` records why that one round trip matters on the detail page's critical
+path.
+
 ```rust
 pub fn movie_details(&self, movie_id: u64) -> Result<TmdbMovieDetails> {
     self.get(&format!("/movie/{movie_id}?append_to_response=credits,recommendations,images"))

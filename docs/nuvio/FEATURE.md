@@ -4,8 +4,8 @@ NuvioNative is a fork of PlxNative (upstream `GLinnik21/plx-native`) that turns 
 native LG webOS browser/player for **Stremio addons** (Cinemeta, Torrentio, AIOStreams, …) and the
 **Nuvio account**, while keeping PlxNative's GPU UI and native Starfish/ACB video pipeline. This
 file is a running catalog of what the fork adds on top of upstream; companion docs
-(`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md`, `PLAYBACK.md`, `WATCH-PROGRESS.md`) hold the
-design detail.
+(`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md`, `PLAYBACK.md`, `WATCH-PROGRESS.md`,
+`DETAIL-LATENCY.md`) hold the design detail.
 
 ## Addon backend (Stremio → Plex dialect)
 

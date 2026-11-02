@@ -6,6 +6,18 @@ Project-specific Claude subagents are available under `.claude/agents/`. Shared 
 through `.claude/skills`, which is a relative symlink to the canonical `.agents/skills/` tree.
 Claude-only hooks and the Rust analyzer plugin are configured in `.claude/settings.json`.
 
+## Fork topology (overrides the upstream assumptions below)
+
+`AGENTS.md` and `docs/nuvio/UPSTREAM.md` are the authority for this repository. Two inherited
+assumptions are wrong here:
+
+- **The trunk is `nuvio-native`, not `main`.** `main` holds upstream-side history only; never cut,
+  build, or ship it. The working line is `forward-port/v0.9-hq`.
+- **`tools/build-gc.sh --worktrees` judges lanes against `origin/main`**, so a lane cut from
+  `nuvio-native` or `forward-port/v0.9-hq` always reads `unmerged` and is kept. Never delete a
+  fork lane on that verdict; check `git merge-base --is-ancestor <sha> origin/nuvio-native`
+  yourself. The failure is conservative (kept, not deleted), but the report is misleading.
+
 ## Worktree gotchas (Claude sessions)
 
 - The Bash tool's "Shell cwd was reset to …" can leave you in the MAIN checkout (`/Users/…/plx-native`), not your worktree: a bare `git checkout -B x` there moves the owner's checkout off `main`. Start branch-switching commands with `cd <your worktree> &&` (or `git -C`), and confirm with `git branch --show-current`.

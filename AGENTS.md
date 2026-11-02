@@ -23,9 +23,11 @@ The target is a cross-compiled 32-bit ARM application with a hardware video plan
 tests and the macOS simulator are valuable, but they cannot prove every device behavior.
 App ids: `com.nuvionative.app.debug` and `com.nuvionative.app`, title "Nuvio Native".
 
-The fork's design authority is `docs/nuvio/`: `ARCHITECTURE.md`, `ID-MANAGEMENT.md`,
-`TMDB.md`, `PLAYBACK.md`, `WATCH-PROGRESS.md`, and `UPSTREAM.md` (which upstream work to
-take, and how). Read the relevant one before changing that area. Upstream PlxNative docs in
+The fork's design authority is `docs/nuvio/`: `FEATURE.md` (the running catalog of what the
+fork adds over upstream), `ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md`, `PLAYBACK.md`,
+`WATCH-PROGRESS.md`, `DETAIL-LATENCY.md` (the detail-page round-trip budget, prefetch and
+caching plan), and `UPSTREAM.md` (which upstream work to take, and how). Read the relevant one
+before changing that area. Upstream PlxNative docs in
 `docs/` may describe Plex-only behavior and do not always apply to the addon backend.
 
 ## Load the right context
@@ -44,9 +46,10 @@ take, and how). Read the relevant one before changing that area. Upstream PlxNat
   and widget systems instead of adding screen-local visual primitives. Before touching a
   screen, also read `rust-modules/screens/src/CLAUDE.md`; the restructure's design record
   is `docs/ui-restructure-spec-v4.md`, which `rust-modules/ui/src/lib.rs` cites by section
-  number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) is on
-  `forward-port/v0.9-hq` (ported on `tier-c/ui`, which was merged and then deleted): run
-  `git log --oneline nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens
+  number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) is in **both** the trunk and
+  `forward-port/v0.9-hq` (ported on `tier-c/ui`, merged then deleted). The working line is three
+  commits ahead of the trunk: the two follow-ups, the branch-topology docs and the poster cap.
+  Run `git log --oneline nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens
   are the ported ones.
 - Before account/watch-progress work, read `docs/nuvio/WATCH-PROGRESS.md`.
 - Before taking any upstream PlxNative work — cherry-picking a fix, absorbing a Richi branch, or
@@ -54,8 +57,10 @@ take, and how). Read the relevant one before changing that area. Upstream PlxNat
   `tools/upstream-seam.sh`. The reference branch is `upstream/feature/v0.9-hq`, which is a
   superset of `upstream/main`, and the measured merge cost is in that file. Run
   `git fetch upstream` first: the seam measures local remote-tracking refs, and the
-  reference moves (it gained 166 commits between the tier-C port and 2026-11-01). A stale
-  ref understates the gap.
+  reference moves (it advanced 166 commits past the ported tip, Package 11 → Package 13, by
+  2026-11-01). A stale ref understates the gap. The documented base in `UPSTREAM.md` is now
+  `d12e8659` (Package 11); `tools/upstream-seam.sh check` passes on both the trunk and the
+  working line and must keep passing after a document edit.
 - Repository skills live in `.agents/skills/`. Use the matching skill whenever its
   description fits the task; the TV, simulator, FFI, release, and verification workflows
   have non-obvious constraints that generic commands miss.
@@ -120,9 +125,9 @@ fails the build on a forbidden edge.
 - **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line
   (2026-11-02).** `nuvio-native` is the trunk and the product; work happens on short-lived
   branches or worktrees cut from it, and lands back on it. Since 2026-11-02 the owner has
-  directed that new work land on `forward-port/v0.9-hq` (the stable `.ipk` line, currently one
-  commit ahead of the trunk with the seek and Continue-Watching follow-ups); fast-forward
-  `nuvio-native` only when the owner asks. Merge
+  directed that new work land on `forward-port/v0.9-hq` (the stable `.ipk` line, currently three
+  commits ahead of the trunk: the two follow-ups, the branch-topology docs, and the poster cap);
+  fast-forward `nuvio-native` only when the owner asks. Merge
   commits and squash commits are both acceptable there. `main` is NOT the trunk: it holds
   upstream-side history and none of the fork's commits — never cut work from it, never build or
   ship it. The upstream relationship (base commit, freeze-and-cherry-pick policy, what a merge
@@ -138,6 +143,9 @@ fails the build on a forbidden edge.
   `ci/allow/layers.txt`, which is empty and only shrinks.
 - Preserve unrelated user changes and generated artifacts. Never clean or reset a dirty
   tree to make a task easier.
+- **Check `git worktree list` before switching branches.** The trunk (`nuvio-native`) and
+  `main` may be checked out in other worktrees; do not try to switch this checkout to a
+  branch another worktree holds. Cut a scratch branch from the working line instead.
 - This repository is public. Never publish values from gitignored private files such as
   `.tv-host`, `.tv-mac`, `src/config.local.h`, `tests/manifest.local.json`,
   `pkg/auth.json`, `pkg/lab.json`, or the other paths enumerated by
@@ -219,6 +227,13 @@ fails the build on a forbidden edge.
 ## 🔍 Offline Debugging Tools
 
 These run entirely on the host (x86_64) with no TV, simulator, or ARM toolchain.
+
+**Tools are not a menu.** The canonical entry points are the `ai-*` scripts below and
+`tools/upstream-seam.sh`. The skills own the rest by name (`tv-lock.sh`, `tv-session.sh`,
+`screenshots.py`, `sim.ps1`, the `profile-*` tools). Everything else in `tools/` is upstream
+PlxNative tooling inherited with the fork: do not invoke one by guessing what its name means —
+read its header or the skill/doc that names it first. Raw `ssh` and `tools/nv-tv.py` are
+forbidden by the TV rules above.
 
 - **Module layers:** `./tools/ai-layers.sh` — runs `python3 ci/check-module-layers.py` and prints
   "Layer check PASSED" or the forbidden edges. Run after touching module references.

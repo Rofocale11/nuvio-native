@@ -6,7 +6,8 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
 Companion documents: `ID-MANAGEMENT.md` (numeric keys, the key table, synthetic keys),
 `TMDB.md` (detail enrichment, person pages, collections), `PLAYBACK.md` (the stream → decoder
-path), `WATCH-PROGRESS.md` (local watch state and the account mirror).
+path), `WATCH-PROGRESS.md` (local watch state and the account mirror), `DETAIL-LATENCY.md`
+(why a detail open is several round trips, and the plan to prefetch and cache them).
 
 ## Findings that drive the design
 
