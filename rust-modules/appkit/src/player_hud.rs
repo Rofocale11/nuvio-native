@@ -1756,7 +1756,8 @@ pub fn draw_title_logo(
     title: *const std::os::raw::c_char,
     sid: u16,
     rk: &str,
-    measure: &dyn plx_machine::machine::Measure,
+    right: f32,
+    measure: &dyn Measure,
 ) {
     let Some((_tex, src_w, src_h)) = (!rk.is_empty())
         .then(|| plx_ui::tex::logo_src(sid, rk))
@@ -1765,6 +1766,10 @@ pub fn draw_title_logo(
         draw_title(p, kicker, title);
         return;
     };
+    // The logo shares the title's column: clip it where the text would have been ellipsised, so a
+    // wide wordmark never runs under the control row.
+    let width = (right - SB_X).max(0.0);
+    let _clip = plx_ui::screen::ClipScope::open_in(p, Rect::new(SB_X, 0.0, width, SCR_H));
     // Only an episode keeps its kicker: it sits BELOW the logo, in the space the episode layout
     // leaves for it. A film's ctxline sits at the logo's own height (`HUD_LOGO_Y_MOVIE` band spans
     // it), so with a logo up it is not drawn at all rather than colliding with the wordmark.
@@ -1788,6 +1793,12 @@ pub fn draw_title_logo(
 /// uses for its art (`chapters_panel`, `info_panel`, `up_next`): the item's own, else the surface's.
 fn hud_logo_sid(ps: &plx_media::route::PlaybackSession) -> u16 {
     plx_media::route::item_sid(plx_media::route::cur_sid(ps)).raw()
+}
+
+/// Whether the HUD has resident clearLogo pixels for `rk` — the same gate [`draw_title_logo`]
+/// applies. When false the display title stays text (the clipped, marquee-aware path).
+fn title_logo_present(sid: u16, rk: &str) -> bool {
+    !rk.is_empty() && plx_ui::tex::logo_src(sid, rk).is_some()
 }
 
 /// How the playhead is drawn — see [`draw_playbar`].
@@ -2103,6 +2114,7 @@ pub fn draw_hud(
         if chrome {
             let right = title_right(slot, row, measure);
             let paused = plx_media::player::TX.paused.load(Relaxed);
+            let sid = hud_logo_sid(ps);
             if let Some(n) = meta.now_playing().filter(|n| n.is_real_episode) {
                 // `fmt::episode_kicker` outright — this line was a byte-identical hand-spelling of it, which
                 // is the drift that formatter exists to prevent (the pre-roll ctx line and the Up Next
@@ -2118,16 +2130,51 @@ pub fn draw_hud(
                 // refactor was supposed to be visual-no-op, and an `unwrap_or_default()` here draws an
                 // EMPTY title line instead of skipping it, which is a real (if rare) behavior change.
                 if let Ok(title) = CString::new(n.title.clone()) {
-                    draw_player_title(pc, Kicker::Episode(kicker.as_ptr()), title.as_ptr(),
-                        right, measure, paused, &row.title_clock);
+                    if title_logo_present(sid, &n.detail_rk) {
+                        draw_title_logo(
+                            pc,
+                            Kicker::Episode(kicker.as_ptr()),
+                            title.as_ptr(),
+                            sid,
+                            &n.detail_rk,
+                            right,
+                            measure,
+                        );
+                    } else {
+                        draw_player_title(
+                            pc,
+                            Kicker::Episode(kicker.as_ptr()),
+                            title.as_ptr(),
+                            right,
+                            measure,
+                            paused,
+                            &row.title_clock,
+                        );
+                    }
                 }
             } else {
-                draw_player_title(
-                    pc,
-                    Kicker::Context(plx_media::route::ctxline_cptr(ps)),
-                    plx_media::route::title_cptr(ps),
-                    right, measure, paused, &row.title_clock,
-                );
+                let rk = meta.now_playing().map_or("", |n| n.detail_rk.as_str());
+                if title_logo_present(sid, rk) {
+                    draw_title_logo(
+                        pc,
+                        Kicker::Context(plx_media::route::ctxline_cptr(ps)),
+                        plx_media::route::title_cptr(ps),
+                        sid,
+                        rk,
+                        right,
+                        measure,
+                    );
+                } else {
+                    draw_player_title(
+                        pc,
+                        Kicker::Context(plx_media::route::ctxline_cptr(ps)),
+                        plx_media::route::title_cptr(ps),
+                        right,
+                        measure,
+                        paused,
+                        &row.title_clock,
+                    );
+                }
             }
 
             // The right control row, from the slot the CALLER resolved — so what is drawn and what a
@@ -3593,5 +3640,30 @@ mod tests {
             );
         }
         assert_eq!(caption_layout(6, 1.0, SUB_BASE_Y, CAPTION_FLOOR_Y).top, CAPSULE_BOTTOM_Y);
+    }
+}
+
+#[cfg(test)]
+mod hud_logo_wiring_tests {
+    /// The tier-C port replaced the HUD's `draw_title_logo` calls with the text-only
+    /// `draw_player_title`, leaving the clearLogo path unreachable. A title with resident logo
+    /// pixels must take the logo path; one without them keeps the clipped text fallback.
+    #[test]
+    fn the_hud_prefers_a_resident_clear_logo_over_the_text_title() {
+        // Split with `concat!` so this test's own text, which `include_str!` reads too, can never
+        // be what the needles match.
+        let source = include_str!("player_hud.rs");
+        let body = source
+            .split_once(concat!("if let Some(n) = meta.", "now_playing().filter(|n| n.is_real_episode)"))
+            .expect("the HUD's title block")
+            .1;
+        let body = body
+            .split_once(concat!("// The right ", "control row, from the slot"))
+            .expect("the end of the title block")
+            .0;
+        assert!(body.contains(concat!("if title_logo_present(", "sid, &n.detail_rk)")), "an episode title must try the logo");
+        assert!(body.contains(concat!("if title_logo_present(", "sid, rk)")), "a film title must try the logo");
+        assert!(body.contains(concat!("draw_title_logo(", "\n")), "the logo path must be called");
+        assert!(body.contains(concat!("draw_player_title(", "\n")), "the text path must remain the fallback");
     }
 }

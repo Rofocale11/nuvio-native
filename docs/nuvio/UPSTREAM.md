@@ -659,6 +659,54 @@ and the A-Z rail are a project, not a pick. The television still has not seen ti
 the ported UI on the set first, then take this span as one tier-C-shaped port — or cherry-pick
 the playback fixes while the UI is being verified.
 
+### 2026-11-02 — the first tier C television pass: four defects and their fixes
+
+The stable `forward-port/v0.9-hq` build (`da56aa21`) ran on the set. Boot, Home, Library,
+Watchlist, Detail and playback worked, P2P worked, and the subtitle size/position preference
+survived a cold boot. Four defects did not:
+
+- **The Detail/Home bookmark disc never learned membership.** `frame_ingest` fed only the
+  Watchlist page (`watchlist_feed`); `catalog_feed`, which feeds every open Detail and Home
+  disc, existed but was called from tests alone. A title on the list therefore still offered
+  Add, and the page could never issue its Remove. `frame_ingest` calls it after
+  `watchlist_feed` now; the route tests no longer feed it themselves, and were RED
+  (`Unknown` vs `Off`) without the call.
+- **A Remove after the metadata cache had gone failed with 404.** `save_my_list_title`
+  re-resolved the full add-on `Meta` before deleting; that cache is in memory with a six-hour
+  TTL, so an Add made from a Detail page worked and a Remove hours later did not. A removal
+  now needs only the account's own `(type, id)` (`Shim::write_meta`); an Add still needs the
+  metadata (or its TMDB fallback).
+- **The player HUD lost the clearLogo.** The tier C port replaced the HUD's `draw_title_logo`
+  calls with the text-only `draw_player_title`, leaving the logo path with no caller. The HUD
+  now takes the logo path when `logo_src` is resident (clipped to the title's control row) and
+  falls back to the clipped/marquee text otherwise.
+- **The Home hero's scrim snapped off at the `hero_a > 0.01` gate.** `base_scrim_bottom_a`
+  had a 0.30 floor while the ramp was gated off at 0.01, so the bottom third dropped in one
+  frame mid-dive. The foot now scales with `hero_a` and reaches zero with the photo; Detail's
+  ramp never had a floor.
+
+The simulator confirmed the Detail disc's filled face (a checkmark) for a My List title and
+the new Home. The television has not seen these fixes yet, and a Remove was not exercised on
+the simulator because that would write to the account.
+
+**Poster gap, not a cache gap (yet).** One Watchlist tile (a 2026 title) was blank while every
+other tile had art; its Detail page had no poster, backdrop or logo, so the source has no art
+for it. The render pool logged `lost=0, rearmed=14, refused=16`, i.e. it re-uploads rather than
+losing art, so the 24 MiB pool is not the proven cause and was NOT raised. A real latch was
+fixed: a `/photo` request for a metadata row that has not landed returned 404, which the
+poster store treats as final; it returns 503 (retryable) now, while a row that exists without
+art still returns 404.
+
+Slow-torrent seeks still stutter. This build predates `da8424b7` (an H.264 non-IDR I-slice as
+a keyframe) and the P2P engine's own buffering dominates; that is a candidate for the next
+upstream pick, not a defect found here.
+
+**Full-suite state on this branch:** `make test-crate C=plxnative-modules` reports 831 passed,
+18 failed. The isolated failure is a stale tier-C expectation — `library_query_tests` expects
+`LibraryMenuKind::Filter` while the tier-C Library opens `SortFilter` — and the rest are
+Library route/recorder tests plus the known sandbox `menu_play_season` port refusal. None are
+in the files these fixes touch; they are a separate triage, not evidence against these fixes.
+
 ## Recomputing
 
 ```sh
