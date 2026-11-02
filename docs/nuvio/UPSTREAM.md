@@ -502,8 +502,8 @@ already has as `1bcf30b2`. Taking it would replace working code with its twin.
 | `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the trunk so an experiment cannot break it. May lag the trunk. |
 | `main` | **not this project.** It holds upstream-side history and none of the fork's commits. Never cut work from it; never build or ship it. |
 | `upstream/feature/v0.9-hq` | Richi's HQ line — the reference for upstream work. Read-only. |
-| `forward-port/v0.9-hq` | the A+B merge (`656e0cb2`) and the forward-port's integration line. Pushed; not the trunk. Tier C lands on `tier-c/ui` and merges back here. |
-| `tier-c/ui` | tier C ported on top of the A+B merge (`741def78` plus the fixes after it). Pushed. The television has not seen it; verify before merging to `nuvio-native`. |
+| `forward-port/v0.9-hq` | the integration line: the A+B merge (`656e0cb2`), then tier C merged on top (`5297c0aa`). Pushed; not the trunk. This is the branch the stable `.ipk` is built from. |
+| `tier-c/ui` | tier C ported on top of the A+B merge (`741def78`), plus the port fixes through `f41d84a5`. Pushed and merged into `forward-port/v0.9-hq`. The television has not seen the newest fixes (poster pool/workers, subtitle Middle); verify before merging to `nuvio-native`. |
 
 Merge commits into `nuvio-native` are normal here. `AGENTS.md`'s inherited "`main` takes SQUASH
 merges only" is the origin project's policy, not this repository's.
@@ -706,7 +706,12 @@ for as long as the screen is up. The pool is back to the measured zero-refusal p
 50/4. The remaining blank-until-late tiles were first-load latency, not loss: a cold row of 20
 images took 450–600 ms each through the fixed two poster workers and drew last at +4.0 s. From
 the same imgtrace, `POSTER_WORKERS` is now 4; that row finishes at +1.2 s, and the decoded-byte
-admission cap (8 MiB) still bounds the batch.
+admission cap (8 MiB) still bounds the batch. All of it is simulator evidence: the pool size,
+the worker count and the cold-row timing have not been exercised on the set.
+
+**The Middle subtitle position sits lower.** `position_lift` lifted Middle 160 px above Low; it is
+60 px now (`media/src/player/text_style.rs`), the pick the viewer already saves is unchanged, and
+the two assertions that pinned the old lift (`text_style`, `text_ass`) moved with it.
 
 Slow-torrent seeks still stutter. This build predates `da8424b7` (an H.264 non-IDR I-slice as
 a keyframe) and the P2P engine's own buffering dominates; that is a candidate for the next
