@@ -664,10 +664,16 @@ fn home_requests(app: &mut App, now: u32) {
                     other => bridge::nav_tab(&mut app.pages, &mut app.bridge, other, None, Some(ret)),
                 }
             }
-            HomeReq::Play { sid, rk, resume_ns } =>
-                activate_home_item(app, source, entry, sid, &rk, Some(resume_ns), ret, now),
-            HomeReq::Detail { sid, rk } =>
-                activate_home_item(app, source, entry, sid, &rk, None, ret, now),
+            HomeReq::Play { sid, rk, resume_ns } => {
+                activate_home_item(&mut app.player.session, &mut app.adapters.player,
+                    &mut app.pages, &mut app.bridge, &mut app.menu_play_await,
+                    sid, &rk, Some(resume_ns), ret, now);
+            }
+            HomeReq::Detail { sid, rk } => {
+                activate_home_item(&mut app.player.session, &mut app.adapters.player,
+                    &mut app.pages, &mut app.bridge, &mut app.menu_play_await,
+                    sid, &rk, None, ret, now);
+            }
             HomeReq::ItemMenu { sid, rk } => {
                 let snapshot = app.bridge.hubs_snapshot();
                 let Some(item) = home_item(snapshot.view(), sid, &rk)
@@ -2558,20 +2564,35 @@ fn home_menu_from_deck(ret: &ReturnState<u32, PageMemory>) -> bool {
         HomeItemIdentity::Item { hub: HomeHubIdentity::ContinueWatching, .. }))
 }
 
+/// **Perform one Home card request against the card the published hubs hold.** Returns whether that
+/// card was found (the loop ignores the answer; the route-test pump asserts it).
+///
+/// **The REQUEST says whether the press plays.** `Play` carries a resume point; `Detail` does not.
+/// The card's place in Continue Watching is not the answer: Home has already consulted the deck
+/// setting (`deck_press().press_plays()`) before it emits either request, so reading "from the
+/// deck" as "play now" here would ignore an Open-details user entirely — the tier-C port passed
+/// `from_deck` in that slot and OK on a Continue Watching tile attempted a play instead of opening
+/// the page.
 #[allow(clippy::too_many_arguments)]
-fn activate_home_item(app: &mut App, source: MachineId, entry: EntryId,
-    sid: plx_plex::plex::ServerId, rk: &str, resume_ns: Option<i64>, ret: ReturnState<u32, PageMemory>, now: u32) {
-    let snapshot = app.bridge.hubs_snapshot();
-    let Some(mut item) = home_item(snapshot.view(), sid, rk).cloned() else { return };
+pub(super) fn activate_home_item(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    menu_play_await: &mut Option<super::input::MenuPlayAwait>,
+    sid: plx_plex::plex::ServerId, rk: &str, resume_ns: Option<i64>,
+    ret: ReturnState<u32, PageMemory>, now: u32,
+) -> bool {
+    let snapshot = bridge.hubs_snapshot();
+    let Some(mut item) = home_item(snapshot.view(), sid, rk).cloned() else { return false };
     if let Some(resume_ns) = resume_ns { item.resume_ms = resume_ns.max(0) / 1_000_000; }
     // Home is the container's ROOT and a card press is the user acting on it, so there is nothing
     // above it to spend — `Trail::reset()` stood here and was a no-op in the only case that could
     // reach it (see `apply_item_action`'s note on `from_home`).
-    let _ = (source, entry);
-    let from_deck = home_menu_from_deck(&ret);
-    unsafe { activate_card(&mut app.player.session, &mut app.adapters.player, &item, from_deck,
-        HUD_LINGER_MS, Some(ret), &mut app.pages, &mut app.bridge,
-        &mut app.menu_play_await, now); }
+    let want_play = resume_ns.is_some();
+    unsafe { activate_card(ps, pa, &item, want_play, HUD_LINGER_MS, Some(ret), pages, bridge,
+        menu_play_await, now); }
+    true
 }
 
 // (`cancel_content_navigation` and `freeze_request` stood here. The first re-checked the queued

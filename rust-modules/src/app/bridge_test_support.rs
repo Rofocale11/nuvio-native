@@ -208,26 +208,19 @@ fn pump_requests(d: &mut Dispatcher<AppHost>, rig: &mut Bridge, mut item: Option
     seen
 }
 
-/// **A Home card's Detail request, performed with the loop's own opener.** `content::home_requests` hands
-/// `HomeReq::Detail` to `activate_home_item`, which finds the card in the published hubs and opens it with
-/// `input::activate_deck_card` and the page's `ReturnState`. This finds the card the same way and calls that
-/// same `activate_deck_card`, so `activate_card`'s and `open_detail`'s handling of the return state is the
-/// loop's. `from_deck` is false: a World's Home has no Continue Watching deck to press. It does NOT run
-/// `activate_home_item` itself, which takes the whole `App` this rig does not build, so a loop that dropped
-/// `ret` between `home_requests` and `activate_deck_card` is not caught by a test that uses this.
+/// **A Home card's Detail request, performed by the loop's own opener.** `content::home_requests`
+/// hands `HomeReq::Detail` to `content::activate_home_item`, which finds the card in the published
+/// hubs and decides play-vs-open from the request before calling `input::activate_card` with the
+/// page's `ReturnState`. This calls that same `activate_home_item` (with no resume point, as a
+/// Detail request carries none), so the wiring under test is the production one: a regression that
+/// turned a Detail press into a play — the tier-C port's `from_deck` slip — fails a World test here.
 fn perform_home_detail(pump: &mut Pump, now: u32, d: &mut Dispatcher<AppHost>, rig: &mut Bridge,
     sid: plx_plex::plex::ServerId, rk: &str, ret: plx_ui::screen::ReturnState<u32, plx_screens::registry::PageMemory>) {
-    let item = {
-        let snapshot = rig.hubs_snapshot();
-        let view = snapshot.view();
-        (0..view.hub_count()).find_map(|i| view.hub(i)?.items.iter()
-            .find(|item| plx_plex::plex::same_item((item.sid, &item.rk), (sid, rk))).map(|item| (**item).clone()))
-    }.expect("the card the request names is in the published hubs");
-    // SAFETY: the player seam is this pump's own `NoSink` session (`Pump::new`).
-    unsafe {
-        crate::app::input::activate_card(&mut pump.ps, &mut pump.pa, &item, false,
-            plx_screens::player::input::HUD_LINGER_MS, Some(ret), d, rig, &mut pump.menu_play_await, now);
-    }
+    assert!(
+        crate::app::content::activate_home_item(&mut pump.ps, &mut pump.pa, d, rig,
+            &mut pump.menu_play_await, sid, rk, None, ret, now),
+        "the card the request names is in the published hubs"
+    );
 }
 
 /// The section table's index of "Film Club" (a Movie library of the second source): the library the

@@ -567,11 +567,25 @@ posters, a tile opens the shim-backed Detail (`rk=10369`), the Detail's bookmark
 title's membership, and the Sort & Filter menu opens (`overlay=watchlist_menu`) with the grid
 reflowing under it. The television has not seen this yet.
 
-**Known gap, not fixed here:** the shared strip still draws its selection capsule on "Movies" while
-the Watchlist page is on top (the bookmark pill is focused, but the stale `view_tab` wins). That is a
-tab-container presentation defect, separate from the data boundary and the requests. `plx_data`'s
-suite also has four concurrency-shaped failures under `make test-crate`
-(`metadata::demo_fixture_tests::…`, `metadata::record::…committed_fixture…`,
+Two further tier-C presentation defects were found on the same simulator and are fixed:
+
+- **The shared strip's capsule froze on the pill the user came from while the Watchlist was on
+  top.** The Watchlist wears the bar, but `run::update`'s chrome chain only stepped
+  `Bridge::update_home_chrome` on Home, Library and Search, so the capsule's springs never saw the
+  Watchlist's selection. The arm covers `AppArg::Watchlist` too now.
+- **OK on a Continue Watching tile did nothing under "Open details".** Home asks
+  `deck_press().press_plays()` and emits either `Play` (which carries a resume point) or `Detail`.
+  The port's `activate_home_item` then passed `home_menu_from_deck` as `activate_card`'s
+  `want_play`, turning every deck press into a play attempt — which, for a title with no playable
+  stream, silently lost — instead of opening the page. `want_play` now comes from the request
+  itself (`resume_ns.is_some()`), and the route-test pump performs the production opener so a World
+  test grades that wiring.
+
+Both were verified on the simulator: Movies → Watchlist leaves the capsule on the bookmark, and a
+Continue Watching tile opens its Detail page.
+
+**Known gap, not fixed here:** `plx_data`'s suite has four concurrency-shaped failures under
+`make test-crate` (`metadata::demo_fixture_tests::…`, `metadata::record::…committed_fixture…`,
 `person::…forty_servers…`, `search::account_scope_tests::…`) that are not Watchlist code.
 
 ## Recomputing

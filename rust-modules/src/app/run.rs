@@ -2122,16 +2122,16 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
             });
             fr.underlay_moving |= moving;
         } else if !super::bridge::host_frozen(&app.pages)
-            && matches!(app.route(), AppArg::Search)
+            && matches!(app.route(), AppArg::Search | AppArg::Watchlist)
         {
-            // Search wears the same shared bar as Home/Library (`ScreenArg::chrome() ==
-            // Chrome::TabBar`, `screens/registry.rs`), and
-            // `SearchScreen::tick` only steps the screen's OWN rows/springs — it never touches
-            // the strip's capsule/scroll/chip springs, which live in `Bridge`'s own
+            // Search and the Watchlist wear the same shared bar as Home/Library
+            // (`ScreenArg::chrome() == Chrome::TabBar`, `screens/registry.rs`), and neither screen's
+            // `tick` steps the strip's capsule/scroll/chip springs — those live in `Bridge`'s own
             // `strip: StripRender` field. Without this arm those springs freeze at whatever the
-            // previously-drawn page left them at, and `ChromeSnapshot::members`'s published
+            // previously-drawn page left them at (the capsule stayed on the pill the user came
+            // FROM while the Watchlist was on top), and `ChromeSnapshot::members`'s published
             // strip rects (read by pointer hit-testing and focus) go stale. This mirrors the
-            // Home/Library arms above rather than adding a fourth call site.
+            // Home/Library arms above rather than adding another call site.
             let (_, moving) = plx_machine::idle::scoped_motion(|| {
                 app.bridge.update_home_chrome(&mut app.pages, &mut app.glass, fr.dt);
             });
