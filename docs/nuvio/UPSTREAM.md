@@ -497,13 +497,13 @@ already has as `1bcf30b2`. Taking it would replace working code with its twin.
 
 | branch | what it is |
 |---|---|
-| `nuvio-native` | **the trunk.** This is the product. Feature branches merge into it. |
+| `nuvio-native` | **the trunk.** This is the product. Feature branches merge into it. It carries tier C and the `forward-port/v0.9-hq` line since the 2026-11-02 fast-forward (see the television pass entry). |
 | `origin/nuvio-native` | the pushed trunk. |
 | `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the trunk so an experiment cannot break it. May lag the trunk. |
 | `main` | **not this project.** It holds upstream-side history and none of the fork's commits. Never cut work from it; never build or ship it. |
 | `upstream/feature/v0.9-hq` | Richi's HQ line — the reference for upstream work. Read-only. |
-| `forward-port/v0.9-hq` | the integration line: the A+B merge (`656e0cb2`), then tier C merged on top (`5297c0aa`). Pushed; not the trunk. This is the branch the stable `.ipk` is built from. |
-| `tier-c/ui` | tier C ported on top of the A+B merge (`741def78`), plus the port fixes through `f41d84a5`. Pushed and merged into `forward-port/v0.9-hq`. The television has not seen the newest fixes (poster pool/workers, subtitle Middle); verify before merging to `nuvio-native`. |
+| `forward-port/v0.9-hq` | the integration line: the A+B merge (`656e0cb2`), tier C on top (`5297c0aa`), the port fixes and the actor page (`1f692378`). Fast-forwarded into `nuvio-native` on 2026-11-02, so it is the trunk's own tip; still the line the stable `.ipk` is built from. |
+| `tier-c/ui` | tier C ported on top of the A+B merge (`741def78`), plus the port fixes through `f41d84a5`. Pushed, merged into `forward-port/v0.9-hq`, and verified on the television on 2026-11-02. |
 
 Merge commits into `nuvio-native` are normal here. `AGENTS.md`'s inherited "`main` takes SQUASH
 merges only" is the origin project's policy, not this repository's.
@@ -572,7 +572,7 @@ boundary `UPSTREAM.md` says must be re-implemented in the shim's terms, so it wa
 Verified on the simulator against a copy of the signed-in session: the page renders My List
 posters, a tile opens the shim-backed Detail (`rk=10369`), the Detail's bookmark disc shows the
 title's membership, and the Sort & Filter menu opens (`overlay=watchlist_menu`) with the grid
-reflowing under it. The television has not seen this yet.
+reflowing under it. The 2026-11-02 television pass below exercised these.
 
 Two further tier-C presentation defects were found on the same simulator and are fixed:
 
@@ -689,8 +689,8 @@ survived a cold boot. Four defects did not:
   ramp never had a floor.
 
 The simulator confirmed the Detail disc's filled face (a checkmark) for a My List title and
-the new Home. The television has not seen these fixes yet, and a Remove was not exercised on
-the simulator because that would write to the account.
+the new Home. The 2026-11-02 television pass below exercised these on the set; a Remove was
+not exercised on the simulator because that would write to the account.
 
 **The poster pool was too small, not the art source.** The first reading (one Watchlist tile with
 no poster, backdrop or logo, `lost=0, refused=16`) looked like a source gap, and one real latch was
@@ -706,8 +706,9 @@ for as long as the screen is up. The pool is back to the measured zero-refusal p
 50/4. The remaining blank-until-late tiles were first-load latency, not loss: a cold row of 20
 images took 450–600 ms each through the fixed two poster workers and drew last at +4.0 s. From
 the same imgtrace, `POSTER_WORKERS` is now 4; that row finishes at +1.2 s, and the decoded-byte
-admission cap (8 MiB) still bounds the batch. All of it is simulator evidence: the pool size,
-the worker count and the cold-row timing have not been exercised on the set.
+admission cap (8 MiB) still bounds the batch. All of it was simulator evidence at the time; the
+2026-11-02 television pass below exercised the pool on the set (`refused=13`, HWM 126,016 kB),
+and the cold row is first-fill latency rather than loss.
 
 **The Middle subtitle position sits lower.** `position_lift` lifted Middle 160 px above Low; it is
 60 px now (`media/src/player/text_style.rs`), the pick the viewer already saves is unchanged, and
@@ -766,7 +767,34 @@ loopback-only local Discover base (`plx_plex` 728/728 with its suite features). 
 Hugh Jackman's page from a Detail cast row draws the biography (`bio=2470B`), born/place, the
 roles line, and a Filmography pill reading 198 over the same 109/74 shelves; the filmography opens
 Actor 183 / Producer 10 / Other 5, newest first, with the availability join marking credits the
-app holds (`… · Nuvio`, and a credit opens its Detail). **The television has not seen this.**
+app holds (`… · Nuvio`, and a credit opens its Detail). The television saw this in the
+2026-11-02 pass below (Ryan Gosling and Emily Blunt pages).
+
+### 2026-11-02 — the television pass on the full tier C line, and the merge to the trunk
+
+The stable `.ipk` built from `1f692378` went on the set and the pass was green: Home fills its
+rows with no blank-stuck tile, My List membership and Remove work, the HUD draws the clearLogo,
+the Home scrim no longer pops, subtitle Middle sits at the new lower lift, and the actor page is
+the full one (Ryan Gosling: `bio=2428B`, roles `Actor, Producer, Director`, 6 credit groups,
+shelves 46/29; Emily Blunt: `bio=2302B`, roles `Actor, Producer`, 3 groups, shelves 63/57).
+
+- **Memory did not come back.** `VmHWM` **126,016 kB**, `VmRSS` **124,960 kB**, `VmSwap`
+  **24,748 kB** — below the old 155,292 kB peak, so the 32 MiB poster pool is not a repeat of the
+  OOM (the queues stay at 50/4 MiB). The 24.7 MB swap is idle pages, the one number to re-check
+  if a long session hitches.
+- **Poster residency on the set:** `lost=276 rearmed=135 refused=13` over the whole session,
+  against 171 refusals at 24 MiB. No fetch or decode failure in the log.
+- **Frame pacing:** every `perf` heartbeat reads `dropped=0 carried=0`; the 12–20 fps entries are
+  mount spikes around detail/person with a `1/1` or `5/3` budget, not dropped frames.
+- **One pre-existing gap, not from this line:** `pmsshim: unhandled GET /hubs/continueWatching/items`
+  (12×). The shim answers `/hubs/continueWatching` — the Home preview — but not the paged
+  `/items` listing the deck paging path reads (`data/src/stores/deck.rs`), so a paged/see-all CW
+  surface would come up empty. Home's row is unaffected. Filed as a follow-up.
+
+**Merged.** `forward-port/v0.9-hq` was fast-forwarded into `nuvio-native` on 2026-11-02 (the trunk
+had not moved since the merge-base `ac0443bc`, 394 commits ahead, 0 behind), so the trunk is the
+product with tier C, the playback lanes, the actor page and every fix above. `forward-port/v0.9-hq`
+stays the branch the stable `.ipk` is built from and has the same tip.
 
 ## Recomputing
 
