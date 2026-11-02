@@ -52,7 +52,7 @@ Also, [storage_worker.rs](../rust-modules/base/src/storage_worker.rs) already ca
 * The poster store has 64 slots and 256-byte path storage, with `KEY_MAX = 255`; identity is server plus the complete built image path (including size/format and token). Fetch/decode happens off-lock; publication checks slot generation and `P_LOADING`. `P_READY` means handed to the render cache, **not resident**. `drain_decoded` currently copies C pixels into `tex::Decoded`, then `tex::accept` queues them; `prepare` uploads under the frame budget. See `poster.rs::{lookup,poster_worker,drain_decoded}` and [ui/tex.rs](../rust-modules/src/ui/tex.rs).
 * The main loop calls `begin_frame` and `drain_decoded` before its texture `prepare` path ([app/run.rs](../rust-modules/src/app/run.rs), around lines 327–409). Main-thread retry deadlines use the app clock; workers park transient results without reading that clock. Retry waits are 1, 2, 4, 8, 16, then 30 seconds. Only a draw restarts a due retry; warm requests do not retry failures.
 * `poster_worker` also reads/writes the existing avatar disk cache and may do a `refresh_after` fetch **after publishing pixels**. This still consumes a worker after the slot looks complete. Moreover, on its successful publication path the local `MutexGuard g` has no explicit drop before that refresh block; only the stale-result branch drops it. The new protocol must make the lock scope end before all subsequent I/O. Treat this as a source-level concern requiring a blocked-refresh regression, not a newly measured TV stall.
-* The target constraints are real: [agent-reference.md](agent-reference.md)'s toolchain section specifies glibc 2.12, ARMv7-A / 32-bit ARM; `ui/tex.rs::TEX_RESIDENT_BYTES_MAX` is 24 MiB (scaled by render area at cache construction). The texture budget is not a bound on compressed input, decoder scratch, pending RGBA, or worker stacks.
+* The target constraints are real: [agent-reference.md](agent-reference.md)'s toolchain section specifies glibc 2.12, ARMv7-A / 32-bit ARM; `ui/tex.rs::TEX_RESIDENT_BYTES_MAX` is 32 MiB (scaled by render area at cache construction; 24 MiB measured as too small for one Home session, see `docs/nuvio/PLAYBACK.md`). The texture budget is not a bound on compressed input, decoder scratch, pending RGBA, or worker stacks.
 
 ## 2. Typed model
 
@@ -62,7 +62,7 @@ Use a fixed slot table for identity and LRU, but choose work by explicit request
 
 ```rust
 const POSTER_SLOTS: usize = 64;
-const POSTER_WORKERS: usize = 2;
+const POSTER_WORKERS: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SlotId(u8);                 // private checked constructor: < POSTER_SLOTS
@@ -289,9 +289,9 @@ Before each behavior piece, audit prose made false by the change: `P_READY` term
 
 ## 5. What this does not fix
 
-**Two workers remain two workers. Their count is frozen until per-image imgtrace measurement exists.** The agreed order supplied for this task is **resident-eviction bug → imgtrace → lookahead/worker-count tuning from measurements → disk cache**. This design is preparation for that measured work, not permission to skip ahead or bundle those projects together.
+**The worker count is frozen until per-image imgtrace measurement exists; that measurement now exists (2026-11-02).** The agreed order supplied for this task is **resident-eviction bug → imgtrace → lookahead/worker-count tuning from measurements → disk cache**. The imgtrace of a cold Home row (`disk=net`) showed 20 identities each needing 450–600 ms, draining in pairs: the last one queued 3.5 s before starting and drew at +4.0 s. At four workers the same row finished at +1.2 s, so `POSTER_WORKERS` is now 4; the decoded-byte admission cap is unchanged.
 
-A scheduler cannot make two workers decode faster, shorten a slow server response, remove texture-upload stalls, or make 64 logical identities fit under the texture byte budget. `Delivered` does not repair the source/cache residency contract: `TexCache::evict_for` can drop residency independently of the adapter slot. That boundary is why resident-eviction work comes first. The scheduler also does not add transport cancellation, cure playback's blocking control paths, or establish a process-wide network budget.
+A scheduler cannot make the workers decode faster, shorten a slow server response, remove texture-upload stalls, or make 64 logical identities fit under the texture byte budget. `Delivered` does not repair the source/cache residency contract: `TexCache::evict_for` can drop residency independently of the adapter slot. That boundary is why resident-eviction work comes first. The scheduler also does not add transport cancellation, cure playback's blocking control paths, or establish a process-wide network budget.
 
 “Then a disk cache” must mean a broader poster-art cache: [imgcache.rs](../rust-modules/platform/src/imgcache.rs) already caches avatars. Its module prose currently says posters “never will be” cached, which conflicts with the requested later roadmap. Record that contradiction rather than claiming no disk tier exists; changing that policy and its prose belongs to the later cache project.
 

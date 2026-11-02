@@ -3,8 +3,10 @@
 ## Storage and ownership
 
 All reusable remote artwork enters `app/adapters/poster.rs` through the shared `ui::tex::Source`.
-Its two demand workers read the disk tier before fetching and decode off the render thread.
-`imgcache.rs` owns persistence; `ui::tex::TexCache` owns GPU residency. Screens choose the image
+Its demand workers read the disk tier before fetching and decode off the render thread. There are
+four of them: on a cold row their concurrency is the limit, and imgtrace of a 20-image Home row
+measured 450–600 ms of fetch+decode per image — 4.0 s to the last draw at two workers, 1.2 s at
+four (2026-11-02). `imgcache.rs` owns persistence; `ui::tex::TexCache` owns GPU residency. Screens choose the image
 and size, without choosing a caching policy. The sign-in QR code is transient authentication data
 and remains outside the artwork cache; bundled icons and fonts already live in the app package.
 
@@ -37,7 +39,7 @@ suppress retry storms. Refresh validates decoding before replacing a file and af
 load; it never holds the source-store lock while accessing the network. A failed refresh keeps
 the old image. Changed versioned source paths miss immediately rather than waiting for expiry.
 
-RAM residency remains independent of library size: 96 source slots and a 44 MiB GPU texture
+RAM residency remains independent of library size: 96 source slots and a 32 MiB GPU texture
 budget. Demand workers stop claiming requests when combined decoded and pending-upload pixels
 reach 8 MiB; already active decodes can temporarily exceed this admission threshold. If the GPU evicts an image while its source slot survives, the next draw requests its
 pixels again through the same disk-first path, subject to the source's residency backoff (a card is
