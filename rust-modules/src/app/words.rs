@@ -35,6 +35,7 @@ pub(crate) fn route_word(route: &AppArg) -> &'static str {
         AppArg::Content(ContentArg::Person { .. } | ContentArg::Filmography { .. }) => "person",
         AppArg::Content(ContentArg::Collection(_)) => "collection",
         AppArg::Search => "search",
+        AppArg::Watchlist => "watchlist",
         AppArg::Player => "player",
         AppArg::Home => "home",
         // Not pages: a surface's word is ` overlay=`, and none of these reaches the page stack's

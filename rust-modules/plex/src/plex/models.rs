@@ -503,6 +503,42 @@ pub fn catalog_hex_of_guid(guid: &str) -> Option<[u8; 12]> {
     Some(out)
 }
 
+/// The marker on a shim item's catalog id: `NVIO` then the numeric ratingKey, big-endian.
+///
+/// The Nuvio backend has no 24-hex discover id — its portable identity is the shim's numeric
+/// `ratingKey` (`docs/nuvio/ID-MANAGEMENT.md`). Encoding it in the same 12-byte catalog id keeps
+/// Home, Detail and the Watchlist agreeing on one identity without teaching any of them about the
+/// shim, and the `NVIO` prefix keeps it from ever colliding with a real `plex://movie/<hex>`.
+pub const NUVIO_HEX_MARK: [u8; 4] = *b"NVIO";
+
+/// The catalog id of a shim ratingKey (12 bytes: `NVIO` + the key, big-endian).
+pub fn hex_of_rating_key(rating_key: i64) -> [u8; 12] {
+    let mut out = [0u8; 12];
+    out[..4].copy_from_slice(&NUVIO_HEX_MARK);
+    out[4..].copy_from_slice(&(rating_key as u64).to_be_bytes());
+    out
+}
+
+/// The ratingKey a catalog id names, or `None` when it is not one of ours.
+pub fn rating_key_of_hex(hex: &[u8; 12]) -> Option<i64> {
+    if hex[..4] != NUVIO_HEX_MARK {
+        return None;
+    }
+    Some(i64::from_be_bytes(<[u8; 8]>::try_from(&hex[4..]).ok()?))
+}
+
+/// A title's catalog id: a `plex://movie|show/<hex>` guid first, else the shim's numeric key for a
+/// `nuvio://movie|series/<id>` guid. `rating_key` is the item's own key (a movie or show); an
+/// episode's or season's catalogue id is its show's, which carries a different key.
+pub fn catalog_hex_of_item(guid: &str, rating_key: &str) -> Option<[u8; 12]> {
+    catalog_hex_of_guid(guid).or_else(|| {
+        let nuvio_title = guid.starts_with("nuvio://movie/")
+            || guid.starts_with("nuvio://series/")
+            || guid.starts_with("nuvio://show/");
+        nuvio_title.then(|| rating_key.parse::<i64>().ok()).flatten().map(hex_of_rating_key)
+    })
+}
+
 /// WORKER. The catalog id to write to: the one the row already carries, else the one the item's own
 /// server record names. `fetch` is `|| client.metadata(rk).map(|m| m.guid)` (or `grandparent`'s
 /// `show_rk` read for an episode's show); it is not called when `known` is set, so a press from a
@@ -564,14 +600,17 @@ impl Metadata {
 
     /// This item's own catalog id (movie or show), decoded once.
     pub fn guid_hex(&self) -> Option<[u8; 12]> {
-        catalog_hex_of_guid(&self.guid)
+        catalog_hex_of_item(&self.guid, &self.rating_key)
     }
 
     /// The show's catalog id for a season (its `parentGuid`) or an episode (its
     /// `grandparentGuid`), decoded once.
     pub fn show_guid_hex(&self) -> Option<[u8; 12]> {
-        let guid = if self.kind == "season" { &self.parent_guid } else { &self.grandparent_guid };
-        catalog_hex_of_guid(guid)
+        if self.kind == "season" {
+            catalog_hex_of_item(&self.parent_guid, &self.parent_rating_key)
+        } else {
+            catalog_hex_of_item(&self.grandparent_guid, &self.grandparent_rating_key)
+        }
     }
 
     /// Media[0].Part[0] — the primary playable part (None for a show container, which carries
@@ -1255,6 +1294,27 @@ mod tests {
         assert_eq!(mc.metadata[0].show_guid_hex(), Some(BYTES));
         assert_eq!(mc.metadata[1].guid_hex(), Some(BYTES));
         assert_eq!(mc.metadata[1].show_guid_hex(), None, "a movie has no show");
+    }
+
+    /// **A Nuvio title's catalog id is its shim ratingKey**, not a discover id: the shim has no
+    /// `plex://movie/<hex>`, and Home, Detail and the Watchlist must still agree on one identity.
+    #[test]
+    fn a_nuvio_title_uses_the_shim_key_as_its_catalog_id() {
+        let key = 10_069i64;
+        let hex = super::hex_of_rating_key(key);
+        assert_eq!(&hex[..4], b"NVIO");
+        assert_eq!(super::rating_key_of_hex(&hex), Some(key));
+        assert_eq!(super::rating_key_of_hex(&BYTES), None, "a discover id is not a shim key");
+        assert_eq!(super::catalog_hex_of_item("nuvio://movie/tt0111161", "10069"), Some(hex));
+        assert_eq!(super::catalog_hex_of_item("nuvio://series/tt0903747", "20001"), Some(super::hex_of_rating_key(20_001)));
+        assert_eq!(super::catalog_hex_of_item("nuvio://episode/tt1", "10069"), None, "an episode is not a watchlist identity");
+        assert_eq!(super::catalog_hex_of_item("local://9", "10069"), None, "no title identity at all");
+
+        let json = format!(
+            r#"{{"MediaContainer":{{"Metadata":[{{"ratingKey":"{key}","type":"movie","guid":"nuvio://movie/tt0111161"}}]}}}}"#
+        );
+        let mc = serde_json::from_slice::<Envelope>(json.as_bytes()).expect("parse").media_container;
+        assert_eq!(mc.metadata[0].guid_hex(), Some(hex));
     }
 
     fn listing(json: &str) -> super::ListingFacts {

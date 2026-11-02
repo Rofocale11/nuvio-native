@@ -718,7 +718,18 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
                 playback.0,
             );
         }
-        _ => {}
+        // The item menu's two Watchlist rows and the catalog "go" row. Add is catalog-keyed and
+        // pulses the tab (the store flips at once); Remove is guid-keyed like the menu's subject,
+        // and the page that asked decides whether the removal landing is owed.
+        Action::WatchlistAdd { hex } => bridge.watchlist_add(hex),
+        Action::WatchlistRemove(guid) => {
+            bridge.watchlist_remove(&guid, super::bridge::Bridge::watchlist_page_on_top(pages));
+        }
+        Action::GoToCatalog(guid) => {
+            if let Some(hex) = super::bridge::hex_of_guid(&guid) {
+                super::bridge::open_catalog(pages, hex, None);
+            }
+        }
     }
 }
 

@@ -103,13 +103,24 @@ fn the_press_table() {
     use crate::registry::ItemMenuAction as Action;
     let hex = plx_data::watchlist::decode_hex(HEX).unwrap();
     assert_eq!(guid_hex(GUID), Some(hex));
-    assert_eq!(press(GUID, Membership::Off), Some(Action::WatchlistAdd { hex }));
-    assert_eq!(press(GUID, Membership::Unknown), Some(Action::WatchlistAdd { hex }));
-    assert_eq!(press(GUID, Membership::On), Some(Action::WatchlistRemove(GUID.into())));
+    assert_eq!(press(GUID, None, Membership::Off), Some(Action::WatchlistAdd { hex }));
+    assert_eq!(press(GUID, None, Membership::Unknown), Some(Action::WatchlistAdd { hex }));
+    assert_eq!(press(GUID, None, Membership::On), Some(Action::WatchlistRemove(GUID.into())));
     for bad in ["", "plex://movie/", "plex://movie/zz", "/library/metadata/42"] {
-        assert_eq!(press(bad, Membership::Off), None, "{bad:?}");
-        assert_eq!(press(bad, Membership::On), None, "{bad:?}");
+        assert_eq!(press(bad, None, Membership::Off), None, "{bad:?}");
+        assert_eq!(press(bad, None, Membership::On), None, "{bad:?}");
     }
+    // A Nuvio title's own guid is not a discover id; the page's knowledge of its shim key is the
+    // identity, and Remove gets a synthetic guid that carries it.
+    let key = plx_data::watchlist::decode_hex("4e56494f0000000000002755").unwrap();
+    let nuvio = "nuvio://movie/tt0111161";
+    assert_eq!(press(nuvio, Some(key), Membership::Off), Some(Action::WatchlistAdd { hex: key }));
+    assert_eq!(press(nuvio, Some(key), Membership::Unknown), Some(Action::WatchlistAdd { hex: key }));
+    assert_eq!(
+        press(nuvio, Some(key), Membership::On),
+        Some(Action::WatchlistRemove(format!("plex://movie/{}", plx_data::watchlist::encode_hex(&key))))
+    );
+    assert_eq!(press(nuvio, None, Membership::Off), None, "no key and no discover id: nothing to press");
 }
 
 /// Without a Watchlist-takeable guid the row has no disc at all: Play, then whatever follows.

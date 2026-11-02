@@ -534,6 +534,46 @@ workspace (`--all-targets`) compile clean; the simulator (`make -j10 sim-linux`)
 TV verification of the new UI is still outstanding.
 
 
+### 2026-11-02 — tier C's Watchlist data boundary is My List, not plex.tv
+
+The tier C port had left the Watchlist on upstream's data path: it called
+`discover.provider.plex.tv/library/sections/watchlist/all` with the Nuvio token and got HTTP 401,
+so the page read "Can't reach your Watchlist" and the list was empty by construction. A guard that
+merely disabled the call for `nuvio-local` did not help a real signed-in account. This is the data
+boundary `UPSTREAM.md` says must be re-implemented in the shim's terms, so it was:
+
+- **`app::watchlist_io::MyListIo`** replaces `LiveIo` for the Watchlist store. `page` reads the
+  shim's `saved_library`; `find` reports the shim as holding every title (so a tile is `Available`
+  and opens the shim-backed Detail); `write` calls the shim's save/remove; `released` derives from
+  the titles' dates. Nothing in it reaches plex.tv.
+- **The portable identity is the shim's numeric ratingKey**, written as `NVIO` + the key in the
+  same 12 bytes a discover id uses (`plex::hex_of_rating_key` / `catalog_hex_of_item`). The
+  Watchlist row's guid is `plex://movie|show/<that hex>`; `Detail::watchlist_hex` and
+  `Metadata::guid_hex` derive the same value, so Home, Detail and the Watchlist share one
+  membership answer. See `ID-MANAGEMENT.md`.
+- **The shim exposes My List read/write** as `Shim::my_list_entries` / `set_my_list_saved`, sharing
+  the `/library/metadata/{rk}` save path (one title, confirmed by a fresh pull).
+- **The app's Watchlist action arms were missing** from the port: the item menu's Add/Remove and
+  the catalog "go" row produced `Action`s that `apply_item_action` ignored. Restored, and the
+  action test now grades them.
+- **`AppFx::Watchlist` and `AppFx::Catalog` were stubbed in the bridge.** Every request the page
+  itself raises — Sort & Filter, the hold menu, the strip pills — went into a no-op arm, which is
+  why OK on the pill did nothing and five app tests failed. They are collected now
+  (`watchlist_reqs` / `catalog_effect`), and those five tests pass.
+- **`route_word` had no `Watchlist` arm**, so the heartbeat printed `route=` with no name.
+
+Verified on the simulator against a copy of the signed-in session: the page renders My List
+posters, a tile opens the shim-backed Detail (`rk=10369`), the Detail's bookmark disc shows the
+title's membership, and the Sort & Filter menu opens (`overlay=watchlist_menu`) with the grid
+reflowing under it. The television has not seen this yet.
+
+**Known gap, not fixed here:** the shared strip still draws its selection capsule on "Movies" while
+the Watchlist page is on top (the bookmark pill is focused, but the stale `view_tab` wins). That is a
+tab-container presentation defect, separate from the data boundary and the requests. `plx_data`'s
+suite also has four concurrency-shaped failures under `make test-crate`
+(`metadata::demo_fixture_tests::…`, `metadata::record::…committed_fixture…`,
+`person::…forty_servers…`, `search::account_scope_tests::…`) that are not Watchlist code.
+
 ## Recomputing
 
 ```sh

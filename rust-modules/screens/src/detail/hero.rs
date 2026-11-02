@@ -340,14 +340,22 @@ pub fn guid_hex(guid: &str) -> Option<[u8; 12]> {
 }
 
 /// What a press on the disc asks for: Add when the title is not (known to be) on the list, Remove
-/// when it is. `None` when the item carries no guid in the form the service takes — the disc then
-/// stays drawn but the press does nothing. The Remove arm is keyed by the guid string, like the
-/// menu's own.
-pub fn press(guid: &str, m: Membership) -> Option<crate::registry::ItemMenuAction> {
+/// when it is. `None` when the item carries no catalog identity — the disc then stays drawn but the
+/// press does nothing. `hex` is the identity the page already knows for a `nuvio://` title (the
+/// shim's numeric key); a `plex://movie|show` guid still wins when it decodes.
+pub fn press(guid: &str, hex: Option<[u8; 12]>, m: Membership) -> Option<crate::registry::ItemMenuAction> {
     use crate::registry::ItemMenuAction as Action;
-    let hex = guid_hex(guid)?;
+    let known = guid_hex(guid);
+    let hex = known.or(hex)?;
+    // Remove is guid-keyed like the menu's own. A title whose own guid is not a discover id (a
+    // Nuvio title) gets a synthetic one carrying the identity, so the app's hex lookup resolves it.
+    let subject = if known.is_some() {
+        guid.to_string()
+    } else {
+        format!("plex://movie/{}", plx_data::watchlist::encode_hex(&hex))
+    };
     Some(match m {
-        Membership::On => Action::WatchlistRemove(guid.to_string()),
+        Membership::On => Action::WatchlistRemove(subject),
         Membership::Off | Membership::Unknown => Action::WatchlistAdd { hex },
     })
 }

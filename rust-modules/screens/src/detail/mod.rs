@@ -3771,7 +3771,7 @@ impl DetailScreen {
         };
         // The bookmark disc's flip, and the identity the app's feed reads. Decorative: it moves
         // no layout, so it never holds a page image.
-        self.watchlist_hex = self.detail(meta).and_then(|d| plx_plex::plex::catalog_hex_of_guid(&d.guid));
+        self.watchlist_hex = self.detail(meta).and_then(|d| d.watchlist_hex());
         let watchlist_moving = self.watchlist.step(dt);
         for (i, spring) in self.disc_unfurl.iter_mut().enumerate() {
             spring.step(
@@ -4290,7 +4290,7 @@ impl DetailScreen {
         // `!hero_set().trailer` and then drive `ELEM_TRAILER` directly to prove `activate_hero`'s
         // handling stays correct even though the disc itself is never shown.)
         hero::HeroSet {
-            watchlist: self.detail(meta).is_some_and(|d| plx_plex::plex::catalog_hex_of_guid(&d.guid).is_some()),
+            watchlist: self.detail(meta).is_some_and(|d| d.watchlist_hex().is_some()),
             restart,
             trailer: false,
             alt: self.alt_available(meta),
@@ -4491,7 +4491,7 @@ impl DetailScreen {
             // refuses. An item with no `plex://movie|show` guid (an episode) presses nothing.
             hero::HeroCtl::Watchlist => {
                 if let Some(d) = self.detail(meta) {
-                    if let Some(act) = hero::press(&d.guid, self.watchlist.membership()).filter(|_| self.watchlist_hex.is_some()) {
+                    if let Some(act) = hero::press(&d.guid, self.watchlist_hex, self.watchlist.membership()).filter(|_| self.watchlist_hex.is_some()) {
                         self.watchlist.press();
                         fx.push(Fx::App(AppFx::ItemMenu(crate::registry::ItemMenuReq {
                             act, sid: d.sid, item: None, season: None, loaded_episode: false, from_home: false,

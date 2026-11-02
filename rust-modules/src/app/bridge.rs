@@ -540,7 +540,13 @@ impl Bridge {
         init: plx_session::auth::SessionInit, session_adapter: super::adapters::session::SessionAdapter,
         consent: plx_telemetry::telemetry::consent::Consent,
         consent_adapter: super::adapters::consent::ConsentAdapter) -> Self {
-        let stores = plx_data::stores::Stores::default();
+        let mut stores = plx_data::stores::Stores::default();
+        // The Watchlist's list is this fork's My List, not plex.tv's: install the shim-backed seam
+        // before any page can open the store. With no shim (host tests, a replay boot) it answers
+        // as a signed-out account.
+        stores.watchlist = plx_data::stores::watchlist::WatchlistStore::with_io(
+            std::sync::Arc::new(crate::app::watchlist_io::MyListIo),
+        );
         let mut directory = plx_data::stores::browse::DirectorySnapshot::default();
         let browse = stores.capture_browse(&mut directory);
         let search = stores.search_snapshot(browse.directory.view());
@@ -1942,7 +1948,8 @@ impl Bridge {
             AppFx::Search(req) => self.search_reqs.push((from, req, self.effect_return.clone())),
             AppFx::Player(req) => self.player_reqs.push(req),
             AppFx::ItemMenu(req) => self.item_menu_reqs.push(req),
-            AppFx::Watchlist(_) | AppFx::Catalog(_) => {}
+            AppFx::Watchlist(req) => self.watchlist_reqs.push((from, req, self.effect_return.clone())),
+            AppFx::Catalog(out) => self.catalog_effect(out),
         }
     }
 

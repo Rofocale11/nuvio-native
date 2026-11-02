@@ -1754,6 +1754,13 @@ pub struct Detail {
     pub trailer_rk: String,
 }
 impl Detail {
+    /// The Watchlist identity of this title: the discover id when the guid carries one, else the
+    /// shim's numeric key for a `nuvio://movie|series` title. `None` for an episode, a season or a
+    /// collection — the Watchlist holds titles, not their parts.
+    pub fn watchlist_hex(&self) -> Option<[u8; 12]> {
+        plx_plex::plex::catalog_hex_of_item(&self.guid, &self.rk)
+    }
+
     /// Choose at presentation time so cached details reflect a changed preference immediately.
     pub fn shown_ratings(&self) -> &[Rating] {
         if !self.guid.starts_with("nuvio://") { return &self.ratings; }

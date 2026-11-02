@@ -367,6 +367,25 @@ pub struct Shim {
     pub account: crate::shim_account::Account,
 }
 
+/// One My List title, as the shim can state it: the account's metadata plus the numeric key the
+/// shim's key table gives the title. This is the Nuvio backend's counterpart of a discover
+/// watchlist row (`/library/sections/watchlist/all`), and the reason the Watchlist does not need a
+/// plex.tv credential.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MyListEntry {
+    pub rating_key: i64,
+    /// Stremio's content type: `movie` or `series`.
+    pub type_: String,
+    pub id: String,
+    pub title: String,
+    pub year: Option<i32>,
+    /// The addon's `releaseInfo`, used as the title's release date.
+    pub release: Option<String>,
+    pub rating: Option<f32>,
+    /// The shim's poster proxy URL.
+    pub thumb: String,
+}
+
 fn container(fields: Value) -> Value {
     let mut mc = Map::new();
     mc.insert("size".into(), json!(0));
@@ -2990,6 +3009,100 @@ impl Shim {
         json!({"title": "Continue Watching", "type": "mixed", "hubIdentifier": "home.continue",
                "key": "/hubs/continueWatching", "size": rows.len(), "more": false, "Metadata": rows})
     }
+    /// The account's My List, keyed by the shim's numeric ratingKeys. `refresh` forces a network
+    /// pull on the first page; the account caches the answer for a minute otherwise.
+    ///
+    /// This is the one read the Nuvio Watchlist is built from. Upstream's page asks
+    /// `discover.provider.plex.tv` for a plex.tv Watchlist, which this fork has no credential for;
+    /// the fork's list is the account's saved library, and the shim is where that boundary lives.
+    pub fn my_list_entries(&self, refresh: bool) -> plx_stremio::model::Result<Vec<MyListEntry>> {
+        let items = self.account.saved_library(refresh)?;
+        Ok(items
+            .into_iter()
+            .map(|p| MyListEntry {
+                rating_key: self.keys.key_of(&Ident::Title { type_: p.type_.clone(), id: p.id.clone() }),
+                type_: p.type_.to_string(),
+                id: p.id.clone(),
+                title: p.name.clone(),
+                year: year_of(p.release_info.as_deref()).and_then(|y| i32::try_from(y).ok()),
+                release: p.release_info.clone(),
+                rating: rating_of(p.imdb_rating.as_deref()).map(|r| r as f32),
+                thumb: self.poster_url(&p.id, p.poster.as_deref()),
+            })
+            .collect())
+    }
+
+    /// Set one title's My List membership by the shim's numeric key (the Write half of
+    /// [`my_list_entries`](Self::my_list_entries)).
+    pub fn set_my_list_saved(&self, rating_key: i64, saved: bool) -> plx_stremio::model::Result<()> {
+        if !self.account.signed_in() {
+            return Err(plx_stremio::model::Error::Status(401));
+        }
+        self.save_my_list_title(rating_key, saved)
+    }
+
+    /// The one save/remove path: resolve the key to the account's own id, resolve the metadata the
+    /// addon needs, and let the account confirm the new list.
+    fn save_my_list_title(&self, rk: i64, saved: bool) -> plx_stremio::model::Result<()> {
+        let Some(Ident::Title { type_, id }) =
+            self.keys.ident(rk).or_else(|| synthetic_ident(rk))
+        else {
+            return Err(plx_stremio::model::Error::Status(404));
+        };
+        let (saved_type, saved_id) = translate_to_stremio_id(rk)
+            .map(|id| {
+                (
+                    if synthetic_show_tmdb_id(rk).is_some() { "series" } else { "movie" }.to_owned(),
+                    id,
+                )
+            })
+            .unwrap_or_else(|| (type_.clone(), id.clone()));
+        let client = TmdbClient::from_env();
+        let tmdb_id = if saved_type == "series" {
+            synthetic_show_tmdb_id(rk)
+        } else {
+            synthetic_tmdb_id(rk)
+        };
+        let imdb_id = tmdb_id.and_then(|tmdb_id| {
+            client.as_ref().and_then(|client| {
+                if saved_type == "series" {
+                    client.tv_external_ids(tmdb_id).ok().flatten()
+                } else {
+                    client.movie_external_ids(tmdb_id).ok().flatten()
+                }
+            })
+        });
+        let save_id = imdb_id.as_deref().unwrap_or(&saved_id);
+        let meta = if let Some(meta) = self.meta(&saved_type, save_id) {
+            meta
+        } else {
+            let (name, poster_path, description, release_info) = if saved_type == "series" {
+                let tmdb_id = synthetic_show_tmdb_id(rk)
+                    .ok_or(plx_stremio::model::Error::Status(404))?;
+                let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
+                let details = client.tv_details(tmdb_id)?;
+                (details.show.name, details.show.poster_path, details.show.overview, details.show.first_air_date)
+            } else {
+                let tmdb_id = synthetic_tmdb_id(rk)
+                    .ok_or(plx_stremio::model::Error::Status(404))?;
+                let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
+                let details = client.movie_details(tmdb_id)?;
+                (details.movie.title, details.movie.poster_path, details.movie.overview, details.movie.release_date)
+            };
+            Arc::new(Meta {
+                id: save_id.to_owned(),
+                type_: saved_type.clone(),
+                name,
+                poster: tmdb_image(poster_path.as_deref()),
+                description,
+                release_info: year_of(release_info.as_deref()).map(|year| year.to_string()),
+                ..Meta::default()
+            })
+        };
+        eprintln!("saving My List item: type={} id={}", meta.type_, meta.id);
+        self.account.set_saved(&meta, saved)
+    }
+
     #[allow(dead_code)]
     fn saved_hub(&self, count: usize) -> Option<Value> {
         let items = self.account.saved_library(false).ok()?;
@@ -3033,79 +3146,7 @@ impl Shim {
                     Some("0") => false,
                     _ => return Err(plx_stremio::model::Error::Status(400)),
                 };
-                let (saved_type, saved_id) = translate_to_stremio_id(rk)
-                    .map(|id| {
-                        (
-                            if synthetic_show_tmdb_id(rk).is_some() {
-                                "series"
-                            } else {
-                                "movie"
-                            }
-                            .to_owned(),
-                            id,
-                        )
-                    })
-                    .unwrap_or_else(|| (type_.clone(), id.clone()));
-                let client = TmdbClient::from_env();
-                let tmdb_id = if saved_type == "series" {
-                    synthetic_show_tmdb_id(rk)
-                } else {
-                    synthetic_tmdb_id(rk)
-                };
-                let imdb_id = tmdb_id.and_then(|tmdb_id| {
-                    client.as_ref().and_then(|client| {
-                        if saved_type == "series" {
-                            client.tv_external_ids(tmdb_id).ok().flatten()
-                        } else {
-                            client.movie_external_ids(tmdb_id).ok().flatten()
-                        }
-                    })
-                });
-                let save_id = imdb_id.as_deref().unwrap_or(&saved_id);
-                let meta = if let Some(meta) = self.meta(&saved_type, save_id) {
-                    meta
-                } else {
-                    let (name, poster_path, description, release_info) =
-                        if saved_type == "series" {
-                            let tmdb_id = synthetic_show_tmdb_id(rk)
-                                .ok_or(plx_stremio::model::Error::Status(404))?;
-                            let client = client
-                                .as_ref()
-                                .ok_or(plx_stremio::model::Error::Status(404))?;
-                            let details = client.tv_details(tmdb_id)?;
-                            (
-                                details.show.name,
-                                details.show.poster_path,
-                                details.show.overview,
-                                details.show.first_air_date,
-                            )
-                        } else {
-                            let tmdb_id = synthetic_tmdb_id(rk)
-                                .ok_or(plx_stremio::model::Error::Status(404))?;
-                            let client = client
-                                .as_ref()
-                                .ok_or(plx_stremio::model::Error::Status(404))?;
-                            let details = client.movie_details(tmdb_id)?;
-                            (
-                                details.movie.title,
-                                details.movie.poster_path,
-                                details.movie.overview,
-                                details.movie.release_date,
-                            )
-                        };
-                    Arc::new(Meta {
-                        id: save_id.to_owned(),
-                        type_: saved_type.clone(),
-                        name,
-                        poster: tmdb_image(poster_path.as_deref()),
-                        description,
-                        release_info: year_of(release_info.as_deref())
-                            .map(|year| year.to_string()),
-                        ..Meta::default()
-                    })
-                };
-                eprintln!("saving My List item: type={} id={}", meta.type_, meta.id);
-                self.account.set_saved(&meta, saved)?;
+                self.save_my_list_title(rk, saved)?;
             }
             let items = self.account.saved_library(req.method != "POST")?;
             let translated_id = translate_to_stremio_id(rk);
