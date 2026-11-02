@@ -1890,6 +1890,87 @@ fn bake_fan(
     fan::bake(&mut WorkerFanIo { client, srv, rk, cache_gen, disk, token_gen, profile })
 }
 
+/// The request box a built key names (`width`/`height` from [`transcode_request`]). `None` for a
+/// fan key, which has none, and for anything the builder did not write.
+fn request_box(key: &str) -> Option<(c_int, c_int)> {
+    let query = key.split_once('?')?.1;
+    let param = |name: &str| {
+        query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix(name))
+            .and_then(|v| v.parse::<c_int>().ok())
+    };
+    let (w, h) = (param("width=")?, param("height=")?);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// A card-sized box no larger than the biggest one the cap is meant for. Backdrops and detail art
+/// are deliberately `Residency` takes; resizing them to a poster box would only degrade them.
+const CAP_BOX_MAX_PX: i64 = 500 * 750;
+
+/// The size to decode a card's art at, when the source is too big for the upload budget to treat
+/// as a poster.
+///
+/// **Why cap at all.** `plx_ui::tex` classifies an upload over [`plx_ui::tex::RESIDENCY_BYTES`]
+/// (1 MiB) as a solo `Residency` take that owns its frame. Some addon CDNs serve a 500×750 WebP
+/// for a URL that takes no size hint (`btttr.cc`, measured 2026-11-02): 1.5 MB of RGBA for a
+/// 250×375 card, which made every fast-scroll poster a long solo frame — fps 44–54 with
+/// `budget …/solo:residency` on the television. Capping the decode keeps it an ordinary `Poster`
+/// take; art already inside the threshold (TMDB's `w342`, 702 KB) is untouched, so the card keeps
+/// its headroom for the focus pop.
+///
+/// **COVER, not fit.** The card crops its texture to the tile (`art_uv`), so a non-matching
+/// source keeps only the middle band. Fitting a landscape still inside a 2:3 card would shrink the
+/// band that survives the crop; covering the box keeps that band at the tile's resolution. A byte
+/// cap then bounds the result to just under the class threshold.
+///
+/// `None` when the image is not over the threshold, the box is not a card's, or the image already
+/// fits.
+fn cap_dims(w: c_int, h: c_int, box_w: c_int, box_h: c_int) -> Option<(c_int, c_int)> {
+    if w <= 0 || h <= 0 || box_w <= 0 || box_h <= 0 {
+        return None;
+    }
+    // A supersampled capture (`render_scale` > 1) asks for n× the box; the class threshold does
+    // not scale, so those posters are Residency by construction and capping only costs the
+    // capture its pixels. The television and the ordinary simulator are 1.
+    if plx_base::surface::render_scale() > 1 {
+        return None;
+    }
+    if i64::from(box_w) * i64::from(box_h) > CAP_BOX_MAX_PX {
+        return None;
+    }
+    let bytes = (w as usize) * (h as usize) * 4;
+    if bytes <= plx_ui::tex::RESIDENCY_BYTES {
+        return None;
+    }
+    let cover = (box_w as f32 / w as f32).max(box_h as f32 / h as f32);
+    // …and no more than the threshold allows. `×0.999` keeps the floor under it.
+    let area = (plx_ui::tex::RESIDENCY_BYTES as f32 / bytes as f32).sqrt() * 0.999;
+    let scale = cover.min(area);
+    if scale >= 1.0 {
+        return None;
+    }
+    let (dw, dh) = (
+        ((w as f32 * scale).floor() as c_int).max(1),
+        ((h as f32 * scale).floor() as c_int).max(1),
+    );
+    (dw != w || dh != h).then_some((dw, dh))
+}
+
+/// Scale decoded RGBA down to `dw`×`dh` (bilinear) on the worker, and hand the result over as the
+/// same kind of owned pixel buffer the decoder returns.
+fn downscale_rgba(px: *mut c_uchar, w: c_int, h: c_int, dw: c_int, dh: c_int) -> Option<(*mut c_uchar, c_int, c_int)> {
+    if px.is_null() || w <= 0 || h <= 0 || dw <= 0 || dh <= 0 {
+        return None;
+    }
+    let len = (w as usize) * (h as usize) * 4;
+    let src = unsafe { std::slice::from_raw_parts(px, len) };
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, src.to_vec())?;
+    let scaled = image::imageops::resize(&img, dw as u32, dh as u32, image::imageops::FilterType::Triangle);
+    let out = img::img_malloc_copy(scaled.as_raw(), || format!("{dw}x{dh} from {w}x{h}"));
+    (!out.is_null()).then_some((out, dw, dh))
+}
+
 /// BACKGROUND worker: claim a request, read disk or fetch and decode off-lock, publish pixels.
 /// RAM/GPU residency stays bounded independently of the number of persistent images.
 fn poster_worker() {
@@ -1938,6 +2019,13 @@ fn poster_worker() {
                 });
                 if let Some((p, dw, dh)) = loaded.art {
                     (px, w, h) = (p, dw, dh);
+                    let capped = request_box(&key_s)
+                        .and_then(|(bw, bh)| cap_dims(w, h, bw, bh))
+                        .and_then(|(cw, ch)| downscale_rgba(px, w, h, cw, ch));
+                    if let Some((p2, cw, ch)) = capped {
+                        img::img_free(px);
+                        (px, w, h) = (p2, cw, ch);
+                    }
                 }
                 trace::disk(idx, gen, if loaded.from_disk { "hit" } else { "net" });
                 stale = loaded.stale.map(|k| (client, k));
@@ -2042,6 +2130,38 @@ mod tests {
     //! server in the registry, which is a crate global. They still touch no socket and no GL —
     //! `poster_key` only formats a string.
     use super::*;
+
+    #[test]
+    fn a_built_key_names_its_request_box() {
+        let key = "/photo/:/transcode?width=250&height=375&minSize=1&url=https%3A%2F%2Fx%2Fa.jpg&X-Plex-Token=t";
+        assert_eq!(request_box(key), Some((250, 375)));
+        assert_eq!(request_box("/photo/:/transcode?url=https%3A%2F%2Fx%2Fa.jpg"), None);
+        assert_eq!(request_box("/plx/fan/123/456"), None, "a fan bake has no box");
+    }
+
+    /// The cap is for card art the CDN served too large: it covers the box only when the source is
+    /// over `RESIDENCY_BYTES` and the box is card-sized. Backdrops stay solo takes, and art already
+    /// under the threshold keeps its pixels.
+    #[test]
+    fn oversized_card_art_is_capped_to_its_box() {
+        // btttr.cc's 500×750 poster for a 250×375 card: 1.5 MB of RGBA, a solo take without this.
+        assert_eq!(cap_dims(500, 750, 250, 375), Some((250, 375)));
+        // MetaHub `large` (780×1170) at the same box.
+        assert_eq!(cap_dims(780, 1170, 250, 375), Some((250, 375)));
+        // TMDB w342 is 702 KB: under the threshold, and its 1.37× headroom is wanted.
+        assert_eq!(cap_dims(342, 513, 250, 375), None);
+        // A backdrop's box is not a card box: a 1280×720 decode is a Residency take by design.
+        assert_eq!(cap_dims(2460, 1384, 1920, 1080), None);
+        // COVER, so the band the 2:3 tile crops keeps its resolution: a 500×750 poster into a
+        // 300×300 headshot box becomes 300×450, not 200×300.
+        assert_eq!(cap_dims(500, 750, 300, 300), Some((300, 450)));
+        // A landscape episode still in a 2:3 card: cover 666×375 (999 KB), still a Poster take.
+        assert_eq!(cap_dims(780, 439, 250, 375), Some((666, 375)));
+        // …and in its own 420×236 still box, the whole frame at its own size.
+        assert_eq!(cap_dims(780, 439, 420, 236), Some((420, 236)));
+        // Already inside the box (and small): nothing to do.
+        assert_eq!(cap_dims(200, 300, 250, 375), None);
+    }
 
     #[test]
     fn demand_waits_for_decoded_bytes_in_both_queues_to_drain() {

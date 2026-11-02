@@ -4699,8 +4699,15 @@ pub fn sized_image_url(url: &str, width: u32) -> String {
             for from in ["small", "medium", "large"] {
                 let pat = format!("/{kind}/{from}/");
                 if url.contains(&pat) {
+                    // MetaHub's ladder is `small` 300×450, `medium` 500×750, `large` 780×1170.
+                    // A card draws 250×375 (`widgets::POSTER_RES`), so `medium` is a 1.5 MB RGBA
+                    // upload — over `tex::RESIDENCY_BYTES` (1 MiB), which makes every poster a
+                    // solo `Residency` take and owns the frame. `small` is 540 KB and lands as an
+                    // ordinary `Poster` take; asking for `medium` here measured as fps 44–54 with
+                    // `budget …/solo:residency` during a fast Home scroll (2026-11-02).
                     let to = match (kind, width) {
-                        ("poster", w) if w > 0 && w <= 400 => "medium",
+                        ("poster", w) if w > 0 && w <= 300 => "small",
+                        ("poster", w) if w > 0 && w <= 500 => "medium",
                         ("poster", _) => "large",
                         ("background", w) if w > 0 && w <= 1280 => "medium",
                         ("background", _) => "large",
@@ -5410,5 +5417,35 @@ mod continue_watching_paging_tests {
         assert_eq!(hub["size"], 2);
         assert_eq!(hub["totalSize"], 5);
         assert_eq!(hub["more"], true);
+    }
+}
+
+#[cfg(test)]
+mod image_sizing_tests {
+    use super::sized_image_url;
+
+    /// The card box is 250×375 (`widgets::POSTER_RES`). MetaHub's `small` is 300×450 (540 KB
+    /// decoded); its `medium` is 500×750 (1.5 MB), which crosses `tex::RESIDENCY_BYTES` and makes
+    /// every poster a solo upload. Asking for medium here measured fps 44–54 during a fast Home
+    /// scroll, with `budget …/solo:residency` on the television (2026-11-02).
+    #[test]
+    fn a_card_sized_metahub_poster_asks_for_the_small_ladder() {
+        let base = "https://images.metahub.space/poster/medium/tt0111161/img";
+        let at = |w| sized_image_url(base, w);
+        assert_eq!(at(250), "https://images.metahub.space/poster/small/tt0111161/img");
+        assert_eq!(at(300), "https://images.metahub.space/poster/small/tt0111161/img");
+        assert_eq!(at(375), "https://images.metahub.space/poster/medium/tt0111161/img");
+        assert_eq!(at(500), "https://images.metahub.space/poster/medium/tt0111161/img");
+        assert_eq!(at(700), "https://images.metahub.space/poster/large/tt0111161/img");
+    }
+
+    /// TMDB's ladder is unchanged: a 250-wide card box is still served `w342`, not the `w500` that
+    /// would cross the same 1 MiB threshold.
+    #[test]
+    fn tmdb_posters_keep_their_ladder() {
+        let url = "https://image.tmdb.org/t/p/w500/abc.jpg";
+        assert_eq!(sized_image_url(url, 250), "https://image.tmdb.org/t/p/w342/abc.jpg");
+        assert_eq!(sized_image_url(url, 500), "https://image.tmdb.org/t/p/w500/abc.jpg");
+        assert_eq!(sized_image_url(url, 780), "https://image.tmdb.org/t/p/w780/abc.jpg");
     }
 }

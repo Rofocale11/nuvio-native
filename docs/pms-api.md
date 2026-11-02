@@ -967,6 +967,24 @@ mirrored in `img.rs`'s decode-budget note.
 | Detail backdrop | `width=1920&height=1080`, `url=art` | overflowed off-panel (`Rect::cover`) |
 | Hero clearLogo | `width=600&height=240&format=png` | contained in its column (`hero_logo::fit`) |
 
+**NuvioNative's shim chooses the CDN rung for that box.** A real PMS rescales any source to the
+requested box; the shim has no transcoder, so `sized_image_url` rewrites the CDN's own size
+segment instead. MetaHub's ladder is `small` 300×450, `medium` 500×750, `large` 780×1170, so a
+250×375 card asks for `small`: `medium` decodes to 1.5 MB and crosses
+`plx_ui::tex::RESIDENCY_BYTES` (1 MiB), which makes every poster a solo `Residency` upload that
+owns its frame — measured as `budget …/solo:residency` and fps 44–54 during a fast Home scroll
+on the television (2026-11-02). TMDB keeps its own `w185/w342/w500/w780/…` ladder.
+
+**…and the poster worker caps what the CDN ignores.** Some addon CDNs have no usable size hint at
+all (`btttr.cc` serves 500×750 WebP for every variant, measured 2026-11-02). Any card art whose
+decode is over `RESIDENCY_BYTES` is therefore cover-scaled to the request box on the worker —
+before the main thread uploads it, and bounded just under the threshold — so it stays an ordinary
+`Poster` take. Cover rather than fit matters: the card crops its texture (`art_uv`), so fitting a
+landscape still inside a 2:3 card would shrink the band that survives the crop. Art already under
+1 MiB (TMDB's `w342`, 702 KB) is untouched, keeping its headroom for the focus pop. In the
+simulator the same fast scroll now uploads 250×375 (93,750 px) per poster instead of
+500×750 (375,000 px), and no poster frame is a solo take.
+
 ---
 
 ## 6. Direct-play URL
