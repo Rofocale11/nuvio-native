@@ -104,7 +104,7 @@ pub fn size_scale(size: SubtitleSize) -> f32 {
 pub fn position_lift(position: SubtitlePosition) -> f32 {
     match position {
         SubtitlePosition::Low => 0.0,
-        SubtitlePosition::Middle => 160.0,
+        SubtitlePosition::Middle => 60.0,
         SubtitlePosition::High => 320.0,
     }
 }
@@ -290,7 +290,7 @@ mod tests {
         let scales: Vec<f32> = SubtitleSize::LADDER.iter().map(|s| size_scale(*s)).collect();
         assert_eq!(scales, [0.78, 1.0, 1.25, 1.5, 1.8]);
         let lifts: Vec<f32> = SubtitlePosition::LADDER.iter().map(|p| position_lift(*p)).collect();
-        assert_eq!(lifts, [0.0, 160.0, 320.0]);
+        assert_eq!(lifts, [0.0, 60.0, 320.0]);
         assert_eq!((SUB_BASE_Y, SUB_CEIL_Y, HUD_LIFT), (980.0, 780.0, 200.0));
         assert_eq!(CAPSULE_BOTTOM_Y, 836.0);
     }
@@ -315,7 +315,7 @@ mod tests {
     fn bottom_anchor_follows_position() {
         // BOTTOM_GAP less INK_TRIM, plus the Position lift.
         assert_eq!(bottom_margin_v(SubtitlePosition::Low), 97);
-        assert_eq!(bottom_margin_v(SubtitlePosition::Middle), 257);
+        assert_eq!(bottom_margin_v(SubtitlePosition::Middle), 157);
         assert_eq!(bottom_margin_v(SubtitlePosition::High), 417);
         assert_eq!(bottom_anchor_y(SubtitlePosition::Low), SUB_BASE_Y + INK_TRIM);
         assert_eq!(bottom_anchor_y(SubtitlePosition::High), 663.0);

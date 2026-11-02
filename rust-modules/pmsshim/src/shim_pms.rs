@@ -3073,34 +3073,52 @@ impl Shim {
             })
         });
         let save_id = imdb_id.as_deref().unwrap_or(&saved_id);
-        let meta = if let Some(meta) = self.meta(&saved_type, save_id) {
-            meta
-        } else {
-            let (name, poster_path, description, release_info) = if saved_type == "series" {
-                let tmdb_id = synthetic_show_tmdb_id(rk)
-                    .ok_or(plx_stremio::model::Error::Status(404))?;
-                let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
-                let details = client.tv_details(tmdb_id)?;
-                (details.show.name, details.show.poster_path, details.show.overview, details.show.first_air_date)
-            } else {
-                let tmdb_id = synthetic_tmdb_id(rk)
-                    .ok_or(plx_stremio::model::Error::Status(404))?;
-                let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
-                let details = client.movie_details(tmdb_id)?;
-                (details.movie.title, details.movie.poster_path, details.movie.overview, details.movie.release_date)
-            };
-            Arc::new(Meta {
-                id: save_id.to_owned(),
-                type_: saved_type.clone(),
-                name,
-                poster: tmdb_image(poster_path.as_deref()),
-                description,
-                release_info: year_of(release_info.as_deref()).map(|year| year.to_string()),
-                ..Meta::default()
-            })
+        // A removal needs only the account's own `(type, id)`. It must NOT wait on the add-on
+        // metadata cache: that cache is in memory with a six-hour TTL, and the Add that warmed it
+        // may be hours old. Requiring a full `Meta` here made a Remove fail with a 404 once the
+        // cache had forgotten the title, while the Add (made from the page that had just loaded
+        // it) still worked.
+        let meta = match Self::write_meta(self.meta(&saved_type, save_id), &saved_type, save_id, saved) {
+            Some(meta) => meta,
+            None => {
+                let (name, poster_path, description, release_info) = if saved_type == "series" {
+                    let tmdb_id = synthetic_show_tmdb_id(rk)
+                        .ok_or(plx_stremio::model::Error::Status(404))?;
+                    let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
+                    let details = client.tv_details(tmdb_id)?;
+                    (details.show.name, details.show.poster_path, details.show.overview, details.show.first_air_date)
+                } else {
+                    let tmdb_id = synthetic_tmdb_id(rk)
+                        .ok_or(plx_stremio::model::Error::Status(404))?;
+                    let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
+                    let details = client.movie_details(tmdb_id)?;
+                    (details.movie.title, details.movie.poster_path, details.movie.overview, details.movie.release_date)
+                };
+                Arc::new(Meta {
+                    id: save_id.to_owned(),
+                    type_: saved_type.clone(),
+                    name,
+                    poster: tmdb_image(poster_path.as_deref()),
+                    description,
+                    release_info: year_of(release_info.as_deref()).map(|year| year.to_string()),
+                    ..Meta::default()
+                })
+            }
         };
         eprintln!("saving My List item: type={} id={}", meta.type_, meta.id);
         self.account.set_saved(&meta, saved)
+    }
+
+    /// The metadata one My List write hands the account. A removal needs only the account's own
+    /// `(type, id)`; the name, poster and description exist to CREATE the row, not to delete it.
+    /// An add therefore still requires the cache (or the TMDB fallback), while a removal may go
+    /// ahead without it.
+    fn write_meta(cached: Option<Arc<Meta>>, saved_type: &str, save_id: &str, saved: bool) -> Option<Arc<Meta>> {
+        cached.or_else(|| {
+            (!saved).then(|| {
+                Arc::new(Meta { id: save_id.to_owned(), type_: saved_type.to_owned(), ..Meta::default() })
+            })
+        })
     }
 
     #[allow(dead_code)]
@@ -4078,15 +4096,22 @@ impl Shim {
                 // clearLogo`), which is why a Related title drew text where a catalog one drew its
                 // logotype. The row is rebuilt from TMDB exactly as `/library/metadata/{rk}` does
                 // (one cached request), and its `clearLogo` URL then takes the proxy path below.
-                rk.parse()
+                let row = rk
+                    .parse()
                     .ok()
-                    .and_then(|rk| self.row(rk).or_else(|| self.tmdb_synthetic_row(rk)))
-                    .and_then(|row| {
-                        row[*kind]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                    })
+                    .and_then(|rk| self.row(rk).or_else(|| self.tmdb_synthetic_row(rk)));
+                let Some(row) = row else {
+                    // The metadata row is not ready yet (or its TMDB rebuild answered nothing).
+                    // That is a WAIT, not a missing asset: a 404 here latches in the poster store
+                    // as final, so the tile stays blank even after the row lands. 5xx is the
+                    // store's retryable class; a row that EXISTS with no art still falls through
+                    // to the 404 below.
+                    return Response::bytes(503, "text/plain", Vec::new());
+                };
+                row[*kind]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
             }
             _ => None,
         };
@@ -4848,5 +4873,34 @@ mod catalog_selector_tests {
         let episode = shim.addon_id_for("series", "tmdb:1396:1:2");
         assert!(episode == "tmdb:1396:1:2"
             || (episode.starts_with("tt") && episode.ends_with(":1:2")), "{episode}");
+    }
+
+    /// A poster asked for before its metadata row has landed is a WAIT: 5xx is the poster store's
+    /// retryable class, while a 404 is final and would leave the tile blank even after the row
+    /// arrived.
+    #[test]
+    fn a_photo_for_an_unlanded_metadata_row_is_a_retryable_wait() {
+        let shim = Arc::new(Shim::new(Arc::new(GenreBackend), Config::default()));
+        let response = shim.handle(&get(
+            "/photo/:/transcode",
+            &[("url", "/library/metadata/999999/thumb")],
+        ));
+        assert_eq!(response.status, 503, "an unlanded row must not latch as a missing poster");
+    }
+}
+
+#[cfg(test)]
+mod my_list_removal_tests {
+    use super::*;
+
+    /// A removal is keyed by the account's own `(type, id)` and must not depend on the add-on
+    /// metadata cache, which is in memory with a six-hour TTL. An add still needs that metadata.
+    #[test]
+    fn a_remove_needs_no_cached_metadata_but_an_add_does() {
+        let removal = Shim::write_meta(None, "movie", "tt0133093", false).expect("a removal has its key");
+        assert_eq!((removal.id.as_str(), removal.type_.as_str()), ("tt0133093", "movie"));
+        assert!(Shim::write_meta(None, "movie", "tt0133093", true).is_none(), "an add still needs metadata");
+        let cached = Arc::new(Meta { id: "tt1".into(), type_: "movie".into(), name: "Matrix".into(), ..Default::default() });
+        assert_eq!(Shim::write_meta(Some(cached), "movie", "tt1", false).expect("cached").name, "Matrix");
     }
 }

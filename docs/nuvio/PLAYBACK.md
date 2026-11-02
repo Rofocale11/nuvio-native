@@ -113,14 +113,18 @@ the decoder, so they are the first thing to size honestly:
 | audio AU queue | `AQ_AUDIO_BYTES` | **4 MiB** | same ratio, so a 3.6 Mbit/s DTS-HD MA track never fills first |
 | pre-audio video grant | `ff::PRE_AUDIO_VIDEO_HEADROOM` | 24 MiB | only for a file whose audio starts late; walked back as it drains |
 | audio-ahead grant | `ff::AUDIO_AHEAD_HEADROOM` | 16 MiB | only for a file that stores more audio than video ahead of it |
-| poster pool | `ui::tex::TEX_RESIDENT_BYTES_MAX` | **24 MiB** | ~58 grid posters or three 1280×720 heroes; the rest re-upload from the disk cache (16 MiB measured as constant re-arming, 183 refusals in a 60 s Home session) |
+| poster pool | `ui::tex::TEX_RESIDENT_BYTES_MAX` | **32 MiB** | the measured zero-refusal point for one Home session; 24 MiB refused 171 arrivals (blank tiles) in a longer simulator session, 16 MiB re-armed constantly. The rest re-upload from the disk cache |
 | image-subtitle store | `player::SUB_BITMAP_BUDGET` | 40 MiB | **not** a cache: this IS the delayed-caption window, measured at 31.1 MB worst case for 4K PGS |
 | Starfish source buffers | `PAYLOAD_AV.bufferingCtrInfo` | 8 MiB video / 1 MiB audio | the pipeline's own, not ours |
 
-The two queues were 96/8 MiB until 2026-11-01 (an LG B4 sizing, 2026-09-22) and the poster pool 32
-MiB; on this set that peak ran the process out of memory mid-playback. That is ~50 MB of queue and
-8 MB of texture back, which is where the peak was. `abr/sim.rs` carries the
-queue numbers by value and a test fails if the two models disagree.
+The two queues were 96/8 MiB until 2026-11-01 (an LG B4 sizing, 2026-09-22); on this set that peak
+ran the process out of memory mid-playback. That is ~50 MB of queue, which is where the peak was;
+those queues stay at 50/4. The poster pool was cut 32→24 MiB with them, then put back to 32 on
+2026-11-02: the 24 MiB pool could not hold one Home (the hero, its prefetched neighbours, and the
+visible grid) and refused 171 arrivals in a single simulator session, each a tile rendered blank
+until its cooldown cleared. The 8 MiB the pool takes back is still far inside the ~50 MB the queues
+gave up. `abr/sim.rs` carries the queue numbers by value and a test fails if the two models
+disagree.
 
 ## Real metadata: `plx_media::ff::probe::probe_url`
 

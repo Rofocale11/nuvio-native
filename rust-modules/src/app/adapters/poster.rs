@@ -70,6 +70,13 @@ pub(crate) fn take_upload_stats() -> (u32, u64) {
 }
 
 const PT_CAP: usize = 96;
+/// Concurrent fetch+decode workers. One worker takes a whole request at a time — fetch through
+/// the loopback shim, decode, publish — so this is how many cold tiles a newly scrolled-in row
+/// can bring in at once. Two made a cold Home row take ≈4 s on the simulator (imgtrace
+/// 2026-11-02: 20 identities in one row, each 450–600 ms of work, started in pairs; the last one
+/// queued 3.5 s before it began). Four halves that first fill, and [`DECODE_BACKLOG_MAX`] still
+/// bounds the pixels they may hold between them.
+const POSTER_WORKERS: usize = 4;
 /// Decoded pixels waiting for upload, independent of the persistent and GPU cache budgets.
 /// Existing active decodes can exceed this threshold; no further demand work starts until
 /// the upload queue drains. This prevents a fast disk from queuing 64 large backdrops.
@@ -1512,7 +1519,7 @@ pub(crate) fn drain_decoded() {
             trace::handoff(i, s.gen);
             let current = s.cache_gen == plx_platform::imgcache::generation();
             // Retain the decoded-byte charge until tex::accept publishes its pending bytes.
-            // A brief double charge is safe; a gap would let both workers over-admit decodes.
+            // A brief double charge is safe; a gap would let the workers over-admit decodes.
             if !current { s.state = P_FAILED; }
             (i, px, w, h, current)
         };
@@ -1680,7 +1687,7 @@ fn warn_fetch_failed(srv: ServerId, cause: ArtFail) {
     let bit = 1u32 << cause as u32;
     let word = &LOGGED[(srv.raw() as usize).min(plx_plex::plex::MAX_SERVERS)];
     // fetch_or, not load-then-store: this loop runs on more than one thread (`posters_init` spawns
-    // two), so two workers can reach the same cause for the same server at once and only
+    // several), so two workers can reach the same cause for the same server at once and only
     // the one that flipped the bit may write the line.
     if word.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
         plx_base::eventlog::log(&format!(
@@ -1710,7 +1717,7 @@ fn disk_namespace(client: &plx_plex::plex::Client) -> String {
 }
 
 /// Diagnostic snapshot only: reading counters must never initialize or scan the disk cache
-/// on the frame thread. The two demand workers are the only callers that open it.
+/// on the frame thread. The demand workers are the only callers that open it.
 pub(crate) fn log_cache_stats() {
     let s = plx_platform::imgcache::stats();
     let queued = note_backlog(&store().slots);
@@ -1983,8 +1990,8 @@ pub(crate) fn init() {
         g.workers.clear();
     }
     // filter_map, not map: a refused worker is one fewer decoder, not a dead app. Artwork degrades
-    // to whatever the survivors can fetch (and to nothing at all if both are refused).
-    let handles: Vec<JoinHandle<()>> = (0..2)
+    // to whatever the survivors can fetch (and to nothing at all if every one is refused).
+    let handles: Vec<JoinHandle<()>> = (0..POSTER_WORKERS)
         .filter_map(|_| plx_base::task::spawn("poster", poster_worker))
         .collect();
     store().workers = handles;
@@ -3915,7 +3922,7 @@ mod tests {
     }
 
     /// The prefetch gate sees every stage of a fetch. If this ever loosens, the prefetch quietly
-    /// starts competing with the tiles on screen for the two workers.
+    /// starts competing with the tiles on screen for the workers.
     #[test]
     fn idle_of_sees_every_stage_of_a_fetch() {
         assert!(

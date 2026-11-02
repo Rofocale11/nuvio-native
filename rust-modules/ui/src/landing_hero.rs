@@ -43,7 +43,11 @@ pub fn hero_stack(title_h: f32, meta_h: f32, synopsis_h: Option<f32>) -> HeroSta
     HeroStack { title, meta, synopsis: spans.next() }
 }
 
-pub fn base_scrim_bottom_a(hero_a: f32) -> f32 { 0.30 + 0.64 * hero_a.clamp(0.0, 1.0) }
+/// The foot of the hero's atmospheric ramp. It scales with the hero itself and has no floor: the
+/// ramp is drawn only while the hero is (`hero_a > 0.01`), so a 0.30 floor vanished in one frame
+/// at that gate — the bottom third of the scrim snapped off while ~45% of the photo was still up
+/// (2026-11-02 TV report). Detail's own ramp has never had a floor; this matches it.
+pub fn base_scrim_bottom_a(hero_a: f32) -> f32 { 0.94 * hero_a.clamp(0.0, 1.0) }
 
 pub fn base_scrim_ramp(hero_a: f32) -> [f32; 4] {
     let foot = base_scrim_bottom_a(hero_a);
@@ -74,5 +78,15 @@ mod tests {
         let bare = hero_stack(100.0, 24.0, None);
         assert!(bare.synopsis.is_none());
         assert!((bare.meta.y + bare.meta.h - TEXT_BOTTOM).abs() < 0.01);
+    }
+
+    /// The ramp must reach zero WITH the hero. A floor here was a one-frame drop of the whole
+    /// bottom third at the `hero_a > 0.01` gate, which is the Home hero-to-gradient jump.
+    #[test]
+    fn the_hero_scrim_reaches_zero_with_the_hero() {
+        assert_eq!(base_scrim_bottom_a(0.0), 0.0);
+        assert!((base_scrim_bottom_a(1.0) - 0.94).abs() < 1e-6);
+        assert!(base_scrim_bottom_a(0.01) < 0.02, "the gate cannot cut a visible foot");
+        assert!(base_scrim_bottom_a(0.5) < 0.6, "the foot fades with the photo, not against it");
     }
 }

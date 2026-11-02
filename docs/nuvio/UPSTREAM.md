@@ -446,7 +446,10 @@ peak is what dies. Back to the fork's own first sizing — **50 MiB / 4 MiB** �
 **24 MiB** (16 measured as constant re-arming on the simulator: 183 refused arrivals against 0 at
 32 MiB in the same 60 s Home session); `abr/sim.rs`'s carried-by-value constants moved with them. The image-subtitle store stays
 at 40 MiB on purpose: it is not a cache but the delayed-caption window, with a measured 31.1 MB
-worst case at 4K (see `docs/nuvio/PLAYBACK.md`, "Memory: what playback is allowed to hold").
+worst case at 4K (see `docs/nuvio/PLAYBACK.md`, "Memory: what playback is allowed to hold"). On
+2026-11-02 the pool went back to **32 MiB**: 24 could not hold one Home — a simulator session that
+hovered the shelves and let hubs land refused 171 arrivals (`lost=65 rearmed=130 refused=171`),
+each a tile blank until its cooldown, and the queues' 50 MB cut is what actually fixed the OOM.
 
 ### The exact next action
 
@@ -658,6 +661,62 @@ The cheap picks against the fork's playback tier are `da8424b7` and `007696c0`; 
 and the A-Z rail are a project, not a pick. The television still has not seen tier C, so verify
 the ported UI on the set first, then take this span as one tier-C-shaped port — or cherry-pick
 the playback fixes while the UI is being verified.
+
+### 2026-11-02 — the first tier C television pass: four defects and their fixes
+
+The stable `forward-port/v0.9-hq` build (`da56aa21`) ran on the set. Boot, Home, Library,
+Watchlist, Detail and playback worked, P2P worked, and the subtitle size/position preference
+survived a cold boot. Four defects did not:
+
+- **The Detail/Home bookmark disc never learned membership.** `frame_ingest` fed only the
+  Watchlist page (`watchlist_feed`); `catalog_feed`, which feeds every open Detail and Home
+  disc, existed but was called from tests alone. A title on the list therefore still offered
+  Add, and the page could never issue its Remove. `frame_ingest` calls it after
+  `watchlist_feed` now; the route tests no longer feed it themselves, and were RED
+  (`Unknown` vs `Off`) without the call.
+- **A Remove after the metadata cache had gone failed with 404.** `save_my_list_title`
+  re-resolved the full add-on `Meta` before deleting; that cache is in memory with a six-hour
+  TTL, so an Add made from a Detail page worked and a Remove hours later did not. A removal
+  now needs only the account's own `(type, id)` (`Shim::write_meta`); an Add still needs the
+  metadata (or its TMDB fallback).
+- **The player HUD lost the clearLogo.** The tier C port replaced the HUD's `draw_title_logo`
+  calls with the text-only `draw_player_title`, leaving the logo path with no caller. The HUD
+  now takes the logo path when `logo_src` is resident (clipped to the title's control row) and
+  falls back to the clipped/marquee text otherwise.
+- **The Home hero's scrim snapped off at the `hero_a > 0.01` gate.** `base_scrim_bottom_a`
+  had a 0.30 floor while the ramp was gated off at 0.01, so the bottom third dropped in one
+  frame mid-dive. The foot now scales with `hero_a` and reaches zero with the photo; Detail's
+  ramp never had a floor.
+
+The simulator confirmed the Detail disc's filled face (a checkmark) for a My List title and
+the new Home. The television has not seen these fixes yet, and a Remove was not exercised on
+the simulator because that would write to the account.
+
+**The poster pool was too small, not the art source.** The first reading (one Watchlist tile with
+no poster, backdrop or logo, `lost=0, refused=16`) looked like a source gap, and one real latch was
+fixed with it: a `/photo` request for a metadata row that had not landed returned 404, which the
+poster store treats as final; it returns 503 (retryable) now, while a row that exists without art
+still returns 404. A longer simulator Home session then settled it the other way —
+`posters: residency lost=65 rearmed=130 refused=171` with no fetch or decode failure in the log.
+Every refusal is an arrival the render cache dropped because it would have evicted art drawn in
+the current or last frame; on a screen whose own art exceeds the pool (hero + two prefetched
+neighbours ≈ 11 MB, plus the visible grid), the retry is refused again, so the tile stays blank
+for as long as the screen is up. The pool is back to the measured zero-refusal point,
+**32 MiB** (`ui::tex::TEX_RESIDENT_BYTES_MAX`); the OOM was the 96/8 MiB AU queues, which stay at
+50/4. The remaining blank-until-late tiles were first-load latency, not loss: a cold row of 20
+images took 450–600 ms each through the fixed two poster workers and drew last at +4.0 s. From
+the same imgtrace, `POSTER_WORKERS` is now 4; that row finishes at +1.2 s, and the decoded-byte
+admission cap (8 MiB) still bounds the batch.
+
+Slow-torrent seeks still stutter. This build predates `da8424b7` (an H.264 non-IDR I-slice as
+a keyframe) and the P2P engine's own buffering dominates; that is a candidate for the next
+upstream pick, not a defect found here.
+
+**Full-suite state on this branch:** `make test-crate C=plxnative-modules` reports 831 passed,
+18 failed. The isolated failure is a stale tier-C expectation — `library_query_tests` expects
+`LibraryMenuKind::Filter` while the tier-C Library opens `SortFilter` — and the rest are
+Library route/recorder tests plus the known sandbox `menu_play_season` port refusal. None are
+in the files these fixes touch; they are a separate triage, not evidence against these fixes.
 
 ## Recomputing
 

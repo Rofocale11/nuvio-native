@@ -2245,6 +2245,10 @@ fn frame_ingest(
     // landing began from the old ones (a snap, then a jump back).
     rig.watchlist_pump();
     rig.watchlist_feed(d);
+    // The same pass feeds every open Detail and Home page its bookmark membership. It is separate
+    // from the Watchlist page's feed: without this call the discs stay at their constructor's
+    // `Unknown`, so a title on the list still offers Add and can never be removed from the page.
+    rig.catalog_feed(d);
     // Library used to be the only route that pumped Browse. Onboard schedules the roster-only
     // owner work from its Tick, but Tick runs after views are captured; land the roster first so
     // a discovery result and the directory publication are observed in one frame. Controlled

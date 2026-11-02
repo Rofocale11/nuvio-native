@@ -543,7 +543,8 @@ impl World {
             script: Some(script), _session: session, _serial: serial, feed: Some(|d, bridge| {
                 bridge.watchlist_for_test().pump();
                 bridge.watchlist_feed(d);
-                bridge.catalog_feed(d);
+                // Membership is NOT fed here: `frame_ingest` owns `catalog_feed`, and the discs'
+                // route tests must exercise that production call rather than a test pump.
             }) }
     }
 

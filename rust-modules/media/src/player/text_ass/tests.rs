@@ -488,7 +488,7 @@ fn header_follows_the_viewers_size_and_position() {
     assert!(an1.contains(",1,390,390,417,-1"), "{an1}");
     let small = header(&TextStyle { size: SubtitleSize::Small, position: SubtitlePosition::Middle });
     assert!(style_lines(&small)[0].contains(",40.16,"), "{}", style_lines(&small)[0]);
-    assert!(style_lines(&small)[0].contains(",2,664,664,257,-1"));
+    assert!(style_lines(&small)[0].contains(",2,664,664,157,-1"));
 }
 
 #[test]

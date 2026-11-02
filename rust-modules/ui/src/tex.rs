@@ -185,16 +185,20 @@ const CACHE_CAP: usize = 96;
 /// reason: a number that is wrong should be wrong SMALL, on the side that asserts early rather
 /// than the side that ships a breach.
 ///
-/// **FORK (RichiL10): 24 MiB.** The derivation above sizes the pool against a 160 MB declaration;
-/// this fork declares 280 MB and still ran out of memory mid-playback on the dev set (see
-/// `engine::AQ_VIDEO_BYTES`), and the poster pool is the one large term that is pure cache. The
-/// cut was measured on the simulator rather than guessed: the same 60 s Home session holds
-/// `refused=0, rearmed=17` at 32 MiB, `refused=37, rearmed=51` at 24, and `refused=183,
-/// rearmed=199` at 16 — so 16 is a pool that cannot hold one screen and re-arms every tile it
-/// loses, while 24 (58 posters, or three 1280×720 heroes) holds a full grid with the hero and
-/// pays a few re-uploads. Every tile the pool does not keep is recoverable from the on-disk image
-/// cache; the memory would not be.
-pub const TEX_RESIDENT_BYTES_MAX: usize = 24 << 20;
+/// **FORK (RichiL10): 32 MiB.** The derivation above sizes the pool against a 160 MB declaration;
+/// this fork declares 280 MB and ran out of memory mid-playback on the dev set when the AU queues
+/// stood at 96/8 MiB (see `engine::AQ_VIDEO_BYTES`), and the poster pool is the one large term that
+/// is pure cache. The 96/8 queues are what died, and they are back at the fork's first sizing
+/// (50/4) — that is the headroom this pool spends. The sizes were measured on the simulator rather
+/// than guessed, on the same 60 s Home session: `refused=0, rearmed=17` at 32 MiB,
+/// `refused=37, rearmed=51` at 24, and `refused=183, rearmed=199` at 16. A longer session that
+/// hovered the rows and let new hubs land refused 171 arrivals at 24 MiB — every one a tile that
+/// renders blank until its cooldown clears, and while that screen is up it cannot land at all,
+/// because a refusal is decided against art drawn this frame. 24 is therefore a pool that no
+/// longer holds one Home: the hero plus its two prefetched neighbours (≈11 MB) and the visible
+/// grid leave nothing for the arrival. Every tile the pool does not keep is recoverable from the
+/// on-disk image cache; the memory would not be.
+pub const TEX_RESIDENT_BYTES_MAX: usize = 32 << 20;
 
 /// How many texels one authored pixel costs: 1 on a television, `n²` under the simulator's
 /// supersampled rendering (`surface::render_scale`), whose images are requested at `n`x per axis.
