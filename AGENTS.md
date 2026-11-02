@@ -9,6 +9,11 @@ of PlxNative (GPL-3.0-or-later). The recorded base, the policy for taking upstre
 and the measured size of the divergence are `docs/nuvio/UPSTREAM.md` — do not restate a
 base commit from memory here.
 
+It is **not a Plex client**: there is no plex.tv credential behind this app, and its only
+server is the in-process shim. The UI still speaks the Plex HTTP dialect, but the account,
+library and watch progress are Nuvio's. An upstream path that reaches plex.tv or a real PMS
+is a data-boundary bug — re-implement it against the shim, do not "fix" it with a credential.
+
 Most of the application is Rust under `rust-modules/` (the application in `src/`, the
 layers in their own crates); `src/main.c` is the boot/crash shim, `src/starfish.c` is the
 StarfishMediaAPIs/ACB seam, and `src/svg.c` rasterizes SVGs. Keep changes properly
@@ -39,26 +44,32 @@ take, and how). Read the relevant one before changing that area. Upstream PlxNat
   and widget systems instead of adding screen-local visual primitives. Before touching a
   screen, also read `rust-modules/screens/src/CLAUDE.md`; the restructure's design record
   is `docs/ui-restructure-spec-v4.md`, which `rust-modules/ui/src/lib.rs` cites by section
-  number.
+  number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) was ported on
+  `tier-c/ui`: run `git log --oneline nuvio-native..tier-c/ui` before assuming the trunk's
+  screens are the ported ones.
 - Before account/watch-progress work, read `docs/nuvio/WATCH-PROGRESS.md`.
 - Before taking any upstream PlxNative work — cherry-picking a fix, absorbing a Richi branch, or
   reasoning about how far this fork has drifted — read `docs/nuvio/UPSTREAM.md` and run
   `tools/upstream-seam.sh`. The reference branch is `upstream/feature/v0.9-hq`, which is a
-  superset of `upstream/main`, and the measured merge cost is in that file.
+  superset of `upstream/main`, and the measured merge cost is in that file. Run
+  `git fetch upstream` first: the seam measures local remote-tracking refs, and the
+  reference moves (it gained 166 commits between the tier-C port and 2026-11-01). A stale
+  ref understates the gap.
 - Repository skills live in `.agents/skills/`. Use the matching skill whenever its
   description fits the task; the TV, simulator, FFI, release, and verification workflows
   have non-obvious constraints that generic commands miss.
 
 ## Fork constraints that shape the code
 
-- **Pure Rust only — no C libraries or JS engines in the TV build.** The app compiles for
-  an ancient LG toolchain (`arm-webos-linux-gnueabi`). Crates such as `innertube-rs`,
-  `rusty_ytdl`, `rquickjs` or `boa_engine` pull C code or need `libclang`/`bindgen`, and
-  the ARM build fails on them. The bundled FFmpeg is built `--disable-everything` plus the
-  demuxers/decoders the player actually uses; adding one means a change to
-  `ci/build-ffmpeg.sh` and the buffer-feed pump. The one in-app audio decode/re-encode is
-  the fork's AC3 encode lane (`media/src/ff_enc.rs`). The P2P server is an external `node`
-  child process, not an embedded JS engine.
+- **No new C libraries or JS engines in the TV build.** The fixed exceptions are the bundled
+  FFmpeg and the C shims (`src/main.c` boot/crash, `src/starfish.c` Starfish/ACB,
+  `src/svg.c`). The app compiles for an ancient LG toolchain (`arm-webos-linux-gnueabi`).
+  Crates such as `innertube-rs`, `rusty_ytdl`, `rquickjs` or `boa_engine` pull C code or
+  need `libclang`/`bindgen`, and the ARM build fails on them. The bundled FFmpeg is built
+  `--disable-everything` plus the demuxers/decoders the player actually uses; adding one
+  means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump. The one in-app audio
+  decode/re-encode is the fork's AC3 encode lane (`media/src/ff_enc.rs`). The P2P server is
+  an external `node` child process, not an embedded JS engine.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string such as
   `"tmdb:603"` blanks the screen. `docs/nuvio/ID-MANAGEMENT.md` is how the shim keeps that
   promise (key table + synthetic bases).
@@ -150,8 +161,8 @@ fails the build on a forbidden edge.
 - `make check` still exists — the 16-binary host unit suite, lint and the `ci/` python/shell
   gates, ~5 minutes, bounded machine-wide to two runs. It is NOT part of the loop and NOT a
   required step before a push: run it deliberately when a change needs the whole suite, in the
-  background, and do not sit on it. Packaging (`make ipk`, and so `ci/check-package.py`) is the
-  one place the full set runs on every artifact.
+  background, and do not sit on it. Packaging (`make ipk`, run in CI where the ARM toolchain
+  lives, and so `ci/check-package.py`) is the one place the full set runs on every artifact.
 - While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and
   runs only that crate's lib tests. It is a loop, not a gate.
 - `make test-crate` does NOT enable `hostsim`. Those tests run through
@@ -162,6 +173,9 @@ fails the build on a forbidden edge.
   `C=media`, several allowed — and pass `--require-match`: a filter that matches no test
   fails the run instead of reporting "0 tests" as success. Do not hand-write a cargo
   invocation with a target dir outside the checkout.
+- Known pre-existing reds are recorded in `docs/nuvio/UPSTREAM.md` (the `plx_data`
+  concurrency tests, `play_automatically_publishes_direct_play_auto_once`). Reproduce a red
+  on the pre-change tree before attributing it to your diff.
 - `make sim-macos` / `make` fail with `make: cargo: No such file` from a non-login shell:
   prefix `PATH="$HOME/.cargo/bin:$PATH"`. Test builds deny warnings, so a new `App` field
   must be read (`dead-code`) and initialised at BOTH construction sites (`app/boot.rs` and
@@ -169,8 +183,13 @@ fails the build on a forbidden edge.
 - A PR that touches `Makefile`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/` config,
   `.github/workflows/` or the module layout pastes a before/after `make build-bench` table
   in its body.
-- `make` performs the ARM cross-build. Do not assume a host-only green result proves the
-  target still builds.
+- `make` performs the ARM cross-build only where the webOS NDK is installed
+  (`$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot`, as set up by the
+  `setup-environment` skill). On a host without it — including this WSL checkout — `make`,
+  `make deploy` and `make ipk` fail before the link, so a host-only green result proves
+  nothing about the target. Build the `.ipk` in CI (`.github/workflows/build-ipk.yml`,
+  `workflow_dispatch` on a pushed branch, or a `v*` tag), and never report an ARM result
+  you did not run.
 - A plain local `make` / `make deploy` compiles with the fast `tvdev` cargo profile (no
   LTO); CI, `RELEASE=1`, `SYMBOLS=1` and `FLAVOR=stable|nightly` keep the fat-LTO
   `release` profile. Timing runs enforce `ARM_PROFILE=release`.
@@ -190,7 +209,8 @@ fails the build on a forbidden edge.
   `fw-compat-reviewer` custom agent (or equivalent manual review) before push.
 - After behavior changes, use the `doc-claim-auditor` custom agent (or perform the same
   audit) to find prose that the change made false.
-- Always update the docs after you finish
+- Always update the docs after you finish.
+
 ## 🔍 Offline Debugging Tools
 
 These run entirely on the host (x86_64) with no TV, simulator, or ARM toolchain.
@@ -237,9 +257,12 @@ These run entirely on the host (x86_64) with no TV, simulator, or ARM toolchain.
   action.
 - `RELEASE=1` must be present on every make invocation that builds or ships the release
   artifact; it is not persistent between commands.
-- Developer-mode tooling: `tools/nv-tv.py` (install/launch/keys/log/capture without root).
-  Host simulator: `make -j10 sim-linux` (Linux libav*/libass staged in `pkg/`) or
-  `make sim-macos` on macOS. TV build: `make ipk`. A release is cut by pushing a tag
+- Developer-mode tooling exists (`tools/nv-tv.py`: install/launch/keys/log/capture without
+  root), but agents are restricted to `./tools/ai-tv-log.sh` for device reads and the
+  `tv-lock`/`tv-session` skills for anything else — see the strict rules below. Host
+  simulator: `make -j10 sim-linux` (Linux libav*/libass staged in `pkg/`) or
+  `make sim-macos` on macOS. TV build: `make ipk` where the NDK is installed; otherwise CI
+  builds it. A release is cut by pushing a tag
   (`git tag -a v0.8.1 -m "…" && git push origin v0.8.1`); CI builds the `.ipk`.
 
 ## 📺 STRICT TV LOGGING RULES (READ-ONLY)
@@ -293,25 +316,22 @@ files you are actively editing (e.g. `cargo fmt -- path/to/file.rs`).
   the parent model and reasoning effort unless a future task deliberately changes that
   policy.
 
-## 🧠 Tooling, MCPs & Orchestration
+## 🧠 Tooling and orchestration
 
-You are equipped with advanced orchestration capabilities and specialized MCP servers. You must use them.
+Use the harness's own equivalents; the tool names below are examples, not a requirement.
 
-- **Subagents:** When a task requires researching external documentation, auditing multiple files, or checking GitHub issues simultaneously, do NOT do it sequentially. Spawn subagents (e.g., `Oracle` for architecture, `Explore` for codebase search, `Librarian` for web docs) to run in parallel.
-- **`rust-coder` (Semantic Navigation):** Do NOT use `grep` or `cat` to find code definitions. You MUST use the `rust-coder` MCP tools:
-  - Use `symbols` to list functions in a file.
-  - Use `definition` to find where a struct or function is declared.
-  - Use `references` to find all usages of a symbol before refactoring.
-  - Use `hierarchy` or `implementations` to map out traits.
-- **Search discipline (STRICT):** NEVER use `grep` to search the codebase. For Rust symbols
-  (functions, structs, variables, traits) you MUST use the `rust-coder` MCP (`symbols`,
-  `definition`, `references`). For plain text search, use `rg` (ripgrep), which respects
-  `.gitignore` and skips `target/` instantly — e.g. `rg -n "playback error" rust-modules/`
-  instead of `grep -rn ...`. The `grep` tool is reserved for the rare case ripgrep cannot cover.
-- **`github` (Repo Management):** Use the `github` MCP to read PRs, check CI action logs, or look up issues. Do not use the `gh` CLI via bash.
-- **`filesystem` (File Edits):** Use the `filesystem` MCP to read and write files. Always show the diff before applying changes.
-- **`websearch`:** Use the remote `websearch` MCP when you need up-to-date crate documentation (e.g., checking if `reqwest` or `serde` changed their API recently).
-
-### The `ultrawork` Trigger
-
-When the user prefixes a prompt with `ultrawork:` or `ulw:`, you must immediately transition into an orchestrator role. Break the task down, assign it to subagents, use `rust-coder` to verify the code compiles, and do not stop until the tests pass.
+- **Subagents:** when a task needs several independent searches (external docs, a
+  multi-file audit, GitHub issues), run them in parallel rather than serially, and keep the
+  findings rather than the file dumps.
+- **Search discipline:** use `rg` for plain text — it respects `.gitignore` and skips
+  `target/` instantly (e.g. `rg -n "playback error" rust-modules/`). For Rust symbols, use
+  the harness's symbol/reference tools when it has them; otherwise `rg` for the definition
+  site before editing. `grep` only when ripgrep cannot cover the case.
+- **GitHub:** use `gh` or the harness's GitHub tooling for PRs, CI logs and issues.
+- **Files:** use the read/edit/write tools, and show the diff before applying a change when
+  the harness supports it.
+- **Current docs:** use a web search tool for current crate documentation; do not guess an
+  API from memory.
+- **`ultrawork:` / `ulw:`** means "orchestrate this": split the independent work across
+  subagents, keep the main context for decisions, and do not stop until the verification
+  the change needs (`which-tier`) has passed.

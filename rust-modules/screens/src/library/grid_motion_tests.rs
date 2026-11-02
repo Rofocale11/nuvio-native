@@ -3,11 +3,11 @@
 // key's `FocusMoved`, then the frame's `Tick`.
 use super::*;
 
-fn frame(page: &mut LibraryScreen, engine: &mut FocusEngine<u32>, fixture: &Fixture, ms: u32) {
+pub(super) fn frame(page: &mut LibraryScreen, engine: &mut FocusEngine<u32>, fixture: &Fixture, ms: u32) {
     deliver(page, engine, fixture, ScreenEvent::Tick(Tick { ms, dt_us: 16_667 }));
 }
 
-fn settle(page: &mut LibraryScreen, engine: &mut FocusEngine<u32>, fixture: &Fixture, from: u32) {
+pub(super) fn settle(page: &mut LibraryScreen, engine: &mut FocusEngine<u32>, fixture: &Fixture, from: u32) {
     for i in 0..120 { frame(page, engine, fixture, from + i * 16); }
 }
 
@@ -52,7 +52,118 @@ fn an_all_grid_tile_and_its_rows_animate_back_when_focus_leaves() {
     assert!(strictly_between(page.layout.row_expansion(3), 0.0, 1.0), "leaving the grid closes its band over frames");
 }
 
-fn numbered(rks: std::ops::Range<usize>) -> plx_data::stores::browse::ListingSnapshot {
+/// Owner report items 8 and 9: switching TYPE (Shows / Seasons / Episodes) in an All grid
+/// scrolled to its heading. The grid fades out, the store empties on the commit, and the answer
+/// lands some frames later. Across that wait the chrome around the dark grid — heading,
+/// TYPE chip — must not move, and the incoming cards must first draw where they settle.
+#[test]
+fn a_type_switch_never_draws_the_empty_interim_layout() {
+    use plx_data::browse::LibraryType;
+    let _guard = plx_base::testlock::serial();
+    let mut fixture = Fixture::new();
+    let mut page = fixture.screen();
+    page.initial = false;
+    let mut engine = FocusEngine::new();
+    settle(&mut page, &mut engine, &fixture, 0);
+    let chip = page.key(page.pair.detail.elem_at(0).unwrap());
+    engine.set(OWNER, chip, Some(page.pair.groups_config().detail), By::Restore);
+    deliver(&mut page, &mut engine, &fixture, ScreenEvent::FocusMoved { from: None, to: chip, by: By::Dir });
+    settle(&mut page, &mut engine, &fixture, 2000);
+    let head = |page: &LibraryScreen| page.layout.grid_top() - page.scroll.pos;
+    let at_rest = head(&page);
+
+    let (mut out, mut present) = (Vec::new(), plx_machine::present::Present::new());
+    page.command(LibraryCmd::SetType(LibraryType::Seasons), &fixture.cx(engine.current(OWNER)),
+        &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
+    let old = fixture.listing.clone();
+    let mut ms = 4000;
+    for _ in 0..12 {
+        let pending = page.pending.grid().is_some();
+        frame(&mut page, &mut engine, &fixture, ms);
+        ms += 16;
+        if pending && page.pending.grid().is_none() {
+            // `browse::requery`: the same section under a new query, emptied and loading
+            fixture.listing = old.clone().with_query(99).with_library_type(LibraryType::Seasons)
+                .with_fetch(SecFetch::Loading, -1).with_total(0);
+        }
+        assert!((head(&page) - at_rest).abs() < 0.5, "the heading moved while the grid waited on its answer: {} vs {at_rest}", head(&page));
+    }
+    assert!(page.pending.grid().is_none(), "the transaction committed");
+    fixture.listing = old.with_query(99).with_library_type(LibraryType::Seasons)
+        .with_fetch(SecFetch::Ready, 30).with_total(30);
+    let mut first = Vec::new();
+    for _ in 0..30 {
+        frame(&mut page, &mut engine, &fixture, ms);
+        ms += 16;
+        assert!((head(&page) - at_rest).abs() < 0.5, "the heading moved when the answer landed: {} vs {at_rest}", head(&page));
+        if page.grid_fade.alpha() > 0.0 {
+            { let r = page.pair.detail.rect_at(&fixture.cx(engine.current(OWNER)), 0); first.push([r.x, r.y, r.w, r.h]); }
+        }
+    }
+    assert!(!first.is_empty() && first.iter().all(|r| *r == first[first.len() - 1]),
+        "the incoming cards first draw where they settle: {first:?}");
+}
+
+/// Owner report item 9: entering another section (Movies → TV Shows). The section's listing
+/// answers some frames after the switch (`Loading` first), and the incoming grid must first draw
+/// where it settles, never above it and then jump. `restore` is a bookmarked scroll
+/// (`ListingView::cursor`) the incoming section reopens at.
+fn a_section_switch_settles(items: usize, restore: Option<f32>) -> LibraryScreen {
+    let _guard = plx_base::testlock::serial();
+    let mut fixture = Fixture::shelves(&["movie.inprogress.1"], 12);
+    let mut page = fixture.screen();
+    page.initial = false;
+    let mut engine = FocusEngine::new();
+    settle(&mut page, &mut engine, &fixture, 0);
+
+    let stores = fixture.stores.take().unwrap();
+    stores.browse_run(BrowseCmd::SetCur(1));
+    let publish = |fixture: &mut Fixture, grid: bool| {
+        if grid { stores.browse.borrow_mut().seed_items_for_test(items); }
+        let publication = stores.capture_browse(&mut fixture.directory);
+        fixture.listing = publication.listing;
+        if !grid { fixture.listing = fixture.listing.clone().with_fetch(SecFetch::Loading, -1).with_total(0); }
+        if let Some(scroll) = restore {
+            fixture.listing = fixture.listing.clone().with_cursor(plx_data::stores::browse::Cursor {
+                at: plx_data::stores::browse::CursorAt::SlotIndex(0), scroll });
+        }
+    };
+    publish(&mut fixture, false);
+    let mut ms = 4000;
+    let mut drawn = Vec::new();
+    for i in 0..120 {
+        if i == 10 { publish(&mut fixture, true); }
+        page.sync(&fixture.cx(engine.current(OWNER)));
+        frame(&mut page, &mut engine, &fixture, ms);
+        ms += 16;
+        if page.page_fade.alpha() > 0.0 && page.grid_fade.alpha() > 0.0 && page.pair.detail.total() > 0 {
+            let r = page.pair.detail.rect_at(&fixture.cx(engine.current(OWNER)), 0);
+            drawn.push((i, [r.x, r.y, r.w, r.h]));
+        }
+    }
+    let settled = drawn.last().expect("the incoming grid was drawn").1;
+    let wrong: Vec<_> = drawn.iter().filter(|(_, r)| *r != settled).collect();
+    assert!(wrong.is_empty(), "card 0 drew away from its settled rect {settled:?} on {wrong:?}");
+    page
+}
+
+#[test]
+fn a_section_switch_draws_the_grid_where_it_settles() {
+    a_section_switch_settles(120, None);
+}
+
+/// A bookmarked scroll is applied against the settled document, not the empty interim.
+#[test]
+fn a_section_switch_restores_its_bookmark_against_the_settled_document() {
+    let saved = 900.0;
+    let page = a_section_switch_settles(120, Some(saved));
+    assert_eq!(page.scroll.pos, saved.min(page.layout.max_scroll()), "the bookmark reopened where it was saved");
+    assert!(page.layout.max_scroll() >= saved, "the fixture's settled document can hold the bookmark");
+}
+
+/// A movie listing of items `rks`, each identified by its number (an element keeps its identity
+/// across a landing that moves it).
+pub(super) fn numbered(rks: std::ops::Range<usize>) -> plx_data::stores::browse::ListingSnapshot {
     let sid = plx_plex::plex::ServerId::from_raw(0);
     let total = rks.len() as i64;
     plx_data::browse::view::ListingSnapshot::fixture(sid, rks.map(|i|
@@ -67,7 +178,7 @@ fn seated(before: std::ops::Range<usize>, focus: usize) -> (Fixture, LibraryScre
     let mut page = fixture.screen();
     page.initial = false;
     let mut engine = FocusEngine::new();
-    let elem = page.pair.detail.elem_at(focus - before.start).unwrap();
+    let elem = crate::library::tests::deep(&mut page, &fixture, focus - before.start);
     let key = page.key(elem);
     engine.set(OWNER, key, Some(page.pair.groups_config().detail), By::Restore);
     deliver(&mut page, &mut engine, &fixture, ScreenEvent::FocusMoved { from: None, to: key, by: By::Restore });
@@ -146,4 +257,110 @@ fn a_requery_refilled_under_a_cover_is_not_read_as_a_landing_on_uncover() {
     let jumped = page.scroll.pos;
     frame(&mut page, &mut engine, &fixture, 6000);
     assert!((page.scroll.pos - jumped).abs() < 0.5, "uncovering moved the page by a landing's rows: {jumped} -> {}", page.scroll.pos);
+}
+
+/// What `deliver` drops: the effects one event produced.
+fn effects_of(page: &mut LibraryScreen, engine: &mut FocusEngine<u32>, fixture: &Fixture, event: ScreenEvent<HostFixture>)
+    -> Vec<plx_machine::machine::Stamped<HostFixture>> {
+    let mut output = Vec::new();
+    let mut present = plx_machine::present::Present::new();
+    page.step(&event, &fixture.cx(engine.current(OWNER)),
+        &mut Effects::new(&mut output, MachineId::Instance(InstanceId(19)), &mut present));
+    for effect in &output {
+        if let Fx::Remember { group, elem } = effect.fx { engine.remember_projected(ENTRY, group, elem); }
+    }
+    output
+}
+
+fn saved_cursors(effects: &[plx_machine::machine::Stamped<HostFixture>]) -> Vec<plx_data::browse::CursorAt> {
+    effects.iter().filter_map(|effect| match &effect.fx {
+        Fx::App(AppFx::Store(StoreId::Browse, StoreCmd::Browse(BrowseCmd::Addressed {
+            work: LibraryWork::SaveCursor { cursor, .. }, .. }))) => Some(cursor.at.clone()),
+        _ => None,
+    }).collect()
+}
+
+/// A page that is stale and then buried by a PAGE push: the store re-fetches the same query in the
+/// background (emptied and loading, then refilled), and the reader comes back to the same place.
+/// `query_moves` is what the store used to do — present the re-fetch as a new query.
+fn a_membership_refresh_under_a_page_push(query_moves: bool, refill_before_uncover: bool) {
+    use plx_machine::machine::Leave;
+    let (mut fixture, mut page, mut engine, elem) = seated(0..90, 50);
+    let key = engine.current(OWNER).unwrap();
+    let scroll = page.scroll.pos;
+    let store = || ScreenEvent::StoreChanged(plx_data::stores::StoreId::Browse.ord(), 1);
+    let query = fixture.listing.view().id().unwrap().query;
+    let after = |l: plx_data::stores::browse::ListingSnapshot| if query_moves { l.with_query(query + 1) } else { l };
+
+    fixture.listing = numbered(0..90).with_membership_stale();
+    deliver(&mut page, &mut engine, &fixture, store());
+    let mut effects = effects_of(&mut page, &mut engine, &fixture, ScreenEvent::WillLeave(Leave::Deeper));
+    effects.extend(effects_of(&mut page, &mut engine, &fixture, ScreenEvent::Cover));
+    assert!(effects.iter().any(|e| matches!(&e.fx, Fx::App(AppFx::Store(StoreId::Browse,
+        StoreCmd::Browse(BrowseCmd::Addressed { work: LibraryWork::Requery, .. }))))), "buried by a page: re-query");
+
+    fixture.listing = after(numbered(0..0).with_fetch(SecFetch::Loading, -1));
+    deliver(&mut page, &mut engine, &fixture, store());
+    if refill_before_uncover {
+        fixture.listing = after(numbered(0..90));
+        deliver(&mut page, &mut engine, &fixture, store());
+    }
+    effects.extend(effects_of(&mut page, &mut engine, &fixture, ScreenEvent::Uncover));
+    effects.extend(effects_of(&mut page, &mut engine, &fixture, ScreenEvent::Enter(Enter::Restored)));
+    frame(&mut page, &mut engine, &fixture, 6000);
+    if !refill_before_uncover {
+        fixture.listing = after(numbered(0..90));
+        deliver(&mut page, &mut engine, &fixture, store());
+    }
+    for ms in 0..30 { frame(&mut page, &mut engine, &fixture, 6016 + ms * 16); }
+
+    assert_eq!(engine.current(OWNER), Some(key), "focus stays on the tile the reader left");
+    assert!(page.pair.detail.index_of(elem) == Some(50), "the tile is still item 50");
+    assert!((page.scroll.pos - scroll).abs() < 0.5, "the page moved: {scroll} -> {}", page.scroll.pos);
+    effects.extend(effects_of(&mut page, &mut engine, &fixture, ScreenEvent::WillLeave(Leave::ForGood)));
+    let saved = saved_cursors(&effects);
+    assert!(!saved.iter().any(|at| matches!(at, plx_data::browse::CursorAt::SlotIndex(0))),
+        "the bookmark was reset to the top: {saved:?}");
+    assert!(matches!(saved.last(), Some(plx_data::browse::CursorAt::ItemKey { rk, .. }) if rk == "50"),
+        "the bookmark names the reader's item: {saved:?}");
+}
+
+#[test]
+fn a_membership_requery_under_a_page_keeps_focus_and_scroll_when_refilled_before_uncover() {
+    let _guard = plx_base::testlock::serial();
+    a_membership_refresh_under_a_page_push(false, true);
+}
+
+#[test]
+fn a_membership_requery_under_a_page_keeps_focus_and_scroll_when_refilled_after_uncover() {
+    let _guard = plx_base::testlock::serial();
+    a_membership_refresh_under_a_page_push(false, false);
+}
+
+/// The Under posters setting reaches the grid: a policy that shows nothing opens no caption band, so
+/// focusing a tile moves no row below it, while the default opens one and pushes them down.
+#[test]
+fn the_under_posters_policy_sizes_the_focused_rows_band() {
+    use plx_plex::plex::session::{UnderPosters, UnderPostersDetails};
+    let _guard = plx_base::testlock::serial();
+    let below_focus = |setting: UnderPosters| {
+        crate::registry::captions::TEST_UNDER_POSTERS.with(|cell| cell.set(Some(setting)));
+        let fixture = Fixture::new();
+        let mut page = fixture.screen();
+        page.initial = false;
+        let mut engine = FocusEngine::new();
+        let rest = page.layout.row_y(4, 0.0);
+        let start = page.key(page.pair.detail.elem_at(12).unwrap());
+        engine.set(OWNER, start, Some(page.pair.groups_config().detail), By::Restore);
+        deliver(&mut page, &mut engine, &fixture, ScreenEvent::FocusMoved { from: None, to: start, by: By::Restore });
+        settle(&mut page, &mut engine, &fixture, 0);
+        page.layout.row_y(4, 0.0) - rest
+    };
+    let nothing = below_focus(UnderPosters { title: false, details: UnderPostersDetails::None });
+    let one_line = below_focus(UnderPosters { title: false, details: UnderPostersDetails::Genre });
+    let two_lines = below_focus(UnderPosters { title: true, details: UnderPostersDetails::Genre });
+    crate::registry::captions::TEST_UNDER_POSTERS.with(|cell| cell.set(None));
+    assert!(nothing.abs() < 0.01, "a policy showing nothing opens no band: {nothing}");
+    assert!((one_line - 40.0).abs() < 0.01, "one line opens 80 - 40 px: {one_line}");
+    assert!((two_lines - 72.0).abs() < 0.01, "two lines open 112 - 40 px: {two_lines}");
 }

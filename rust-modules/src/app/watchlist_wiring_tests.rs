@@ -430,29 +430,6 @@ fn an_unmatched_title_gets_its_poster_through_a_reachable_server() {
     assert_eq!(page(&d).art_of(0), Some(("https://image.example/one.jpg".to_string(), 1)));
 }
 
-/// Plan §1.3 / §1.11 B: a resume while the Watchlist is live reads the plex.tv list again (which
-/// re-matches it), where before only the 2 s write timer and Try again did.
-#[test]
-fn a_resume_with_the_page_live_reads_the_list_again() {
-    use super::super::reread::{self, Reread};
-    let _serial = plx_base::testlock::serial();
-    let script = Script::new(&THREE, true);
-    let (mut d, mut rig) = mounted(&script);
-    settle(&mut d, &mut rig, 2);
-    let mut reread = Reread::default();
-    let before = script.reads.load(Ordering::SeqCst);
-    for _ in 0..3 {
-        reread::run(&mut reread, &mut d, &mut rig);
-        settle(&mut d, &mut rig, 10);
-    }
-    assert_eq!(script.reads.load(Ordering::SeqCst), before, "nothing is read before a resume");
-    reread.resume();
-    reread::run(&mut reread, &mut d, &mut rig);
-    settle(&mut d, &mut rig, 20);
-    assert!(script.reads.load(Ordering::SeqCst) > before, "the resume read the list again");
-    assert_eq!(guids(&d), vec![guid(1), guid(2), guid(3)], "and the page still shows it");
-}
-
 /// The hold window follows the page's cursor, a reserved cell past the loaded tail included: the
 /// focus read there is no title, and reading it as "none" sent the window back to the head.
 #[test]

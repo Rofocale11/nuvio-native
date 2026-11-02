@@ -39,7 +39,7 @@
     "description": "Shared display formatter: duration_long_minutes"
   },
   "core.time_left_hours": {
-    "value": "{hours} hr {minutes} min left",
+    "value": "{hours}h {minutes}m left",
     "args": {
       "hours": "i64",
       "minutes": "i64"
@@ -47,7 +47,7 @@
     "description": "Shared display formatter: time_left_hours"
   },
   "core.time_left_minutes": {
-    "value": "{minutes} min left",
+    "value": "{minutes}m left",
     "args": {
       "minutes": "i64"
     },

@@ -14,13 +14,19 @@
 //! the entry stays, and a Pop that reaches it remounts from its `ReturnState` — which is what
 //! `an_evicted_entry_keeps_its_focus_identity_on_remount` grades.
 
-use plx_machine::machine::{EntryId, GroupId, Host, InstanceId, Leave, NavOp, RequestId, Stamped};
+use plx_machine::machine::{EntryId, GroupId, Host, InstanceId, Leave, NavOp, RequestId, ScreenId, Stamped};
 use super::super::screen::{Enter, FocusTarget, ReturnState, Screen, ScreenArg, ScreenEvent};
 use super::transition::{CommitPoint, Transition};
 use super::{Life, Minter};
 
 /// Entries a stack keeps BODIES for (§6.1).
 pub const CAP: usize = 16;
+
+/// How far below the top an entry sits before it keeps only its route and its focused identity.
+/// Depth follows what the user navigated, with no cap on it; what an entry far below holds does
+/// not follow it: its page memory is cut to one identity, and on return the page reloads and seats
+/// by that identity, the path a cold restore already takes.
+pub const DEEP: usize = 32;
 
 /// A mounted body (§5.1).
 pub struct Instance<H: Host> {
@@ -84,6 +90,18 @@ impl<H: Host> NavStack<H> {
 
     pub fn root(&self) -> Option<&Entry<H>> {
         self.entries.first()
+    }
+
+    /// **The kind of page BACK returns to from `entry`** — the screen id of the entry beneath it
+    /// on this stack, which is the ONE answer to "where does BACK go" for a page whose opener
+    /// varies ([`Host::views_over`] hands it to the screens). `None` when `entry` is the root (BACK
+    /// leaves the page stack). An entry staged behind a dip is not on the stack yet; it will be
+    /// pushed over the current top, so that is what lies beneath it.
+    pub fn beneath_id(&self, entry: EntryId) -> Option<ScreenId> {
+        match self.entries.iter().position(|e| e.id == entry) {
+            Some(index) => index.checked_sub(1).map(|below| self.entries[below].arg.id()),
+            None => self.top().map(|top| top.arg.id()),
+        }
     }
 
     pub fn depth(&self) -> usize {
@@ -330,6 +348,16 @@ impl<H: Host> NavStack<H> {
         }
     }
 
+    /// Entries more than [`DEEP`] below the top give up everything but their route and focus
+    /// identity: their group cursors go and the host sheds their page memory. Idempotent.
+    fn shed_deep(&mut self) {
+        let n = self.entries.len();
+        for e in self.entries.iter_mut().take(n.saturating_sub(DEEP + 1)) {
+            e.ret.remembered = Vec::new();
+            H::shed_memory(&mut e.ret.memory, e.ret.focus.map(|key| key.elem));
+        }
+    }
+
     /// Bodies beyond `CAP`, oldest first, below the top: evicted (§6.1).
     fn evict(&mut self, out: &mut Vec<Life<H>>) {
         let live = self.entries.iter().filter(|e| e.inst.is_some()).count();
@@ -396,6 +424,7 @@ impl<H: Host> NavStack<H> {
                 let old = self.top().map(|e| e.id);
                 let new = self.adopt_or_mint(ids, arg, &mut staged);
                 self.evict(&mut out);
+                self.shed_deep();
                 if let Some(o) = old {
                     out.push(Life::Ev(o, ScreenEvent::WillLeave(Leave::Deeper)));
                 }

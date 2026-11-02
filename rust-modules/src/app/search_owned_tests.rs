@@ -277,7 +277,7 @@ fn owned_search_wheel_scrolls_without_moving_focus_and_dpad_reveals_again() {
     let mut rig = Bridge::for_test(|| 0);
     rig.search_run(plx_data::stores::search::SearchCmd::SetQuery("wheel".into()));
     rig.stores.search.publish_shelves_for_test([plx_data::search::Kind::Movie, plx_data::search::Kind::Show,
-        plx_data::search::Kind::Episode].into_iter().map(|kind| plx_data::search::Shelf { kind,
+        plx_data::search::Kind::Episode].into_iter().map(|kind| plx_data::search::Shelf { epoch: 0, window: Default::default(), kind,
             items: vec![plx_data::search::Item::Media(plx_data::pms::PmsMovie {
                 rk: format!("synthetic-{kind:?}"), title: "Synthetic wheel result".into(), ..Default::default()
             })] }).collect());
@@ -395,7 +395,7 @@ fn owned_search_adopts_panel_text_without_restarting_or_losing_the_commit() {
     let mut d = Dispatcher::<AppHost>::new();
     let mut rig = Bridge::for_test(|| 0);
     rig.search_run(plx_data::stores::search::SearchCmd::SetQuery("ab".into()));
-    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { kind: plx_data::search::Kind::Movie,
+    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { epoch: 0, window: Default::default(), kind: plx_data::search::Kind::Movie,
         items: vec![plx_data::search::Item::Media(plx_data::pms::PmsMovie {
             rk: "adopt-result".into(), title: "Synthetic result".into(), ..Default::default()
         })] }]);
@@ -596,7 +596,7 @@ fn owned_search_result_keys_are_server_scoped_and_survive_same_query_reordering(
     let mut d = Dispatcher::<AppHost>::new();
     let mut rig = Bridge::for_test(|| 0);
     rig.search_run(plx_data::stores::search::SearchCmd::SetQuery("synthetic".into()));
-    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { kind: plx_data::search::Kind::Movie,
+    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { epoch: 0, window: Default::default(), kind: plx_data::search::Kind::Movie,
         items: vec![item(a), item(b)] }]);
     frame(&mut d, &mut rig, AppArg::Search, tick(0), vec![]);
     frame(&mut d, &mut rig, AppArg::Search, tick(1), script_key(Key::Down, tick(1)));
@@ -604,7 +604,7 @@ fn owned_search_result_keys_are_server_scoped_and_survive_same_query_reordering(
     frame(&mut d, &mut rig, AppArg::Search, tick(2), script_key(Key::Right, tick(2)));
     let second = d.focus().unwrap();
     assert_ne!(first, second);
-    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { kind: plx_data::search::Kind::Movie,
+    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { epoch: 0, window: Default::default(), kind: plx_data::search::Kind::Movie,
         items: vec![item(b), item(a)] }]);
     frame(&mut d, &mut rig, AppArg::Search, tick(3), vec![]);
     assert_eq!(d.focus(), Some(second), "identity survives the changed catalog order");
@@ -670,7 +670,7 @@ fn owned_search_return_memory_reconstructs_positions_with_a_query_guard() {
     let session = plx_plex::plex::session::TempSession::new("owned-search-return");
     session.watching("synthetic-return-profile");
     plx_plex::plex::reset_servers_for_test();
-    let catalog = || vec![plx_data::search::Shelf { kind: plx_data::search::Kind::Movie,
+    let catalog = || vec![plx_data::search::Shelf { epoch: 0, window: Default::default(), kind: plx_data::search::Kind::Movie,
         items: (0..8).map(|i| plx_data::search::Item::Media(plx_data::pms::PmsMovie {
             rk: format!("item-{i}"), title: format!("Synthetic {i}"), ..Default::default()
         })).collect() }];
@@ -782,7 +782,7 @@ fn a_seeded_boot_query_survives_the_freshly_mounted_screens_first_sync() {
     let mut rig = Bridge::for_test(|| 0);
     crate::dev::scenarios::apply_search_boot_trigger("dune", &mut d, &mut rig);
     rig.stores.search.publish_shelves_for_test([plx_data::search::Kind::Movie].into_iter()
-        .map(|kind| plx_data::search::Shelf { kind, items: vec![plx_data::search::Item::Media(
+        .map(|kind| plx_data::search::Shelf { epoch: 0, window: Default::default(), kind, items: vec![plx_data::search::Item::Media(
             plx_data::pms::PmsMovie { rk: "synthetic-boot-seed".into(), title: "Dune".into(), ..Default::default() })] })
         .collect());
     // Mirror the loop's own next step: the first frame mounts the page the trigger just rooted the
@@ -924,22 +924,23 @@ fn draw_chromes_guard_calls_the_named_predicate_and_names_no_page_literal() {
     );
 }
 
-/// **Pins the `AppArg::Search` arm of `app::run::update` that keeps the shared top strip's springs
-/// and hit rects live while Search is on screen.**
+/// **Pins the `AppArg::Search | AppArg::Watchlist` arm of `app::run::update` that keeps the shared
+/// top strip's springs and hit rects live while either page is on screen.**
 ///
-/// `SearchScreen::tick` steps only this screen's OWN rows/springs — it never touches the strip's
-/// travelling capsules, its scroll spring or the profile chip's unfurl, which all live in
-/// `Bridge`'s own `strip: StripRender` field and are stepped by `Bridge::update_home_chrome`.
-/// Home and Library each get an arm in `update` that calls it every frame they are on screen; if
-/// Search's mirroring arm (added alongside the owned cutover) were ever deleted, those springs
-/// would freeze at whatever the previously-drawn page left them, and `ChromeSnapshot::members`'s
-/// published strip rects (read by pointer hit-testing and by focus) would go stale under Search —
+/// `SearchScreen::tick` and `WatchlistScreen::tick` step only their own rows/springs — neither
+/// touches the strip's travelling capsules, its scroll spring or the profile chip's unfurl, which
+/// all live in `Bridge`'s own `strip: StripRender` field and are stepped by
+/// `Bridge::update_home_chrome`. Home and Library each get an arm in `update` that calls it every
+/// frame they are on screen; if this mirroring arm were ever deleted or narrowed back to Search,
+/// those springs would freeze at whatever the previously-drawn page left them (the Watchlist kept
+/// the capsule on the pill the user came FROM), and `ChromeSnapshot::members`'s published strip
+/// rects (read by pointer hit-testing and by focus) would go stale under Search and Watchlist —
 /// exactly the regression `search_route_steps_the_shared_strip_so_its_published_rects_do_not_go_stale`
 /// (this file, above) proves `update_home_chrome` FIXES once it is actually called.
 ///
 /// That test cannot see the arm itself: it calls `Bridge::update_home_chrome` directly, never
-/// `app::run::update`, so it stays green whether or not `update`'s `AppArg::Search` branch exists
-/// at all — which is exactly how this arm could vanish with every test still passing. And
+/// `app::run::update`, so it stays green whether or not `update`'s arm exists at all — which is
+/// exactly how this arm could vanish with every test still passing. And
 /// `app::run::update` cannot be driven end to end from a host test either: it is `unsafe fn
 /// update(app: &mut App, fr: &mut Frame)`, and `App`/`Frame` carry the live SDL/GL window state
 /// boot creates — there is no host constructor for either. So, like
@@ -947,14 +948,13 @@ fn draw_chromes_guard_calls_the_named_predicate_and_names_no_page_literal() {
 /// shape of gap, one function over), this reads the source text of the arm itself rather than
 /// running it.
 ///
-/// Observed RED: commenting out the `else if !host_frozen(&app.pages) && matches!(app.route(),
-/// AppArg::Search) { ... }` block in `run.rs` (leaving the Home/Library arms above it and the
-/// `search_osc` block below it untouched) makes this test fail with "update must still branch on
-/// AppArg::Search to step the shared strip", while `cargo +nightly test --lib` on that same
-/// mutation reports every other test passing — the disabled-arm-passes-every-test blind spot the
-/// finding named directly.
+/// Observed RED: narrowing the arm back to `AppArg::Search` (leaving the Home/Library arms above it
+/// and the `search_osc` block below it untouched) makes this test fail with "update must still branch
+/// on AppArg::Search | AppArg::Watchlist to step the shared strip", while `cargo +nightly test --lib`
+/// on that same mutation reports every other test passing — the disabled-arm-passes-every-test blind
+/// spot the finding named directly.
 #[test]
-fn update_still_steps_the_shared_strip_on_search_the_way_home_and_library_do() {
+fn update_still_steps_the_shared_strip_on_search_and_watchlist_the_way_home_and_library_do() {
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/run.rs"),
     ).expect("read run.rs");
@@ -962,23 +962,24 @@ fn update_still_steps_the_shared_strip_on_search_the_way_home_and_library_do() {
         .expect("app::run::update must exist with its documented signature");
     // `page_of(app.route)` until restructure phase 10, when the two popover routes it resolved
     // were deleted and `page_of` became the identity function and went with them.
-    let needle = "matches!(app.route(), AppArg::Search)";
+    let needle = "matches!(app.route(), AppArg::Search | AppArg::Watchlist)";
     let arm_at = src[fn_start..].find(needle).map(|i| fn_start + i).expect(
-        "update must still branch on AppArg::Search to step the shared strip — no arm of this \
-         shape was found after fn update's own start",
+        "update must still branch on AppArg::Search | AppArg::Watchlist to step the shared strip — \
+         no arm of this shape was found after fn update's own start",
     );
     let body_start = src[arm_at..].find('{').map(|i| arm_at + i)
-        .expect("the AppArg::Search condition must open a block");
+        .expect("the AppArg::Search | AppArg::Watchlist condition must open a block");
     // Bounded by this arm's OWN closing statement rather than a raw character window, so the
     // search cannot spill into the unrelated `search_osc` block right after it (which mentions
     // neither `update_home_chrome` nor `scoped_motion`) and read that as a false pass.
     let body_end = src[body_start..].find("fr.underlay_moving |= moving;").map(|i| body_start + i)
-        .expect("the AppArg::Search arm must still report underlay motion the way Home/Library do");
+        .expect("the AppArg::Search | AppArg::Watchlist arm must still report underlay motion the way Home/Library do");
     let body = &src[body_start..body_end];
     assert!(
         body.contains("update_home_chrome"),
-        "the AppArg::Search arm must call Bridge::update_home_chrome — without it the shared \
-         strip's springs and published hit rects freeze while Search is on screen — got: {body:?}"
+        "the AppArg::Search | AppArg::Watchlist arm must call Bridge::update_home_chrome — without \
+         it the shared strip's springs and published hit rects freeze while that page is on screen — \
+         got: {body:?}"
     );
 }
 
@@ -1011,7 +1012,7 @@ fn owned_search_content_probe_reports_zone_row_col_pill_and_card_as_focus_moves(
     let mut d = Dispatcher::<AppHost>::new();
     let mut rig = Bridge::for_test(|| 0);
     rig.search_run(plx_data::stores::search::SearchCmd::SetQuery("fingerprint".into()));
-    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { kind: plx_data::search::Kind::Movie,
+    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { epoch: 0, window: Default::default(), kind: plx_data::search::Kind::Movie,
         items: vec![plx_data::search::Item::Media(plx_data::pms::PmsMovie {
             rk: "fp-result".into(), title: "Fingerprint result".into(), ..Default::default()
         })] }]);
@@ -1076,7 +1077,7 @@ fn owned_search_ok_on_a_collection_requests_its_collection_page() {
     let mut d = Dispatcher::<AppHost>::new();
     let mut rig = Bridge::for_test(|| 0);
     rig.search_run(plx_data::stores::search::SearchCmd::SetQuery("synthetic".into()));
-    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf {
+    rig.stores.search.publish_shelves_for_test(vec![plx_data::search::Shelf { epoch: 0, window: Default::default(),
         kind: plx_data::search::Kind::Collection, items: vec![hit] }]);
     frame(&mut d, &mut rig, AppArg::Search, tick(0), vec![]);
     frame(&mut d, &mut rig, AppArg::Search, tick(1), script_key(Key::Down, tick(1)));

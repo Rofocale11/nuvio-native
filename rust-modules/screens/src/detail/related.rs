@@ -6,8 +6,8 @@ use plx_ui::cards::{self as ui_cards, RowStyle};
 use plx_machine::machine::GroupId;
 use plx_ui::{theme, Painter};
 
-pub const RELATED_ELEM_RANGE_START: u32 = 640;
-pub const RELATED_ELEM_RANGE_END: u32 = 1152;
+pub const RELATED_ELEM_RANGE_START: u32 = 2 * super::SECTION_BLOCK;
+pub const RELATED_ELEM_RANGE_END: u32 = 3 * super::SECTION_BLOCK;
 pub const RELATED_GROUP: GroupId = GroupId(3);
 /// Heading cap top to card top — the SHARED shelf pitch (`consts::TITLE_DY + CARD_DY`), the same
 /// 60 a Home or Library shelf puts between its heading and its posters. It was a local 46, so the
@@ -45,10 +45,12 @@ pub fn item<'a>(d: &'a Detail, key: u32) -> Option<&'a PmsMovie> {
     d.related.get(locate(key)?)
 }
 
-/// `band` is this shelf's live label-band expansion ([`plx_ui::cards::Shelf::band_expand`]), 0 collapsed → 1
-/// focused. The band is the SHARED collapse every other screen uses, not a fixed reservation: a
-/// shelf that holds no focus draws no label, so it gives the room back and the next section's
-/// heading rises to the design system's own region gap behind it.
+/// `band` is this shelf's label-band expansion, 0 collapsed → 1 focused; the page asks for the SETTLED,
+/// collapsed block (`0.0`) and lifts it by the live opening of the shelf's band
+/// (`DetailScreen::band_open`, which sizes the opening by the shelf's own Under posters policy). The band
+/// is the SHARED collapse every other screen uses, not a fixed reservation: a shelf that holds no
+/// focus draws no label, so it gives the room back and the next section's heading rises to the
+/// design system's own region gap behind it.
 pub fn block_h(band: f32) -> f32 {
     LABEL_H + RowStyle::HOME.h + ui_cards::under_band(band)
 }

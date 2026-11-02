@@ -60,6 +60,8 @@ fn a_compact_library_menu_holds_a_frozen_host_and_gives_it_back_on_dismissal() {
                     sid: listing.sid,
                     section: listing.section,
                 },
+                folded: vec![],
+                opener: None,
             },
         )),
     );
@@ -155,6 +157,8 @@ fn a_host_page_spring_under_an_open_panel_is_host_motion() {
                 sid: listing.sid,
                 section: listing.section,
             },
+            folded: vec![],
+            opener: None,
         })),
     );
     for i in 80..120u32 {

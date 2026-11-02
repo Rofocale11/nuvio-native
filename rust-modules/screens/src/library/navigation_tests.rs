@@ -31,6 +31,27 @@ impl LibraryLike for TestHost {
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> {
         cx.views.hubs
     }
+    /// The app's probe, in the one respect the header cares about: it answers for ANY section of
+    /// the directory the probe has learned (`collections_probe::count`, which the app warms for
+    /// every section when the directory lands), and only once a test has said the probe landed
+    /// ([`land_collections`]). A section the test has not landed is the probe that has not answered
+    /// yet: `None`, whichever library the row names.
+    fn collections_count(cx: &Cx<'_, Self>, section: usize) -> Option<Result<u32, crate::registry::Forbidden>> {
+        let key = u32::try_from(cx.views.directory.sections().get(section)?.key).ok()?;
+        COLLECTION_ANSWERS.with(|answers| answers.borrow().iter().find(|(seen, _)| *seen == key).map(|(_, answer)| *answer))
+    }
+}
+thread_local! {
+    /// What the fixture's collections probe has learned, by section key.
+    static COLLECTION_ANSWERS: std::cell::RefCell<Vec<(u32, Result<u32, crate::registry::Forbidden>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// The fixture's probe for section `key` returns: `Ok(0)` / `Err` hide the control, `Ok(n)` counts.
+fn land_collections(key: u32, answer: Result<u32, crate::registry::Forbidden>) {
+    COLLECTION_ANSWERS.with(|answers| {
+        let mut answers = answers.borrow_mut();
+        answers.retain(|(seen, _)| *seen != key);
+        answers.push((key, answer));
+    });
 }
 const ENTRY: EntryId = EntryId(81);
 const OWNER: InputOwner = InputOwner::Entry(ENTRY);
@@ -203,7 +224,7 @@ fn shows_requested_before_discovery_stays_loading_and_never_fetches_the_foreign_
         assert_eq!(page.kind, SecKind::Show);
         assert_eq!(page.wanted_kind, Some(SecKind::Show));
         assert_eq!(page.readout, Readout::Loading);
-        assert!(page.pair.detail.elems.is_empty());
+        assert!(page.pair.detail.total() == 0);
         assert!(!effects.iter().any(|effect| matches!(
             effect,
             AppFx::Store(_, StoreCmd::Browse(BrowseCmd::Addressed { .. }))
@@ -241,7 +262,7 @@ fn shows_requested_before_discovery_stays_loading_and_never_fetches_the_foreign_
             work: LibraryWork::Commit { select: true, .. } })) if target.section == 2)));
     assert!(!effects.iter().any(|effect| matches!(effect,
         AppFx::Store(_, StoreCmd::Browse(BrowseCmd::Addressed { target, .. })) if target.section == 1)));
-    assert!(page.pair.detail.elems.is_empty());
+    assert!(page.pair.detail.total() == 0);
     fixture.publish(1, 12);
     fixture.step(
         &mut page,
@@ -251,7 +272,7 @@ fn shows_requested_before_discovery_stays_loading_and_never_fetches_the_foreign_
     assert_eq!(page.kind, SecKind::Show);
     assert_eq!(page.wanted_kind, None);
     assert_eq!(page.readout, Readout::Grid);
-    assert_eq!(page.pair.detail.elems.len(), 12);
+    assert_eq!(page.pair.detail.total(), 12);
     assert!((0..12).all(|i| fixture.listing.view().item(i).unwrap().kind == 1));
 }
 
@@ -346,11 +367,128 @@ fn an_external_sources_selection_reseats_the_library_row_once_not_on_metadata_re
     );
 }
 
-/// The poster wall under the heading closes the same square: DOWN from a heading chip lands on
-/// the grid tile under that chip, not on a remembered cell rows away (which dragged the page deep
-/// into All from its heading).
 #[test]
-fn down_from_a_heading_chip_lands_on_the_grid_tile_under_it() {
+fn source_controls_and_document_groups_match_bare_full_and_failed_content() {
+    let _guard = plx_base::testlock::serial();
+    for (libraries, items, shelves, failed) in [
+        (0, 0, 0, false),
+        (2, 0, 2, false),
+        (2, 12, 2, false),
+        // A SINGLE favourite (issue #100/#165) never contributes a selector group any more —
+        // `SectionView` carries no ownership bit to make it ambiguous, see
+        // `screens/library/tests.rs`'s `a_single_favourite_library_draws_no_selector`. This tuple
+        // keeps the 1-library case in the census below, now asserting its ABSENCE rather than its
+        // presence.
+        (1, 12, 0, false),
+        (2, 0, 2, true),
+    ] {
+        let mut fixture = Fixture::new(libraries, items, shelves);
+        if libraries == 0 {
+            fixture.directory = Default::default();
+        }
+        if failed {
+            fixture.listing = fixture.listing.clone().with_fetch(SecFetch::Failed, -1);
+        }
+        let mut page = fixture.screen();
+        page.initial = false;
+        let mut engine = FocusEngine::new();
+        let mut groups = Vec::new();
+        page.groups(&fixture.cx(&engine), &mut groups);
+        // One header row (names, "+N" and the controls) always leads the document.
+        let mut expected = vec![LIBRARY_GROUP];
+        let head = true;
+        if items > 0 {
+            expected.push(page.pair.groups_config().detail);
+        }
+        if failed {
+            expected.push(STATUS_GROUP);
+        }
+        // A loading listing declares its (empty) grid group so a fresh enter into it seats nothing
+        // (`PageRegions::declare_pending`): focus-inert, so it is not a control of the document.
+        assert_eq!(
+            groups.iter().filter(|group| group.len > 0).map(|group| group.id).collect::<Vec<_>>(),
+            expected
+        );
+        for control in [SORTFILTER] {
+            assert_eq!(
+                page.place(&control, &fixture.cx(&engine), At::SpringTarget)
+                    .is_some(),
+                head
+            );
+        }
+        if expected.is_empty() {
+            continue;
+        }
+        fixture.step(
+            &mut page,
+            &mut engine,
+            ScreenEvent::Enter(Enter::Fresh {
+                focus: FocusTarget::ContainerGroup(expected[0]),
+            }),
+        );
+        for wanted in expected.iter().skip(1) {
+            fixture.direction(&mut page, &mut engine, Dir::Down);
+            assert_eq!(
+                page.group_of(&engine.current(OWNER).unwrap().elem, &fixture.cx(&engine)),
+                Some(*wanted)
+            );
+        }
+        if items == 0 {
+            let at_end = engine.current(OWNER);
+            fixture.direction(&mut page, &mut engine, Dir::Down);
+            assert_eq!(
+                engine.current(OWNER),
+                at_end,
+                "shelves/status are the real foot when no grid exists"
+            );
+        }
+        // The foot boundary must not strand Retry: Up still returns through
+        // the preceding document blocks, just as ordinary grid/toolbar Up does.
+        for wanted in expected[..expected.len() - 1].iter().rev() {
+            fixture.direction(&mut page, &mut engine, Dir::Up);
+            assert_eq!(
+                page.group_of(&engine.current(OWNER).unwrap().elem, &fixture.cx(&engine)),
+                Some(*wanted),
+                "Up must retrace the document, including Retry's preceding shelf"
+            );
+        }
+        if items > 0 {
+            let heading = page.toolbar_group();
+            fixture.step(
+                &mut page,
+                &mut engine,
+                ScreenEvent::Enter(Enter::Fresh {
+                    focus: FocusTarget::ContainerGroup(heading),
+                }),
+            );
+            let key = engine.current(OWNER).unwrap();
+            let elems = page.header_elems();
+            assert!(elems.contains(&key.elem), "the header row is one stop sequence");
+            assert_eq!(
+                groups.iter().find(|group| group.id == LIBRARY_GROUP).unwrap().len,
+                elems.len()
+            );
+            for _ in 0..elems.len() {
+                fixture.direction(&mut page, &mut engine, Dir::Left);
+            }
+            assert_eq!(engine.current(OWNER).unwrap().elem, elems[0], "Left stops at the first name");
+            for want in elems.iter().skip(1) {
+                fixture.direction(&mut page, &mut engine, Dir::Right);
+                assert_eq!(engine.current(OWNER).unwrap().elem, *want, "Right walks names, +N, then the controls");
+            }
+            fixture.direction(&mut page, &mut engine, Dir::Right);
+            assert_eq!(engine.current(OWNER).unwrap().elem, SORTFILTER, "Right stops at Sort & Filter");
+        }
+    }
+}
+
+/// DOWN from a heading chip lands on the cell the last UP left from (`PageRegions`'
+/// `CONTENT_HEAD_SEAT`: Up then Down is a round trip, whatever stop of the row the walk ended on);
+/// only a grid with no memory takes the tile under the chip (the projection that dragged the page
+/// deep into All from its heading when the remembered cell was rows away is the memory's cell now,
+/// and it is the one the reader just left).
+#[test]
+fn down_from_a_heading_chip_lands_on_the_remembered_tile_else_the_one_under_it() {
     let _guard = plx_base::testlock::serial();
     let fixture = Fixture::new(1, 24, 0);
     let mut page = fixture.screen();
@@ -358,17 +496,28 @@ fn down_from_a_heading_chip_lands_on_the_grid_tile_under_it() {
     let mut engine = FocusEngine::new();
     let grid = page.pair.groups_config().detail;
     let deep = page.pair.detail.elem_at(15).expect("a 24-item grid");
-    engine.remember_projected(ENTRY, grid, deep);
-    let seat = page.key(FILTER);
+    let seat = page.key(SORTFILTER);
     fixture.step(&mut page, &mut engine, ScreenEvent::Enter(Enter::Fresh { focus: FocusTarget::Elem(seat) }));
-    let chip = page.place(&FILTER, &fixture.cx(&engine), At::SpringTarget).unwrap().rect;
+    let chip = page.place(&SORTFILTER, &fixture.cx(&engine), At::SpringTarget).unwrap().rect;
     let under = (0..page.layout.cols()).map(|col| page.pair.detail.elem_at(col).unwrap())
         .min_by(|a, b| {
             let d = |elem: &u32| (page.place(elem, &fixture.cx(&engine), At::SpringTarget).unwrap().rect.cx() - chip.cx()).abs();
             d(a).total_cmp(&d(b))
         }).unwrap();
-    assert_ne!(under, page.pair.detail.elem_at(0).unwrap(), "the fixture's FILTER chip stands over a later column");
+    assert_ne!(under, page.pair.detail.elem_at(0).unwrap(), "the fixture's SORTFILTER chip stands over a later column");
+    assert_ne!(under, deep, "the remembered cell is not the one under the chip");
+    // No memory: the projection under the chip.
     fixture.direction(&mut page, &mut engine, Dir::Down);
     assert_eq!(engine.current(OWNER), Some(page.key(under)),
-        "DOWN from FILTER lands in the grid's first row under the chip");
+        "with nothing remembered, DOWN from SORTFILTER lands in the grid's first row under the chip");
+    // Memory: the cell Up left from, whatever the chip stands over.
+    let mut engine = FocusEngine::new();
+    engine.remember_projected(ENTRY, grid, deep);
+    fixture.step(&mut page, &mut engine, ScreenEvent::Enter(Enter::Fresh { focus: FocusTarget::Elem(seat) }));
+    fixture.direction(&mut page, &mut engine, Dir::Down);
+    assert_eq!(engine.current(OWNER), Some(page.key(deep)),
+        "DOWN from SORTFILTER returns to the cell the last UP left from");
 }
+
+#[cfg(test)]
+mod header_tests { include!("header_tests.rs"); }

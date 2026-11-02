@@ -185,6 +185,8 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
                     sid: listing_id.sid,
                     section: listing_id.section,
                 },
+                folded: vec![],
+                opener: None,
             },
         )),
     );

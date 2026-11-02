@@ -443,7 +443,7 @@ mod activate_card_tests {
         for (card, expect, season_index) in [(&show, "show-1", None), (&season, "show-1", Some(4))] {
             let mut menu_play_await = None;
             let req = |act, item| plx_screens::registry::ItemMenuReq {
-                act, sid, item, loaded_episode: false, from_home: false };
+                act, sid, item, season: None, loaded_episode: false, from_home: false };
             // a key that is not the captured row's: nothing happens
             unsafe { apply_item_action(&mut ps, &mut pa, req(Action::Play("other".into()), Some(card.clone())),
                 &mut pages, &mut bridge, &mut crate::app::playback::LivePlaybackResources,
@@ -554,7 +554,7 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
 ) {
     let mut playback = LiveItemPlayback(resources);
     use plx_screens::item_menu::Action;
-    let plx_screens::registry::ItemMenuReq { act, sid, item, loaded_episode, from_home } = req;
+    let plx_screens::registry::ItemMenuReq { act, sid, item, loaded_episode, from_home, .. } = req;
     // `sid` is WHICH SERVER this menu's rows are about, captured when the panel was presented.
     // Every arm below turns an rk into a fetch, a scrobble or a play, and resolving one against
     // `plex::current_server()` is the reported bug itself: on a merged Continue Watching shelf,
@@ -601,23 +601,12 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
             // asking for a refetch here would re-read the mounted show for a write that never
             // touched it. The tile's own tick is flipped by `metadata::set_watched_local` instead,
             // which walks the Related shelf for exactly this case.
-            let detail = loaded_episode.then(|| ()).and_then(|()| {
-                let entry = pages.nav.top_page()?;
-                let plx_screens::registry::AppArg::Content(
-                    plx_screens::registry::ContentArg::Detail { sid, rk: detail_rk },
-                ) = &entry.arg else { return None };
-                Some(plx_data::stores::viewstate::DetailRefresh {
-                    sid: *sid,
-                    rk: detail_rk.clone(),
-                    keep: Some(rk.clone()),
-                })
-            });
             // NO GUID from here, and deliberately: a catalog row carries none, and the guid the
             // detail page is holding belongs to the SHOW when this rk is one of its episodes. A
             // guid that is merely close marks a DIFFERENT title watched on every other source, so
             // `viewstate` looks the right one up from `(sid, rk)` on its own worker instead.
             bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Request {
-                sid, rk: rk.to_string(), write: w, detail, guid: String::new(),
+                sid, rk: rk.to_string(), write: w, scope: plx_data::viewstate::Scope::Leaf, guid: String::new(),
             });
         }
         Action::RemoveFromDeck(rk) => {
@@ -638,7 +627,7 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
             // row is yours, and hiding a friend's item from it is not a claim about their deck.
             bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Request {
                 sid, rk: rk.to_string(), write: plx_data::viewstate::Write::RemoveFromDeck,
-                detail: None, guid: String::new(),
+                scope: plx_data::viewstate::Scope::Leaf, guid: String::new(),
             });
         }
         // The deck card's Play row (OK opens the page): the same captured-row launch as Play from
@@ -728,6 +717,18 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
                 bridge,
                 playback.0,
             );
+        }
+        // The item menu's two Watchlist rows and the catalog "go" row. Add is catalog-keyed and
+        // pulses the tab (the store flips at once); Remove is guid-keyed like the menu's subject,
+        // and the page that asked decides whether the removal landing is owed.
+        Action::WatchlistAdd { hex } => bridge.watchlist_add(hex),
+        Action::WatchlistRemove(guid) => {
+            bridge.watchlist_remove(&guid, super::bridge::Bridge::watchlist_page_on_top(pages));
+        }
+        Action::GoToCatalog(guid) => {
+            if let Some(hex) = super::bridge::hex_of_guid(&guid) {
+                super::bridge::open_catalog(pages, hex, None);
+            }
         }
     }
 }
@@ -1377,13 +1378,26 @@ pub(crate) fn wears_the_chip(route: &AppArg) -> bool {
 /// Did this click land on the profile chip of a screen that is WEARING the shared bar? The pointer
 /// twin of [`chip_activate`]'s key path, and the route test is the whole of what makes it safe:
 /// `widgets::CHIP_FRAME` is a constant (the chip never moves), so nothing else bounds it to the
+fn mark_scope(
+    rk: &str,
+    item: Option<&plx_data::pms::PmsMovie>,
+    season: Option<&(String, i64)>,
+) -> plx_data::viewstate::Scope {
+    use plx_data::viewstate::Scope;
+    match (item.filter(|m| m.rk == rk), season) {
+        (Some(row), _) => Scope::of_row(row),
+        (None, Some((show_rk, index))) => Scope::Season { show_rk: show_rk.clone(), index: *index },
+        (None, None) => Scope::Leaf,
+    }
+}
+
 /// screens that actually draw one.
 pub(crate) fn chip_clicked(route: &AppArg, ev: &[u8]) -> bool {
     if !wears_the_chip(route) {
         return false;
     }
     let (mx, my) = ptr_xy(ev);
-    plx_ui::widgets::profile_chip_at(mx, my)
+    plx_ui::widgets::CHIP_FRAME.contains(mx, my)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1469,6 +1483,7 @@ pub(crate) unsafe fn key_ok(
 /// is an ordinary BACK on the NEW screen — the press is never dropped, only ever spent on exactly
 /// one of the two. (It matters most at Home's root, where "what BACK would otherwise do" is hand
 /// the screen back to the television — see [`back_at_root`].)
+#[allow(unused_variables)]
 pub(crate) fn key_back(
     ps: &mut plx_media::route::PlaybackSession,
     pa: &mut plx_media::player::adapter::PlayerAdapter,
@@ -1477,7 +1492,6 @@ pub(crate) fn key_back(
 ) {
     if super::bridge::nav_cancel(pages) {
     } else if super::bridge::player(pages).is_some() {
-        exit_player(ps, pa, refresh_hubs_at, pages);
     } else if matches!(pages.top_arg(), Some(AppArg::Content(_))) {
         // The two stacking screens, through the page transition. All three
         // halves of the pop — the outgoing page's teardown, the trail move and

@@ -83,12 +83,15 @@ pub(super) fn src(slot: u16, handle: &str, state: HubState, last: Option<SourceB
     let mut s = Src::new(sid(slot), handle.into());
     s.state = state;
     s.last = last;
+    // a Ready fixture is a source that answered
+    if state == HubState::Ready { s.deck_read = DeckRead::Answered; }
     s
 }
 
 /// Install a source table and the merge of it — the state a run of landings would have reached.
 /// Bypasses the roster, because a host test has no server registry to derive one from.
-pub(super) fn seed(state: &mut PmsState, srcs: Vec<Src>) {
+pub(super) fn seed(state: &mut PmsState, mut srcs: Vec<Src>) {
+    for s in &mut srcs { s.ledger = state.ledger.clone(); s.feed_copies(); }
     let build = merge(&srcs);
     state.srcs = srcs;
     // leave `sync_roster` idle — both halves, see `seed_for_test`
@@ -134,13 +137,13 @@ fn plain_row(slot: u16, rk: &str) -> PmsMovie {
 }
 
 pub(super) fn shelf(slot: u16, title: &str, hub_id: &str, rks: &[&str]) -> Shelf {
-    Shelf {
+    Shelf { epoch: 0,
         title: title.into(),
         hub_id: hub_id.into(),
         key: String::new(),
         items: rks.iter().map(|r| row(slot, r)).collect(),
         positions: (0..rks.len()).collect(),
-        total: 0, offset: 0, end: 0, more: false,
+        total: 0, offset: 0, end: 0, more: false, shown: 0, row: Default::default(),
     }
 }
 
@@ -157,11 +160,13 @@ pub(super) fn shelf_in(slot: u16, sec: i64, title: &str, hub_id: &str, rks: &[&s
 /// A source's projection: `(lastViewedAt, rk)` deck entries plus whole shelves.
 pub(super) fn built(slot: u16, cw: &[(i64, &str)], shelves: Vec<Shelf>) -> SourceBuild {
     SourceBuild {
+        lane: Default::default(),
         cw: cw
             .iter()
             .map(|&(t, r)| CwItem {
                 last_viewed_at: t,
                 m: row(slot, r),
+                position: 0,
             })
             .collect(),
         shelves,

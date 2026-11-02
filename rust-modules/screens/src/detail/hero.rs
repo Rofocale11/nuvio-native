@@ -25,14 +25,17 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_int;
 
 use plx_data::metadata::{Detail, Episode, Extra};
+use plx_ui::hstack::{Flow, Item, Span};
 use plx_ui::label::HAlign;
 use plx_machine::machine::{GroupId, Measure};
 use plx_ui::text_view::TextView;
-use plx_ui::widgets::{CircleButton, PosterMark};
+use plx_ui::vstack::{Anchor, VStack};
+use plx_ui::widgets::PosterMark;
 use plx_ui::{theme, Painter, Rect};
 
-/// The hero's whole `u32` elem namespace. A later Detail package's own range must start here.
-pub const HERO_ELEM_RANGE_END: u32 = 64;
+/// The hero owns the local ids below the season block; its controls are the `ELEM_*` ids at its
+/// bottom.
+pub const HERO_ELEM_RANGE_END: u32 = super::SECTION_BLOCK;
 
 pub const ELEM_PLAY: u32 = 0;
 pub const ELEM_RESTART: u32 = 1;
@@ -40,7 +43,9 @@ pub const ELEM_ALT: u32 = 2;
 pub const ELEM_MARK_WATCHED: u32 = 3;
 pub const ELEM_MARK_UNWATCHED: u32 = 4;
 pub const ELEM_TRAILER: u32 = 5;
-pub const ELEM_MY_LIST: u32 = 6;
+/// The bookmark disc — the Watchlist toggle. ONE identity for both faces (outline / filled): the
+/// face is membership, not a different control, so focus rides straight through a flip.
+pub const ELEM_WATCHLIST: u32 = 6;
 
 /// The hero's one focus group. Local to this screen — nothing outside `screens::detail` ever names
 /// it — so, like `screens::profiles`'s `ROSTER_GROUP`/`FOOTER_GROUP`, any small integer would do;
@@ -48,33 +53,23 @@ pub const ELEM_MY_LIST: u32 = 6;
 /// group.
 pub const HERO_GROUP: GroupId = GroupId(0);
 
-/// The Play/Resume pill's minimum width — a pathologically short label still gets a pill.
-const PW: f32 = 168.0;
-
-/// The row's inter-control air and its disc diameter — the SHARED control-family numbers
-/// (`ui::widgets::CTRL_GAP`/`StatusOverlay::CTRL_H`), not a second copy of them.
-const CGAP: f32 = plx_ui::widgets::CTRL_GAP;
-pub const CD: f32 = plx_ui::widgets::StatusOverlay::CTRL_H;
+// The row's shared geometry (PW, CGAP, CD, FACTS_R, the pill-width formula, the row accumulation,
+// the disc-unfurl budget and the meta line) lives in `appkit::hero_layout`, so the catalog page lays
+// out with the same numbers.
+pub use plx_appkit::hero_layout::{HeroWidths, CD, MAX_CTLS};
+use plx_appkit::hero_layout::{FACTS_R, PW, pill_w};
+#[cfg(test)]
+use plx_appkit::hero_layout::CGAP;
 const PEOPLE_MAX_LINES: usize = 2;
-const PEOPLE_CAST: usize = 3;
+/// Names on the hero's Starring line: a summary. The whole cast is the Cast row further down the
+/// page, one headshot per credit with nothing cut (`cards::Cards` counts `Detail::credits_len`).
+const PEOPLE_SUMMARY: usize = 3;
 const PEOPLE_LABEL_INK: [f32; 4] = theme::TEXT_TERTIARY;
 const FACTS_SEP_PAD: f32 = theme::space::SM;
-const FACTS_R: f32 = plx_ui::consts::SCR_W
-    - plx_ui::consts::MARGIN_X
-    - plx_ui::detail_layout::PEOPLE_W
-    - theme::space::SM;
 
-/// Duplicated from `widgets::Button`'s own PRIVATE `BTN_ICON_RATIO`/`BTN_ICON_GAP` (1.15, 12.0):
-/// those two constants are `widgets.rs`-internal, and this module may not reach past that file's
-/// `pub`/`pub` surface (the layer rule: a screen names `ui/`'s public surface, never its
-/// internals). `BTN_PILL_AIR` IS `pub` and is reused directly rather than copied.
-///
-/// A drift here is COSMETIC, not a hit-test miss: whatever width this formula computes is fed to
-/// BOTH [`Focusable::place`](super::DetailScreen) and `draw`'s `Button::new(label, sz, rect)` (which
-/// only ever fills the rect it is given — see `widgets::Button::new`'s doc), so the two paths can
-/// disagree with the REAL widget's own preferred width, never with EACH OTHER.
-const HERO_ICON_RATIO: f32 = 1.15;
-const HERO_ICON_GAP: f32 = 12.0;
+/// The Alt pill's trailing mark: drawn by `Button::trailing_icon` and counted by [`alt_pill_w`], so
+/// the pill is sized to the very glyph it carries.
+pub const ALT_ICON: plx_ui::icons::Icon = plx_ui::icons::Icon::ChevronDown;
 
 pub fn alt_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_also_available_c() }
 
@@ -90,6 +85,7 @@ fn trailer_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_tra
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeroCtl {
     /// Save/remove this Nuvio title in the active account profile.
+    #[allow(dead_code)]
     MyList,
     /// the Play/Resume pill — always present, always first
     Play,
@@ -104,27 +100,32 @@ pub enum HeroCtl {
     MarkWatched,
     /// the − face of that same toggle — worn once the item IS watched
     MarkUnwatched,
+    /// the bookmark disc — present only for an item with a Watchlist-takeable guid, then always
+    /// SECOND (right after Play/Resume); a circle that never unfurls and carries no name, focused or
+    /// not: an icon-only control is its glyph and its focus fill
+    Watchlist,
 }
 
 impl HeroCtl {
     /// This control's fixed `u32` identity (never its position — see the module doc).
     pub const fn elem(self) -> u32 {
         match self {
-            HeroCtl::MyList => ELEM_MY_LIST,
+            HeroCtl::MyList => ELEM_WATCHLIST,
             HeroCtl::Play => ELEM_PLAY,
             HeroCtl::Restart => ELEM_RESTART,
             HeroCtl::Trailer => ELEM_TRAILER,
             HeroCtl::Alt => ELEM_ALT,
             HeroCtl::MarkWatched => ELEM_MARK_WATCHED,
             HeroCtl::MarkUnwatched => ELEM_MARK_UNWATCHED,
+            HeroCtl::Watchlist => ELEM_WATCHLIST,
         }
     }
-    /// The inverse of [`elem`](Self::elem) — `None` for any `u32` outside the six identities
-    /// above, which is every elem a NON-hero group can mint (the completed sections use
+    /// The inverse of [`elem`](Self::elem) — `None` for any `u32` outside the seven identities
+    /// above (seven with the bookmark), which is every elem a NON-hero group can mint (the completed sections use
     /// their own disjoint range, per the module doc).
     pub fn of_elem(e: u32) -> Option<Self> {
         match e {
-            ELEM_MY_LIST => Some(HeroCtl::MyList),
+            ELEM_WATCHLIST => Some(HeroCtl::Watchlist),
             ELEM_PLAY => Some(HeroCtl::Play),
             ELEM_RESTART => Some(HeroCtl::Restart),
             ELEM_TRAILER => Some(HeroCtl::Trailer),
@@ -145,19 +146,24 @@ impl HeroCtl {
 /// toggle wears.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct HeroSet {
-    pub list: bool,
+    /// the item carries a `plex://movie|show` guid the Watchlist takes — the bookmark disc exists only then
+    pub watchlist: bool,
     pub restart: bool,
     pub trailer: bool,
     pub alt: bool,
     pub mark: PosterMark,
 }
 
-/// The row's controls, in drawn order, for a given set. A fixed 6-slot array (Play + Restart +
-/// Trailer + Alt + My List + one watch face is the widest the row ever gets) plus a live count, so no
-/// per-frame allocation.
-pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; 6], usize) {
-    let mut v = [HeroCtl::Play; 6];
+/// The row's controls, in drawn order, for a given set. A fixed [`MAX_CTLS`]-slot array plus a
+/// live count, so no per-frame allocation. The bookmark disc (only when `set.watchlist`) is SECOND, after Play/Resume;
+/// whether it wears the outline or the filled face is membership ([`face`]), not presence.
+pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; MAX_CTLS], usize) {
+    let mut v = [HeroCtl::Play; MAX_CTLS];
     let mut n = 1;
+    if set.watchlist {
+        v[n] = HeroCtl::Watchlist;
+        n += 1;
+    }
     if set.restart {
         v[n] = HeroCtl::Restart;
         n += 1;
@@ -170,7 +176,6 @@ pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; 6], usize) {
         v[n] = HeroCtl::Alt;
         n += 1;
     }
-    if set.list { v[n] = HeroCtl::MyList; n += 1; }
     v[n] = if set.mark == PosterMark::Watched {
         HeroCtl::MarkUnwatched
     } else {
@@ -209,12 +214,12 @@ pub fn focusable(ctl: HeroCtl, full_trailer: bool) -> bool {
 /// presentation mode. Every call site that enumerates the row for focus/hit-testing extent must go
 /// through this rather than `hero_ctls` directly, or the two can disagree about which controls
 /// exist right now.
-pub fn visible_ctls(set: HeroSet, full_trailer: bool) -> ([HeroCtl; 6], usize) {
+pub fn visible_ctls(set: HeroSet, full_trailer: bool) -> ([HeroCtl; MAX_CTLS], usize) {
     let (all, n) = hero_ctls(set);
     if !full_trailer {
         return (all, n);
     }
-    let mut v = [HeroCtl::Play; 6];
+    let mut v = [HeroCtl::Play; MAX_CTLS];
     let mut count = 0;
     for &c in &all[..n] {
         if focusable(c, full_trailer) {
@@ -308,7 +313,9 @@ pub fn watch_names_show(d: &Detail) -> bool {
     hero_episode(d).is_some()
 }
 
-/// A disc's slot (`[restart, trailer, watch]`) and the verb it unfurls to — `None` for the two PILLS.
+/// A disc's slot (`[restart, trailer, watch]`) and the verb it unfurls to — `None` for the two PILLS
+/// and for the bookmark disc, which has no verb to unfurl and wears no name: it is its glyph and its
+/// focus fill.
 pub fn disc_verb(ctl: HeroCtl, name_show: bool) -> Option<(usize, &'static CStr)> {
     match (ctl, name_show) {
         (HeroCtl::Restart, _) => Some((0, play_from_start_label())),
@@ -321,6 +328,42 @@ pub fn disc_verb(ctl: HeroCtl, name_show: bool) -> Option<(usize, &'static CStr)
     }
 }
 
+// ---- the bookmark disc (docs/watchlist-plan.md §1.8) ---------------------------------------------
+
+use plx_data::catalog::Membership;
+
+pub use plx_appkit::watchlist_disc::{face_icon, Face};
+
+/// The 12 hex bytes of a PMS item's `plex://movie|show/<hex>` guid, `None` for any other shape.
+pub fn guid_hex(guid: &str) -> Option<[u8; 12]> {
+    plx_data::watchlist::decode_hex(guid.rsplit('/').next()?)
+}
+
+/// What a press on the disc asks for: Add when the title is not (known to be) on the list, Remove
+/// when it is. `None` when the item carries no catalog identity — the disc then stays drawn but the
+/// press does nothing. `hex` is the identity the page already knows for a `nuvio://` title (the
+/// shim's numeric key); a `plex://movie|show` guid still wins when it decodes.
+pub fn press(guid: &str, hex: Option<[u8; 12]>, m: Membership) -> Option<crate::registry::ItemMenuAction> {
+    use crate::registry::ItemMenuAction as Action;
+    let known = guid_hex(guid);
+    let hex = known.or(hex)?;
+    // Remove is guid-keyed like the menu's own. A title whose own guid is not a discover id (a
+    // Nuvio title) gets a synthetic one carrying the identity, so the app's hex lookup resolves it.
+    let subject = if known.is_some() {
+        guid.to_string()
+    } else {
+        format!("plex://movie/{}", plx_data::watchlist::encode_hex(&hex))
+    };
+    Some(match m {
+        Membership::On => Action::WatchlistRemove(subject),
+        Membership::Off | Membership::Unknown => Action::WatchlistAdd { hex },
+    })
+}
+
+#[cfg(test)]
+#[path = "hero_watchlist_tests.rs"]
+mod watchlist_tests;
+
 /// The Trailer disc's play fields — extra identity and HUD title, always from start.
 /// `None` when the loaded item has no playable trailer (no button, no-op activate).
 pub fn trailer_play(d: &Detail) -> Option<(&Extra, &str)> {
@@ -330,78 +373,41 @@ pub fn trailer_play(d: &Detail) -> Option<(&Extra, &str)> {
 
 /// The Play pill's label — the word the press will actually perform.
 pub fn hero_pill_label(has_restart: bool) -> &'static CStr {
-    if has_restart {
-        plx_platform::i18n::msg::browse_detail_resume_c()
-    } else {
-        plx_platform::i18n::msg::browse_detail_play_c()
-    }
-}
-
-/// `widgets::Button::pill_w_full`, reproduced over [`Measure`] rather than `plx_gfx::text` directly
-/// — see [`HERO_ICON_RATIO`]'s doc for why the icon-box constants are duplicated, and
-/// `screens::login::status_action_rect`'s own doc for the general pattern (host-test-safe geometry
-/// shared by `Focusable::place` and `draw`).
-fn pill_w(measure: &dyn Measure, label: &CStr, sz: i32, icon: bool, trailing: bool) -> f32 {
-    let (isz, gap) = if icon {
-        (sz as f32 * HERO_ICON_RATIO, HERO_ICON_GAP)
-    } else {
-        (0.0, 0.0)
-    };
-    let (tsz, tgap) = if trailing {
-        (sz as f32 * HERO_ICON_RATIO, HERO_ICON_GAP)
-    } else {
-        (0.0, 0.0)
-    };
-    isz + gap + measure.width(label, sz, true) + tgap + tsz + plx_ui::widgets::BTN_PILL_AIR
+    plx_appkit::hero_layout::play_label(has_restart)
 }
 
 pub fn hero_pill_w(measure: &dyn Measure, has_restart: bool) -> f32 {
-    pill_w(
+    plx_appkit::hero_layout::pill_w(
         measure,
         hero_pill_label(has_restart),
         theme::size::BODY,
         true,
-        false,
+        None,
     )
     .max(PW)
 }
 
 pub fn alt_pill_w(measure: &dyn Measure) -> f32 {
-    pill_w(measure, alt_label(), theme::size::BODY, false, true)
-}
-
-/// Every measured width the row's accumulation needs, as one value — ported verbatim from
-/// `ui/detail.rs::HeroWidths`.
-#[derive(Clone, Copy, Debug)]
-pub struct HeroWidths {
-    pub list: f32,
-    pub pill: f32,
-    pub alt: f32,
-    /// the three discs, in [`disc_verb`]'s slot order, each already unfurled
-    pub disc: [f32; 3],
+    plx_appkit::hero_layout::pill_w(measure, alt_label(), theme::size::BODY, false, Some(ALT_ICON))
 }
 
 /// The accumulation itself, PURE: the drawn frame of control `i` in `set`, given both pills'
 /// measured widths. Ported verbatim from `ui/detail.rs::hero_btn_rect_at`.
 pub fn hero_btn_rect_at(set: HeroSet, i: usize, y: f32, cw: HeroWidths) -> Rect {
     let (v, n) = hero_ctls(set);
-    let mut x = plx_ui::consts::MARGIN_X;
-    let mut w = cw.pill;
-    for (k, c) in v[..n].iter().enumerate() {
-        w = match c {
-            HeroCtl::MyList => cw.list,
+    let mut widths = [0.0f32; MAX_CTLS];
+    for (slot, c) in widths.iter_mut().zip(&v[..n]) {
+        *slot = match c {
             HeroCtl::Play => cw.pill,
             HeroCtl::Alt => cw.alt,
             HeroCtl::Restart => cw.disc[0],
+            // no verb to unfurl: a circle at every instant
+            HeroCtl::Watchlist | HeroCtl::MyList => CD,
             HeroCtl::Trailer => cw.disc[1],
             HeroCtl::MarkWatched | HeroCtl::MarkUnwatched => cw.disc[2],
         };
-        if k >= i {
-            break;
-        }
-        x += w + CGAP;
     }
-    Rect::new(x, y, w, CD)
+    plx_appkit::hero_layout::row_rect(&widths[..n], i, y)
 }
 
 /// Every disc's drawn width right now, given the row's set, both pills' widths, each disc's
@@ -441,37 +447,10 @@ pub(super) fn disc_caps_at(
     label_w: [f32; 3],
 ) -> [f32; 3] {
     let (_, n) = hero_ctls(set);
-    let closed = HeroWidths {
-        list: 0.0,
-        pill,
-        alt,
-        disc: [CD; 3],
-    };
-    let last = hero_btn_rect_at(set, n.saturating_sub(1), 0.0, closed);
-    let budget = CircleButton::label_budget(CD, FACTS_R - (last.x + last.w));
-    if label_w.iter().copied().fold(0.0f32, f32::max) > budget {
-        return [CD; 3];
-    }
-    let open = [
-        CircleButton::cap_w(CD, unfurl[0], label_w[0]),
-        CircleButton::cap_w(CD, unfurl[1], label_w[1]),
-        CircleButton::cap_w(CD, unfurl[2], label_w[2]),
-    ];
-    let last_open = hero_btn_rect_at(
-        set,
-        n.saturating_sub(1),
-        0.0,
-        HeroWidths {
-            list: 0.0,
-            pill,
-            alt,
-            disc: open,
-        },
-    );
-    if last_open.x + last_open.w > FACTS_R + 0.01 {
-        return [CD; 3];
-    }
-    open
+    plx_appkit::hero_layout::disc_caps_with(unfurl, label_w, |disc| {
+        let last = hero_btn_rect_at(set, n.saturating_sub(1), 0.0, HeroWidths { pill, alt, disc });
+        last.x + last.w
+    })
 }
 
 /// The live widths, combining [`hero_pill_w`]/[`alt_pill_w`]/[`disc_caps`] — the one function
@@ -485,10 +464,9 @@ pub fn hero_widths(
     named_show: bool,
 ) -> HeroWidths {
     HeroWidths {
-        list: if set.list { my_list_width(measure) } else { 0.0 },
         pill: hero_pill_w(measure, has_restart),
         alt: alt_pill_w(measure),
-        disc: if set.list { [CD; 3] } else { disc_caps(measure, set, unfurl, named_show) },
+        disc: if set.watchlist { [CD; 3] } else { disc_caps(measure, set, unfurl, named_show) },
     }
 }
 
@@ -513,60 +491,54 @@ pub fn has_people(d: &Detail) -> bool {
 pub fn draw_people(p: Painter, d: &Detail, button_y: f32, measure: &dyn Measure) {
     use plx_ui::detail_layout::PEOPLE_W;
     let x = plx_ui::consts::SCR_W - plx_ui::consts::MARGIN_X - PEOPLE_W;
-    let mut bottom = button_y + CD;
-    if !d.cast.is_empty() {
-        let names: Vec<&str> = d
-            .cast
-            .iter()
-            .take(PEOPLE_CAST)
-            .map(|credit| credit.tag.as_str())
-            .collect();
-        bottom -= people_line(p, plx_platform::i18n::msg::browse_detail_starring(), &names, x, bottom, measure);
-    }
-    if let Some((label, names)) = hero_credit(d) {
-        people_line(p, label, &names, x, bottom, measure);
+    let cast_names: Vec<&str> = d
+        .cast
+        .iter()
+        .take(PEOPLE_SUMMARY)
+        .map(|credit| credit.tag.as_str())
+        .collect();
+    let credit = hero_credit(d);
+    // The credit line stands above the cast line, flush against it, the pair's bottom on the button
+    // row's: one bottom-anchored stack, an absent line taking no room.
+    let cast_text = people_text(&cast_names);
+    let credit_text = credit.as_ref().map(|(_, names)| people_text(names));
+    let cast = (!cast_names.is_empty()).then(|| {
+        people_view(&cast_text, plx_platform::i18n::msg::browse_detail_starring(), measure)
+    });
+    let credit_view = credit.as_ref().zip(credit_text.as_deref()).map(|((label, _), text)| people_view(text, label, measure));
+    let heights = [
+        credit_view.as_ref().map(|v| v.measure_h(PEOPLE_W)),
+        cast.as_ref().map(|v| v.measure_h(PEOPLE_W)),
+    ];
+    let items = heights.map(|h| h.map_or(Item::absent(), Item::new));
+    let stack = VStack::new(&items, 0.0, Anchor::Bottom(button_y + CD));
+    for span in stack.placed() {
+        let view = if span.i == 0 { credit_view.as_ref() } else { cast.as_ref() };
+        if let Some(view) = view {
+            view.draw(p, Rect::new(x, span.y, PEOPLE_W, 0.0));
+        }
     }
 }
 
-fn people_line(p: Painter, label: &str, names: &[&str], x: f32, bottom: f32, measure: &dyn Measure) -> f32 {
-    use plx_ui::detail_layout::{PEOPLE_INK, PEOPLE_LEAD, PEOPLE_W};
-    let names = names
+fn people_text(names: &[&str]) -> String {
+    names
         .iter()
         .map(|name| name.replace(' ', "\u{a0}"))
         .collect::<Vec<_>>()
-        .join(", ");
-    let view = TextView::new(&names, theme::size::CAPTION, PEOPLE_INK).with_measure(measure)
+        .join(", ")
+}
+
+fn people_view<'a>(names: &'a str, label: &'a str, measure: &'a dyn Measure) -> TextView<'a> {
+    use plx_ui::detail_layout::{PEOPLE_INK, PEOPLE_LEAD};
+    TextView::new(names, theme::size::CAPTION, PEOPLE_INK).with_measure(measure)
         .leading(PEOPLE_LEAD)
         .max_lines(PEOPLE_MAX_LINES)
         .h(HAlign::Right)
-        .lead_quiet(label, PEOPLE_LABEL_INK);
-    let h = view.measure_h(PEOPLE_W);
-    view.draw(p, Rect::new(x, bottom - h, PEOPLE_W, 0.0));
-    h
+        .lead_quiet(label, PEOPLE_LABEL_INK)
 }
 
 fn hero_facts(d: &Detail) -> (String, Option<String>) {
-    if let Some(ep) = hero_episode(d) {
-        let runtime = (ep.dur_ms >= 60_000).then(|| plx_ui::fmt::dur_long(ep.dur_ms));
-        return (plx_ui::fmt::pretty_date(&ep.aired, 0), runtime);
-    }
-    let date = plx_ui::fmt::pretty_date(&d.aired, d.year);
-    if d.is_show {
-        let seasons = d.seasons.len();
-        if seasons == 0 {
-            return (date, None);
-        }
-        let episodes: i64 = d.seasons.iter().map(|season| season.leaf_count).sum();
-        let seasons = plx_platform::i18n::msg::browse_detail_seasons(seasons as i64);
-        let extent = if episodes > 0 {
-            plx_platform::i18n::msg::browse_detail_extent(&plx_platform::i18n::msg::browse_detail_episodes(episodes), &seasons)
-        } else { seasons };
-        return (date, Some(extent));
-    }
-    (
-        date,
-        (d.dur_ms >= 60_000).then(|| plx_ui::fmt::dur_long(d.dur_ms)),
-    )
+    plx_appkit::hero_layout::meta_facts(d, hero_episode(d))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -602,8 +574,10 @@ fn converts_on_server_c() -> &'static CStr { plx_platform::i18n::msg::browse_det
 #[derive(Clone, Copy)]
 enum Bit {
     Word(&'static CStr, [f32; 4], c_int),
-    Sep(f32),
+    /// The separator dot, `FACTS_SEP_PAD` from the run on each side (the flow's own gap).
+    Sep,
     Glyph,
+    /// The gap after the bit before it, in place of the flow's own (`Item::after`).
     Air(f32),
     Capsule,
 }
@@ -611,19 +585,30 @@ enum Bit {
 const FACTS_BITS: usize = 8;
 
 fn play_mode_bits(d: &Detail, after: bool) -> ([Bit; FACTS_BITS], usize) {
+    match plx_media::route::playback_preview(d) {
+        Some(preview) => play_mode_bits_for(preview, d.hdr, item_subscription(d), after),
+        None => ([Bit::Air(0.0); FACTS_BITS], 0),
+    }
+}
+
+/// [`play_mode_bits`] once the item's route has been read: the line's play-mode clause, behind a
+/// separator of its own when something already stands in front of it (`after`).
+fn play_mode_bits_for(
+    preview: plx_media::route::Preview,
+    hdr: bool,
+    subscription: plx_plex::plex::serverinfo::Subscription,
+    after: bool,
+) -> ([Bit; FACTS_BITS], usize) {
     let mut bits = [Bit::Air(0.0); FACTS_BITS];
     let mut n = 0;
-    let Some(preview) = plx_media::route::playback_preview(d) else {
-        return (bits, 0);
-    };
     let mut push = |bit: Bit| {
         bits[n] = bit;
         n += 1;
     };
     if after {
-        push(Bit::Sep(theme::space::MD));
+        push(Bit::Sep);
     }
-    match play_note(preview, d.hdr, item_subscription(d)) {
+    match play_note(preview, hdr, subscription) {
         PlayNote::Quiet => push(Bit::Word(
             match preview {
                 plx_media::route::Preview::DirectPlay => plx_platform::i18n::msg::browse_detail_direct_play_c(),
@@ -638,7 +623,7 @@ fn play_mode_bits(d: &Detail, after: bool) -> ([Bit; FACTS_BITS], usize) {
         )),
         PlayNote::Soft => {
             push(Bit::Word(converts_on_server_c(), plx_ui::detail_layout::FACTS_INK, 0));
-            push(Bit::Sep(theme::space::SM));
+            push(Bit::Sep);
             push(Bit::Word(
                 plx_platform::i18n::msg::browse_detail_hardware_needs_c(),
                 theme::TEXT_SECONDARY,
@@ -651,7 +636,7 @@ fn play_mode_bits(d: &Detail, after: bool) -> ([Bit; FACTS_BITS], usize) {
             push(Bit::Glyph);
             push(Bit::Air(theme::space::SM));
             push(Bit::Word(c"HDR \u{2192} SDR", theme::TEXT_SECONDARY, 1));
-            push(Bit::Sep(theme::space::SM));
+            push(Bit::Sep);
             push(Bit::Word(plx_platform::i18n::msg::browse_detail_tonemap_needs_c(), theme::TEXT_SECONDARY, 0));
             push(Bit::Air(theme::space::SM));
             push(Bit::Capsule);
@@ -660,19 +645,43 @@ fn play_mode_bits(d: &Detail, after: bool) -> ([Bit; FACTS_BITS], usize) {
     (bits, n)
 }
 
-fn bit_w(bit: Bit, measure: &dyn plx_machine::machine::Measure) -> f32 {
-    match bit {
-        Bit::Word(text, _, bold) => measure.width(text, theme::size::CAPTION, bold != 0),
-        Bit::Sep(gap) => 2.0 * gap + measure.width(c"\u{b7}", theme::size::CAPTION, false),
-        Bit::Glyph => FACTS_GLYPH_D,
-        Bit::Air(gap) => gap,
-        Bit::Capsule => plx_ui::widgets::pass_capsule_w(measure),
+/// **The play-mode clause's one layout**, from `x`: each bit with the span it draws, as a [`Flow`]
+/// whose own gap is `FACTS_SEP_PAD` (word, dot, word) and in which an [`Bit::Air`] is the previous
+/// bit's [`Item::after`]. A clause that opens with its dot stands that dot `FACTS_SEP_PAD` after
+/// `x`, the end of the run in front, which a zero-width item for that run provides. Returns the
+/// width, `x` to the last bit's trailing edge.
+fn bits_flow(
+    bits: &[Bit],
+    x: f32,
+    measure: &dyn plx_machine::machine::Measure,
+    mut each: impl FnMut(Bit, Span),
+) -> f32 {
+    let mut flow = Flow::new(x, FACTS_SEP_PAD);
+    if matches!(bits.first(), Some(Bit::Sep)) {
+        flow.push(Item::new(0.0));
     }
+    for (i, bit) in bits.iter().enumerate() {
+        let w = match *bit {
+            Bit::Word(text, _, bold) => measure.width(text, theme::size::CAPTION, bold != 0),
+            Bit::Sep => measure.width(c"\u{b7}", theme::size::CAPTION, false),
+            Bit::Glyph => FACTS_GLYPH_D,
+            Bit::Capsule => plx_ui::widgets::pass_capsule_w(measure),
+            Bit::Air(_) => continue,
+        };
+        let item = match bits.get(i + 1) {
+            Some(Bit::Air(gap)) => Item::new(w).after(*gap),
+            _ => Item::new(w),
+        };
+        if let Some(span) = flow.push(item) {
+            each(*bit, span);
+        }
+    }
+    flow.end() - x
 }
 
 fn play_mode_w(d: &Detail, after: bool, measure: &dyn plx_machine::machine::Measure) -> f32 {
     let (bits, n) = play_mode_bits(d, after);
-    bits[..n].iter().copied().map(|b| bit_w(b, measure)).sum()
+    bits_flow(&bits[..n], 0.0, measure, |_, _| {})
 }
 
 fn draw_play_mode(
@@ -683,41 +692,32 @@ fn draw_play_mode(
     after: bool,
     measure: &dyn plx_machine::machine::Measure,
 ) -> f32 {
+    let (bits, n) = play_mode_bits(d, after);
+    paint_bits(p, &bits[..n], x, y, measure)
+}
+
+/// Paint the play-mode clause's `bits` from `x` on the line whose text top is `y`; the width drawn.
+fn paint_bits(p: Painter, bits: &[Bit], x: f32, y: f32, measure: &dyn plx_machine::machine::Measure) -> f32 {
     let (top, baseline) = plx_gfx::text::text_cap_band(theme::size::CAPTION, 0);
     let cy = y + (top + baseline) * 0.5;
-    let (bits, n) = play_mode_bits(d, after);
-    let mut bx = x;
-    for bit in &bits[..n] {
-        match *bit {
-            Bit::Word(text, color, bold) => {
-                bx += p.text(text.as_ptr(), bx, y, theme::size::CAPTION, color, 0, bold);
-            }
-            Bit::Sep(gap) => {
-                p.text(
-                    c"\u{b7}".as_ptr(),
-                    bx + gap,
-                    y,
-                    theme::size::CAPTION,
-                    theme::TEXT_SEPARATOR,
-                    0,
-                    0,
-                );
-                bx += bit_w(*bit, measure);
-            }
-            Bit::Glyph => {
-                plx_ui::icons::draw(
-                    p,
-                    plx_ui::icons::Icon::Alert,
-                    Rect::new(bx, cy - FACTS_GLYPH_D * 0.5, FACTS_GLYPH_D, FACTS_GLYPH_D),
-                    theme::TEXT_SECONDARY,
-                );
-                bx += FACTS_GLYPH_D;
-            }
-            Bit::Air(gap) => bx += gap,
-            Bit::Capsule => bx += plx_ui::widgets::pass_capsule(p, bx, cy, false, measure),
+    bits_flow(bits, x, measure, |bit, span| match bit {
+        Bit::Word(text, color, bold) => {
+            p.text(text.as_ptr(), span.x, y, theme::size::CAPTION, color, 0, bold);
         }
-    }
-    bx - x
+        Bit::Sep => {
+            p.text(c"\u{b7}".as_ptr(), span.x, y, theme::size::CAPTION, theme::TEXT_SEPARATOR, 0, 0);
+        }
+        Bit::Glyph => plx_ui::icons::draw(
+            p,
+            plx_ui::icons::Icon::Alert,
+            Rect::new(span.x, cy - FACTS_GLYPH_D * 0.5, FACTS_GLYPH_D, FACTS_GLYPH_D),
+            theme::TEXT_SECONDARY,
+        ),
+        Bit::Capsule => {
+            plx_ui::widgets::pass_capsule(p, span.x, cy, false, measure);
+        }
+        Bit::Air(_) => {}
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -755,34 +755,33 @@ fn facts_flow(
     mut run: impl FnMut(&str, f32, c_int, [f32; 4]) -> f32,
     mode: impl FnOnce(f32, bool) -> f32,
 ) -> f32 {
-    fn separator(run: &mut impl FnMut(&str, f32, c_int, [f32; 4]) -> f32, dx: f32) -> f32 {
-        2.0 * FACTS_SEP_PAD
-            + run(
-                "\u{b7}",
-                dx + FACTS_SEP_PAD,
-                theme::size::CAPTION,
-                theme::TEXT_SEPARATOR,
-            )
-    }
-    let mut dx = 0.0;
+    // The date, the extent and the dots between them are one `Flow` whose gap is the dot's pad; the
+    // play-mode clause carries its own leading dot (`mode` is told whether something precedes it),
+    // so the credit's flow starts at the clause's end with a zero-width item standing for it.
+    let dot = |run: &mut dyn FnMut(&str, f32, c_int, [f32; 4]) -> f32, x: f32| {
+        Item::new(run("\u{b7}", x, theme::size::CAPTION, theme::TEXT_SEPARATOR))
+    };
+    let mut flow = Flow::new(0.0, FACTS_SEP_PAD);
     let mut any = false;
     for part in parts.iter().filter(|part| !part.is_empty()) {
         if any {
-            dx += separator(&mut run, dx);
+            flow.place(|x| dot(&mut run, x));
         }
-        dx += run(part, dx, theme::size::CAPTION, plx_ui::detail_layout::FACTS_INK);
+        flow.place(|x| Item::new(run(part, x, theme::size::CAPTION, plx_ui::detail_layout::FACTS_INK)));
         any = true;
     }
-    let mode_w = mode(dx, any);
-    dx += mode_w;
+    // the clause abuts the run before it: it stands its own dot `FACTS_SEP_PAD` out
+    let mode_w = mode(flow.end(), any);
     any |= mode_w > 0.0;
+    let mut flow = Flow::new(flow.end() + mode_w, FACTS_SEP_PAD);
     if !credit.is_empty() {
         if any {
-            dx += separator(&mut run, dx);
+            flow.push(Item::new(0.0)); // the run in front (the last run or the clause)
+            flow.place(|x| dot(&mut run, x));
         }
-        dx += run(credit, dx, theme::size::CAPTION, plx_ui::detail_layout::FACTS_INK);
+        flow.place(|x| Item::new(run(credit, x, theme::size::CAPTION, plx_ui::detail_layout::FACTS_INK)));
     }
-    dx
+    flow.end()
 }
 
 pub fn draw_facts(p: Painter, d: &Detail, y: f32, measure: &dyn plx_machine::machine::Measure) {
@@ -858,7 +857,7 @@ mod tests {
 
     fn set_full(restart: bool, alt: bool, mark: PosterMark, trailer: bool) -> HeroSet {
         HeroSet {
-            list: false,
+            watchlist: true,
             restart,
             trailer,
             alt,
@@ -1028,7 +1027,7 @@ mod tests {
         assert!(has_restart(1), "any positive resume position offers one");
         let with = set(true, false, PosterMark::None);
         let without = set(false, false, PosterMark::None);
-        assert_eq!(index_of(with, HeroCtl::Restart), Some(1));
+        assert_eq!(index_of(with, HeroCtl::Restart), Some(2), "after Play and the bookmark disc");
         assert_eq!(
             index_of(without, HeroCtl::Restart),
             None,
@@ -1042,7 +1041,6 @@ mod tests {
     #[test]
     fn the_row_s_controls_never_overlap_at_any_set_size() {
         let cw = HeroWidths {
-            list: 0.0,
             pill: 200.0,
             alt: 260.0,
             disc: [CD, CD, CD],
@@ -1063,6 +1061,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **W6a pin.** The row accumulation moved to `appkit::hero_layout::row_rect`; this pins the
+    /// Detail row's rects against the pre-move algorithm (a verbatim copy of the old loop, the
+    /// oracle) with a distinct width per control kind, at every set the row can take, and shows the
+    /// move's one difference (an empty slice) is unreachable: every set has Play and a watch face.
+    #[test]
+    fn the_row_geometry_matches_the_pre_move_accumulation() {
+        let cw = HeroWidths { pill: 211.0, alt: 263.0, disc: [57.0, 61.0, 67.0] };
+        let y = 13.0;
+        for restart in [false, true] {
+            for alt in [false, true] {
+                for trailer in [false, true] {
+                    for mark in [PosterMark::None, PosterMark::InProgress, PosterMark::Watched] {
+                        let s = set_full(restart, alt, mark, trailer);
+                        let (v, n) = hero_ctls(s);
+                        assert!(n >= 2, "{s:?}: Play and a watch face are always present, so row_rect never sees an empty slice");
+                        for i in 0..=n + 1 {
+                            // The old body, verbatim.
+                            let mut x = plx_ui::consts::MARGIN_X;
+                            let mut w = cw.pill;
+                            for (k, c) in v[..n].iter().enumerate() {
+                                w = match c {
+                                    HeroCtl::Play => cw.pill,
+                                    HeroCtl::Alt => cw.alt,
+                                    HeroCtl::Restart => cw.disc[0],
+                                    HeroCtl::Trailer => cw.disc[1],
+                                    HeroCtl::Watchlist | HeroCtl::MyList => CD,
+                                    HeroCtl::MarkWatched | HeroCtl::MarkUnwatched => cw.disc[2],
+                                };
+                                if k >= i {
+                                    break;
+                                }
+                                x += w + CGAP;
+                            }
+                            let want = Rect::new(x, y, w, CD);
+                            let got = hero_btn_rect_at(s, i, y, cw);
+                            assert_eq!(
+                                [got.x, got.y, got.w, got.h].map(f32::to_bits),
+                                [want.x, want.y, want.w, want.h].map(f32::to_bits),
+                                "set={s:?} i={i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // And the absolute numbers for the commonest row (Play, Trailer, watch face), so a drift
+        // in CGAP / MARGIN_X / CD shows here, not only against the copy above.
+        let s = set_full(false, false, PosterMark::None, true);
+        let play = hero_btn_rect_at(s, 0, 0.0, cw);
+        let mark = hero_btn_rect_at(s, 1, 0.0, cw);
+        let trailer = hero_btn_rect_at(s, 2, 0.0, cw);
+        assert_eq!((play.x, play.w), (plx_ui::consts::MARGIN_X, 211.0));
+        assert_eq!((mark.x, mark.w), (plx_ui::consts::MARGIN_X + 211.0 + CGAP, CD), "the bookmark disc is a plain circle");
+        assert_eq!((trailer.x, trailer.w), (mark.x + CD + CGAP, 61.0));
     }
 
     /// `ctl_at`/`index_of` are exact inverses over every index the set actually has.
@@ -1163,7 +1217,7 @@ mod tests {
         }
         let events = std::cell::RefCell::new(Vec::new());
         facts_flow(
-            &["13 Jun 2024", "1 hr 57 min"],
+            &["13 Jun 2024", "1h 57m"],
             "",
             |text, _, _, _| {
                 events.borrow_mut().push(Event::Run(text.into()));
@@ -1175,6 +1229,49 @@ mod tests {
             },
         );
         assert_eq!(events.into_inner().last(), Some(&Event::Mode));
+    }
+
+    /// Q2, painted: the facts line is flowed and PAINTED through a recording painter, and every
+    /// dot on it, the one before the play-mode clause included, stands `FACTS_SEP_PAD` after the
+    /// run before it and `FACTS_SEP_PAD` before the run after it. With nothing in front of the
+    /// clause there is no dot.
+    #[test]
+    fn a_painted_facts_line_pads_the_play_mode_dot_like_every_other_dot() {
+        use plx_media::route::Preview;
+        use plx_plex::plex::serverinfo::Subscription;
+        let _g = plx_base::testlock::serial();
+        let measure = plx_ui::widgets::LegacyMeasure;
+        let paint = |parts: &[&str]| {
+            let mut runs = plx_ui::draw_census::capture_runs(|| {
+                let p = Painter::recording();
+                facts_flow(
+                    parts,
+                    "",
+                    |text, dx, size, color| {
+                        let text = CString::new(text).unwrap();
+                        p.text(text.as_ptr(), 100.0 + dx, 50.0, size, color, 0, 0)
+                    },
+                    |dx, after| {
+                        let (bits, n) = play_mode_bits_for(Preview::DirectPlay, false, Subscription::No, after);
+                        paint_bits(p, &bits[..n], 100.0 + dx, 50.0, &measure)
+                    },
+                );
+            });
+            runs.sort_by(|a, b| a.at.x.total_cmp(&b.at.x));
+            runs
+        };
+        let line = paint(&["2021", "1h 40m"]);
+        let dots: Vec<usize> = (0..line.len()).filter(|&i| line[i].text == "\u{b7}").collect();
+        assert_eq!(dots.len(), 2, "one dot between the facts and one before the clause: {line:?}");
+        for i in dots {
+            let (before, after) = (&line[i - 1], &line[i + 1]);
+            let lead = line[i].at.x - (before.at.x + before.at.w);
+            let trail = after.at.x - (line[i].at.x + line[i].at.w);
+            assert!((lead - FACTS_SEP_PAD).abs() < 0.5, "run {} -> dot: {lead}", i - 1);
+            assert!((trail - FACTS_SEP_PAD).abs() < 0.5, "dot -> run {}: {trail}", i + 1);
+        }
+        let bare = paint(&["", ""]);
+        assert!(bare.iter().all(|r| r.text != "\u{b7}"), "nothing in front of the clause, no dot: {bare:?}");
     }
 
     #[test]
@@ -1270,7 +1367,7 @@ mod tests {
     #[test]
     fn restart_and_the_watch_tail_are_independent() {
         let set = HeroSet {
-            list: false,
+            watchlist: true,
             restart: true,
             trailer: false,
             alt: false,
@@ -1279,21 +1376,21 @@ mod tests {
         let (controls, n) = hero_ctls(set);
         assert_eq!(
             &controls[..n],
-            &[HeroCtl::Play, HeroCtl::Restart, HeroCtl::MarkUnwatched]
+            &[HeroCtl::Play, HeroCtl::Watchlist, HeroCtl::Restart, HeroCtl::MarkUnwatched]
         );
     }
 
     #[test]
     fn the_actions_row_grows_an_also_available_control_only_for_a_second_source() {
         let without = HeroSet {
-            list: false,
+            watchlist: true,
             restart: false,
             trailer: false,
             alt: false,
             mark: PosterMark::None,
         };
         let with = HeroSet {
-            list: false,
+            watchlist: true,
             alt: true,
             ..without
         };
@@ -1306,7 +1403,7 @@ mod tests {
         for alt in [false, true] {
             for trailer in [false, true] {
                 let set = HeroSet {
-                    list: false,
+                    watchlist: true,
                     restart: true,
                     trailer,
                     alt,
@@ -1321,6 +1418,7 @@ mod tests {
                         | HeroCtl::Alt
                         | HeroCtl::MarkWatched
                         | HeroCtl::MarkUnwatched
+                        | HeroCtl::Watchlist
                 )));
             }
         }
@@ -1375,7 +1473,10 @@ mod tests {
             ..Default::default()
         }));
         assert!(test_store().run(
-            plx_data::stores::metadata::MetadataCmd::SetWatchedLocal { sid, rk: "movie".into(), on: true }
+            plx_data::stores::metadata::MetadataCmd::ApplyView {
+                at: plx_data::viewstate::ViewAt::leaf(sid, "movie"),
+                edit: plx_data::viewstate::ViewEdit::Watched(true),
+            }
         ));
         let movie = test_store().view().current().unwrap();
         assert_eq!(hero_mark(movie), PosterMark::Watched);
@@ -1403,7 +1504,10 @@ mod tests {
             ..Default::default()
         }));
         assert!(test_store().run(
-            plx_data::stores::metadata::MetadataCmd::SetWatchedLocal { sid, rk: "show".into(), on: true }
+            plx_data::stores::metadata::MetadataCmd::ApplyView {
+                at: plx_data::viewstate::ViewAt::leaf(sid, "show"),
+                edit: plx_data::viewstate::ViewEdit::Watched(true),
+            }
         ));
         assert_eq!(
             hero_mark(test_store().view().current().unwrap()),
@@ -1427,35 +1531,36 @@ mod tests {
     #[test]
     fn hero_indices_mean_different_actions_in_the_two_control_sets() {
         let compact = HeroSet {
-            list: false,
+            watchlist: true,
             restart: false,
             trailer: false,
             alt: false,
             mark: PosterMark::None,
         };
         let wide = HeroSet {
-            list: false,
+            watchlist: true,
             restart: true,
             trailer: false,
             alt: true,
             mark: PosterMark::None,
         };
-        assert_eq!(ctl_at(compact, 1), Some(HeroCtl::MarkWatched));
-        assert_eq!(ctl_at(wide, 1), Some(HeroCtl::Restart));
-        assert_eq!(ctl_at(wide, 2), Some(HeroCtl::Alt));
+        assert_eq!(ctl_at(compact, 1), Some(HeroCtl::Watchlist));
+        assert_eq!(ctl_at(compact, 2), Some(HeroCtl::MarkWatched));
+        assert_eq!(ctl_at(wide, 1), Some(HeroCtl::Watchlist));
+        assert_eq!(ctl_at(wide, 2), Some(HeroCtl::Restart));
+        assert_eq!(ctl_at(wide, 3), Some(HeroCtl::Alt));
     }
 
     #[test]
     fn the_actions_row_accumulates_around_a_variable_width_control() {
         let set = HeroSet {
-            list: false,
+            watchlist: true,
             restart: true,
             trailer: false,
             alt: true,
             mark: PosterMark::None,
         };
         let widths = HeroWidths {
-            list: 0.0,
             pill: 210.0,
             alt: 300.0,
             disc: [90.0, 120.0, 120.0],
@@ -1505,7 +1610,6 @@ mod tests {
                                         n - 1,
                                         0.0,
                                         HeroWidths {
-                                            list: 0.0,
                                             pill: PW + 62.0,
                                             alt: 340.0,
                                             disc,
@@ -1527,7 +1631,7 @@ mod tests {
     fn the_real_verbs_all_fit_the_widest_row() {
         let measure = plx_ui::fixture::FixtureMeasure;
         let wide = HeroSet {
-            list: false,
+            watchlist: true,
             restart: true,
             trailer: true,
             alt: true,
@@ -1540,7 +1644,6 @@ mod tests {
             n - 1,
             0.0,
             HeroWidths {
-                list: 0.0,
                 pill: hero_pill_w(&measure, true),
                 alt: alt_pill_w(&measure),
                 disc: caps,
@@ -1552,7 +1655,7 @@ mod tests {
         );
 
         let roomy = HeroSet {
-            list: false,
+            watchlist: true,
             restart: false,
             trailer: true,
             alt: false,
@@ -1579,7 +1682,7 @@ mod tests {
     #[test]
     fn a_verb_that_does_not_fit_is_dropped_whole() {
         let set = HeroSet {
-            list: false,
+            watchlist: true,
             restart: true,
             trailer: true,
             alt: true,
@@ -1619,7 +1722,7 @@ mod tests {
     #[test]
     fn the_widest_action_row_clears_the_people_column() {
         let set = HeroSet {
-            list: false,
+            watchlist: true,
             restart: true,
             trailer: true,
             alt: true,
@@ -1631,7 +1734,6 @@ mod tests {
             n - 1,
             0.0,
             HeroWidths {
-                list: 0.0,
                 pill: PW + 62.0,
                 alt: 340.0,
                 disc: [CD; 3],
@@ -1641,13 +1743,14 @@ mod tests {
     }
 
     #[test]
-    fn trailer_false_matches_today_s_four_control_sets() {
+    fn trailer_false_matches_today_s_control_sets_plus_the_bookmark() {
         let set = set(true, true, PosterMark::None);
         let (controls, n) = hero_ctls(set);
         assert_eq!(
             &controls[..n],
             &[
                 HeroCtl::Play,
+                HeroCtl::Watchlist,
                 HeroCtl::Restart,
                 HeroCtl::Alt,
                 HeroCtl::MarkWatched
@@ -1663,6 +1766,7 @@ mod tests {
             &controls[..n],
             &[
                 HeroCtl::Play,
+                HeroCtl::Watchlist,
                 HeroCtl::Restart,
                 HeroCtl::Trailer,
                 HeroCtl::Alt,
@@ -1678,7 +1782,7 @@ mod tests {
         assert_eq!(index_of(before, HeroCtl::Play), Some(0));
         assert_eq!(index_of(after, HeroCtl::Play), Some(0));
         assert_eq!(index_of(before, HeroCtl::Trailer), None);
-        assert_eq!(index_of(after, HeroCtl::Trailer), Some(1));
+        assert_eq!(index_of(after, HeroCtl::Trailer), Some(2));
         let watch = index_of(after, HeroCtl::MarkWatched).unwrap();
         assert_eq!(watch, index_of(before, HeroCtl::MarkWatched).unwrap() + 1);
         assert_eq!(ctl_at(after, watch).unwrap().elem(), ELEM_MARK_WATCHED);
@@ -1688,7 +1792,7 @@ mod tests {
     fn losing_the_trailer_disc_drops_its_identity() {
         let with = set_full(true, false, PosterMark::None, true);
         let without = set(true, false, PosterMark::None);
-        assert_eq!(index_of(with, HeroCtl::Trailer), Some(2));
+        assert_eq!(index_of(with, HeroCtl::Trailer), Some(3));
         assert_eq!(index_of(without, HeroCtl::Trailer), None);
     }
 
@@ -1812,12 +1916,34 @@ mod tests {
             "the third unfurl spring is quiet at rest"
         );
     }
+
+    /// The people lines are one bottom-anchored stack: the cast line stays pinned to the button row's
+    /// bottom whether or not a credit line exists above it, and the credit stands wholly above it.
+    #[test]
+    fn the_people_lines_stack_up_from_the_button_row() {
+        let _g = plx_base::testlock::serial();
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let credit = |tag: &str| plx_data::metadata::Cast { tag: tag.into(), role: String::new(), thumb: String::new(), id: 0, tag_key: String::new() };
+        let cast_only = Detail { cast: vec![credit("An Actor")], ..Default::default() };
+        let both = Detail { directors: vec!["A Director".into()], ..cast_only.clone() };
+        let ys = |d: &Detail| {
+            let runs = plx_ui::draw_census::capture_runs(|| draw_people(Painter::recording(), d, 100.0, &measure));
+            runs.iter().map(|r| r.at.y).collect::<Vec<_>>()
+        };
+        let alone = ys(&cast_only);
+        let pair = ys(&both);
+        let cast_y = alone.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(pair.len() > alone.len());
+        assert!((pair.iter().cloned().fold(f32::MIN, f32::max) - cast_y).abs() < 0.01);
+        assert!(pair.iter().cloned().fold(f32::MAX, f32::min) < alone.iter().cloned().fold(f32::MAX, f32::min));
+    }
 }
 
 
 /// Reserve the widest translated state, so an asynchronous list reply never shifts other buttons.
+#[allow(dead_code)]
 pub fn my_list_width(measure: &dyn Measure) -> f32 {
     use plx_platform::i18n::msg;
     [msg::browse_list_add_c(),msg::browse_list_remove_c(),msg::browse_list_saving_c(),msg::browse_list_retry_c(),msg::browse_list_signin_c()]
-        .into_iter().map(|label| pill_w(measure,label,theme::size::BODY,false,false)).fold(0.0,f32::max)
+        .into_iter().map(|label| pill_w(measure,label,theme::size::BODY,false,None)).fold(0.0,f32::max)
 }

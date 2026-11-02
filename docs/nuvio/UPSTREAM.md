@@ -19,7 +19,7 @@ GLinnik21/plx-native      origin: UI, GPU render path, Starfish/ACB, device port
         │
         └── feature/v0.9-hq ───────────────► what this fork ABSORBS FROM
               the same HQ work, rebuilt        contains v0.9.0 and upstream/main
-              on top of 0.9.0                  still maintained.  tip 2026-10-22
+              on top of 0.9.0                  still maintained.  tip 2026-11-01
 ```
 
 **`v0.8-hq` and `v0.9-hq` are siblings, not parent and child.** Neither contains the other: both
@@ -54,23 +54,25 @@ because `v0.8-hq` stopped on 2026-10-12 while `v0.9-hq` is still being maintaine
 Not `upstream/main`. Richi's HQ branch **contains** it (verified: the `upstream/main` head
 `0b0b2209` is an ancestor of `feature/v0.9-hq`, as is the `v0.9.0` release), so it is a superset
 of the origin project's line plus the audio/DV/routing fork. Measuring against `upstream/main`
-therefore *understates* what is available — 268 commits there versus 360 on the HQ branch — and it
+therefore *understates* what is available — 268 commits there versus 526 on the HQ branch — and it
 points at files the HQ branch has already moved past.
 
-`feature/v0.9-hq` and `feature/v0.9-p11` are the same commit (`d12e8659`, 2026-10-22). Use the
-`-hq` name; `-p11` is an alias at this point, not a separate line.
+`feature/v0.9-hq` and `feature/v0.9-p13` are the same commit (`c2138acb`, 2026-11-01). Use the
+`-hq` name; `-p13` is an alias at this point, not a separate line. `-p11` (`d12e8659`) is the
+package the tier-C port was cut from, and `-p12` (`16fed7e9`) is a sibling of the tip: it shares
+the package-12 merge (`fb05279e`) but has three commits the tip does not.
 
 The base is the **merge-base of the trunk with the reference branch**, computed and never
 remembered:
 
 | | |
 |---|---|
-| reference | `upstream/feature/v0.9-hq` (`d12e8659`, 2026-10-22) |
+| reference | `upstream/feature/v0.9-hq` (`c2138acb`, 2026-11-01) |
 | merge-base with the trunk | `acca94a4` — `release: 0.8.0`, 2026-10-07 |
-| commits on our side since the base | 168 |
-| commits on the reference side since the base | 360 |
+| commits on our side since the base | 173 |
+| commits on the reference side since the base | 526 |
 
-(The counts were measured before this file was committed; `drift` will report one or two more.)
+(Measured 2026-11-02; `drift` is the authority when this drifts.)
 
 ## What this fork adds on top of Richi's branch
 
@@ -90,14 +92,14 @@ Two deltas, of very different size and very different merge cost:
 
 ## What taking upstream work costs
 
-Measured against the base on 2026-10-31. These numbers drift; `tools/upstream-seam.sh` recomputes
+Measured against the base on 2026-11-02. These numbers drift; `tools/upstream-seam.sh` recomputes
 them, and the command is right when this file disagrees.
 
 | | |
 |---|---|
-| files this fork changed | 583 |
-| files the reference branch changed | 1261 |
-| **contested** — changed on **both** sides | 478 |
+| files this fork changed | 585 |
+| files the reference branch changed | 1581 |
+| **contested** — changed on **both** sides | 484 |
 | of those, under `rust-modules/screens` or `rust-modules/media` | 119 |
 | upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 247 |
 | upstream-owned source **added** (the fork's own crates) | 78 |
@@ -188,8 +190,9 @@ Work happens on a scratch branch cut from `nuvio-native`, one merge per tier, an
 
 ### Status: A+B merged on `forward-port/v0.9-hq` (`656e0cb2`), host suites green
 
-Target `d12e8659` — the tip of `feature/v0.9-hq` ("Package 11"), the newest commit in Richi's
-repository. Merged into the branch on 2026-10-31: **247 conflicts**, resolved in tier order.
+Target `d12e8659` — then the tip of `feature/v0.9-hq` ("Package 11"), the newest commit in
+Richi's repository. Merged into the branch on 2026-10-31: **247 conflicts**, resolved in tier
+order.
 
 **A merge cannot be committed half-resolved.** The tiers are an *order of resolution*, not separate
 commits: A and B are one commit because git does not let you close a merge with files still
@@ -494,9 +497,10 @@ already has as `1bcf30b2`. Taking it would replace working code with its twin.
 | `nuvio-native` | **the trunk.** This is the product. Feature branches merge into it. |
 | `origin/nuvio-native` | the pushed trunk. |
 | `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the trunk so an experiment cannot break it. May lag the trunk. |
-| `main` | **not this project.** It holds upstream-side history and none of the fork's 168 commits. Never cut work from it; never build or ship it. |
+| `main` | **not this project.** It holds upstream-side history and none of the fork's commits. Never cut work from it; never build or ship it. |
 | `upstream/feature/v0.9-hq` | Richi's HQ line — the reference for upstream work. Read-only. |
-| `forward-port/v0.9-hq` | the A+B merge of it (`656e0cb2`). Parity work in progress; not shipped, not pushed. |
+| `forward-port/v0.9-hq` | the A+B merge (`656e0cb2`) and the forward-port's integration line. Pushed; not the trunk. Tier C lands on `tier-c/ui` and merges back here. |
+| `tier-c/ui` | tier C ported on top of the A+B merge (`741def78` plus the fixes after it). Pushed. The television has not seen it; verify before merging to `nuvio-native`. |
 
 Merge commits into `nuvio-native` are normal here. `AGENTS.md`'s inherited "`main` takes SQUASH
 merges only" is the origin project's policy, not this repository's.
@@ -510,6 +514,7 @@ Revisit deliberately, in this file, if:
 - the DTS delta is accepted upstream, removing the fork's only audio divergence;
 - the edited-file count falls far enough (say, under ~40) that a merge stops being expensive.
 
+
 ### 2026-11-01 — tier C ported in a separate worktree (`tier-c/ui`)
 
 Tier C (`screens`, `ui`, `data`, `appkit`, `gfx`) is ported as a git-checkout port rather than a
@@ -518,20 +523,141 @@ The port overlays upstream's tier-C crates on the fork's tree, re-applies the fo
 gets the simulator booting the new UI (`make -j10 sim-linux` links and boots, `route=login`, no
 panic). Commit `741def78`, pushed as `origin/tier-c/ui`.
 
-Status after the `tier-c/ui` fixes (this branch plus the port worktree): the fork's
-preference persistence is restored (RatingSource, P2pEnabled, P2pServer write through
-`Account::write_prefs` and push the P2P policy to the shim), `super::nuvio::restore_p2p(...)` is
-back in the boot path, and the post-playback detail reconciliation is handled by the ported
-`viewreconcile`/`Scope` machinery rather than the dropped `DetailRefresh`. The More menu stays
-the fork's source-lead version by deliberate design: under the Stremio shim a playback's quality
-is a property of the stream picked, so the quality ladder belongs only in Settings > Playback
-(see `appkit/src/more_menu.rs`'s module doc) — upstream's quality page would be a second,
-contradictory answer. The remaining `#[allow(dead_code)]` sites are upstream's own module-level
-allowance, not port stubs. `ui/src/value_chip.rs` was removed (orphaned; `page_header` replaced
-it). The P2P streaming server, addon backend, and DTS/TrueHD lanes are untouched (still the
-fork's). `plx_ui`, `plx_screens`, `plx_appkit` and the full workspace (`--all-targets`) compile
-clean; the simulator (`make -j10 sim-linux`) links and boots. TV verification of the new UI is
-still outstanding.
+Status after the port fixes: the fork's preference persistence is restored (RatingSource,
+P2pEnabled, P2pServer write through `Account::write_prefs` and push the P2P policy to the shim),
+`super::nuvio::restore_p2p(...)` is back in the boot path, and the post-playback detail
+reconciliation is handled by the ported `viewreconcile`/`Scope` machinery rather than the dropped
+`DetailRefresh`. The More menu stays the fork's source-lead version by deliberate design: under the
+Stremio shim a playback's quality is a property of the stream picked, so the quality ladder
+belongs only in Settings > Playback (see `appkit/src/more_menu.rs`'s module doc) — upstream's
+quality page would be a second, contradictory answer. The remaining `#[allow(dead_code)]` sites
+are upstream's own module-level allowance, not port stubs. `ui/src/value_chip.rs` was removed
+(orphaned; `page_header` replaced it). The P2P streaming server, addon backend, and DTS/TrueHD
+lanes are untouched (still the fork's). `plx_ui`, `plx_screens`, `plx_appkit` and the full
+workspace (`--all-targets`) compile clean; the simulator (`make -j10 sim-linux`) links and boots.
+TV verification of the new UI is still outstanding.
+
+
+### 2026-11-02 — tier C's Watchlist data boundary is My List, not plex.tv
+
+The tier C port had left the Watchlist on upstream's data path: it called
+`discover.provider.plex.tv/library/sections/watchlist/all` with the Nuvio token and got HTTP 401,
+so the page read "Can't reach your Watchlist" and the list was empty by construction. A guard that
+merely disabled the call for `nuvio-local` did not help a real signed-in account. This is the data
+boundary `UPSTREAM.md` says must be re-implemented in the shim's terms, so it was:
+
+- **`app::watchlist_io::MyListIo`** replaces `LiveIo` for the Watchlist store. `page` reads the
+  shim's `saved_library`; `find` reports the shim as holding every title (so a tile is `Available`
+  and opens the shim-backed Detail); `write` calls the shim's save/remove; `released` derives from
+  the titles' dates. Nothing in it reaches plex.tv.
+- **The portable identity is the shim's numeric ratingKey**, written as `NVIO` + the key in the
+  same 12 bytes a discover id uses (`plex::hex_of_rating_key` / `catalog_hex_of_item`). The
+  Watchlist row's guid is `plex://movie|show/<that hex>`; `Detail::watchlist_hex` and
+  `Metadata::guid_hex` derive the same value, so Home, Detail and the Watchlist share one
+  membership answer. See `ID-MANAGEMENT.md`.
+- **The shim exposes My List read/write** as `Shim::my_list_entries` / `set_my_list_saved`, sharing
+  the `/library/metadata/{rk}` save path (one title, confirmed by a fresh pull).
+- **The app's Watchlist action arms were missing** from the port: the item menu's Add/Remove and
+  the catalog "go" row produced `Action`s that `apply_item_action` ignored. Restored, and the
+  action test now grades them.
+- **`AppFx::Watchlist` and `AppFx::Catalog` were stubbed in the bridge.** Every request the page
+  itself raises — Sort & Filter, the hold menu, the strip pills — went into a no-op arm, which is
+  why OK on the pill did nothing and five app tests failed. They are collected now
+  (`watchlist_reqs` / `catalog_effect`), and those five tests pass.
+- **`route_word` had no `Watchlist` arm**, so the heartbeat printed `route=` with no name.
+
+Verified on the simulator against a copy of the signed-in session: the page renders My List
+posters, a tile opens the shim-backed Detail (`rk=10369`), the Detail's bookmark disc shows the
+title's membership, and the Sort & Filter menu opens (`overlay=watchlist_menu`) with the grid
+reflowing under it. The television has not seen this yet.
+
+Two further tier-C presentation defects were found on the same simulator and are fixed:
+
+- **The shared strip's capsule froze on the pill the user came from while the Watchlist was on
+  top.** The Watchlist wears the bar, but `run::update`'s chrome chain only stepped
+  `Bridge::update_home_chrome` on Home, Library and Search, so the capsule's springs never saw the
+  Watchlist's selection. The arm covers `AppArg::Watchlist` too now.
+- **OK on a Continue Watching tile did nothing under "Open details".** Home asks
+  `deck_press().press_plays()` and emits either `Play` (which carries a resume point) or `Detail`.
+  The port's `activate_home_item` then passed `home_menu_from_deck` as `activate_card`'s
+  `want_play`, turning every deck press into a play attempt — which, for a title with no playable
+  stream, silently lost — instead of opening the page. `want_play` now comes from the request
+  itself (`resume_ns.is_some()`), and the route-test pump performs the production opener so a World
+  test grades that wiring.
+
+Both were verified on the simulator: Movies → Watchlist leaves the capsule on the bookmark, and a
+Continue Watching tile opens its Detail page.
+
+**Known gap, not fixed here:** `plx_data`'s suite has four concurrency-shaped failures under
+`make test-crate` (`metadata::demo_fixture_tests::…`, `metadata::record::…committed_fixture…`,
+`person::…forty_servers…`, `search::account_scope_tests::…`) that are not Watchlist code.
+
+### 2026-11-02 — tier C dropped two preference paths, so picks did not survive a restart
+
+A report that the subtitle size/position picks reset between playbacks reproduced on the simulator
+against a copy of the signed-in session: the pick WAS saved (`profile_prefs` held
+`"subtitle_size": "extra_large"`), but the next cold boot showed Medium. The port had kept
+`SeatWatch` and its documentation while dropping the call that feeds it.
+
+- **`SessionFx::PublishProfile` no longer ran `SeatWatch::arrive`**, so the per-profile player cells
+  were never restored at a seat change. Boot restores only the `Unseated` fallback, which is the
+  type's default (Medium/Low etc.), so every cold boot reset quality, Direct Play, subtitle
+  size/position/tone, HDR overlay, next-episode mode, skip interval, deck press, under-posters,
+  audio enhancements and trailer autoplay to their defaults. The arm restores again, computing the
+  seat from the publication itself.
+- **`app::playback::commit_track` discarded every `memo`**, calling the plain
+  `commit_audio_selection`/`commit_subtitle_selection`, and its `SubtitleForcedOnly` arm was empty.
+  The route writes the per-show track memory only through `commit_audio_pick` /
+  `commit_subtitle_and_sidecar` / `commit_forced_only_and_sidecar`, so the player menu's audio and
+  subtitle picks (including Off) were never saved, and Forced only did nothing. `commit_track` now
+  hands each pick to its remembering commit; a source-pin test grades the three arms.
+
+Verified on the simulator: Extra Large picked in Settings > Playback survives a cold boot. The
+hostsim regression `restore_characterisation_tests::stored_boot_restores_the_seated_profiles_own_values`
+was RED (all cells at defaults) and is green with the seat restore. A stale `player_requests` call
+in `run.rs`'s hostsim tests was adapted so that suite compiles again; its
+`play_automatically_publishes_direct_play_auto_once` failure is a separate pre-existing
+double-publish and is not this work.
+
+### 2026-11-02 — the reference branch moved 166 commits past the ported tip
+
+`git fetch upstream` on 2026-11-02 moved `feature/v0.9-hq` from `d12e8659` (Package 11, the tip
+the tier-C port was cut from) to `c2138acb` (Package 13, 2026-11-01). The new span is **166
+commits / 875 files**; against the base the fork and the reference now change **585 / 1581**
+files with **484 contested**. The tier-C branch already contains `d12e8659`, so this is not
+"merge and resolve": taking it is a port against the already-ported UI. Measured with
+`git merge-tree --write-tree tier-c/ui upstream/feature/v0.9-hq`, it is **87 conflicted files**
+(`src` 13, `screens` 10, replay fixtures 8, `site/media` 6, `media` 5, `plex` 4, `data` 4,
+`telemetry` 2, workflows 2).
+
+What is in it, by theme:
+
+- **HUD plugins** — a large `appkit`/`ui` rework: a package format with a strict parser, a
+  layout compiler (classic compiles to the hand-written geometry), a package store, a JSON
+  schema and lint, `--hud-lint`/`--hud-schema`/`--hud-export` simulator flags, and one shared
+  command performer. BACK now dismisses a Skip/Up Next offer and restores the discs.
+- **Library** — the A-Z rail (pure band model, PMS band-count probe, data job, drawing and
+  navigation for value and date bands), sort value under posters and a header sort control,
+  and the Watchlist's sort button becoming the Library's control. That last one is a data
+  boundary here: it must read My List through the shim, not plex.tv.
+- **Playback** — a per-profile Dolby Vision Auto/Off setting (`007696c0`), an H.264 non-IDR
+  I-slice treated as a keyframe so Blu-ray remux seeks stop stalling (`da8424b7`), and leaving
+  for the next episode marking the finished one watched (`0e5cb47f`).
+- **Input and text** — Magic Remote edge scrolling and sideways row glide (`36e5ffea`), Arabic
+  and Hebrew RTL paragraphs (`411f6d33`), and Dutch as a UI language (`11f714dc`).
+- **Presentation fixes** — the top bar reading its ground from the band image and keeping its
+  glass at strip width, a page opened over a closing menu leaving the host uncovered on Back,
+  and poster eviction ordering.
+
+`feature/v0.9-p12` is not on this line: it shares the package-12 merge (`fb05279e`) with the tip
+but has three commits of its own that `c2138acb` does not (an encode-lane borrow, a `DvCapability`
+remux test, and multichannel FLAC/PCM tests). Treat `-hq` as the reference, and check a p12
+commit against it before taking it.
+
+The cheap picks against the fork's playback tier are `da8424b7` and `007696c0`; the HUD rework
+and the A-Z rail are a project, not a pick. The television still has not seen tier C, so verify
+the ported UI on the set first, then take this span as one tier-C-shaped port — or cherry-pick
+the playback fixes while the UI is being verified.
 
 ## Recomputing
 
@@ -542,9 +668,13 @@ still outstanding.
 ./tools/upstream-seam.sh check        # exit 1 if this file's base marker disagrees with git
 ```
 
+Run `drift` and `diff` on the trunk as well: on a port branch (`tier-c/ui`,
+`forward-port/v0.9-hq`) the computed base is the older reference tip the branch contains, so
+their counts describe the port rather than the trunk.
 `--ref` measures against another branch (try `upstream/main` to see why it is the wrong one).
-`check` is a **trunk** command: on `forward-port/v0.9-hq` it reports base drift by construction,
-because that branch's merge-base with the reference IS the reference tip (`d12e8659`). Reading that
-as drift on the forward-port branch is a mistake; reading it as drift on `nuvio-native` is not.
+`check` is a **trunk** command: on a branch that already contains the reference tip it was
+ported from (`forward-port/v0.9-hq`, or `tier-c/ui` at `d12e8659`), it reports base drift by
+construction, because the computed merge-base is that older tip rather than the trunk's. Reading
+that as drift on the port branch is a mistake; reading it as drift on `nuvio-native` is not.
 `check` is deliberately **not** wired into `make check` or CI: a moved base is usually something a
 human just did, and it is a question to ask before a pick, not a gate.

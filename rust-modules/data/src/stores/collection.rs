@@ -1,20 +1,29 @@
 //! Physically owned Collection model and its worker adapter.
 
 use crate::collection::{CollectionAdapter, CollectionState, CollectionTarget, CollectionView};
-use plx_plex::plex::ServerId;
 use plx_machine::machine::{Cx, Effects, Handled, Host, Machine};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use super::StoreEv;
+use std::ops::Range;
 
 #[derive(Clone, Debug)]
 pub enum CollectionCmd {
     Open { target: CollectionTarget },
+    /// The screen's window: the indices it shows, the focused index and a pending restore target.
+    /// Every landing evicts the pages outside these (see `PageCache::evict`).
+    Window { wanted: Range<usize>, focus: Option<usize>, restore: Option<usize> },
+    /// A restore's saved kept counts, one per page of a `total`-item listing, and the
+    /// [`generation`](crate::collection::Collection::generation) of the listing they were saved
+    /// from. With them the restore reads only its target's pages; without them the listing is read
+    /// forward to it. A store still holding that listing (the page was only covered, never closed)
+    /// ignores them and keeps its rows and its own counts, however far it has read since.
+    Restore { total: usize, counts: Vec<u8>, generation: u32 },
     Close,
     Reset,
-    /// Optimistic watched-state edit from the view-state fan-out (see `viewstate::fan_out`).
-    SetWatchedLocal { sid: ServerId, rk: String, on: bool },
+    /// Optimistic view-state edit (`viewstate::publish_view`), including the fan-out's copies.
+    ApplyView { at: crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit },
 }
 
 pub struct CollectionStore {
@@ -32,6 +41,11 @@ impl Default for CollectionStore {
 }
 
 impl CollectionStore {
+    /// Join the owner's view-state publish order (`Stores::view_ledger`).
+    pub(crate) fn share_ledger(&mut self, ledger: &crate::viewledger::ViewLedger) {
+        self.state.ledger = ledger.clone();
+    }
+
     fn bump(&self) {
         self.notice_dirty.store(true, Ordering::Relaxed);
         self.notice_gen.fetch_add(1, Ordering::Relaxed);
@@ -41,6 +55,14 @@ impl CollectionStore {
         self.notice_dirty.swap(false, Ordering::Relaxed).then(|| self.gen())
     }
     pub fn view(&self) -> CollectionView<'_> { self.state.view() }
+    /// The members the page for `arg` holds cards for (its wanted window), or nothing when the
+    /// store holds a different collection.
+    pub fn held_keys(&self, arg: &super::content_arg::ContentArg) -> super::HeldKeys {
+        let mut keys = super::HeldKeys::new();
+        let (super::content_arg::ContentArg::Collection(r), Some(c)) = (arg, self.state.view().current()) else { return keys };
+        if c.id.same_collection(r) { c.held_keys(&mut keys); }
+        keys
+    }
     pub fn run(&mut self, cmd: CollectionCmd) -> bool {
         if matches!(cmd, CollectionCmd::Reset) { self.adapter = Arc::new(Default::default()); }
         let changed = self.state.run(&self.adapter, cmd);

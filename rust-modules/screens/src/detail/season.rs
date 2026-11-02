@@ -7,8 +7,8 @@ use plx_machine::machine::{GroupId, Measure};
 use plx_ui::widgets::{self, SelMark, StripLay, TabGround, TabStrip};
 use plx_ui::{theme, Painter, Rect};
 
-pub const SEASON_ELEM_RANGE_START: u32 = 64;
-pub const SEASON_ELEM_RANGE_END: u32 = 128;
+pub const SEASON_ELEM_RANGE_START: u32 = super::SECTION_BLOCK;
+pub const SEASON_ELEM_RANGE_END: u32 = 2 * super::SECTION_BLOCK;
 pub const SEASON_GROUP: GroupId = GroupId(1);
 pub const ROW_H: f32 = plx_ui::widgets::StatusOverlay::CTRL_H;
 pub const SETTLE_S: f32 = 0.2;
@@ -112,13 +112,7 @@ impl Metrics {
         }
         self.fingerprint = fp;
         self.lays = widgets::strip_layout_measured(
-            d.seasons.iter().map(|season| {
-                if season.title.is_empty() {
-                    plx_platform::i18n::msg::browse_detail_season_number(season.index as i64)
-                } else {
-                    season.title.clone()
-                }
-            }),
+            d.seasons.iter().map(|season| plx_ui::fmt::season_identity(season.index, &season.title)),
             // The LABEL origin: the first pill's FRAME then starts on the page's content edge
             // (`MARGIN_X`), the same leading edge as the hero buttons above it and the season
             // group's own focus extent — the Library's strip lays out from the same origin.
@@ -140,6 +134,22 @@ impl Metrics {
             let r = widgets::strip_pill_rect(lay, top, ROW_H);
             Rect::new(r.x - scroll, r.y, r.w, r.h)
         })
+    }
+
+    /// The tabs whose pill is on the axis at `scroll`, as an index range. The pills are laid out left
+    /// to right, so two binary searches find the range: its cost is the visible count, not the
+    /// strip's length. The test is the one `widgets::draw_strip` culls its paint by.
+    pub fn visible(&self, scroll: f32) -> std::ops::Range<usize> {
+        let left_edge_and_width = |lay: &StripLay| {
+            let r = widgets::strip_pill_rect(lay, 0.0, ROW_H);
+            (r.x - scroll, r.w.max(1.0))
+        };
+        let first = self.lays.partition_point(|lay| {
+            let (x, w) = left_edge_and_width(lay);
+            x + w <= 0.0
+        });
+        let end = self.lays.partition_point(|lay| left_edge_and_width(lay).0 < plx_ui::consts::SCR_W);
+        first..end.max(first)
     }
 
     pub fn scroll_target(&self, current: f32, index: usize) -> f32 {
@@ -188,10 +198,11 @@ mod tests {
 
     #[test]
     fn all_frozen_season_keys_round_trip() {
-        for i in 0..64 {
+        // a list of any length: every tab in the block has its id, and the block ends at its width
+        for i in 0..200 {
             assert_eq!(locate(elem(i).unwrap()), Some(i));
         }
-        assert_eq!(elem(64), None);
+        assert_eq!(elem(SEASON_ELEM_RANGE_END as usize - SEASON_ELEM_RANGE_START as usize), None);
     }
 
     fn detail() -> Detail {
@@ -297,6 +308,22 @@ mod tests {
             watch_state(&season),
             plx_ui::widgets::PosterMark::Watched
         );
+    }
+
+    /// **A season tab is named by the ONE identity rule the captions use** (`fmt::season_identity`):
+    /// its own title, else "Season N", else "Specials" for the season numbered 0. A server that gave
+    /// season 0 no title used to put "Season 0" on its tab while the same season's caption said
+    /// "Specials".
+    #[test]
+    fn an_untitled_season_zero_tab_reads_specials_not_season_zero() {
+        let mut d = detail();
+        d.seasons[0].index = 0;
+        d.seasons[0].title = String::new();
+        d.seasons[1].title = String::new();
+        let mut metrics = Metrics::new();
+        metrics.update(&d, &plx_ui::fixture::FixtureMeasure);
+        let labels: Vec<_> = metrics.lays().iter().map(|lay| lay.label.to_str().unwrap().to_string()).collect();
+        assert_eq!(labels, ["Specials", "Season 3"]);
     }
 
     #[test]

@@ -167,6 +167,12 @@ see "The P2P streaming server" below.
   The selected profile is retained with the backend session. The UI uses
   `/nuvio/library`, runs requests on a worker and refreshes Home after a confirmed
   reply; the shelf pages through `/hubs/nuvio/list`.
+- **The Watchlist tab IS My List.** Upstream's Watchlist page is built over the plex.tv
+  Watchlist, which this fork has no credential for. `app::watchlist_io::MyListIo` replaces that
+  seam: `page` reads the shim's `saved_library` (one title's metadata and its numeric ratingKey),
+  `find` reports the shim as holding every title so a tile is playable and opens the shim-backed
+  Detail, and `write` goes back through the shim's one save path. The shim exposes the read/write
+  as `Shim::my_list_entries` / `set_my_list_saved`; nothing here calls plex.tv.
 - Watch state / progress: stored locally by the shim (the app already reports timeline to "the
   server") and mirrored to the active profile through Nuvio's `sync_push_watch_progress` /
   `sync_pull_watch_progress` RPCs, so Continue Watching follows the account across devices. A

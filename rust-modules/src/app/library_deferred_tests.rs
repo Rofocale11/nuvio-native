@@ -70,6 +70,8 @@ fn back_dismisses_the_filter_menu_before_the_floor_without_cancelling_its_query(
                     sid: listing.sid,
                     section: listing.section,
                 },
+                folded: vec![],
+                opener: None,
             },
         )),
     );

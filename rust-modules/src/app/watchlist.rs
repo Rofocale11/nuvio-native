@@ -319,6 +319,9 @@ impl Bridge {
         let options = WatchlistOptionsState::from_specs(view.sort(), view.filter());
         let (_, screen) = Self::watchlist_page(d)?;
         let pill = screen.pill_rect(&self.measure);
+        if pill.w <= 0.0 || pill.h <= 0.0 {
+            return None;
+        }
         Some(WatchlistMenuArg { host, options, anchor: [pill.x, pill.y, pill.w, pill.h].map(f32::to_bits) })
     }
 

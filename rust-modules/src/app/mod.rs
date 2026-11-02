@@ -120,10 +120,13 @@ mod window_activity;
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod nuvio;
+mod watchlist_io;
 pub(crate) mod playback;
 mod preferences;
 pub(crate) mod input;
 pub(crate) mod bridge;
+pub(crate) mod page_title;
+mod collections_probe;
 pub(crate) mod chrome;
 pub(crate) mod content;
 pub(crate) mod run;
@@ -290,7 +293,6 @@ pub(crate) struct App {
     pub(crate) refresh_hubs_at: u32,
     /// The Detail page a playback returned to, waiting for the stop report to land so it can
     /// re-read the item (`content::refresh_after_playback`).
-    pub(crate) refresh_detail: Option<plx_data::stores::viewstate::DetailRefresh>,
     /// The HTTPS retry for servers on a plaintext grant (`plex::grant::UpgradeRetry`), stepped
     /// every frame beside the view-state pump (`app/run.rs`).
     pub(crate) plaintext_upgrade: plx_plex::plex::grant::UpgradeRetry,

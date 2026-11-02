@@ -2,6 +2,7 @@
 //! worker-result addressing and directory-discovery landing order.
 
 use super::*;
+use plx_ui::screen::DrawFrame;
 #[allow(unused_imports)]
 use super::test_support::*;
 use super::test_support::{frame, frame_with_tap, frame_with_results};
@@ -386,7 +387,8 @@ fn library_publishes_the_actual_container_strip() {
     bridge.capture_chrome(&mut dispatcher);
     let base = plx_ui::dispatch::STRIP_BASE;
     assert_eq!(dispatcher.nav.tabs.strip.iter().map(|member| member.elem).collect::<Vec<_>>(),
-        vec![base + 4, base, base + 1, base + 2, base + 3]);
+        vec![base + 4, base, base + 1, base + 2, base + 5, base + 3],
+        "the chip, then Home, Movies, TV Shows, the Watchlist mark, Search");
     assert_eq!(dispatcher.nav.tabs.strip_fallback, Some(base));
 }
 

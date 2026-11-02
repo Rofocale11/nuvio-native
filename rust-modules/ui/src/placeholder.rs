@@ -193,13 +193,15 @@ impl Reason {
         }
     }
 
-    /// Is this a PAGE's loading state rather than art that is on its way? A read-out, a spinner, a
-    /// skeleton line or a stale episode strip waits on the store that owns the page; a card tile,
-    /// a backdrop or a logo waits on the poster source instead, and a page-sized spinner of
-    /// onboarding, sign-in or the profile picker waits on the session — none of those is a store's
-    /// loading state. The dump driver excuses these, and only these, while its landing lag is
-    /// deliberately holding a store's answer out (`dev::framedump`, "The landing lag"), so a slow
-    /// page is filmed with the loading frames its user would see.
+    /// Is this placeholder a page's LOADING STATE: it stands for a store request that is out and goes
+    /// when the answer lands (a spinner, the "Loading" read-out, the Detail's "Loading" title, an
+    /// episode strip dimmed for its season, the Person page's skeleton lines and cards)? The art
+    /// placeholders (a card's skeleton or ground, a backdrop, a logo, an avatar, a still) wait on
+    /// the poster source instead, and a page-sized spinner of onboarding, sign-in or the profile
+    /// picker waits on the session; neither is a store's loading state. The dump driver excuses
+    /// these, and only these, while its landing lag is deliberately holding a store's answer out
+    /// (`dev::framedump`, "The landing lag"), so a slow page is filmed with the loading frames its
+    /// user would see.
     pub fn is_loading_state(self) -> bool {
         // Exhaustive on purpose: a new `Reason` must be classified here, not fall into a default.
         match self {
@@ -234,12 +236,11 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Is this draw a page's loading state: its [`Reason`] is ([`Reason::is_loading_state`]), or it
-    /// is a card tile with an EMPTY key (`Art::Poster(None)`, the Collection header's thumb before
-    /// the collection lands). No poster fetch can answer an empty key, so the tile is waiting for
-    /// the store that will supply the key, not for the poster source; when the store has answered
-    /// and the key is still empty, the tile is a card that never resolves and the dump driver fails
-    /// on it.
+    /// Is this draw a page's loading state: its [`Reason`] is ([`Reason::is_loading_state`]), or it is a
+    /// card tile with an EMPTY key (`Art::Poster(None)`, the Collection header's thumb before the
+    /// collection lands). No poster fetch can answer an empty key, so the tile is waiting for the
+    /// store that will supply the key, not for the poster source; when the store has answered and
+    /// the key is still empty, the tile is a card that never resolves and the dump driver fails on it.
     pub fn is_loading_state(&self) -> bool {
         self.reason.is_loading_state()
             || (matches!(self.reason, Reason::CardSkeleton | Reason::CardGround) && self.key.is_empty())
@@ -265,10 +266,10 @@ impl Frame {
         self.entries.iter().filter(|e| e.reason == reason).count()
     }
 
-    /// How many of this frame's placeholders are a page's loading state
-    /// ([`Entry::is_loading_state`]). Counted from the kept entries, which are a prefix of the
-    /// draws: a draw past [`ENTRY_CAP`] has no known reason and is never counted here, so
-    /// `count - loading_state()` can only over-state what is left over.
+    /// How many of this frame's placeholders are a page's loading state ([`Entry::is_loading_state`]).
+    /// Counted from the kept entries, which are a prefix of the draws: a draw past [`ENTRY_CAP`]
+    /// has no known reason and is never counted here, so `count - loading_state()` can only
+    /// over-state what is left over.
     pub fn loading_state(&self) -> u32 {
         self.entries.iter().filter(|e| e.is_loading_state()).count() as u32
     }
@@ -545,6 +546,28 @@ pub fn skeleton(p: Painter, reason: Reason, key: &str, r: Rect, rad: f32) {
     painter(p).rect(r, rad, theme::SKELETON_TOP, theme::SKELETON_BOT, 0.0);
 }
 
+/// **The skeleton sheet under art that is dissolving in over it**, NOT counted: the picture is here,
+/// so the frame owes nothing to wait for (a frame dump must not hold on it, and the sentinel build
+/// must not paint it). Drawn exactly as [`skeleton`] draws, so the art fades over the sheet the
+/// card wore until it landed (`widgets::card_named`).
+pub fn skeleton_under(p: Painter, r: Rect, rad: f32) {
+    // placeholder-exempt: the art is resident and dissolving in over this sheet; nothing is awaited
+    #[cfg(not(feature = "placeholder-sentinel"))]
+    p.rect_sheened(r, rad, theme::SKELETON_TOP, theme::SKELETON_BOT);
+    #[cfg(feature = "placeholder-sentinel")]
+    let _ = (p, r, rad);
+}
+
+/// [`skeleton_under`] for a tile whose placeholder is the flat sheened [`ground`] (a `Thumb` or
+/// `Person`).
+pub fn ground_under(p: Painter, r: Rect, rad: f32) {
+    // placeholder-exempt: the art is resident and dissolving in over this ground; nothing is awaited
+    #[cfg(not(feature = "placeholder-sentinel"))]
+    p.rrect_sheened(r, rad, theme::CARD_PLACEHOLDER);
+    #[cfg(feature = "placeholder-sentinel")]
+    let _ = (p, r, rad);
+}
+
 /// **A sheened face with `top`→`bot` fills**, counted: a placeholder that is not a skeleton token
 /// (the profile chip's disc). The sentinel build paints the flat sentinel in its place.
 pub fn face(p: Painter, reason: Reason, key: &str, r: Rect, rad: f32, top: [f32; 4], bot: [f32; 4]) {
@@ -801,5 +824,25 @@ mod tests {
         let packed = src.matches("ff00fe").count();
         assert_eq!(spaced, 1, "only the sentinel's own definition may spell #FF00FE");
         assert_eq!(packed, 1, "only the sentinel's own doc line may spell #FF00FE");
+    }
+
+    /// **DS3: every read-out's verdict is bright, and its body is secondary.** The verdict line of
+    /// an empty, failed or filtered read-out (`StatusOverlay`, anchor 540) is inked
+    /// `TEXT_PRIMARY`; the body under it is `TEXT_SECONDARY`. Neither is ever the danger token,
+    /// and the Working caption keeps its secondary ink (it is progress copy, not a verdict).
+    /// Source: the Design artifact boards WatchlistEmpty and WatchlistFiltered (verdict
+    /// `--text-primary`, body `--text-secondary`). Shipped size and weight are kept.
+    #[test]
+    fn a_read_out_verdict_is_bright_and_its_body_secondary() {
+        use crate::widgets::{StatusKind, StatusOverlay};
+        for kind in [StatusKind::Failed, StatusKind::Empty] {
+            let (_, _, verdict) = StatusOverlay::verdict_face(kind);
+            assert_eq!(verdict, theme::TEXT_PRIMARY, "{kind:?} verdict");
+            let (_, body) = StatusOverlay::reason_face(kind);
+            assert_eq!(body, theme::TEXT_SECONDARY, "{kind:?} body");
+            assert_ne!(verdict, theme::DANGER, "{kind:?} verdict never scolds");
+        }
+        assert_eq!(StatusOverlay::verdict_face(StatusKind::Working).2, theme::TEXT_SECONDARY);
+        assert_eq!(StatusOverlay::reason_face(StatusKind::Working).1, theme::TEXT_SECONDARY);
     }
 }

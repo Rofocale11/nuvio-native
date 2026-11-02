@@ -36,6 +36,9 @@ impl LibraryLike for HostFixture {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> { cx.views.listing }
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> { cx.views.directory }
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> { cx.views.hubs }
+    /// The fixture's libraries all hold collections, and their probe has said so: the Collections
+    /// control is on the row only with a known count, and these tests are about a row that has it.
+    fn collections_count(_cx: &Cx<'_, Self>, _section: usize) -> Option<Result<u32, crate::registry::Forbidden>> { Some(Ok(4)) }
 }
 const ENTRY: EntryId = EntryId(81);
 const OWNER: InputOwner = InputOwner::Entry(ENTRY);
@@ -105,12 +108,18 @@ fn page_memory_shares_1200_keys_and_preserves_older_snapshots() {
         "neither live reconciliation nor remount mutation may change saved canonical memory");
 }
 
+/// The key at a grid slot that may lie outside the projected windows (a far seat projects it).
+pub(super) fn deep(page: &mut LibraryScreen, fixture: &Fixture, index: usize) -> u32 {
+    page.pair.detail.elem_for(&fixture.cx(None), &mut page.keys, index, COLS).expect("a slot of the listing")
+}
+
 #[test]
 fn all_grid_caption_band_restores_with_the_saved_viewport() {
     let _guard = plx_base::testlock::serial();
     let fixture = Fixture::new();
     let mut page = fixture.screen();
-    let key = page.key(page.pair.detail.elem_at(35).unwrap());
+    let elem = deep(&mut page, &fixture, 35);
+    let key = page.key(elem);
     page.relayout(Some(key));
     page.scroll_target = page.target_layout.row_reveal(5);
     page.scroll.jump(page.scroll_target);
@@ -232,7 +241,8 @@ fn duplicate_across_pages_keeps_full_projection_recovery_metadata() {
         partial.sync(&fixture.cx(None));
         full.pair.detail.clear_projection();
         full.sync(&fixture.cx(None));
-        assert_eq!(partial.pair.detail.publication_ops().0, 60);
+        // The pass visits the wanted window (five rows of six), exactly, not the 60-slot listing.
+        assert_eq!(partial.pair.detail.publication_ops().0, 30);
         assert!(partial.pair.detail.publication_ops().1 <= 120);
         canonical.push((grid_hash(&partial), grid_hash(&full)));
         observations.push((partial.keys.last_place(duplicate), full.keys.last_place(duplicate)));
@@ -268,7 +278,7 @@ fn duplicate_across_pages_keeps_full_projection_recovery_metadata() {
 }
 
 #[test]
-fn large_listing_publication_work_is_bounded_by_initial_slots_then_changed_page() {
+fn large_listing_publication_work_is_bounded_by_the_window_not_the_listing() {
     let _guard = plx_base::testlock::serial();
     const TOTAL: usize = 10_000;
     const PAGE: usize = 60;
@@ -292,9 +302,9 @@ fn large_listing_publication_work_is_bounded_by_initial_slots_then_changed_page(
     let next_registry = page.keys.register_probes();
     eprintln!("publication-ops initial slots={initial_slots} known={initial_known} registry={initial_registry}; next slots={next_slots} known={next_known} registry={next_registry}");
 
-    assert!(initial_slots == TOTAL && initial_known <= TOTAL && initial_registry <= TOTAL + 128
-        && next_slots == PAGE && next_known <= PAGE && next_registry <= PAGE + 128,
-        "publication work must be linear initially and page-bounded later: initial slots={initial_slots} known={initial_known} registry={initial_registry}; next slots={next_slots} known={next_known} registry={next_registry}");
+    assert!(initial_slots <= 64 && initial_known <= 64 && initial_registry <= 128
+        && next_slots <= 64 && next_known <= 64 && next_registry <= 128,
+        "publication work is the wanted window, never the listing: initial slots={initial_slots} known={initial_known} registry={initial_registry}; next slots={next_slots} known={next_known} registry={next_registry}");
 }
 
 #[test]
@@ -304,7 +314,7 @@ fn derived_grid_indexes_survive_reorder_truncation_clear_and_restore() {
     let original = fixture.listing.clone();
     let mut page = fixture.screen();
     let stable = page.pair.detail.elem_at(5).unwrap();
-    let removed = page.pair.detail.elem_at(30).unwrap();
+    let removed = deep(&mut page, &fixture, 30);
 
     let mut reordered = (0..36).map(|i| original.view().item(i).unwrap().clone()).collect::<Vec<_>>();
     reordered.swap(5, 17);
@@ -324,7 +334,7 @@ fn derived_grid_indexes_survive_reorder_truncation_clear_and_restore() {
     let memory = page.page_memory();
     fixture.listing = plx_data::browse::view::ListingSnapshot::absent();
     page.sync(&fixture.cx(None));
-    assert!(page.pair.detail.elems.is_empty());
+    assert!(page.pair.detail.total() == 0);
     assert_eq!(page.pair.detail.index_of(stable), None);
 
     fixture.listing = original.with_total(10);
@@ -347,18 +357,18 @@ fn down_from_a_missing_final_row_column_clamps_to_the_last_item() {
         Vec::new());
     let mut page = fixture.screen();
     let mut engine = FocusEngine::new();
-    let key = page.key(page.pair.detail.elems[5]);
+    let key = page.key(page.pair.detail.elem_at(5).unwrap());
     engine.set(OWNER, key, Some(page.pair.groups_config().detail), By::Restore);
     direction(&mut page, &mut engine, &fixture, Dir::Down);
-    assert_eq!(engine.current(OWNER), Some(page.key(page.pair.detail.elems[7])));
+    assert_eq!(engine.current(OWNER), Some(page.key(page.pair.detail.elem_at(7).unwrap())));
     direction(&mut page, &mut engine, &fixture, Dir::Down);
-    assert_eq!(engine.current(OWNER), Some(page.key(page.pair.detail.elems[7])), "the last row remains an edge");
+    assert_eq!(engine.current(OWNER), Some(page.key(page.pair.detail.elem_at(7).unwrap())), "the last row remains an edge");
 }
 
 #[test]
-fn owned_rail_keeps_the_fixed_legacy_origin_and_short_window() {
+fn owned_rail_keeps_the_fixed_grid_top_origin_and_short_window() {
     let _guard = plx_base::testlock::serial();
-    for n in [9, 30] {
+    for n in [9, 40] {
         let mut fixture = Fixture::new();
         let sid = plx_plex::plex::ServerId::from_raw(0);
         fixture.listing = plx_data::browse::view::ListingSnapshot::fixture(sid,
@@ -366,12 +376,39 @@ fn owned_rail_keeps_the_fixed_legacy_origin_and_short_window() {
             (0..n).map(|i| (format!("{i}"), 1)).collect());
         let page = fixture.screen();
         let mut groups = Vec::new();
-        page.pair.master.groups(&fixture.cx(Some(page.key(page.pair.detail.elems[0]))), &mut groups);
+        page.pair.master.groups(&fixture.cx(Some(page.key(page.pair.detail.elem_at(0).unwrap()))), &mut groups);
         let rail = groups.first().expect("the fixture has a real rail").extent;
-        assert_eq!(rail.y, 240.0, "the rail is not attached to the scrolling first grid row");
+        // a short alphabet starts at the grid's top; a long one climbs to the board's 152 first
+        assert_eq!(rail.y, if n == 9 { 244.0 } else { 152.0 }, "the rail is not attached to the scrolling first grid row");
         if n == 9 { assert_eq!(rail.h, 9.0 * layout::RAIL_PITCH); }
-        else { assert!(rail.h < n as f32 * layout::RAIL_PITCH, "long alphabets scroll at the same pitch"); }
+        else { assert!(rail.h < n as f32 * layout::rail_pitch(n), "an alphabet too long even squeezed scrolls"); }
     }
+}
+
+#[test]
+fn the_rail_lists_the_whole_alphabet_and_letters_the_server_omitted_are_empty() {
+    let _guard = plx_base::testlock::serial();
+    let mut fixture = Fixture::new();
+    let sid = plx_plex::plex::ServerId::from_raw(0);
+    // PMS answers only the letters something starts with.
+    fixture.listing = plx_data::browse::view::ListingSnapshot::fixture(sid,
+        (0..6).map(|i| Some(plx_data::pms::PmsMovie { sid, rk: format!("{i}"), ..Default::default() })).collect(),
+        vec![("B".into(), 2), ("C".into(), 1), ("E".into(), 3)]);
+    let page = fixture.screen();
+    let rail = &page.pair.master;
+    assert_eq!(rail.elems.len(), 26, "A to Z, not the three the server listed");
+    let empty: Vec<usize> = (0..26).filter(|i| rail.letter_empty(*i)).collect();
+    assert_eq!(empty.len(), 23, "every letter but B, C and E is dimmed and skipped by focus");
+    assert!(!empty.contains(&1) && !empty.contains(&2) && !empty.contains(&4));
+    assert_eq!(rail.letter_for_item(0), 1);
+    assert_eq!(rail.letter_for_item(2), 2);
+    assert_eq!(rail.letter_for_item(3), 4, "the jump offsets are the prefix sums: E starts at item 3");
+    let (_, _, h, max) = layout::rail_geom(26);
+    assert_eq!(max, 0.0);
+    let mut groups = Vec::new();
+    page.pair.master.groups(&fixture.cx(Some(page.key(page.pair.detail.elem_at(0).unwrap()))), &mut groups);
+    let extent = groups.first().expect("the rail is a group").extent;
+    assert!((extent.h - h).abs() < 0.01 && extent.y + extent.h < 1080.0, "the whole alphabet stands on screen");
 }
 
 #[test]
@@ -588,7 +625,7 @@ fn a_fully_discovered_missing_kind_finishes_its_fade_and_has_no_foreign_grid() {
         "waiting for Shows cannot page through the retained Movies listing");
     let mut groups = Vec::new();
     page.groups(&fixture.cx(None), &mut groups);
-    assert!(!groups.iter().any(|g| g.id == page.pair.groups_config().detail || g.id == page.toolbar_group()));
+    assert!(!groups.iter().any(|g| g.id == page.pair.groups_config().detail));
     assert!(page.focused_item(Some(page.key(page.keys.keys().first().map_or(0, |k| k.elem))), &fixture.cx(None)).is_none());
 }
 
@@ -603,8 +640,8 @@ fn owned_card_stops_clip_pointer_hits_and_hold_the_engine_item() {
     page.initial = false;
     page.scroll.jump(400.0);
     page.scroll_target = 400.0;
-    let first = page.key(page.pair.detail.elems[0]);
-    let chosen = page.key(page.pair.detail.elems[1]);
+    let first = page.key(page.pair.detail.elem_at(0).unwrap());
+    let chosen = page.key(page.pair.detail.elem_at(1).unwrap());
     page.relayout(Some(first));
     let cx = fixture.cx(Some(first));
     let mut draw = DrawFrame::new(&cx, plx_ui::Painter::root());
@@ -647,7 +684,7 @@ fn actual_sort_menu_traps_engine_navigation_in_its_own_entry() {
     let owner = InputOwner::Entry(entry);
     let arg = crate::registry::LibraryMenuArg { host: InstanceId(19),
         target: page.address(&fixture.cx(None)).unwrap(), kind: crate::registry::LibraryMenuKind::Sort,
-        anchor: [0; 4] };
+        anchor: [0; 4], folded: Vec::new(), opener: None };
     let mut menu = menu::LibraryMenu::new(entry, arg);
     let mut out = Vec::new();
     let mut present = plx_machine::present::Present::new();
@@ -685,6 +722,66 @@ fn a_compact_menu_keeps_the_host_store_pump_and_deferred_commit_live() {
         "the store must fetch the just-committed query while the compact menu remains open");
 }
 
+/// The page asks Browse to re-run a listing whose membership a read-back made stale ONLY once a
+/// PAGE has buried it (`WillLeave(Deeper)`, then `Cover`): not on the notice that makes it stale
+/// while it is visible, not under a compact menu (which leaves the page visible and ticking), and
+/// not again once the re-query has cleared the flag.
+#[test]
+fn a_stale_listing_is_requeried_when_a_page_buries_it_never_while_visible() {
+    use plx_machine::machine::Leave;
+    let _guard = plx_base::testlock::serial();
+    let requeries = |stale: bool, events: Vec<ScreenEvent<HostFixture>>| {
+        let mut fixture = Fixture::new();
+        if stale { fixture.listing = fixture.listing.clone().with_membership_stale(); }
+        let mut page = fixture.screen();
+        page.wanted_kind = None;
+        let mut out = Vec::new();
+        let mut present = plx_machine::present::Present::new();
+        let mut fx = Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present);
+        for ev in &events { page.step(ev, &fixture.cx(None), &mut fx); }
+        drop(fx);
+        out.iter().filter(|effect| matches!(&effect.fx, Fx::App(AppFx::Store(StoreId::Browse,
+            StoreCmd::Browse(BrowseCmd::Addressed { work: LibraryWork::Requery, .. }))))).count()
+    };
+    let notice = || ScreenEvent::StoreChanged(StoreId::ViewReconcile.ord(), 1);
+    let buried = || vec![ScreenEvent::WillLeave(Leave::Deeper), ScreenEvent::Cover];
+    assert_eq!(requeries(true, vec![notice(), ScreenEvent::Tick(Tick { ms: 16, dt_us: 16_667 })]), 0,
+        "a visible page never re-queries under the cursor");
+    assert_eq!(requeries(true, buried()), 1, "a page push re-queries once");
+    let mut and_back = buried();
+    and_back.extend([ScreenEvent::Uncover, ScreenEvent::Enter(Enter::Restored)]);
+    assert_eq!(requeries(true, and_back), 1, "Uncover never does");
+    let mut and_notice = buried();
+    and_notice.push(notice());
+    assert_eq!(requeries(true, and_notice), 2,
+        "a notice that finds the buried listing still stale asks again; the store clears the flag on the first");
+    assert_eq!(requeries(false, buried()), 0, "a listing whose membership is current is left alone");
+    let mut returned = buried();
+    returned.extend([ScreenEvent::Uncover, ScreenEvent::Enter(Enter::Restored), notice()]);
+    assert_eq!(requeries(true, returned), 1, "back on top, a notice no longer re-queries");
+}
+
+/// A compact menu (Sort, Filter, the item menu) covers the page without burying it: the page stays
+/// visible and ticking, so a read-back that arrives under it never re-queries the grid beneath.
+#[test]
+fn a_compact_menu_over_a_stale_listing_never_requeries_it() {
+    let _guard = plx_base::testlock::serial();
+    let mut fixture = Fixture::new();
+    fixture.listing = fixture.listing.clone().with_membership_stale();
+    let mut page = fixture.screen();
+    page.wanted_kind = None;
+    let mut out = Vec::new();
+    let mut present = plx_machine::present::Present::new();
+    let mut fx = Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present);
+    for ev in [ScreenEvent::Cover, ScreenEvent::StoreChanged(StoreId::ViewReconcile.ord(), 1),
+        ScreenEvent::Tick(Tick { ms: 16, dt_us: 16_667 })] {
+        page.step(&ev, &fixture.cx(None), &mut fx);
+    }
+    drop(fx);
+    assert_eq!(out.iter().filter(|effect| matches!(&effect.fx, Fx::App(AppFx::Store(StoreId::Browse,
+        StoreCmd::Browse(BrowseCmd::Addressed { work: LibraryWork::Requery, .. }))))).count(), 0);
+}
+
 #[test]
 fn published_library_projection_and_layout_enter_canonical_state() {
     let _guard = plx_base::testlock::serial();
@@ -692,7 +789,7 @@ fn published_library_projection_and_layout_enter_canonical_state() {
     let hash = |page: &LibraryScreen| { let mut c = Canon::new(); page.write(&mut c); c.finish() };
     let mut page = fixture.screen();
     let initial = hash(&page);
-    page.pair.detail.elems.swap(0, 1);
+    page.pair.detail.swap_for_test(0, 1);
     assert_ne!(initial, hash(&page), "published item order determines the next navigation step");
     let prior = hash(&page);
     page.target_layout.rows += 1;
@@ -706,7 +803,7 @@ fn published_library_projection_and_layout_enter_canonical_state() {
 }
 
 #[test]
-fn library_capsule_and_control_motion_enter_canonical_state() {
+fn a_pending_library_switch_enters_canonical_state() {
     let hash = |page: &LibraryScreen| {
         let mut c = Canon::new();
         page.write(&mut c);
@@ -714,12 +811,8 @@ fn library_capsule_and_control_motion_enter_canonical_state() {
     };
     let mut page = LibraryScreen::new(ENTRY, InstanceId(19), SecKind::Movie);
     let initial = hash(&page);
-    page.library_capsules.update(0, 0, |_| Some((120.0, 180.0)),
-        plx_ui::widgets::SelMark::Travels, 0.016);
-    let capsule = hash(&page);
-    assert_ne!(initial, capsule, "held capsule geometry affects subsequent frames");
-    page.library_pop.step(Some(0), 0.016);
-    assert_ne!(capsule, hash(&page), "control focus and spring velocity affect subsequent frames");
+    page.switched = true;
+    assert_ne!(initial, hash(&page), "the header-focus-keeping switch changes subsequent frames");
 }
 
 #[test]
@@ -865,9 +958,12 @@ fn failed_and_empty_readouts_offer_only_their_real_owned_controls() {
         assert_eq!(page.readout, expected);
         let mut groups = Vec::new();
         page.groups(&cx, &mut groups);
-        assert_eq!(groups.iter().any(|g| g.id == page.pair.groups_config().detail), grid);
-        for control in [TYPE, SORT, FILTER] {
-            assert_eq!(page.place(&control, &cx, At::SpringTarget).is_some(), head);
+        // (A loading listing declares its grid group EMPTY, `PageRegions::declare_pending`: no control.)
+        assert_eq!(groups.iter().any(|g| g.id == page.pair.groups_config().detail && g.len > 0), grid);
+        // The header row is the way out of every state, so its controls are always placed.
+        let _ = head;
+        for control in [SORTFILTER] {
+            assert!(page.place(&control, &cx, At::SpringTarget).is_some());
         }
         assert_eq!(page.place(&RETRY, &cx, At::SpringTarget).is_some(), retry);
         if !grid {
@@ -899,16 +995,19 @@ fn foreign_section_replacement_upgrades_a_grid_fade_once() {
 }
 
 #[test]
-fn toolbar_stops_use_the_shared_value_chip_measurement() {
+fn header_controls_sit_in_the_header_row_left_to_right() {
     let _guard = plx_base::testlock::serial();
     let fixture = Fixture::new();
     let page = fixture.screen();
     let cx = fixture.cx(None);
-    let sort = page.place(&SORT, &cx, At::Drawn).unwrap().rect;
-    let filter = page.place(&FILTER, &cx, At::Drawn).unwrap().rect;
-    assert_eq!(sort.w, plx_ui::value_chip::ValueChip::width(cx.measure, c"Sort", c" · Title", None));
-    assert_eq!(filter.w, plx_ui::value_chip::ValueChip::width(cx.measure, c"Filter", c" · All", None));
-    assert_eq!(filter.x, sort.x + sort.w + 16.0);
+    let mut last = f32::MIN;
+    for elem in page.toolbar_elems() {
+        let rect = page.place(elem, &cx, At::Drawn).unwrap().rect;
+        assert!(rect.x >= last, "{elem}: controls read left to right without overlap");
+        let lowered = if page.libraries.is_empty() { layout::SINGLE_LIBRARY_DY } else { 0.0 };
+        assert_eq!(rect.y + rect.h * 0.5, layout::HEADER_Y + lowered + plx_ui::page_header::HEIGHT * 0.5 - page.scroll.pos);
+        last = rect.x + rect.w;
+    }
 }
 
 #[test]
@@ -934,10 +1033,6 @@ fn section_grid_memories_do_not_overwrite_one_another() {
     assert!(engine.remembered_for(ENTRY).contains(&(group_b, card_b.elem)));
     engine.enter(OWNER, &page, FocusTarget::ContainerGroup(group_a), None, &fixture.cx(engine.current(OWNER)));
     assert_eq!(engine.current(OWNER), Some(card_a), "Remembered seating restores the exact section card");
-    // Enter the rail through a toolbar: projection must consult only this section's grid memory.
-    engine.set(OWNER, page.key(FILTER), Some(page.toolbar_group()), By::Dir);
-    direction(&mut page, &mut engine, &fixture, Dir::Right);
-    assert_eq!(page.pair.master.start_for_elem(engine.current(OWNER).unwrap().elem), Some(0));
 }
 
 #[test]
@@ -1092,22 +1187,6 @@ fn projected_entry_preserves_the_last_item_within_a_letter_then_live_move_jumps(
 }
 
 #[test]
-fn toolbar_rail_entry_uses_engine_grid_memory_and_returns_to_toolbar() {
-    let _guard = plx_base::testlock::serial();
-    let fixture = Fixture::new();
-    let mut page = fixture.screen();
-    let mut engine = FocusEngine::new();
-    let exact = page.key(page.pair.detail.elem_at(23).unwrap());
-    engine.set(OWNER, exact, Some(page.pair.groups_config().detail), By::Restore);
-    engine.set(OWNER, page.key(FILTER), Some(page.toolbar_group()), By::Dir);
-    assert_eq!(direction(&mut page, &mut engine, &fixture, Dir::Right), 0);
-    assert_eq!(page.pair.master.start_for_elem(engine.current(OWNER).unwrap().elem), Some(18));
-    direction(&mut page, &mut engine, &fixture, Dir::Left);
-    assert_eq!(engine.current(OWNER), Some(page.key(FILTER)));
-    assert_eq!(engine.remembered_for(ENTRY).iter().find(|(g, _)| *g == page.pair.groups_config().detail).unwrap().1, exact.elem);
-}
-
-#[test]
 fn removed_grid_key_keeps_its_typed_master_detail_reconciliation_path() {
     let _guard = plx_base::testlock::serial();
     let mut fixture = Fixture::new();
@@ -1151,7 +1230,7 @@ fn sort_chosen_during_section_fade_commits_to_the_incoming_library() {
     let mut present = plx_machine::present::Present::new();
     let mut fx = Effects::new(&mut output, MachineId::Instance(InstanceId(19)), &mut present);
     page.activate(page.libraries[1].0, false, &fixture.cx(None), &mut fx);
-    page.activate(SORT, false, &fixture.cx(None), &mut fx);
+    page.activate(SORTFILTER, false, &fixture.cx(None), &mut fx);
     drop(fx);
     let incoming = SectionAddress { epoch: 1, sid, section: 2 };
     let target = output.iter().find_map(|effect| match &effect.fx {
@@ -1195,12 +1274,11 @@ fn a_single_favourite_library_draws_no_selector() {
                 pinned: true, current: true, ..Default::default() } }]);
     let page = fixture.screen();
     assert!(page.libraries.is_empty(), "a lone favourite must clear the selector");
-    assert!(!page.layout.libraries, "no row height is reserved for it");
+    assert!(page.layout.libraries, "the header row is always reserved, names or not");
     let cx = fixture.cx(None);
     let mut groups = Vec::new();
     page.groups(&cx, &mut groups);
-    assert!(!groups.iter().any(|group| group.id == LIBRARY_GROUP),
-        "no selector focus group is offered");
+    assert_eq!(page.header_elems(), page.toolbar_elems(), "the header row holds only the controls");
     let mut draw = DrawFrame::new(&cx, plx_ui::Painter::root());
     page.record_stops(&mut draw);
     let stops = draw.into_stops();
@@ -1220,42 +1298,15 @@ fn favorite_library_row_uses_shared_strip_geometry_and_incoming_type() {
                 current: i == 0, ..Default::default() } }).collect());
     let mut page = fixture.screen();
     let cx = fixture.cx(None);
-    let lays = plx_ui::widgets::strip_layout_measured(["Library 0".into(), "Library 1".into()].into_iter(),
-        MARGIN_X + plx_ui::widgets::STRIP_PAD, plx_ui::theme::size::BODY,
-        plx_ui::widgets::STRIP_GAP_WIDE, cx.measure);
-    for (i, lay) in lays.iter().enumerate() {
-        let expected = plx_ui::widgets::strip_pill_rect(lay, CONTENT_TOP, plx_ui::widgets::StatusOverlay::CTRL_H);
-        let actual = page.library_rect(i, &cx);
-        assert_eq!([actual.x, actual.y, actual.w, actual.h], [expected.x, expected.y, expected.w, expected.h]);
+    for (elem, _) in page.libraries.clone() {
+        let rect = page.place(&elem, &cx, At::Drawn).unwrap().rect;
+        assert_eq!(rect.y + rect.h * 0.5, layout::HEADER_Y + plx_ui::page_header::HEIGHT * 0.5, "names sit in the header row");
     }
     page.pending.request_section(SectionTarget { epoch: 1, index: 3,
         identity: LibrarySectionIdentity { sid, key: 4 }, kind: SecKind::Show });
     page.sync(&cx);
     assert_eq!(page.libraries.iter().map(|(_, section)| *section).collect::<Vec<_>>(), vec![2, 3],
         "the favorite row must not keep movie libraries beneath the incoming Shows type");
-}
-
-#[test]
-fn library_opens_on_the_grid_and_never_requests_hub_shelves() {
-    let _guard = plx_base::testlock::serial();
-    let fixture = Fixture::new();
-    let mut page = fixture.screen();
-    page.initial = false;
-    let grid = page.key(page.pair.detail.elem_at(0).unwrap());
-    let mut out = Vec::new();
-    let mut present = plx_machine::present::Present::new();
-    page.step(&ScreenEvent::Tick(Tick::default()), &fixture.cx(Some(grid)),
-        &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
-    assert!(
-        !out.iter().any(|effect| matches!(
-            effect.fx,
-            Fx::App(AppFx::Library(LibraryReq::PublishShelves { .. }))
-        )),
-        "the Library must never ask for /hubs/sections/{{k}}: its page starts at the grid"
-    );
-    assert!(page.shelves.is_empty(), "no hub rows on the Library page");
-    assert_eq!(page.first_group(), page.toolbar,
-        "Type/Sort/Filter is the first thing above the grid");
 }
 
 /// **The page glyph and the Library's own live tab strip never overlap.** They used to (measured
@@ -1273,7 +1324,7 @@ fn the_page_glyph_and_the_librarys_live_tab_strip_never_overlap() {
     use plx_ui::widgets::StatusOverlay;
     let _guard = plx_base::testlock::serial();
     let tab_strip_bottom = CONTENT_TOP + StatusOverlay::CTRL_H;
-    assert_eq!(tab_strip_bottom, 254.0, "the tab strip band moved — re-measure the fix against it");
+    assert_eq!(tab_strip_bottom, 208.0, "the tab strip band moved — re-measure the fix against it");
 
     // A live strip: two pinned sections of the current kind. `favorite_sections_for` only
     // populates `self.libraries` for 2+ candidates (see
@@ -1318,10 +1369,13 @@ fn the_page_glyph_and_the_librarys_live_tab_strip_never_overlap() {
 
 mod type_tests { include!("type_tests.rs"); }
 
+mod collections_listing_tests { include!("collections_listing_tests.rs"); }
+
 mod art_admission_tests { include!("art_admission_tests.rs"); }
 mod lookahead_tests { include!("lookahead_tests.rs"); }
 
 mod grid_motion_tests { include!("grid_motion_tests.rs"); }
+mod keys_window_tests { include!("keys_window_tests.rs"); }
 
 /// BACK from deep in the document returns to the top on the scroll SPRING, the way Home's BACK
 /// glides its page back to the hero — it must not snap. The reseat BACK raises arrives as
@@ -1341,7 +1395,8 @@ fn assert_back_glides(fixture: &Fixture, deep_index: usize) {
     let mut page = fixture.screen();
     page.initial = false;
     let mut engine = FocusEngine::new();
-    let deep = page.key(page.pair.detail.elem_at(deep_index).unwrap());
+    let elem = deep(&mut page, fixture, deep_index);
+    let deep = page.key(elem);
     page.relayout(Some(deep));
     page.scroll_target = page.target_layout.row_reveal(deep_index / page.layout.cols());
     page.scroll.jump(page.scroll_target);
@@ -1411,7 +1466,6 @@ fn an_unfetched_hub_publication_never_holds_the_page_dark() {
             &mut Effects::new(&mut out, MachineId::Instance(InstanceId(19)), &mut present));
     }
     assert!(page.page_fade.alpha() > 0.99, "the page never faded in: {}", page.page_fade.alpha());
-    assert_eq!(page.layout.shelves, 0, "the Library draws no shelves");
-    assert_eq!(page.layout.grid_block_top(), page.layout.library_h(),
+    assert_eq!(page.layout.grid_top(), page.layout.library_h(),
         "with no shelf run the grid starts directly under the library row");
 }

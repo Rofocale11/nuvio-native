@@ -1,12 +1,15 @@
-//! The Tier 2 card-conformance harness for the Library page (`cards_conformance_tests.rs`): the
-//! All grid (a `GridPart` over `cards::Grid`). The page no longer draws hub shelves above the grid,
-//! so there is one card set. A child module of `library` so it reads the private rect and scale
-//! helpers the screen's own tests read.
+//! The Tier 2 card-conformance harnesses for the Library page (`cards_conformance_tests.rs`): the
+//! All grid (a `GridPart` over `cards::Grid`, on `LibraryScreen`) and the Recommended page's hub
+//! shelves (`cards::Shelf`s, on `RecommendedScreen`). A child module of `library` so it reads the
+//! private rect and scale helpers the screens' own tests read. One `Harness` drives either card
+//! set; `Set` says which, and the other screen stays idle.
 use super::*;
 use plx_machine::machine::{FocusRead, Host, InputOwner, PressRead, Tick};
 use plx_ui::cards::conformance::{CardHarness, Landing, Nb};
 use plx_ui::fixture::{FixtureArg, FixtureMeasure};
 use plx_ui::screen::By;
+use plx_ui::cards::RowStyle;
+use super::recommended::RecommendedScreen;
 
 struct LibHost;
 #[derive(Clone, Copy)]
@@ -33,19 +36,26 @@ impl LibraryLike for LibHost {
 const ENTRY: EntryId = EntryId(81);
 const INSTANCE: InstanceId = InstanceId(19);
 
+#[derive(Clone, Copy, PartialEq)]
+enum Set { Grid, Shelf }
+
 pub(crate) struct Harness {
+    set: Set,
     n: usize,
     rks: Vec<String>,
     listing: plx_data::stores::browse::ListingSnapshot,
     directory: plx_data::stores::browse::DirectorySnapshot,
     hubs: plx_data::stores::browse::HubsSnapshot,
+    _stores: Option<plx_data::stores::Stores>,
     screen: LibraryScreen,
+    rec: RecommendedScreen,
     focus: Option<FocusKey<u32>>,
     press: f32,
     ms: u32,
 }
 
-pub(crate) fn mount_grid(n: usize) -> Box<dyn CardHarness> { Box::new(Harness::new(n)) }
+pub(crate) fn mount_grid(n: usize) -> Box<dyn CardHarness> { Box::new(Harness::new(Set::Grid, n)) }
+pub(crate) fn mount_shelves(n: usize) -> Box<dyn CardHarness> { Box::new(Harness::new(Set::Shelf, n)) }
 
 fn listing_of(rks: &[String]) -> plx_data::stores::browse::ListingSnapshot {
     let sid = plx_plex::plex::ServerId::from_raw(0);
@@ -55,18 +65,42 @@ fn listing_of(rks: &[String]) -> plx_data::stores::browse::ListingSnapshot {
 }
 
 impl Harness {
-    fn new(n: usize) -> Self {
+    fn new(set: Set, n: usize) -> Self {
         let rks: Vec<String> = (0..n).map(|i| format!("m{i}")).collect();
         let sid = plx_plex::plex::ServerId::from_raw(0);
-        let directory = plx_data::browse::view::DirectorySnapshot::fixture(1, 0, vec![
+        let mut directory = plx_data::browse::view::DirectorySnapshot::fixture(1, 0, vec![
             plx_data::browse::view::SectionView { sid: Some(sid), key: 1, kind: SecKind::Movie,
                 row: plx_data::browse::SrcRow { section: 0, pinned: true, current: true, ..Default::default() } }]);
-        let listing = listing_of(&rks);
-        let hubs = plx_data::stores::browse::HubsSnapshot::empty_for_test();
-        let mut h = Self { n, rks, listing, directory, hubs,
-            screen: LibraryScreen::new(ENTRY, INSTANCE, SecKind::Movie), focus: None, press: 1.0, ms: 0 };
+        let (listing, hubs, stores) = match set {
+            Set::Grid => (listing_of(&rks), plx_data::stores::browse::HubsSnapshot::empty_for_test(), None),
+            Set::Shelf => {
+                // The same seeding `tests::Fixture::shelves` does: three hub shelves of `n` tiles
+                // over a (here unused) 120-item grid.
+                let stores = plx_data::stores::Stores::default();
+                stores.browse.borrow_mut().seed_two_source_table_for_test();
+                stores.capture_browse(&mut directory);
+                stores.browse_run(BrowseCmd::SetCur(0));
+                {
+                    let mut browse = stores.browse.borrow_mut();
+                    browse.seed_items_for_test(120);
+                    browse.seed_shelves_for_test(0, &["movie.recentlyadded.1", "movie.recentlyreleased.1", "movie.toprated.1"], n);
+                }
+                let publication = stores.capture_browse(&mut directory);
+                (publication.listing, publication.section_hubs, Some(stores))
+            }
+        };
+        // A hub shelf's landing edits its own items, whose rating keys the seed names.
+        let rks = match set {
+            Set::Grid => rks,
+            Set::Shelf => hubs.view().shelves().first()
+                .map(|shelf| shelf.items.iter().map(|item| item.rk.clone()).collect()).unwrap_or_default(),
+        };
+        let mut h = Self { set, n, rks, listing, directory, hubs, _stores: stores,
+            screen: LibraryScreen::new(ENTRY, INSTANCE, SecKind::Movie),
+            rec: RecommendedScreen::new(ENTRY, INSTANCE, SecKind::Movie), focus: None, press: 1.0, ms: 0 };
         h.sync();
         h.screen.initial = false;
+        h.rec.initial = false;
         h
     }
 
@@ -83,7 +117,10 @@ impl Harness {
             tick: Tick { ms: self.ms, dt_us: 16_667 }, measure: &FixtureMeasure,
             press: PressRead { scale: self.press, owner: self.focus, ..Default::default() },
             focus: FocusRead { current: self.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) };
-        self.screen.sync(&cx);
+        match self.set {
+            Set::Grid => self.screen.sync(&cx),
+            Set::Shelf => self.rec.sync(&cx),
+        }
     }
 
     fn step(&mut self, ev: ScreenEvent<LibHost>) -> bool {
@@ -96,20 +133,47 @@ impl Harness {
                 press: PressRead { scale: self.press, owner: self.focus, ..Default::default() },
                 focus: FocusRead { current: self.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) };
             let mut fx = Effects::new(&mut out, MachineId::Instance(INSTANCE), &mut present);
-            Machine::<LibHost>::step(&mut self.screen, &ev, &cx, &mut fx);
+            match self.set {
+                Set::Grid => { Machine::<LibHost>::step(&mut self.screen, &ev, &cx, &mut fx); }
+                Set::Shelf => { Machine::<LibHost>::step(&mut self.rec, &ev, &cx, &mut fx); }
+            }
         });
         moving || present.page_moving()
     }
 
     fn key(&self, elem: u32) -> FocusKey<u32> { FocusKey { entry: ENTRY, elem } }
 
+    /// Publish `rks` as the cards and deliver the store-changed event: the way a refetch lands.
+    fn republish(&mut self) -> Result<(), &'static str> {
+        match self.set {
+            Set::Grid => self.listing = listing_of(&self.rks),
+            // The hub shelf's items are republished the way a refetch would land them.
+            Set::Shelf => {
+                let stores = self._stores.as_ref().ok_or("the shelf set has no store")?;
+                stores.browse.borrow_mut().seed_first_shelf_items_for_test(0, &self.rks);
+                self.hubs = stores.capture_browse(&mut self.directory).section_hubs;
+            }
+        }
+        self.step(ScreenEvent::StoreChanged(plx_data::stores::StoreId::Browse.ord(), 1));
+        Ok(())
+    }
+
     fn cell(&self, elem: u32) -> Option<(usize, usize)> {
-        self.screen.pair.detail.index_of(elem).map(|i| (0, i))
+        match self.set {
+            Set::Grid => self.screen.pair.detail.index_of(elem).map(|i| (0, i)),
+            Set::Shelf => self.rec.shelves.iter().enumerate()
+                .find_map(|(r, s)| s.elems.iter().position(|e| *e == elem).map(|c| (r, c))),
+        }
     }
 }
 
 impl CardHarness for Harness {
-    fn cards(&self) -> Vec<u32> { self.screen.pair.detail.elems.clone() }
+    fn cards(&self) -> Vec<u32> {
+        match self.set {
+            Set::Grid => (0..self.screen.pair.detail.total()).filter_map(|i| self.screen.pair.detail.elem_at(i)).collect(),
+            Set::Shelf => self.rec.shelves.first().map(|s| s.elems.clone()).unwrap_or_default(),
+        }
+    }
     fn focused(&self) -> Option<u32> { self.focus.map(|k| k.elem) }
     fn focus(&mut self, elem: u32, by: By) {
         let from = self.focus;
@@ -134,30 +198,66 @@ impl CardHarness for Harness {
         }
     }
     fn place(&self, elem: u32, at: At) -> Option<Placed> {
-        Focusable::<LibHost>::place(&self.screen, &elem, &self.cx(), at)
+        match self.set {
+            Set::Grid => Focusable::<LibHost>::place(&self.screen, &elem, &self.cx(), at),
+            Set::Shelf => Focusable::<LibHost>::place(&self.rec, &elem, &self.cx(), at),
+        }
     }
     /// What the draw paints and registers: the grid's rect for the card, the shelves' recorded stop.
     fn drawn_rect(&self, elem: u32, press: f32) -> Option<Rect> {
         let (_, col) = self.cell(elem)?;
-        let mut cx = self.cx();
-        cx.press = PressRead { scale: press, owner: cx.focus.current, ..Default::default() };
-        Some(self.screen.pair.detail.rect_at(&cx, col))
+        Some(match self.set {
+            Set::Grid => {
+                let mut cx = self.cx();
+                cx.press = PressRead { scale: press, owner: cx.focus.current, ..Default::default() };
+                self.screen.pair.detail.rect_at(&cx, col)
+            }
+            // The rect the page's real stop recording registers for the card (`record_stops`, what the
+            // draw ends with): the pointer's target, built from the draw's own placement.
+            Set::Shelf => {
+                let mut cx = self.cx();
+                cx.press = PressRead { scale: press, owner: cx.focus.current, ..Default::default() };
+                let mut frame = plx_ui::screen::DrawFrame::new(&cx, plx_ui::Painter::root());
+                self.rec.record_stops(&mut frame);
+                frame.into_stops().into_iter().find(|stop| stop.key.elem == elem)?.rect
+            }
+        })
     }
     fn scale(&self, elem: u32) -> Option<f32> {
-        self.cell(elem)?;
-        self.screen.pair.detail.scale_of(&self.cx(), elem)
+        let (row, _) = self.cell(elem)?;
+        Some(match self.set {
+            Set::Grid => self.screen.pair.detail.scale_of(&self.cx(), elem)?,
+            Set::Shelf => {
+                let cx = self.cx();
+                let src = self.rec.hub_src(row, &cx);
+                self.rec.shelves[row].cards.scale_of(&cx, &src, &elem)?
+            }
+        })
     }
     fn focus_scale(&self) -> f32 { RowStyle::HOME.focus_scale }
-    fn canon(&self) -> u64 { LogicalState::hash(&self.screen) }
+    fn canon(&self) -> u64 {
+        match self.set {
+            Set::Grid => LogicalState::hash(&self.screen),
+            Set::Shelf => LogicalState::hash(&self.rec),
+        }
+    }
     fn identity(&self, elem: u32) -> String {
-        let Some((_, col)) = self.cell(elem) else { return String::new() };
-        self.listing.view().item(col).map(|m| m.rk.clone()).unwrap_or_default()
+        let Some((row, col)) = self.cell(elem) else { return String::new() };
+        match self.set {
+            Set::Grid => self.listing.view().item(col).map(|m| m.rk.clone()).unwrap_or_default(),
+            Set::Shelf => self.hubs.view().shelves().get(row).and_then(|s| s.items.get(col)).map(|m| m.rk.clone()).unwrap_or_default(),
+        }
     }
     fn scroll(&self) -> Option<f32> {
-        Some(self.screen.scroll.pos)
+        Some(match self.set {
+            Set::Grid => self.screen.scroll.pos,
+            Set::Shelf => self.rec.shelves.first()?.cards.scroll(),
+        })
     }
-    fn scroll_max(&self) -> Option<f32> { None }
-    fn columns(&self) -> Option<usize> { Some(super::layout::COLS) }
+    fn scroll_max(&self) -> Option<f32> {
+        (self.set == Set::Shelf).then(|| self.rec.shelves.first().map(|s| s.cards.style().max_scroll(self.cards().len()))).flatten()
+    }
+    fn columns(&self) -> Option<usize> { (self.set == Set::Grid).then_some(super::layout::COLS) }
     fn landing(&mut self, l: Landing) -> Result<(), &'static str> {
         let (_, at) = self.focus.and_then(|k| self.cell(k.elem)).ok_or("nothing focused")?;
         match l {
@@ -165,23 +265,40 @@ impl CardHarness for Harness {
             Landing::InsertAbove => self.rks.insert(0, "landed".into()),
             Landing::RemoveFocused => { self.rks.remove(at); }
         }
-        self.listing = listing_of(&self.rks);
-        self.step(ScreenEvent::StoreChanged(plx_data::stores::StoreId::Browse.ord(), 1));
+        self.republish()?;
         let want = self.focus.unwrap();
-        let now = Focusable::<LibHost>::reconcile(&self.screen, want, &self.cx());
+        let now = match self.set {
+            Set::Grid => Focusable::<LibHost>::reconcile(&self.screen, want, &self.cx()),
+            Set::Shelf => Focusable::<LibHost>::reconcile(&self.rec, want, &self.cx()),
+        };
         if now != want { self.focus(now.elem, By::Reconcile); }
         Ok(())
     }
+    fn shift(&mut self, by: usize) -> Result<(), &'static str> {
+        for k in 0..by { self.rks.insert(0, format!("arrived{k}")); }
+        self.republish()
+    }
     fn memory_roundtrip(&mut self) -> Result<Box<dyn CardHarness>, &'static str> {
-        let PageMemory::Library(mem) = Screen::<LibHost>::memory_at(&self.screen, self.focus) else {
+        let memory = match self.set {
+            Set::Grid => Screen::<LibHost>::memory_at(&self.screen, self.focus),
+            Set::Shelf => Screen::<LibHost>::memory_at(&self.rec, self.focus),
+        };
+        let PageMemory::Library(mem) = memory else {
             return Err("memory_at did not return PageMemory::Library");
         };
-        let mut fresh = Harness::new(self.n);
-        fresh.screen.restore(&mem);
+        let mut fresh = Harness::new(self.set, self.n);
+        match self.set {
+            Set::Grid => fresh.screen.restore(&mem),
+            Set::Shelf => fresh.rec.restore(&mem),
+        }
         fresh.sync();
         fresh.screen.initial = false;
+        fresh.rec.initial = false;
         let want = self.focus.ok_or("nothing focused")?;
-        let now = Focusable::<LibHost>::reconcile(&fresh.screen, want, &fresh.cx());
+        let now = match self.set {
+            Set::Grid => Focusable::<LibHost>::reconcile(&fresh.screen, want, &fresh.cx()),
+            Set::Shelf => Focusable::<LibHost>::reconcile(&fresh.rec, want, &fresh.cx()),
+        };
         fresh.focus(now.elem, By::Restore);
         Ok(Box::new(fresh))
     }
@@ -199,8 +316,8 @@ mod pop_tests {
 
     #[test]
     fn episode_grid_geometry_and_page_window_share_four_column_rows() {
-        let mut h = Harness::new(80);
-        let layout = Layout::new(false, &[], 20, true).with_episodes(true);
+        let mut h = Harness::new(Set::Grid, 80);
+        let layout = Layout::new(false, 20).with_episodes(true);
         h.screen.pair.detail.set_geometry(layout, 0.0, layout, 0.0);
         let cx = h.cx();
         let (first, next_row) = (h.screen.pair.detail.rect_at(&cx, 0), h.screen.pair.detail.rect_at(&cx, 4));
@@ -218,7 +335,7 @@ mod pop_tests {
     /// animated". A deliberate move grows the new tile from rest over frames and lets the old go.
     #[test]
     fn a_newly_focused_grid_tile_grows_over_frames_and_the_old_one_lets_go() {
-        let mut h = Harness::new(12);
+        let mut h = Harness::new(Set::Grid, 12);
         let cards = h.cards();
         let full = CARD_W * RowStyle::HOME.focus_scale;
         h.focus(cards[3], By::Dir);
@@ -241,7 +358,7 @@ mod pop_tests {
     /// scale: `scale_of` is the value `Grid::draw` hands both.
     #[test]
     fn an_unfocusing_grid_tile_draws_its_shrinking_rect_and_treatment_at_the_same_scale() {
-        let mut h = Harness::new(12);
+        let mut h = Harness::new(Set::Grid, 12);
         let cards = h.cards();
         h.focus(cards[3], By::Restore);
         h.tick(60);
@@ -256,11 +373,12 @@ mod pop_tests {
         h.tick(120);
         assert_eq!(h.scale(cards[3]), Some(1.0), "…and once settled, the shared scale agrees it is at rest");
     }
+
     /// A cell focused without a deliberate move is a restore or a reconcile: FULL scale on its
     /// first frame, before and after the tick that adopts it.
     #[test]
     fn a_cell_focused_without_a_move_is_adopted_at_full_scale() {
-        let mut h = Harness::new(12);
+        let mut h = Harness::new(Set::Grid, 12);
         let cards = h.cards();
         let full = CARD_W * RowStyle::HOME.focus_scale;
         h.focus(cards[5], By::Restore);
@@ -276,7 +394,7 @@ mod pop_tests {
     #[test]
     fn a_pressed_grid_tile_hands_the_card_renderer_the_scale_its_rect_was_built_from() {
         let _guard = plx_base::testlock::serial();
-        let mut h = Harness::new(12);
+        let mut h = Harness::new(Set::Grid, 12);
         let cards = h.cards();
         h.focus(cards[3], By::Restore);
         h.tick(1);

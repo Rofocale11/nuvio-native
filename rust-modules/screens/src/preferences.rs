@@ -18,8 +18,9 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver};
+use plx_plex::plex::session::UiResolution;
 use plx_plex::plex::account::{AudioPreferences, PreferenceError, PreferenceRequest, PreferenceSnapshot, PreferenceUpdate};
-use plx_media::route::{DeckPress, DirectPlayMode, NextEpisodeMode, Quality, SkipInterval, SubtitlePosition, SubtitleSize};
+use plx_media::route::{Choice, DeckPress, DirectPlayMode, NextEpisodeMode, Quality, SkipInterval, SubtitlePosition, SubtitleSize, HdrOverlayBrightness};
 use plx_ui::form::{Form, FormId, FormSection, FormTable, RowKey, RowKind};
 use plx_ui::frame::Budget;
 use plx_machine::machine::{Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId,
@@ -47,9 +48,11 @@ impl PickerKind {
         Self::RatingSource => plx_platform::i18n::msg::settings_ratings_title(),
         Self::Quality => plx_platform::i18n::msg::settings_playback_quality(), Self::DirectPlay => plx_platform::i18n::msg::settings_playback_direct_play(),
         Self::SubtitleSize => plx_platform::i18n::msg::settings_playback_subtitle_size(), Self::SubtitlePosition => plx_platform::i18n::msg::settings_playback_subtitle_position(),
+        Self::HdrOverlay => plx_platform::i18n::msg::settings_playback_hdr_overlay(),
         Self::NextEpisode => plx_platform::i18n::msg::settings_playback_next_episode(),
         Self::DeckPress => plx_platform::i18n::msg::settings_playback_deck_press(),
         Self::SkipInterval => plx_platform::i18n::msg::settings_playback_skip_interval(),
+        Self::UiResolution => plx_platform::i18n::msg::settings_resolution_title(),
         Self::AudioLanguage => plx_platform::i18n::msg::settings_audio_language(), Self::SubtitleMode => plx_platform::i18n::msg::settings_audio_subtitles(),
         Self::SubtitleLanguage => plx_platform::i18n::msg::settings_audio_subtitle_language(), Self::ForcedSubtitles => plx_platform::i18n::msg::settings_audio_forced_subtitles(),
     }}
@@ -61,17 +64,24 @@ impl PickerKind {
         Self::DirectPlay => plx_platform::i18n::msg::settings_playback_direct_play_copy(),
         Self::SubtitleSize => plx_platform::i18n::msg::settings_playback_subtitle_size_copy(),
         Self::SubtitlePosition => plx_platform::i18n::msg::settings_playback_subtitle_position_copy(),
+        Self::HdrOverlay => plx_platform::i18n::msg::settings_playback_hdr_overlay_copy(),
         Self::NextEpisode => plx_platform::i18n::msg::settings_playback_next_episode_copy(),
         Self::DeckPress => plx_platform::i18n::msg::settings_playback_deck_press_copy(),
         Self::SkipInterval => plx_platform::i18n::msg::settings_playback_skip_interval_copy(),
+        Self::UiResolution => plx_platform::i18n::msg::settings_resolution_detail(),
         Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => plx_platform::i18n::msg::settings_audio_account_note(),
     }}
-    /// The field-list page this field belongs to.
-    fn kind(self) -> Kind {
+    /// The field-list page this field belongs to; `None` for a field the Settings root lists itself.
+    fn kind(self) -> Option<Kind> {
         match self {
-            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::NextEpisode | Self::DeckPress | Self::SkipInterval | Self::RatingSource => Kind::Playback,
-            Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => Kind::AudioSubtitles,
+            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::HdrOverlay | Self::NextEpisode | Self::DeckPress | Self::SkipInterval | Self::RatingSource => Some(Kind::Playback),
+            Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => Some(Kind::AudioSubtitles),
+            Self::UiResolution => None,
         }
+    }
+    /// The crumb over this field's picker: the title of the page it was opened from.
+    fn parent_title(self) -> &'static str {
+        self.kind().map_or(plx_platform::i18n::msg::settings_title(), Kind::title)
     }
 }
 impl Kind {
@@ -85,7 +95,7 @@ impl Kind {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), Language(String), Mode(i64), Forced(i64), P2pEnabled(bool), P2pServer(Option<String>) }
+enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), HdrOverlay(HdrOverlayBrightness), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), UiResolution(UiResolution), Language(String), Mode(i64), Forced(i64), P2pEnabled(bool), P2pServer(Option<String>) }
 
 /// The hashed half of a transaction: what the page shows while a load or save is in flight.
 struct Io { busy: bool, status: String }
@@ -102,20 +112,57 @@ impl Subject {
     }
 }
 
+/// **Whose settings the Playback page shows.** Its rows are the seated profile's own picks
+/// (`session::Seat`), so the page names that profile; while nobody is seated (a normal session always has one, because
+/// Settings is opened through a profile; `Seat` lists the unseated states, among them a dev-token run and a controlled
+/// replay) the rows show the legacy fallback values and the data layer refuses
+/// a write, so the page shows them read-only instead of offering a pick that cannot land.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Whose { Nobody, Profile(String) }
+impl Whose {
+    /// The seated profile as the profile chip names it (`chrome.rs`): the active profile's title,
+    /// else the roster's owner, else the Account label of a signed-in owner with no name. It reads
+    /// the chip's own session accessors; `account_menu::chip_label` is that rule, but a screen never
+    /// names a sibling. A seat implies a signed-in account, so the chip's signed-out arm (the Sign
+    /// in label) cannot be this page's. Returns the publication generation it read, to notice a change.
+    fn now() -> (u32, Self) {
+        let profile = plx_plex::plex::session::current_snapshot();
+        if profile.seat() == plx_plex::plex::session::Seat::Unseated { return (profile.generation, Self::Nobody); }
+        let account = plx_plex::plex::session::peek().account(profile.user.as_ref());
+        let name = account.name.unwrap_or_else(|| plx_platform::i18n::msg::settings_account_title().to_string());
+        (profile.generation, Self::Profile(name))
+    }
+    /// The Playback list's Profile rows cannot be changed.
+    fn read_only(&self, kind: Kind) -> bool { kind == Kind::Playback && *self == Self::Nobody }
+}
+
 /// The copy under the title: the failure / progress status (with the Force note while Forced is
-/// on and matters here), else the Force note itself, else the subject's own explanation — a
-/// picker explains its own setting, never its page's.
-fn copy_text<'a>(subject: Subject, status: &'a str, direct_play: DirectPlayMode) -> Cow<'a, str> {
+/// on and matters here), else the subject's own explanation, with the Force note replacing it on
+/// the two pickers Force overrides — a picker explains its own setting, never its page's. The
+/// Playback page's own explanation names the profile whose settings these are (`whose`), or says
+/// to choose one; under Force it keeps a shorter profile sentence, followed by the Force note in
+/// the same paragraph (the text view draws no line break); nobody seated: the rows are
+/// read-only, so only the line.
+fn copy_text<'a>(subject: Subject, status: &'a str, direct_play: DirectPlayMode, whose: &Whose) -> Cow<'a, str> {
     let forced = direct_play == DirectPlayMode::Forced && subject.overridden_by_force();
     if !status.is_empty() {
         return if forced {
             Cow::Owned(format!("{}\n\n{}", status, plx_platform::i18n::msg::settings_playback_force_note()))
         } else { Cow::Borrowed(status) };
     }
+    if subject == Subject::Page(Kind::Playback) {
+        // The page's own line wins over the bare Force note: Settings has no other place that names
+        // the profile, and with nobody seated the Force advice cannot be acted on from read-only rows.
+        return match whose {
+            Whose::Nobody => Cow::Borrowed(plx_platform::i18n::msg::settings_playback_unseated()),
+            Whose::Profile(name) if forced => Cow::Owned(format!("{} {}", plx_platform::i18n::msg::settings_playback_copy_profile_forced(name),
+                plx_platform::i18n::msg::settings_playback_force_note())),
+            Whose::Profile(name) => Cow::Owned(plx_platform::i18n::msg::settings_playback_copy_profile(name)),
+        };
+    }
     if forced { return Cow::Borrowed(plx_platform::i18n::msg::settings_playback_force_note()); }
     Cow::Borrowed(match subject {
-        Subject::Page(Kind::AudioSubtitles) => plx_platform::i18n::msg::settings_audio_account_note(),
-        Subject::Page(Kind::Playback) => plx_platform::i18n::msg::settings_playback_copy(),
+        Subject::Page(_) => plx_platform::i18n::msg::settings_audio_account_note(),
         Subject::Picker(field) => field.copy(),
     })
 }
@@ -208,14 +255,20 @@ impl Txn {
     fn save_local(&mut self, io: &mut Io, value: Value, fx: &mut Effects<'_, InnerHost>) {
         let (reply, rx) = mpsc::channel();
         let command = match value {
+            Value::Quality(quality) => PreferenceCmd::Choose(Choice::Quality(quality), reply),
+            Value::DirectPlay(mode) => PreferenceCmd::Choose(Choice::DirectPlay(mode), reply),
+            Value::SubtitleSize(size) => PreferenceCmd::Choose(Choice::SubtitleSize(size), reply),
+            Value::SubtitlePosition(position) => PreferenceCmd::Choose(Choice::SubtitlePosition(position), reply),
+            Value::HdrOverlay(brightness) => PreferenceCmd::Choose(Choice::HdrOverlayBrightness(brightness), reply),
+            Value::NextEpisode(mode) => PreferenceCmd::Choose(Choice::NextEpisode(mode), reply),
+            Value::DeckPress(mode) => PreferenceCmd::Choose(Choice::DeckPress(mode), reply),
+            Value::SkipInterval(interval) => PreferenceCmd::Choose(Choice::SkipInterval(interval), reply),
+            // Install-wide, not a seated profile's live setting, so it has no `Choice`.
+            Value::UiResolution(mode) => PreferenceCmd::UiResolution { mode, reply },
+            // **FORK (nuvio):** the account file's own settings, which the media route's
+            // `Choice` does not carry — the ratings source and the two P2P rows. They write
+            // through the shim's live policy, not through a Plex preference.
             Value::RatingSource(source) => PreferenceCmd::RatingSource { source, reply },
-            Value::Quality(quality) => PreferenceCmd::Quality { quality, reply },
-            Value::DirectPlay(mode) => PreferenceCmd::DirectPlay { mode, reply },
-            Value::SubtitleSize(size) => PreferenceCmd::SubtitleSize { size, reply },
-            Value::SubtitlePosition(position) => PreferenceCmd::SubtitlePosition { position, reply },
-            Value::NextEpisode(mode) => PreferenceCmd::NextEpisode { mode, reply },
-            Value::DeckPress(mode) => PreferenceCmd::DeckPress { mode, reply },
-            Value::SkipInterval(interval) => PreferenceCmd::SkipInterval { interval, reply },
             Value::P2pEnabled(on) => PreferenceCmd::P2pEnabled { on, reply },
             Value::P2pServer(url) => PreferenceCmd::P2pServer { url, reply },
             _ => return,
@@ -291,7 +344,10 @@ impl FormId for RowId {
             Self::Field(PickerKind::NextEpisode) => 4,
             Self::Field(PickerKind::SkipInterval) => 5,
             Self::Field(PickerKind::DeckPress) => 7,
-            Self::Field(PickerKind::RatingSource) => 8,
+            Self::Field(PickerKind::HdrOverlay) => 8,
+            Self::Field(PickerKind::RatingSource) => 11,
+            // Listed on the Settings root, never on a field list; the number only keeps the match total.
+            Self::Field(PickerKind::UiResolution) => 9,
             Self::Retry => 6,
             Self::P2pToggle => 9,
             Self::P2pServer => 10,
@@ -325,13 +381,15 @@ pub struct PreferencesPage {
     /// The caption Size/Position the rows were last built from. Not canonical state: it only
     /// notices a pick made elsewhere (the player's Style pages, or this page's picker, which
     /// publish the live value before their write lands) so the cached read-outs are rebuilt.
-    look: (SubtitleSize, SubtitlePosition),
+    look: (SubtitleSize, SubtitlePosition, HdrOverlayBrightness),
     /// The next-episode mode, deck press and skip interval the rows were last built from (not
     /// canonical state, like `look`).
     next_episode: NextEpisodeMode,
     deck_press: DeckPress,
     skip_interval: SkipInterval,
-    rating_source: plx_plex::plex::session::RatingSource,
+    /// Whose settings the list was last built for, with the profile publication it read that from
+    /// (not canonical state, like `look`: the copy and the rows' dimming are not hashed either).
+    whose: (u32, Whose),
     /// The P2P switch and engine URL the rows were last built from (not canonical state, like
     /// `look`), so a save landing elsewhere rebuilds the two P2P rows.
     p2p: (bool, Option<String>),
@@ -345,9 +403,9 @@ impl PreferencesPage {
             state: State { kind, selected: 0, io: Io { busy: false, status: String::new() },
                 quality: plx_media::route::quality(), direct_play: plx_media::route::direct_play_mode(), values: Vec::new() },
             copy: String::new(), txn: Txn::new(false),
-            look: (plx_media::route::subtitle_size(), plx_media::route::subtitle_position()),
+            look: (plx_media::route::subtitle_size(), plx_media::route::subtitle_position(), plx_media::route::hdr_overlay_brightness()),
             next_episode: plx_media::route::next_episode_mode(), deck_press: plx_media::route::deck_press(),
-            skip_interval: plx_media::route::skip_interval(), rating_source: plx_plex::plex::nuvio::rating_source(),
+            skip_interval: plx_media::route::skip_interval(), whose: Whose::now(),
             p2p: plx_plex::plex::nuvio::p2p(), draft: None };
         s.rebuild(None);
         s
@@ -372,19 +430,18 @@ impl PreferencesPage {
     fn rebuild(&mut self, keep: Option<RowId>) {
         self.state.quality = plx_media::route::quality();
         self.state.direct_play = plx_media::route::direct_play_mode();
-        self.look = (plx_media::route::subtitle_size(), plx_media::route::subtitle_position());
+        self.look = (plx_media::route::subtitle_size(), plx_media::route::subtitle_position(), plx_media::route::hdr_overlay_brightness());
         self.next_episode = plx_media::route::next_episode_mode();
         self.deck_press = plx_media::route::deck_press();
         self.skip_interval = plx_media::route::skip_interval();
-        self.rating_source = plx_plex::plex::nuvio::rating_source();
         self.p2p = plx_plex::plex::nuvio::p2p();
-        self.copy = copy_text(Subject::Page(self.state.kind), &self.state.io.status, self.state.direct_play).into_owned();
-        // The draft's text outlives the borrow `FieldListInputs` takes of it: `form.set` below needs
-        // the page mutably, and the row read-out is the one thing built from the page's own state.
+        self.whose = Whose::now();
+        self.copy = copy_text(Subject::Page(self.state.kind), &self.state.io.status, self.state.direct_play, &self.whose.1).into_owned();
         let draft = self.draft.as_ref().map(|d| d.text().to_owned());
         let inputs = FieldListInputs {
             kind: self.state.kind, quality: self.state.quality, direct_play: self.state.direct_play,
             prefs: self.txn.prefs(), busy: self.state.io.busy, show_retry: !self.state.io.status.is_empty(),
+            read_only: self.whose.1.read_only(self.state.kind),
             p2p: self.p2p.clone(), p2p_draft: draft.as_deref(),
         };
         self.state.values = fields_of(&inputs).iter()
@@ -485,7 +542,7 @@ impl PreferencesPage {
 /// Which fields `kind`'s list shows: Audio & Subtitles has none until a snapshot has loaded.
 fn fields_of(inputs: &FieldListInputs<'_>) -> &'static [PickerKind] {
     match inputs.kind {
-        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::RatingSource],
+        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval],
         Kind::AudioSubtitles if inputs.prefs.is_some() => &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles],
         _ => &[],
     }
@@ -499,9 +556,11 @@ fn resolve_value(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
         PickerKind::DirectPlay => Value::DirectPlay(direct_play),
         PickerKind::SubtitleSize => Value::SubtitleSize(plx_media::route::subtitle_size()),
         PickerKind::SubtitlePosition => Value::SubtitlePosition(plx_media::route::subtitle_position()),
+        PickerKind::HdrOverlay => Value::HdrOverlay(plx_media::route::hdr_overlay_brightness()),
         PickerKind::NextEpisode => Value::NextEpisode(plx_media::route::next_episode_mode()),
         PickerKind::DeckPress => Value::DeckPress(plx_media::route::deck_press()),
         PickerKind::SkipInterval => Value::SkipInterval(plx_media::route::skip_interval()),
+        PickerKind::UiResolution => Value::UiResolution(plx_plex::plex::session::peek().ui_resolution()),
         // A deprecated code (`pb`) resolves to its replacement so the picker checks that entry.
         PickerKind::AudioLanguage => Value::Language(prefs.and_then(|p| p.stated_language.as_deref()).map(plx_plex::plex::languages::canonical).unwrap_or_default().to_string()),
         PickerKind::SubtitleLanguage => Value::Language(prefs.and_then(|p| p.subtitle_language.as_deref()).map(plx_plex::plex::languages::canonical).unwrap_or_default().to_string()),
@@ -524,12 +583,16 @@ fn field_options(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
             .map(|s| (subtitle_size_label(s).into(), Value::SubtitleSize(s))).collect(),
         PickerKind::SubtitlePosition => SubtitlePosition::LADDER.into_iter()
             .map(|p| (subtitle_position_label(p).into(), Value::SubtitlePosition(p))).collect(),
+        PickerKind::HdrOverlay => HdrOverlayBrightness::LADDER.into_iter()
+            .map(|b| (hdr_overlay_label(b).into(), Value::HdrOverlay(b))).collect(),
         PickerKind::NextEpisode => NextEpisodeMode::LADDER.into_iter()
             .map(|m| (next_episode_label(m).into(), Value::NextEpisode(m))).collect(),
         PickerKind::DeckPress => DeckPress::LADDER.into_iter()
             .map(|m| (deck_press_label(m).into(), Value::DeckPress(m))).collect(),
         PickerKind::SkipInterval => SkipInterval::LADDER.into_iter()
             .map(|i| (skip_interval_label(i), Value::SkipInterval(i))).collect(),
+        PickerKind::UiResolution => UiResolution::LADDER.into_iter()
+            .map(|m| (resolution_label(m), Value::UiResolution(m))).collect(),
         PickerKind::SubtitleMode => [(plx_platform::i18n::msg::settings_audio_manual(), 0), (plx_platform::i18n::msg::settings_audio_foreign(), 1), (plx_platform::i18n::msg::settings_audio_always(), 2)]
             .into_iter().map(|(label, mode)| (label.into(), Value::Mode(mode))).collect(),
         PickerKind::ForcedSubtitles => [plx_platform::i18n::msg::settings_audio_prefer_regular(), plx_platform::i18n::msg::settings_audio_prefer_forced(), plx_platform::i18n::msg::settings_audio_only_forced(), plx_platform::i18n::msg::settings_audio_only_regular()]
@@ -559,6 +622,7 @@ fn field_readout(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
         PickerKind::SubtitleMode if prefs.is_some_and(|p| p.subtitle_mode == 1) => plx_platform::i18n::msg::settings_audio_foreign_short().into(),
         PickerKind::SubtitleSize => subtitle_size_label(plx_media::route::subtitle_size()).into(),
         PickerKind::SubtitlePosition => subtitle_position_label(plx_media::route::subtitle_position()).into(),
+        PickerKind::HdrOverlay => hdr_overlay_label(plx_media::route::hdr_overlay_brightness()).into(),
         _ => {
             let current = resolve_value(field, quality, direct_play, prefs);
             field_options(field, quality, direct_play, prefs).into_iter().find(|(_, v)| *v == current)
@@ -568,35 +632,12 @@ fn field_readout(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
 }
 
 /// The inputs [`field_form`] builds a `Kind`'s field list from, so the builder reads no global.
-struct FieldListInputs<'a> {
-    kind: Kind,
-    quality: Quality,
-    direct_play: DirectPlayMode,
-    /// The signed-in account's audio/subtitle preferences, once a snapshot has loaded.
-    prefs: Option<&'a AudioPreferences>,
-    busy: bool,
-    /// Show the Retry row: the account kind has a non-empty status message and nothing is in flight.
-    show_retry: bool,
-    /// Settings > Playback's P2P switch and engine URL (`nuvio::p2p`).
-    p2p: (bool, Option<String>),
-    /// The URL being typed on the Playback page, while the television's keyboard is up.
-    p2p_draft: Option<&'a str>,
-}
-/// The Server URL row's read-out when it is not being typed: the saved address, else the local
-/// engine's default ports. An empty field is a choice, not a missing value.
 fn p2p_server_readout(url: Option<&str>) -> String {
     url.filter(|u| !u.trim().is_empty()).map_or_else(|| plx_platform::i18n::msg::settings_playback_p2p_default().into(), str::to_owned)
 }
-/// The Server URL row's read-out in every state, draft included.
-///
-/// **The read-out IS the field while the television's keyboard is up.** A [`Row`] is a label, a
-/// sub-line and a trailing read-out — it has no text widget of its own — so the caret after the
-/// value is the only thing that says "your keystrokes land here", and it must be drawn or the row
-/// looks inert while it is in fact taking input.
 fn p2p_server_value(url: Option<&str>, draft: Option<&str>) -> String {
     draft.map_or_else(|| p2p_server_readout(url), |d| format!("{d}|"))
 }
-/// The Playback page's own P2P section: the switch, then the engine address it applies to.
 fn p2p_section(inputs: &FieldListInputs<'_>) -> FormSection<RowId, Action, SettingsPage> {
     let (on, ref url) = inputs.p2p;
     let editing = inputs.p2p_draft.is_some();
@@ -606,11 +647,25 @@ fn p2p_section(inputs: &FieldListInputs<'_>) -> FormSection<RowId, Action, Setti
             Row::new(plx_platform::i18n::msg::settings_playback_p2p_enable())
                 .detail(plx_platform::i18n::msg::settings_playback_p2p_enable_detail())
                 .toggle(on).dim(inputs.busy))
-        // No chevron while editing: the row is not a door then, it is the field.
         .item(RowId::P2pServer, RowKind::Button, Action::EditP2pServer,
             Row::new(plx_platform::i18n::msg::settings_playback_p2p_server())
                 .detail(plx_platform::i18n::msg::settings_playback_p2p_server_detail())
                 .value(&readout).chevron(!editing).dim(inputs.busy))
+}
+
+struct FieldListInputs<'a> {
+    kind: Kind,
+    quality: Quality,
+    direct_play: DirectPlayMode,
+    /// The signed-in account's audio/subtitle preferences, once a snapshot has loaded.
+    prefs: Option<&'a AudioPreferences>,
+    busy: bool,
+    /// Show the Retry row: the account kind has a non-empty status message and nothing is in flight.
+    show_retry: bool,
+    /// The field rows are shown but cannot be opened: no profile is seated to own a pick.
+    read_only: bool,
+    p2p: (bool, Option<String>),
+    p2p_draft: Option<&'a str>,
 }
 /// The page's field list as a [`Form`]: each field a `Nav` item onto its picker page, plus the
 /// Audio & Subtitles Retry button, built from [`FieldListInputs`] alone.
@@ -625,7 +680,8 @@ fn field_form(inputs: &FieldListInputs<'_>) -> Form<RowId, Action, SettingsPage>
         if field == PickerKind::AudioLanguage && inputs.prefs.is_some_and(|p| p.auto_select_audio == Some(false)) {
             row = row.detail(plx_platform::i18n::msg::settings_audio_selection_off());
         }
-        section = section.item(RowId::Field(field), RowKind::Nav(SettingsPage::Picker(field)), Action::Open, row);
+        section = section.item(RowId::Field(field), RowKind::Nav(SettingsPage::Picker(field)), Action::Open, row)
+            .disabled(inputs.read_only);
     }
     section = section.item_if(inputs.kind == Kind::AudioSubtitles && !inputs.busy && inputs.show_retry,
         RowId::Retry, RowKind::Button, Action::Retry,
@@ -642,6 +698,13 @@ fn mode_label(mode: DirectPlayMode) -> &'static str {
     match mode { DirectPlayMode::Auto => plx_platform::i18n::msg::settings_playback_auto(), DirectPlayMode::Forced => plx_platform::i18n::msg::settings_playback_forced(), DirectPlayMode::Disabled => plx_platform::i18n::msg::settings_playback_disabled() }
 }
 use plx_appkit::track_menu::{subtitle_position_label, subtitle_size_label};
+fn hdr_overlay_label(brightness: HdrOverlayBrightness) -> &'static str {
+    match brightness {
+        HdrOverlayBrightness::Full => plx_platform::i18n::msg::settings_playback_hdr_overlay_full(),
+        HdrOverlayBrightness::ThreeQuarters => plx_platform::i18n::msg::settings_playback_hdr_overlay_three_quarters(),
+        HdrOverlayBrightness::Half => plx_platform::i18n::msg::settings_playback_hdr_overlay_half(),
+    }
+}
 fn next_episode_label(mode: NextEpisodeMode) -> &'static str {
     match mode {
         NextEpisodeMode::Countdown => plx_platform::i18n::msg::settings_playback_next_episode_countdown(),
@@ -653,6 +716,14 @@ fn deck_press_label(mode: DeckPress) -> &'static str {
     match mode {
         DeckPress::Details => plx_platform::i18n::msg::settings_playback_deck_press_details(),
         DeckPress::Play => plx_platform::i18n::msg::settings_playback_deck_press_play(),
+    }
+}
+/// What the Interface resolution reads, on the Settings root and in its picker. The sizes are
+/// numbers, not words, so only Automatic (the native 1920x1080 canvas on every set) is translated.
+pub(crate) fn resolution_label(mode: UiResolution) -> String {
+    match mode.size() {
+        None => plx_platform::i18n::msg::settings_resolution_auto().to_string(),
+        Some((w, h)) => format!("{w}x{h}"),
     }
 }
 fn skip_interval_label(interval: SkipInterval) -> String {
@@ -698,12 +769,11 @@ impl Machine<InnerHost> for PreferencesPage {
                 let landed = self.txn.poll(&mut self.state.io, fx) != Landed::Nothing;
                 if landed || stale || started || adopted || self.state.quality != plx_media::route::quality()
                     || self.state.direct_play != plx_media::route::direct_play_mode()
-                    || self.look != (plx_media::route::subtitle_size(), plx_media::route::subtitle_position())
+                    || self.look != (plx_media::route::subtitle_size(), plx_media::route::subtitle_position(), plx_media::route::hdr_overlay_brightness())
                     || self.next_episode != plx_media::route::next_episode_mode()
                     || self.deck_press != plx_media::route::deck_press()
                     || self.skip_interval != plx_media::route::skip_interval()
-                    || self.rating_source != plx_plex::plex::nuvio::rating_source()
-                    || self.p2p != plx_plex::plex::nuvio::p2p() {
+                    || self.whose.0 != plx_plex::plex::session::current_gen() {
                     self.rebuild_keeping();
                     // An empty loading table had no engine seat. Give its first landing (or
                     // Retry row) one so OK works immediately, without moving an existing
@@ -768,7 +838,7 @@ impl Screen<InnerHost> for PreferencesPage {
 pub fn nav_items_for_test(kind: Kind, prefs: Option<&AudioPreferences>) -> Vec<(u32, SettingsPage)> {
     let mut form: FormTable<RowId, Action, SettingsPage> = FormTable::new(BAND);
     form.set(field_form(&FieldListInputs { kind, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs, busy: false, show_retry: false, p2p: (false, None), p2p_draft: None }), None);
+        prefs, busy: false, show_retry: false, read_only: false, p2p: (false, None), p2p_draft: None }), None);
     (0..form.table.n_rows() as usize).filter_map(|i| match form.binding_at(i)?.kind.clone() {
         RowKind::Nav(dest) => Some((form.key_at(i)?.0, dest)),
         _ => None,

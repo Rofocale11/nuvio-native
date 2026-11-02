@@ -24,8 +24,7 @@ use plx_ui::screen::By;
 fn a_page_keyboard_request_survives_forward_addressed_to_the_surface() {
     let _g = plx_base::testlock::serial();
     let _sess = scratch_session("surface-keyboard-forward");
-    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Playback,
-        plx_data::pms::HubsSnapshot::empty_for_test().view());
+    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Playback);
     step(&mut s, ScreenEvent::Mount, None);
     let page = s.inner.top().unwrap().inst.as_ref().unwrap().id;
     assert_ne!(page, s.id, "the harness is pointless if the page is the surface");
@@ -43,8 +42,7 @@ fn a_page_keyboard_request_survives_forward_addressed_to_the_surface() {
 fn only_current_inner_instance_can_project_remembered_selection() {
     let _g = plx_base::testlock::serial();
     let _sess = scratch_session("inner-remember-owner");
-    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root,
-        plx_data::pms::HubsSnapshot::empty_for_test().view());
+    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root);
     step(&mut s, ScreenEvent::Mount, None);
     let covered = s.inner.top().unwrap().inst.as_ref().unwrap().id;
     forwarded(&mut s, Fx::Nav(NavOp::Push(SettingsPage::Legal)));
@@ -83,9 +81,7 @@ fn a_pop_that_would_empty_the_stack_dismisses_the_surface_instead() {
         EntryId(7),
         InstanceId(0),
         Family::Settings,
-        SettingsPage::Privacy,
-    
-        plx_data::pms::HubsSnapshot::empty_for_test().view(),
+        SettingsPage::Privacy
     );
     step(&mut s, ScreenEvent::Mount, None);
     assert_eq!(
@@ -123,9 +119,7 @@ fn a_pop_with_a_page_under_it_pops_the_inner_stack_and_stays_up() {
         EntryId(7),
         InstanceId(0),
         Family::Settings,
-        SettingsPage::Root,
-    
-        plx_data::pms::HubsSnapshot::empty_for_test().view(),
+        SettingsPage::Root
     );
     step(&mut s, ScreenEvent::Mount, None);
     let legal_row = FocusKey {
@@ -184,9 +178,7 @@ fn the_remembered_seats_are_part_of_the_hash() {
         EntryId(0),
         InstanceId(0),
         Family::Settings,
-        SettingsPage::Root,
-    
-        plx_data::pms::HubsSnapshot::empty_for_test().view(),
+        SettingsPage::Root
     );
     step(&mut seated, ScreenEvent::Mount, None);
     step(
@@ -208,9 +200,7 @@ fn the_remembered_seats_are_part_of_the_hash() {
         EntryId(0),
         InstanceId(0),
         Family::Settings,
-        SettingsPage::Root,
-    
-        plx_data::pms::HubsSnapshot::empty_for_test().view(),
+        SettingsPage::Root
     );
     step(&mut unseated, ScreenEvent::Mount, None);
     step(

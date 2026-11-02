@@ -78,6 +78,16 @@ fn synthetic_collection_id(rk: i64) -> Option<u64> {
 - A collection key is a **`ratingKey`** for a franchise row — it is never sent to an addon (nothing
   plays a collection), and it exists so the shelf's linked heading can open the collection page.
 
+## The Watchlist's catalog id
+
+A title's Watchlist identity is its catalog id: a discover item's `plex://movie|show/<24 hex>`, or,
+for a Nuvio title with no discover id, the shim's numeric key written as `NVIO` plus the key in the
+same 12 bytes (`plex::hex_of_rating_key`). Home, Detail and the Watchlist all derive the same value
+(`Metadata::guid_hex`, `Detail::watchlist_hex`, `catalog_hex_of_item`), so one membership answer
+serves every surface. The Watchlist row's guid is `plex://movie|show/<that hex>`, which is what the
+match pipeline and the item menu already understand; the real Stremio id never has to leave the
+shim.
+
 Every synthetic kind is handled on the way back in by `/library/metadata/{rk}`: parse the key,
 decode it with the matching helper, fetch TMDB, and return the enriched Plex row
 (`tmdb_details_row` for movies, `tmdb_show_details_row` for shows, `collection_row` for a
