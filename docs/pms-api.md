@@ -249,6 +249,28 @@ the spec but **this server does not emit it on `Role[]`** — treat 0 as unknown
   passes the whole URL as `url=` to `/photo/:/transcode` and **the server does the TLS** — the
   same path posters take. Never invent another image route for them.
 
+**NuvioNative's shim answers the person page itself.** Everything above describes a real PMS and
+plex.tv. Here the shim is the one metadata provider, so `Role[]` rows carry a synthetic
+`tagKey` — `nuvio-person-<TMDB person id>` — and the two GLOBAL reads above are answered on the
+shim's own base rather than on `discover.provider.plex.tv`:
+
+- `GET /library/people/{guid}` (the `nuvio-person-…` form) → `MediaContainer.Metadata[0]` with
+  `title`, `summary` (TMDB biography), `bornAt`, `diedAt`, `birthPlace`, `knownFor`, `thumb` and
+  `CreditType[]` (cast count + each crew department, most-credits-first).
+- `GET /library/people/{guid}/credits` → `MediaContainer.CreditGroup[]` from TMDB
+  `combined_credits`: the cast group first (`type:"actor"`), then one group per crew department
+  (Directing/Writing/Production take Plex's "Director"/"Writer"/"Producer" names, and TMDB's
+  catch-all `Crew` bucket becomes "Other"). Each
+  `Credit.Metadata.ratingKey` is `tmdb:<id>` — the tail of the shim row's
+  `nuvio://movie|series/tmdb:<id>` guid, which is what the availability join compares.
+- `GET /library/people/{personId}/media` is unchanged and still gives the Movies/Shows shelves;
+  the numeric synthetic key on `Role[].id` is what addresses it.
+- `plex::account::discover()` follows the installed local server (`plx_base::local_server`) before
+  any trigger or the real host, so these reads never need a plex.tv credential — and a dev-token
+  boot is not refused, because the shim is a stand-in by construction.
+- An unknown guid (including an empty one) is a `200` with an empty `Metadata` / `CreditGroup`,
+  exactly the provider's "never heard of them" answer the page settles on.
+
 ---
 
 ## 2d. Which of these guids does this server hold? — `GET /library/all?type=T&guid=a,b,c`

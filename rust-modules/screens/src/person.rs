@@ -1800,7 +1800,7 @@ mod tests {
     }
 
     /// **The mount-on-entry-pill rule's PENDING half** (module doc, point 2 of `ui/person.rs`'s
-    /// own doc): with no filmography answered yet but a guid to ask plex.tv with,
+    /// own doc): with no filmography answered yet but a guid to ask Discover with,
     /// `entry_reachable_of` holds the entry group open even though `has_entry_of` is false — which
     /// is exactly what lets a fresh mount's default `FirstInGroup(GroupId(0))` target
     /// (`ENTRY_GROUP`) have somewhere to land before credits have answered at all.

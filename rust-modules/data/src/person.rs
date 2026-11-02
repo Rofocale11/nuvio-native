@@ -44,12 +44,14 @@
 //!   [`address`] expresses that by keying it on that source's shelf keys, which are empty until
 //!   then. Per source, because a `ratingKey` csv means nothing on another machine, and filtered on
 //!   the SOURCE's own local id, not the origin's.
-//! * **[`F_PROFILE`]** — the biography, from plex.tv: `GET
-//!   discover.provider.plex.tv/library/people/{tagKey}` over the TLS+DNS `net.rs` path (see
-//!   `plex/discover.rs` for the wire facts). **Deliberately still single.** It is already GLOBAL —
-//!   plex.tv answers about the person, not about anybody's library — so fanning it out would be the
-//!   same request N times for one answer.
-//! * **[`F_CREDITS`]** — the filmography, from the same host: `GET
+//! * **[`F_PROFILE`]** — the biography, from Discover: `GET
+//!   {discover}/library/people/{tagKey}` over the TLS+DNS `net.rs` path (see `plex/discover.rs`
+//!   for the wire facts). On a real install that is plex.tv; under Nuvio it is the in-process
+//!   shim (`plex::account::discover` follows the installed local server), which answers the same
+//!   shape from TMDB. **Deliberately still single.** It is already GLOBAL — the provider answers
+//!   about the person, not about anybody's library — so fanning it out would be the same request
+//!   N times for one answer.
+//! * **[`F_CREDITS`]** — the filmography, from the same base: `GET
 //!   …/library/people/{tagKey}/credits` → `CreditGroup[]`. Global for exactly [`F_PROFILE`]'s
 //!   reason and then some, since a person's CAREER is not a fact any server has an opinion about.
 //!   What the servers contribute to it is the availability JOIN, and that rides on the [`K_MEDIA`]
@@ -72,9 +74,11 @@
 //! **The three id spaces are not interchangeable.** [`Person::key`] is the ORIGIN server's local
 //! `personId` (the numeric `Tag::id`, or its `tagKey` when that server omitted the number) and
 //! addresses `/media` **on `Person::sid` only**; [`Src::local`] is the same thing for every other
-//! source, resolved rather than given; [`Person::guid`] is the `tagKey` and is the ONLY thing
-//! plex.tv answers to — the numeric id 404s there (`"Invalid value provided for metadataId!"`).
-//! Keep all three; do not collapse them.
+//! source, resolved rather than given; [`Person::guid`] is the `tagKey` — plex.tv's global person
+//! guid on a real install, or the shim's `nuvio-person-<TMDB id>` — and is the ONLY thing the
+//! biography and credits endpoints answer to (plex.tv 404s a numeric id: `"Invalid value provided
+//! for metadataId!"`; the shim's two routes take this guid and nothing else). Keep all three; do
+//! not collapse them.
 use plx_plex::plex::{Hub, ServerId, Tag};
 use crate::pms::{parse_item, PmsMovie};
 use std::panic::catch_unwind;

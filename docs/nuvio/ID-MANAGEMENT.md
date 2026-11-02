@@ -75,6 +75,13 @@ fn synthetic_collection_id(rk: i64) -> Option<u64> {
   movie.
 - A person key is a **`personId`, not a `ratingKey`** — it travels in `Role[].id` on a cast row,
   which is what the app's cast shelf reads to open `/library/people/{id}/media` (see `TMDB.md`).
+- A person has a **second, global identity**: the `tagKey` on the same `Role[]` row. On a real
+  install that is plex.tv's person guid and Discover answers the biography and filmography under
+  it. Under Nuvio it is the string `nuvio-person-<TMDB person id>`, and the shim answers both
+  routes (`/library/people/{guid}`, `/library/people/{guid}/credits`) from TMDB. The numeric
+  `personId` addresses `/media`; the guid addresses the page's two global reads. Do not substitute
+  one for the other — the person store asks for both, and an empty `tagKey` settles the page at
+  portrait + shelves.
 - A collection key is a **`ratingKey`** for a franchise row — it is never sent to an addon (nothing
   plays a collection), and it exists so the shelf's linked heading can open the collection page.
 

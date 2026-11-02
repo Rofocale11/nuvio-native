@@ -165,18 +165,40 @@ fn discover_resolved() -> DiscoverBase {
     read_discover()
 }
 
-/// The Discover provider's base URL: [`DISCOVER`], or, in a dev build only, a loopback stand-in —
-/// the `/tmp/plxnative-discover` trigger, else the one `plxnative-plextv` already redirects plex.tv
-/// to ([`DiscoverSource::FollowsPlexTv`]). **The one copy**: the person profile and credits
+/// The Discover provider's base URL: **the in-process shim when this build runs Nuvio**
+/// ([`plx_base::local_server`]), else, in a dev build only, a loopback stand-in — the
+/// `/tmp/plxnative-discover` trigger, else the one `plxnative-plextv` already redirects plex.tv to
+/// ([`DiscoverSource::FollowsPlexTv`]). **The one copy**: the person profile and credits
 /// (`discover.rs`) and the Watchlist (`watchlist.rs`) both build their URLs on it, so a stand-in
 /// armed for one serves the other and neither can reach the real host behind the other's back.
+///
+/// The local server is read on every call rather than folded into the cached resolution, for the
+/// same reason [`plex_tv`] reads it there: the shim installs itself during boot, possibly after
+/// the first caller resolved a base, and a cached real host would put a Nuvio read on plex.tv with
+/// no credential to answer it — a data-boundary bug, not a degraded page.
 pub fn discover() -> String {
+    if let Some(local) = local_discover() {
+        return local;
+    }
     discover_resolved().base
+}
+
+/// The Discover base the installed local server names, if it is usable.
+fn local_discover() -> Option<String> {
+    resolve_local_base(plx_base::local_server::get().map(|local| local.origin.as_str()))
+}
+
+/// The pure half of [`local_discover`]: a local origin is followed only when it is plain `http` to
+/// a loopback address, the same rule every Discover trigger obeys.
+fn resolve_local_base(local: Option<&str>) -> Option<String> {
+    local
+        .filter(|base| loopback_http(base))
+        .map(|base| base.trim_end_matches('/').to_string())
 }
 
 /// Is a Discover stand-in in force (the base is not the real service)?
 pub(super) fn stand_in_armed() -> bool {
-    discover_resolved().source != DiscoverSource::Real
+    local_discover().is_some() || discover_resolved().source != DiscoverSource::Real
 }
 
 /// The dev-build failsafe for READS, [`watchlist`](super::watchlist)'s `permit_write` for the other
@@ -193,7 +215,8 @@ pub(super) fn stand_in_armed() -> bool {
 /// the real-PMS `--guest` scenes) shows no person biography and no filmography credits; the person
 /// page settles as for a person the provider has never heard of. To see them, arm the stand-in
 /// (`plxnative-discover`, or a loopback `plxnative-plextv`): `tests/mock_pms.py` answers with
-/// synthetic data.
+/// synthetic data. **The Nuvio build is never in that state**: the installed in-process shim is
+/// itself a stand-in ([`local_discover`]), and it answers both reads from TMDB.
 ///
 /// **A refusal is terminal.** It cannot change during the process (the trigger files and the
 /// dev-token boot are read once), so the person store asks [`super::discover::person_profile_refused`] /
@@ -210,7 +233,8 @@ fn permit_read(devtriggers_build: bool, token_boot: bool, armed: bool) -> bool {
 /// caller sends nothing.
 pub(super) fn discover_read_allowed(url: &str) -> bool {
     let resolved = discover_resolved();
-    if permit_read(cfg!(feature = "devtriggers"), resolved.token_boot, resolved.source != DiscoverSource::Real) {
+    let armed = local_discover().is_some() || resolved.source != DiscoverSource::Real;
+    if permit_read(cfg!(feature = "devtriggers"), resolved.token_boot, armed) {
         return true;
     }
     // The shapes fold REAL ids (all-digit or all-hex segments of 8 or more characters, so a
@@ -239,10 +263,14 @@ pub(super) fn discover_read_allowed(url: &str) -> bool {
 pub fn announce_discover() {
     let resolved = discover_resolved();
     #[cfg(feature = "devtriggers")]
-    plx_base::eventlog::log(&format!(
-        "discover: base={} reads={}",
-        if resolved.source == DiscoverSource::Real { "real" } else { "stand-in" },
-        if permit_read(true, resolved.token_boot, resolved.source != DiscoverSource::Real) { "open" } else { "refused" }));
+    {
+        let local = local_discover();
+        let armed = local.is_some() || resolved.source != DiscoverSource::Real;
+        plx_base::eventlog::log(&format!(
+            "discover: base={} reads={}",
+            if local.is_some() { "shim" } else if resolved.source == DiscoverSource::Real { "real" } else { "stand-in" },
+            if permit_read(true, resolved.token_boot, armed) { "open" } else { "refused" }));
+    }
     #[cfg(not(feature = "devtriggers"))]
     let _ = resolved;
 }
@@ -1646,9 +1674,21 @@ pub struct HomeUser {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_shape, pin_is_gone, AccountClient, Pin, Resource};
+    use super::{endpoint_shape, pin_is_gone, resolve_local_base, AccountClient, Pin, Resource};
     use super::{permit_read, resolve_discover, DiscoverSource, DISCOVER};
     use std::time::Duration;
+
+    /// The in-process shim is the Nuvio build's Discover provider, and it obeys the same loopback
+    /// rule every trigger does: an origin the shim did not install can never receive the reads.
+    #[test]
+    fn the_local_server_is_the_discover_base_only_when_it_is_plain_loopback_http() {
+        assert_eq!(resolve_local_base(Some("http://127.0.0.1:32420/")).as_deref(), Some("http://127.0.0.1:32420"));
+        assert_eq!(resolve_local_base(Some("http://localhost:32420")).as_deref(), Some("http://localhost:32420"));
+        for refused in ["https://127.0.0.1:32420", "http://plex.tv", "http://127.0.0.1", ""] {
+            assert_eq!(resolve_local_base(Some(refused)), None, "{refused}");
+        }
+        assert_eq!(resolve_local_base(None), None);
+    }
 
     #[test]
     fn discover_resolves_trigger_then_plex_tv_then_the_real_host() {

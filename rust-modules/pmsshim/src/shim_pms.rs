@@ -8,7 +8,7 @@ use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
 use plx_stremio::addons_tmdb::{
     TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
-    TmdbShow, TmdbShowDetails, TmdbVideo,
+    TmdbPerson, TmdbShow, TmdbShowDetails, TmdbVideo,
 };
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
@@ -80,6 +80,21 @@ fn synthetic_person_id(rk: i64) -> Option<u64> {
 /// A synthetic collection ratingKey's TMDB collection id.
 fn synthetic_collection_id(rk: i64) -> Option<u64> {
     (rk >= TMDB_COLLECTION_KEY_BASE).then_some((rk - TMDB_COLLECTION_KEY_BASE) as u64)
+}
+
+/// The GLOBAL person identity the shim's cast rows carry as `tagKey`. On a real PMS that is
+/// plex.tv's person guid and Discover answers the biography and the filmography under it; under
+/// Nuvio there is no plex.tv, so the shim — the one metadata provider the app has — names an id it
+/// answers itself (`/library/people/{guid}` and `/credits`). The prefix keeps it disjoint from any
+/// tagKey a real provider could send.
+const PERSON_GUID_PREFIX: &str = "nuvio-person-";
+
+fn person_guid(person_id: u64) -> String {
+    format!("{PERSON_GUID_PREFIX}{person_id}")
+}
+
+fn person_id_of_guid(guid: &str) -> Option<u64> {
+    guid.strip_prefix(PERSON_GUID_PREFIX)?.parse().ok().filter(|id| *id > 0)
 }
 
 /// The orders the shim can compute from a Stremio `MetaPreview` without another fetch. These are
@@ -595,9 +610,11 @@ fn tmdb_role(cast: &TmdbCast) -> Option<Value> {
     }
     // `Role[].id` is the `personId` a headshot opens (`/library/people/{id}/media`), so a TMDB
     // person gets a synthetic one and the app's cast row follows it with no TMDB knowledge at all.
-    // `tagKey` stays empty on purpose: that is plex.tv's global person guid, and TMDB has none.
+    // `tagKey` is the person page's GLOBAL identity — the biography and filmography are read from
+    // `discover()` under it, and under Nuvio that base is this shim, which answers the two routes.
     if cast.id > 0 && cast.id < (i64::MAX - TMDB_PERSON_KEY_BASE) as u64 {
         role["id"] = json!(TMDB_PERSON_KEY_BASE + cast.id as i64);
+        role["tagKey"] = json!(person_guid(cast.id));
     }
     Some(role)
 }
@@ -608,6 +625,84 @@ fn set_roles(row: &mut Value, cast: &[TmdbCast]) {
     if !roles.is_empty() {
         row["Role"] = Value::Array(roles);
     }
+}
+
+/// A TMDB crew department as a filmography tab's `(type, title)`. The three departments a viewer
+/// most often knows an actor for take Plex's own group names ("Director", "Writer", "Producer");
+/// every other department keeps TMDB's display name, with a slug `type` for the page's fallback.
+fn person_department_group(department: &str) -> Option<(String, String)> {
+    let name = department.trim();
+    if name.is_empty() {
+        return None;
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "directing" => return Some(("director".into(), "Director".into())),
+        "writing" => return Some(("writer".into(), "Writer".into())),
+        "production" => return Some(("producer".into(), "Producer".into())),
+        // TMDB's catch-all bucket ("Creator", "Thanks", stunts, …). Plex files this under "Other"
+        // too, and it is not a role anyone would name in a header's roles line.
+        "crew" => return Some(("other".into(), "Other".into())),
+        _ => {}
+    }
+    let slug: String = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("-");
+    (!slug.is_empty()).then(|| (slug, name.to_string()))
+}
+
+/// One credit inside a filmography department, as the person page's Discover shape spells it.
+///
+/// `ratingKey` is the availability join key: the page compares it against the TAIL of a library
+/// row's guid, and every shim row's guid ends in the same `tmdb:<id>` (`nuvio://movie/tmdb:603`).
+fn person_credit_item(credit: &TmdbCredit, role: &str) -> Option<Value> {
+    if credit.id == 0 {
+        return None;
+    }
+    let (kind, year, title, poster) = match credit.media_type.as_str() {
+        "movie" => (
+            "movie",
+            year_of(credit.release_date.as_deref()).unwrap_or(0),
+            credit.title.trim(),
+            credit.poster_path.as_deref(),
+        ),
+        "tv" => (
+            "show",
+            year_of(credit.first_air_date.as_deref()).unwrap_or(0),
+            credit.name.trim(),
+            credit.poster_path.as_deref(),
+        ),
+        // Neither a film nor a show: the page has two kinds and neither would draw it.
+        _ => return None,
+    };
+    if title.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "role": role,
+        "Metadata": {
+            "type": kind,
+            "title": title,
+            "year": year,
+            "thumb": tmdb_image(poster).unwrap_or_default(),
+            "ratingKey": format!("tmdb:{}", credit.id),
+        }
+    }))
+}
+
+/// One `CreditGroup` object: a department, its own count, and its rows in billing order.
+fn person_credit_group(kind: &str, title: &str, mut rows: Vec<Value>) -> Value {
+    for (order, row) in rows.iter_mut().enumerate() {
+        row["order"] = json!(order as i64);
+    }
+    json!({
+        "type": kind,
+        "title": title,
+        "size": rows.len() as i64,
+        "Credit": rows,
+    })
 }
 
 fn related_hub_json(kind: &str, rows: Vec<Value>) -> Value {
@@ -782,6 +877,8 @@ mod tmdb_metadata_tests {
             json!({
                 // the synthetic `personId` a headshot opens — `/library/people/3000000638/media`
                 "id": 3_000_000_638i64,
+                // …and the global identity its biography/filmography reads are addressed to
+                "tagKey": "nuvio-person-638",
                 "tag": "Actor Name",
                 "role": "Character Name",
                 "thumb": "https://image.tmdb.org/t/p/w300/actor.jpg"
@@ -1127,6 +1224,168 @@ mod tmdb_metadata_tests {
             assert_eq!(response.status, 200, "id {id}");
             let body: Value = serde_json::from_slice(&response.body).unwrap();
             assert_eq!(body["MediaContainer"]["Metadata"], json!([]), "id {id}");
+        }
+    }
+
+    /// Every headshot carries the GLOBAL person identity as `tagKey` — the id the person page's
+    /// biography and filmography reads are addressed to, and one this shim answers itself.
+    #[test]
+    fn a_headshot_carries_the_shim_person_guid() {
+        let role = tmdb_role(&TmdbCast {
+            id: 638,
+            name: "Hugh Jackman".into(),
+            character: "Logan".into(),
+            profile_path: None,
+        })
+        .expect("a named headshot");
+        assert_eq!(role["id"], 3_000_000_638i64);
+        assert_eq!(role["tagKey"], "nuvio-person-638");
+        assert_eq!(person_id_of_guid("nuvio-person-638"), Some(638));
+        // A real plex.tv tagKey (and a truncated synthetic one) is not ours: the routes answer it
+        // with an empty container rather than guessing a person.
+        assert_eq!(person_id_of_guid("nuvio-person-"), None);
+        assert_eq!(person_id_of_guid("5d77682aeb5d26001f1de4b0"), None);
+    }
+
+    /// The filmography's departments: cast leads as "Actor", each crew row carries its job under
+    /// its own department, and every row's `ratingKey` is the `tmdb:<id>` a library row's
+    /// `nuvio://…/tmdb:<id>` guid ends in — the availability join.
+    #[test]
+    fn a_persons_career_is_grouped_by_department() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        let cast = vec![TmdbCredit {
+            id: 603,
+            media_type: "movie".into(),
+            title: "The Matrix".into(),
+            release_date: Some("1999-03-31".into()),
+            character: "Neo".into(),
+            poster_path: Some("/matrix.jpg".into()),
+            ..Default::default()
+        }];
+        let crew = vec![
+            TmdbCredit {
+                id: 155,
+                media_type: "movie".into(),
+                title: "The Dark Knight".into(),
+                release_date: Some("2008-07-16".into()),
+                department: "Directing".into(),
+                job: "Director".into(),
+                ..Default::default()
+            },
+            TmdbCredit {
+                id: 1396,
+                media_type: "tv".into(),
+                name: "Breaking Bad".into(),
+                first_air_date: Some("2008-01-20".into()),
+                department: "Writing".into(),
+                job: "Writer".into(),
+                ..Default::default()
+            },
+            // TMDB's catch-all bucket is Plex's "Other", not a tab called "Crew".
+            TmdbCredit {
+                id: 27205,
+                media_type: "movie".into(),
+                title: "Inception".into(),
+                department: "Crew".into(),
+                job: "Thanks".into(),
+                ..Default::default()
+            },
+        ];
+        let groups = shim.person_credit_groups(&cast, &crew);
+        assert_eq!(groups.len(), 4, "Actor, then one group per crew department");
+        assert_eq!(groups[0]["type"], "actor");
+        assert_eq!(groups[0]["title"], "Actor");
+        assert_eq!(groups[0]["size"], 1);
+        assert_eq!(groups[0]["Credit"][0]["role"], "Neo");
+        assert_eq!(groups[0]["Credit"][0]["order"], 0);
+        assert_eq!(groups[0]["Credit"][0]["Metadata"]["ratingKey"], "tmdb:603");
+        assert_eq!(groups[0]["Credit"][0]["Metadata"]["type"], "movie");
+        assert_eq!(groups[0]["Credit"][0]["Metadata"]["year"], 1999);
+        let directing = groups.iter().find(|g| g["type"] == "director").expect("the directing tab");
+        assert_eq!(directing["title"], "Director");
+        assert_eq!(directing["Credit"][0]["role"], "Director");
+        // Renaming a department to Plex's name does not lose the item kind: a show stays a show.
+        let writing = groups.iter().find(|g| g["type"] == "writer").expect("the writing tab");
+        assert_eq!(writing["Credit"][0]["Metadata"]["type"], "show");
+        assert_eq!(writing["Credit"][0]["Metadata"]["title"], "Breaking Bad");
+        let other = groups.iter().find(|g| g["type"] == "other").expect("the Other tab");
+        assert_eq!(other["title"], "Other");
+        assert_eq!(other["Credit"][0]["role"], "Thanks");
+    }
+
+    /// The header record is TMDB's person record in Discover's spelling, including the department
+    /// counts the roles line and the Filmography pill read.
+    #[test]
+    fn a_person_header_states_their_facts_and_departments() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        let person = TmdbPerson {
+            id: 638,
+            name: "Hugh Jackman".into(),
+            biography: "An Australian actor.".into(),
+            birthday: Some("1968-10-12".into()),
+            deathday: None,
+            place_of_birth: Some("Sydney, Australia".into()),
+            known_for_department: Some("Acting".into()),
+            profile_path: Some("/portrait.jpg".into()),
+        };
+        let cast = vec![TmdbCredit {
+            id: 603,
+            media_type: "movie".into(),
+            title: "The Matrix".into(),
+            character: "Neo".into(),
+            ..Default::default()
+        }];
+        let crew = vec![
+            TmdbCredit {
+                id: 155,
+                media_type: "movie".into(),
+                title: "The Dark Knight".into(),
+                department: "Directing".into(),
+                job: "Director".into(),
+                ..Default::default()
+            },
+            TmdbCredit {
+                id: 27205,
+                media_type: "movie".into(),
+                title: "Inception".into(),
+                department: "Crew".into(),
+                job: "Thanks".into(),
+                ..Default::default()
+            },
+        ];
+        let row = shim.person_profile_row(&person, &cast, &crew);
+        assert_eq!(row["title"], "Hugh Jackman");
+        assert_eq!(row["summary"], "An Australian actor.");
+        assert_eq!(row["bornAt"], "1968-10-12");
+        assert_eq!(row["diedAt"], "");
+        assert_eq!(row["birthPlace"], "Sydney, Australia");
+        assert_eq!(row["knownFor"], "Acting");
+        assert_eq!(row["thumb"], "https://image.tmdb.org/t/p/w300/portrait.jpg");
+        assert_eq!(row["CreditType"][0], json!({"type": "actor", "title": "Actor"}));
+        assert_eq!(row["CreditType"][1], json!({"type": "director", "title": "Director"}));
+        assert_eq!(row["CreditType"].as_array().unwrap().len(), 2, "Crew is a tab, not a role");
+    }
+
+    /// A guid this shim never handed out is an EMPTY container on both routes — the answer a real
+    /// provider gives for someone it has never heard of, so the page settles instead of retrying.
+    #[test]
+    fn an_unknown_person_guid_answers_empty_containers() {
+        let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
+        for (path, key) in [
+            ("/library/people/nuvio-person-", "Metadata"),
+            ("/library/people/somebody-else", "Metadata"),
+            ("/library/people/somebody-else/credits", "CreditGroup"),
+        ] {
+            let response = shim.handle(&Request {
+                method: "GET".into(),
+                path: path.into(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: Vec::new(),
+            });
+            assert_eq!(response.status, 200, "{path}");
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["MediaContainer"][key], json!([]), "{path}");
         }
     }
 
@@ -2560,6 +2819,135 @@ impl Shim {
         })
     }
 
+    /// `/library/people/{guid}` — the person page's header (name, biography, life facts, roles).
+    ///
+    /// `guid` is the synthetic [`person_guid`] a cast row carried as `tagKey`. Anything else is an
+    /// EMPTY container, the same answer a real Discover provider gives for a person it has never
+    /// heard of: the page settles on portrait + name rather than retrying forever.
+    fn person_profile_page(&self, guid: &str) -> Response {
+        let Some(person_id) = person_id_of_guid(guid) else {
+            return Response::json(&container(json!({"Metadata": []})));
+        };
+        let Some(client) = TmdbClient::from_env() else {
+            return Response::json_status(
+                503,
+                &container(json!({"Metadata": [], "error": "TMDB_API_KEY is not configured"})),
+            );
+        };
+        let details = match client.person_details(person_id) {
+            Ok(details) => details,
+            Err(error) => {
+                return Response::json_status(
+                    503,
+                    &container(json!({
+                        "Metadata": [],
+                        "error": format!("TMDB person lookup failed: {error}")
+                    })),
+                )
+            }
+        };
+        // The roles line and the filmography tabs are department COUNTS. They are derived from the
+        // same combined-credits answer the `/credits` route reads, and TMDB's response cache makes
+        // the second request free; a failure here still leaves a page worth drawing.
+        let (cast, crew) = client.person_career(person_id).unwrap_or_default();
+        Response::json(&container(json!({
+            "Metadata": [self.person_profile_row(&details, &cast, &crew)]
+        })))
+    }
+
+    /// `/library/people/{guid}/credits` — the person page's filmography, one `CreditGroup` per
+    /// department. Cast leads, then the crew departments by size; each group's rows carry the
+    /// character (cast) or the job (crew) and the `tmdb:<id>` identity the library join speaks.
+    fn person_career_page(&self, guid: &str) -> Response {
+        let Some(person_id) = person_id_of_guid(guid) else {
+            return Response::json(&container(json!({"CreditGroup": []})));
+        };
+        let Some(client) = TmdbClient::from_env() else {
+            return Response::json_status(
+                503,
+                &container(json!({"error": "TMDB_API_KEY is not configured"})),
+            );
+        };
+        match client.person_career(person_id) {
+            Ok((cast, crew)) => Response::json(&container(json!({
+                "CreditGroup": self.person_credit_groups(&cast, &crew)
+            }))),
+            Err(error) => Response::json_status(
+                503,
+                &container(json!({"error": format!("TMDB person credits lookup failed: {error}")})),
+            ),
+        }
+    }
+
+    /// The header record of [`Self::person_profile_page`], from TMDB's person record and the
+    /// department counts of the same career answer.
+    fn person_profile_row(&self, details: &TmdbPerson, cast: &[TmdbCredit], crew: &[TmdbCredit]) -> Value {
+        let mut departments: Vec<(usize, String, String)> = Vec::new();
+        let acted = cast
+            .iter()
+            .filter(|credit| person_credit_item(credit, &credit.character).is_some())
+            .count();
+        if acted > 0 {
+            departments.push((acted, "actor".to_string(), "Actor".to_string()));
+        }
+        let mut crew_departments: HashMap<String, (usize, String, String)> = HashMap::new();
+        for credit in crew {
+            let Some((kind, title)) = person_department_group(&credit.department) else { continue };
+            // The catch-all bucket is a tab, never a role: a header reading "Actor · Producer ·
+            // Other" says less than the two departments the viewer came to know them by.
+            if kind == "other" || person_credit_item(credit, &credit.job).is_none() {
+                continue;
+            }
+            let entry = crew_departments.entry(kind.clone()).or_insert((0, kind, title));
+            entry.0 += 1;
+        }
+        departments.extend(crew_departments.into_values());
+        // Most credits first, exactly the order the provider's own roles line uses.
+        departments.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let credit_types: Vec<Value> = departments
+            .into_iter()
+            .map(|(_, kind, title)| json!({"type": kind, "title": title}))
+            .collect();
+        json!({
+            "title": details.name,
+            "summary": details.biography,
+            "bornAt": details.birthday.clone().unwrap_or_default(),
+            "diedAt": details.deathday.clone().unwrap_or_default(),
+            "birthPlace": details.place_of_birth.clone().unwrap_or_default(),
+            "knownFor": details.known_for_department.clone().unwrap_or_default(),
+            "thumb": tmdb_image(details.profile_path.as_deref()).unwrap_or_default(),
+            "CreditType": credit_types,
+        })
+    }
+
+    /// [`Self::person_career_page`]'s `CreditGroup[]`, without a request: the mapping, the group
+    /// order and each row's identity, host-testable without TMDB.
+    fn person_credit_groups(&self, cast: &[TmdbCredit], crew: &[TmdbCredit]) -> Vec<Value> {
+        let mut groups: Vec<Value> = Vec::new();
+        let acted: Vec<Value> = cast
+            .iter()
+            .filter_map(|credit| person_credit_item(credit, &credit.character))
+            .collect();
+        if !acted.is_empty() {
+            groups.push(person_credit_group("actor", "Actor", acted));
+        }
+        let mut by_department: Vec<(String, String, Vec<Value>)> = Vec::new();
+        for credit in crew {
+            let Some((kind, title)) = person_department_group(&credit.department) else { continue };
+            let Some(row) = person_credit_item(credit, &credit.job) else { continue };
+            match by_department.iter_mut().find(|(known, _, _)| *known == kind) {
+                Some((_, _, rows)) => rows.push(row),
+                None => by_department.push((kind, title, vec![row])),
+            }
+        }
+        // Most credits first, then the department's own name, so the tab strip is stable.
+        by_department.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then_with(|| a.1.cmp(&b.1)));
+        for (kind, title, rows) in by_department {
+            groups.push(person_credit_group(&kind, &title, rows));
+        }
+        groups
+    }
+
     /// The filmography of a Cast & Crew headshot, as the rows `/library/people/{person key}/media`
     /// answers with — the route the app's person page reads its two shelves from.
     ///
@@ -3463,6 +3851,12 @@ impl Shim {
                     .unwrap_or_default();
                 Response::json(&container(json!({"Metadata": rows})))
             }
+            // The person page's two GLOBAL reads. On a real PMS they are plex.tv Discover calls
+            // keyed by the cast row's `tagKey`; under Nuvio the app's Discover base IS this shim
+            // (`account::discover` follows the installed local server), so the shim answers them
+            // from TMDB under the synthetic `nuvio-person-<id>` guid it stamped on every headshot.
+            (_, ["library", "people", guid, "credits"]) => self.person_career_page(guid),
+            (_, ["library", "people", guid]) => self.person_profile_page(guid),
             (_, ["library", "collections", rk, "children"]) => {
                 let collection = rk
                     .parse()

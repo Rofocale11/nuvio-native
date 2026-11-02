@@ -723,6 +723,51 @@ upstream pick, not a defect found here.
 Library route/recorder tests plus the known sandbox `menu_play_season` port refusal. None are
 in the files these fixes touch; they are a separate triage, not evidence against these fixes.
 
+### 2026-11-02 — the actor page's global reads were plex.tv's, and there is no plex.tv here
+
+Clicking a cast member on a film/show Detail opened the ported Person page, but a simulator boot
+showed only the portrait, the name and the Movies/Shows shelves — no biography, no life facts, no
+roles line, and no Filmography pill. The page itself was not missing: `screens::person`,
+`screens::filmography` and `screens::person_bio` are upstream's, ported intact, and the shelves
+came through `/library/people/{personId}/media`. What was missing was its two GLOBAL reads: the
+biography (`/library/people/{tagKey}`) and the department filmography
+(`/library/people/{tagKey}/credits`). Both are **discover.provider.plex.tv** calls on a real
+install, keyed by the cast row's `tagKey`; the shim had deliberately left `tagKey` empty ("TMDB
+has no plex.tv person guid") and `plex::account::discover()` resolved to the real host, which this
+app has no credential for. So both reads were unreachable by construction. This is the data
+boundary `UPSTREAM.md` says to re-implement in the shim's terms — not to "fix" with a credential.
+
+- **The shim is the person's global identity now.** `Role[]` rows carry
+  `tagKey = "nuvio-person-<TMDB person id>"`, and the shim answers both reads on its own base:
+  `/library/people/{guid}` returns the biography, birthday/death day, birthplace, known-for
+  department, portrait and `CreditType[]` from TMDB `/person/{id}`; `/library/people/{guid}/credits`
+  returns TMDB `combined_credits` grouped into `CreditGroup[]` — the cast group first, then one per
+  crew department (Directing/Writing/Production under Plex's Director/Writer/Producer names), each
+  row carrying the character or job. A credit's `ratingKey` is `tmdb:<id>`, which is precisely the
+  tail of the shim row's `nuvio://movie|series/tmdb:<id>` guid, so the availability join marks
+  credits the app holds. The numeric `personKey` on `/media` is unchanged; it still feeds the shelves.
+  An unknown or empty guid is a `200` with an empty container, the same "never heard of them" answer
+  the page settles on rather than retrying.
+- **Discover resolves to the installed local server.** `plex::account::discover()` now follows
+  `plx_base::local_server` on every call (the same seam `plex_tv()` already used, read per call
+  because the shim installs itself during boot), ahead of the dev triggers and the real host; the
+  read gate counts it as a stand-in, so a dev-token boot is not refused. A Nuvio read can no longer
+  reach plex.tv behind the app's back.
+- **TMDB grew the two reads.** `plx_stremio::addons_tmdb::TmdbClient` gained `person_details`
+  (`/person/{id}`) and `person_career` (both halves of `combined_credits`, crew carrying
+  department/job); the existing cast-only `person_credits` still feeds the shelves.
+
+TMDB's catch-all `Crew` department is filed as Plex's "Other" (`Other` is a tab, never part of the
+header's roles line), which is why Hugh Jackman's reads "Actor · Producer · Sound".
+
+Verified by host tests: the shim's guid stamping, department grouping, profile record and the
+empty-container routes (`plx_pmsshim` + `plx_stremio` 116/116); the two TMDB decoders; and the
+loopback-only local Discover base (`plx_plex` 728/728 with its suite features). On the simulator,
+Hugh Jackman's page from a Detail cast row draws the biography (`bio=2470B`), born/place, the
+roles line, and a Filmography pill reading 198 over the same 109/74 shelves; the filmography opens
+Actor 183 / Producer 10 / Other 5, newest first, with the availability join marking credits the
+app holds (`… · Nuvio`, and a credit opens its Detail). **The television has not seen this.**
+
 ## Recomputing
 
 ```sh

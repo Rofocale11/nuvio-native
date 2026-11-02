@@ -50,6 +50,14 @@ see "The P2P streaming server" below.
   "Finding streams…" placeholder). Part URLs redirect (or proxy, when headers are needed) to the
   stream's real URL. The decision endpoint waits for discovery/probing and refuses media that
   cannot direct play; the native route uses its probed fields.
+- **A person page's global reads are the shim's too.** A cast headshot carries a synthetic
+  `tagKey` (`nuvio-person-<TMDB person id>`); `/library/people/{guid}` and
+  `/library/people/{guid}/credits` are answered from TMDB, and `plex::account::discover()` resolves
+  to the installed local server, so the biography, life facts and department filmography never
+  reach plex.tv — which has no Nuvio credential behind this app. The numeric synthetic key on
+  `Role[].id` still opens `/library/people/{personId}/media`, the page's two shelves. The television
+  sees the same shapes a real PMS + Discover pair used to send, so the ported person/filmography
+  screens run unmodified.
 - **A Library section's Type menu is a catalog selector, not a movie/show switch.** The section
   already fixes the content type, so `includeMeta=1` returns one `MediaContainer.Meta.Type[]` entry
   per browseable catalog of that type. Each entry carries the shim extension `catalogKey`, the

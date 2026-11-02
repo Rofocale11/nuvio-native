@@ -86,6 +86,22 @@ pub struct TmdbShow {
     pub genres: Vec<TmdbGenre>,
 }
 
+/// `/person/{id}` — the biography and life facts the person page's header and biography sheet
+/// draw. Every optional fact is `null` when TMDB does not have it, and a living person has no
+/// `deathday`; the page is composed to read as finished either way.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbPerson {
+    pub id: u64,
+    pub name: String,
+    pub biography: String,
+    pub birthday: Option<String>,
+    pub deathday: Option<String>,
+    pub place_of_birth: Option<String>,
+    pub known_for_department: Option<String>,
+    pub profile_path: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TmdbGenre {
@@ -197,6 +213,12 @@ pub struct TmdbCredit {
     pub first_air_date: Option<String>,
     /// The part they played, `""` where TMDB named none.
     pub character: String,
+    /// A `crew` row's department — `"Directing"`, `"Writing"`, `"Production"`, … — which is what
+    /// the filmography tabs group by. Empty on a `cast` row.
+    pub department: String,
+    /// A `crew` row's job inside that department — `"Director"`, `"Screenplay"`, … — drawn where a
+    /// cast row shows the character. Empty on a `cast` row.
+    pub job: String,
 }
 
 impl TmdbCredit {
@@ -231,6 +253,7 @@ impl TmdbCredit {
 #[serde(default)]
 struct CombinedCredits {
     cast: Vec<TmdbCredit>,
+    crew: Vec<TmdbCredit>,
 }
 
 impl TmdbClient {
@@ -311,12 +334,26 @@ impl TmdbClient {
     }
 
     /// `/person/{id}/combined_credits` — every movie and show TMDB credits this person in, in one
-    /// request. `cast` only: the same endpoint's `crew` half is a different question (what they
-    /// worked ON) and nothing here draws it.
+    /// request. `cast` only: the person page's SHELVES are what they appeared in, and the `crew`
+    /// half answers the different question of what they worked on.
     pub fn person_credits(&self, person_id: u64) -> Result<Vec<TmdbCredit>> {
         let response: CombinedCredits =
             self.get(&format!("/person/{person_id}/combined_credits"))?;
         Ok(response.cast)
+    }
+
+    /// The whole career, both halves: what they played (`cast`) and what they worked on (`crew`,
+    /// carrying its department and job). The filmography's department tabs are the career, so it
+    /// reads both; the request is the same one [`Self::person_credits`] makes and shares its cache.
+    pub fn person_career(&self, person_id: u64) -> Result<(Vec<TmdbCredit>, Vec<TmdbCredit>)> {
+        let response: CombinedCredits =
+            self.get(&format!("/person/{person_id}/combined_credits"))?;
+        Ok((response.cast, response.crew))
+    }
+
+    /// `/person/{id}` — the biography, life facts and headshot.
+    pub fn person_details(&self, person_id: u64) -> Result<TmdbPerson> {
+        self.get(&format!("/person/{person_id}"))
     }
 
     pub fn recommendations(&self, movie_id: u64) -> Result<Vec<TmdbMovie>> {
@@ -548,6 +585,40 @@ mod tests {
         assert_eq!(details.show.genres[0].name, "Drama");
         assert_eq!(details.credits.cast[0].character, "Role");
         assert_eq!(details.recommendations.results[0].name, "Better Call Saul");
+    }
+
+    /// The two person shapes are the actor page's whole header and filmography: the biography and
+    /// life facts come from `/person/{id}`, and `combined_credits` keeps its `crew` half distinct
+    /// from `cast` because the tabs group by the crew row's own department and job.
+    #[test]
+    fn decodes_a_persons_biography_and_both_halves_of_their_career() {
+        let person: TmdbPerson = serde_json::from_value(serde_json::json!({
+            "id": 638,
+            "name": "Hugh Jackman",
+            "biography": "Hugh Michael Jackman (born 12 October 1968) is an Australian actor.",
+            "birthday": "1968-10-12",
+            "deathday": null,
+            "place_of_birth": "Sydney, New South Wales, Australia",
+            "known_for_department": "Acting",
+            "profile_path": "/portrait.jpg"
+        }))
+        .unwrap();
+        assert_eq!(person.name, "Hugh Jackman");
+        assert_eq!(person.birthday.as_deref(), Some("1968-10-12"));
+        assert!(person.deathday.is_none(), "a living person has no death day");
+        assert_eq!(person.known_for_department.as_deref(), Some("Acting"));
+
+        let career: CombinedCredits = serde_json::from_value(serde_json::json!({
+            "cast": [{"id": 603, "media_type": "movie", "title": "The Matrix", "character": "Neo"}],
+            "crew": [{"id": 155, "media_type": "movie", "title": "The Dark Knight",
+                       "department": "Directing", "job": "Director"}]
+        }))
+        .unwrap();
+        assert_eq!(career.cast.len(), 1);
+        assert_eq!(career.crew.len(), 1);
+        assert_eq!(career.crew[0].department, "Directing");
+        assert_eq!(career.crew[0].job, "Director");
+        assert_eq!(career.crew[0].character, "");
     }
 
     #[test]

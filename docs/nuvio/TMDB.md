@@ -114,22 +114,39 @@ so an in-memory filter cannot page forever.
   `Ident` must special-case it the way `related_hub`, `/library/metadata/{rk}`, the `photo` route
   and `slot()` do.
 
-## Cast & Crew → the person page (filmography)
+## Cast & Crew → the person page (biography + filmography)
 
 A headshot on a detail page is clickable, and what it opens is the app's **person page** — the same
-screen a real Plex server's cast row opens, driven by the same `/library/people/{personId}/media`
-fetch.
+screen a real Plex server's cast row opens. It reads three shim routes: `/media` for its two
+shelves, and the two GLOBAL reads the page inherited from plex.tv Discover (the biography and the
+department filmography) under the person's `tagKey`.
 
-- **The link is `Role[].id`.** `tmdb_role` sets it to `TMDB_PERSON_KEY_BASE + cast.id`, so the app's
-  cast shelf (`screens::detail::cast`) needs no TMDB knowledge at all: `Cast::person_key` returns
-  that number and the Person store addresses `/library/people/{key}/media` with it. `tagKey` stays
-  empty — it is plex.tv's global person guid, and TMDB has none.
-- **The route** answers `MediaContainer.Metadata[]` of ordinary movie/show rows. `PersonStore`
-  splits them into its Movies and Shows shelves **by each row's own `type`**, so a film must be
-  tagged `movie` and a show `show` — a mismatch lands on the wrong shelf.
-- **One request.** `person_credits` is `GET /person/{id}/combined_credits`, which merges films and
-  shows into one array and states the kind per row in `media_type`. Do not add a `/person/{id}`
-  call for the name or portrait: the page's header is drawn from the `Role[]` entry that opened it.
+- **Two identities, both synthetic, and neither substitutes for the other.** `Role[].id` is
+  `TMDB_PERSON_KEY_BASE + cast.id` and addresses `/library/people/{personId}/media`
+  (`Cast::person_key`). `Role[].tagKey` is `nuvio-person-<TMDB person id>` and is the identity the
+  person store asks for the biography and credits; on a real install it is plex.tv's person guid,
+  and here the shim answers the same two shapes from TMDB.
+- **`/library/people/{guid}` — the header.** `person_profile_page` reads TMDB `/person/{id}` and
+  answers `MediaContainer.Metadata[0]` with `summary` (biography), `bornAt`, `diedAt`, `birthPlace`,
+  `knownFor`, `thumb`, and `CreditType[]` built from the same career answer (cast first, then each
+  crew department, most-credits-first). That is what draws the biography, the born/place line, the
+  roles line and the `MORE` mark.
+- **`/library/people/{guid}/credits` — the Filmography.** `person_career_page` reads
+  `combined_credits` **both halves**: `cast` becomes the `actor` group, and `crew` is grouped by its
+  own `department`. Directing/Writing/Production take Plex's "Director"/"Writer"/"Producer" names,
+  and TMDB's catch-all `Crew` bucket becomes "Other" (a tab, never a role). A row's `role` is the
+  character (cast) or the job (crew).
+- **The credit's join key is `tmdb:<id>`.** It is exactly the tail of the shim row's
+  `nuvio://movie|series/tmdb:<id>` guid, so `person::guid_tail` matches and the filmography marks
+  credits the app holds — and OK on one opens that title.
+- **The routes answer ordinary rows** (`/media`: `MediaContainer.Metadata[]`; both global reads:
+  the Discover shapes above). `PersonStore` splits `/media` into Movies and Shows **by each row's
+  own `type`**, so a film must be tagged `movie` and a show `show` — a mismatch lands on the wrong
+  shelf.
+- **Two TMDB requests per person, both cached.** `person_details` is `/person/{id}`; `person_career`
+  is `/person/{id}/combined_credits` (the same request the cast-only `person_credits` makes for the
+  shelves). The profile handler also needs the department counts, so it reads the career answer too
+  — the shared response cache makes that the same request, not a third.
 - **The rows come from TMDB alone** (`tmdb_fallback_row` / `tmdb_show_fallback_row`), not from
   `meta()`. A recommendation row prefers the addon's own metadata, but a filmography has dozens of
   credits and one `meta()` per credit would be one HTTP request each.
@@ -138,10 +155,11 @@ fetch.
   dropping it loses the only place "Neo" appears on that page.
 - **Newest first, undated last** — the page sorts its own list the same way, so a stable server
   order keeps the shelves from reshuffling between fetches.
-- **A person with no TMDB id opens nothing.** `tmdb_role` omits `id` rather than emitting the bare
-  base, which would address person `0`.
+- **A person with no TMDB id opens nothing.** `tmdb_role` omits `id`/`tagKey` rather than emitting
+  the bare base, which would address person `0`.
 - **A failed or unconfigured lookup is an empty container**, matching the other TMDB routes: the
-  page then draws its header (from the `Role[]` entry) with no shelves, not an error screen.
+  page then draws what it was handed and no biography, shelves or filmography, not an error screen.
+  An unknown or empty guid is that same empty answer, which the store settles on.
 
 ## Movie collections (franchises)
 
