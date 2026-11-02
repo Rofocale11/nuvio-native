@@ -497,13 +497,18 @@ already has as `1bcf30b2`. Taking it would replace working code with its twin.
 
 | branch | what it is |
 |---|---|
-| `nuvio-native` | **the trunk.** This is the product. Feature branches merge into it. It carries tier C and the `forward-port/v0.9-hq` line since the 2026-11-02 fast-forward (see the television pass entry). |
+| `nuvio-native` | **the trunk.** This is the product. Feature branches merge into it. It carries tier C and the `forward-port/v0.9-hq` line through `541a5ad9` (the 2026-11-02 fast-forward). The follow-up commit `1443fc03` was deliberately left on `forward-port/v0.9-hq`, which is the working line, so the trunk is one commit behind it. |
 | `origin/nuvio-native` | the pushed trunk. |
-| `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the trunk so an experiment cannot break it. May lag the trunk. |
+| `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the working line (`forward-port/v0.9-hq`, or the trunk) so an experiment cannot break it. May lag. |
 | `main` | **not this project.** It holds upstream-side history and none of the fork's commits. Never cut work from it; never build or ship it. |
 | `upstream/feature/v0.9-hq` | Richi's HQ line — the reference for upstream work. Read-only. |
-| `forward-port/v0.9-hq` | the integration line: the A+B merge (`656e0cb2`), tier C on top (`5297c0aa`), the port fixes and the actor page (`1f692378`). Fast-forwarded into `nuvio-native` on 2026-11-02, so it is the trunk's own tip; still the line the stable `.ipk` is built from. |
-| `tier-c/ui` | tier C ported on top of the A+B merge (`741def78`), plus the port fixes through `f41d84a5`. Pushed, merged into `forward-port/v0.9-hq`, and verified on the television on 2026-11-02. |
+| `forward-port/v0.9-hq` | **the working line since 2026-11-02** (the owner directed new work here): the A+B merge (`656e0cb2`), tier C on top (`5297c0aa`), the port fixes, the actor page (`1f692378`) and the two follow-ups (`1443fc03`). Fast-forwarded into `nuvio-native` at `541a5ad9`; now one commit ahead of the trunk. Still the line the stable `.ipk` is built from. |
+| ~~`tier-c/ui`~~ | tier C ported on top of the A+B merge (`741def78`), plus the port fixes through `f41d84a5`. Merged into `forward-port/v0.9-hq` and verified on the television on 2026-11-02, then **deleted** (local and `origin`) on 2026-11-02. `f41d84a5` stays in `forward-port/v0.9-hq`'s history. |
+
+The p11 merge attempts are gone too: `nuvio-native-p11-merge` (a failed merge attempt, deleted
+with its worktree on 2026-11-02), plus the stale `docs/upstream-policy` and
+`feature-nuvio-test-p11-merge` lanes. `origin/nuvio-v0.9-p11` is the remaining remote p11 line;
+`forward-port/v0.9-hq` does not contain it.
 
 Merge commits into `nuvio-native` are normal here. `AGENTS.md`'s inherited "`main` takes SQUASH
 merges only" is the origin project's policy, not this repository's.
@@ -524,7 +529,9 @@ Tier C (`screens`, `ui`, `data`, `appkit`, `gfx`) is ported as a git-checkout po
 merge, on branch `tier-c/ui` (`/home/kungpow/nuvio-tier-c`), so the TV branch keeps building.
 The port overlays upstream's tier-C crates on the fork's tree, re-applies the fork's deltas, and
 gets the simulator booting the new UI (`make -j10 sim-linux` links and boots, `route=login`, no
-panic). Commit `741def78`, pushed as `origin/tier-c/ui`.
+panic). Commit `741def78`, pushed as `origin/tier-c/ui`; the branch was deleted after the merge on
+2026-11-02 (its tip `f41d84a5` is in `forward-port/v0.9-hq`'s history), and
+`/home/kungpow/nuvio-tier-c` is now a worktree on `main`.
 
 Status after the port fixes: the fork's preference persistence is restored (RatingSource,
 P2pEnabled, P2pServer write through `Account::write_prefs` and push the P2P policy to the shim),
@@ -629,7 +636,8 @@ the tier-C port was cut from) to `c2138acb` (Package 13, 2026-11-01). The new sp
 commits / 875 files**; against the base the fork and the reference now change **585 / 1581**
 files with **484 contested**. The tier-C branch already contains `d12e8659`, so this is not
 "merge and resolve": taking it is a port against the already-ported UI. Measured with
-`git merge-tree --write-tree tier-c/ui upstream/feature/v0.9-hq`, it is **87 conflicted files**
+`git merge-tree --write-tree f41d84a5 upstream/feature/v0.9-hq` (the tier-c/ui tip, since
+deleted), it is **87 conflicted files**
 (`src` 13, `screens` 10, replay fixtures 8, `site/media` 6, `media` 5, `plex` 4, `data` 4,
 `telemetry` 2, workflows 2).
 
@@ -809,6 +817,10 @@ The shim now answers `/hubs/continueWatching/items`: the same rows as the previe
 itself reports `totalSize` and a truthful `more`. That closes the unhandled-request gap without
 changing Home, whose row reads the preview (`docs/pms-api.md`).
 
+**Landed on `forward-port/v0.9-hq` (`1443fc03`) and pushed.** The owner directed that new work
+continue on `forward-port/v0.9-hq`, so `nuvio-native` was left at `541a5ad9` rather than
+fast-forwarded.
+
 ## Recomputing
 
 ```sh
@@ -818,12 +830,12 @@ changing Home, whose row reads the preview (`docs/pms-api.md`).
 ./tools/upstream-seam.sh check        # exit 1 if this file's base marker disagrees with git
 ```
 
-Run `drift` and `diff` on the trunk as well: on a port branch (`tier-c/ui`,
-`forward-port/v0.9-hq`) the computed base is the older reference tip the branch contains, so
-their counts describe the port rather than the trunk.
+Run `drift` and `diff` on the trunk as well: on the working line (`forward-port/v0.9-hq`) the
+computed base is the older reference tip its history contains, so their counts describe the port
+rather than the trunk.
 `--ref` measures against another branch (try `upstream/main` to see why it is the wrong one).
 `check` is a **trunk** command: on a branch that already contains the reference tip it was
-ported from (`forward-port/v0.9-hq`, or `tier-c/ui` at `d12e8659`), it reports base drift by
+ported from (`forward-port/v0.9-hq`, whose history contains `d12e8659`), it reports base drift by
 construction, because the computed merge-base is that older tip rather than the trunk's. Reading
 that as drift on the port branch is a mistake; reading it as drift on `nuvio-native` is not.
 `check` is deliberately **not** wired into `make check` or CI: a moved base is usually something a

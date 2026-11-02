@@ -44,9 +44,10 @@ take, and how). Read the relevant one before changing that area. Upstream PlxNat
   and widget systems instead of adding screen-local visual primitives. Before touching a
   screen, also read `rust-modules/screens/src/CLAUDE.md`; the restructure's design record
   is `docs/ui-restructure-spec-v4.md`, which `rust-modules/ui/src/lib.rs` cites by section
-  number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) was ported on
-  `tier-c/ui`: run `git log --oneline nuvio-native..tier-c/ui` before assuming the trunk's
-  screens are the ported ones.
+  number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) is on
+  `forward-port/v0.9-hq` (ported on `tier-c/ui`, which was merged and then deleted): run
+  `git log --oneline nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens
+  are the ported ones.
 - Before account/watch-progress work, read `docs/nuvio/WATCH-PROGRESS.md`.
 - Before taking any upstream PlxNative work — cherry-picking a fix, absorbing a Richi branch, or
   reasoning about how far this fork has drifted — read `docs/nuvio/UPSTREAM.md` and run
@@ -116,8 +117,12 @@ fails the build on a forbidden edge.
 
 ## Working rules
 
-- **Trunk-based development on `nuvio-native`.** `nuvio-native` is the trunk and the product;
-  work happens on short-lived branches or worktrees cut from it, and lands back on it. Merge
+- **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line
+  (2026-11-02).** `nuvio-native` is the trunk and the product; work happens on short-lived
+  branches or worktrees cut from it, and lands back on it. Since 2026-11-02 the owner has
+  directed that new work land on `forward-port/v0.9-hq` (the stable `.ipk` line, currently one
+  commit ahead of the trunk with the seek and Continue-Watching follow-ups); fast-forward
+  `nuvio-native` only when the owner asks. Merge
   commits and squash commits are both acceptable there. `main` is NOT the trunk: it holds
   upstream-side history and none of the fork's commits — never cut work from it, never build or
   ship it. The upstream relationship (base commit, freeze-and-cherry-pick policy, what a merge
