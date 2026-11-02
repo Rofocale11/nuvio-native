@@ -4053,9 +4053,9 @@ mod lifecycle_regression_tests {
         assert!(!rig.app.adapters.player.is_live());
 
         player_requests(
-            &mut rig.app.player.repair,
-            &mut rig.app.player.session,
+            &mut rig.app.player,
             &mut rig.app.adapters.player,
+            &mut rig.app.repause_at,
             vec![plx_screens::registry::PlayerReq::Exit],
             fr.now,
             &mut rig.app.refresh_hubs_at,
@@ -4063,7 +4063,6 @@ mod lifecycle_regression_tests {
             &mut rig.app.bridge,
             &mut rig.app.ok_armed,
             &mut rig.app.input.press,
-            &mut rig.app.repause_at,
         );
         frame(&mut rig.app, 48);
         assert!(super::super::bridge::player(&rig.app.pages).is_none());

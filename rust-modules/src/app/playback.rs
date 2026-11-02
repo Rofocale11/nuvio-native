@@ -529,10 +529,11 @@ pub(crate) unsafe fn commit_info_press(
 #[allow(clippy::too_many_arguments)]
 /// **Perform the track menu's pick.**
 ///
-/// `route::commit_audio_selection`/`commit_subtitle_selection` take the playback session's `&mut`,
-/// which no screen has (§2.2) — the panel returns a
+/// `route::commit_audio_pick`/`commit_subtitle_and_sidecar`/`commit_forced_only_and_sidecar`
+/// take the playback session's `&mut`, which no screen has (§2.2) — the panel returns a
 /// [`TrackCommit`](plx_appkit::track_menu::TrackCommit) and this is where it lands, from the
-/// overlay's `PlayerReq` and from the headless `plxnative-menupick` trigger alike.
+/// overlay's `PlayerReq` and from the headless `plxnative-menupick` trigger alike. Each carries
+/// the menu's `memo`, so a pick is committed AND remembered for the show in one call.
 pub(crate) fn commit_track(
     ps: &mut plx_media::route::PlaybackSession,
     commit: plx_appkit::track_menu::TrackCommit,
@@ -540,28 +541,26 @@ pub(crate) fn commit_track(
     use plx_appkit::track_menu::TrackCommit;
     match commit {
         // The route reports whether it accepted the pick (track memory is written on that); the
-        // menu's own commit path has nothing to do with the answer.
-        TrackCommit::Audio { carried: audio, memo: _ } => {
-            let _ = plx_media::route::commit_audio_selection(ps, audio);
+        // menu's own commit path has nothing to do with the answer. The memo is the show's
+        // remembered pick, so this is the door that persists it.
+        TrackCommit::Audio { carried: audio, memo } => {
+            let _ = plx_media::route::commit_audio_pick(ps, audio, memo);
         }
         TrackCommit::AudioEnhancement(a) => plx_media::player::request_audio_enhancement(ps, a),
-        TrackCommit::Subtitle { render_ordinal, stream_id, sidecar_key, sidecar_codec, memo: _ } => {
-            // What the client can draw itself — an embedded ordinal or an external sidecar — is
-            // what an Original route (issue #266's candidate) can carry without a burn.
-            let client_renderable = render_ordinal >= 0 || sidecar_key.is_some();
-            plx_media::route::commit_subtitle_selection(ps, render_ordinal, stream_id, client_renderable);
-            // An EXTERNAL pick has no demuxer ordinal (`render_ordinal` is -1, so the embedded
-            // renderer is off) — on direct play `player::sidecar` fetches and draws it instead.
-            // While transcoding the commit above already asked for a burn and the sidecar draw
-            // is silenced for as long as that is true, so selecting here is harmless and means
-            // the line survives the playback going BACK to direct play.
-            match sidecar_key {
-                Some(key) => plx_media::player::sidecar::select(plx_media::route::cur_sid(ps), stream_id, key, sidecar_codec),
-                None => plx_media::player::sidecar::deselect(),
-            }
+        // The route commit and the remembered write in one call, plus the sidecar it names: an
+        // EXTERNAL pick has no demuxer ordinal (`render_ordinal` is -1, so the embedded renderer
+        // is off) and `player::sidecar` fetches and draws it instead; `None` deselects any sidecar.
+        TrackCommit::Subtitle { render_ordinal, stream_id, sidecar_key, sidecar_codec, memo } => {
+            plx_media::route::commit_subtitle_and_sidecar(
+                ps, render_ordinal, stream_id, sidecar_key, sidecar_codec, memo);
         }
         TrackCommit::SubtitleTone(tone) => plx_media::player::set_subtitle_tone(tone),
-        TrackCommit::SubtitleForcedOnly { .. } => {}
+        // The menu matched the forced track (or nothing), holds the mode and remembers the pick;
+        // the sidecar an earlier pick drew is dropped, since a forced track is always embedded.
+        TrackCommit::SubtitleForcedOnly { render_ordinal, stream_id, lang, changed } => {
+            plx_media::route::commit_forced_only_and_sidecar(
+                ps, render_ordinal, stream_id, &lang, changed);
+        }
         // live first, persisted after, nothing republished on completion (`route::select_subtitle_size`)
         TrackCommit::SubtitleSize(size) => plx_media::route::select_subtitle_size(size, None),
         TrackCommit::SubtitlePosition(position) => plx_media::route::select_subtitle_position(position, None),
@@ -1702,5 +1701,44 @@ mod player_return_tests {
             assert!(matches!(p.top(), AppArg::Home));
         }
         plx_plex::plex::reset_servers_for_test();
+    }
+}
+
+#[cfg(test)]
+mod commit_track_tests {
+    /// **The track menu's memo must reach the route commit that remembers it.** The menu builds
+    /// what to remember for the show and the route writes it only through `commit_audio_pick` /
+    /// `commit_subtitle_and_sidecar` / `commit_forced_only_and_sidecar`; the plain
+    /// `commit_*_selection` calls commit the pick and forget the memo. A port that calls the plain
+    /// ones saves no per-show track memory at all, and an empty Forced-only arm drops the mode.
+    #[test]
+    fn every_menu_pick_goes_through_the_route_commit_that_remembers_it() {
+        // Split with `concat!` so this test's own text, which `include_str!` reads too, can never
+        // be what the needles match.
+        let source = include_str!("playback.rs");
+        let body = source
+            .split_once(concat!("pub(crate) fn ", "commit_track("))
+            .expect("commit_track")
+            .1;
+        let body = body
+            .split_once(concat!("\npub(crate) fn ", "player_requests("))
+            .expect("the item after commit_track")
+            .0;
+        for needle in [
+            concat!("plx_media::route::", "commit_audio_pick("),
+            concat!("plx_media::route::", "commit_subtitle_and_sidecar("),
+            concat!("plx_media::route::", "commit_forced_only_and_sidecar("),
+        ] {
+            assert!(body.contains(needle), "commit_track must call {needle}");
+        }
+        for forgotten in [
+            concat!("plx_media::route::", "commit_audio_selection("),
+            concat!("plx_media::route::", "commit_subtitle_selection("),
+        ] {
+            assert!(
+                !body.contains(forgotten),
+                "commit_track must not call {forgotten}: that commit forgets the menu's memo"
+            );
+        }
     }
 }

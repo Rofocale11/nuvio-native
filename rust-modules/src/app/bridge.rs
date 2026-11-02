@@ -2007,7 +2007,15 @@ impl Bridge {
             }
             SessionFx::PublishProfile(publication) => {
                 if self.session.publication_is_current(&publication) {
+                    // The seat the publication installs, read from the publication itself rather
+                    // than the process global, so a fixture publisher that keeps the publication to
+                    // itself still drives the restore.
+                    let seat = plx_plex::plex::session::Seat::of(
+                        publication.profile.as_ref(), &publication.stamp);
                     self.session_adapter.publish_profile(publication);
+                    // The one place a seat changes: restore the per-profile player cells for the
+                    // seat the publication just installed, before this step's `Ready` is consumed.
+                    self.seat_watch.arrive(seat);
                     if let Some(io) = &mut self.home_io {
                         io.profile = self.session_adapter.profile_resource_view().expect("controlled publisher");
                     }

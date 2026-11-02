@@ -588,6 +588,33 @@ Continue Watching tile opens its Detail page.
 `make test-crate` (`metadata::demo_fixture_tests::…`, `metadata::record::…committed_fixture…`,
 `person::…forty_servers…`, `search::account_scope_tests::…`) that are not Watchlist code.
 
+### 2026-11-02 — tier C dropped two preference paths, so picks did not survive a restart
+
+A report that the subtitle size/position picks reset between playbacks reproduced on the simulator
+against a copy of the signed-in session: the pick WAS saved (`profile_prefs` held
+`"subtitle_size": "extra_large"`), but the next cold boot showed Medium. The port had kept
+`SeatWatch` and its documentation while dropping the call that feeds it.
+
+- **`SessionFx::PublishProfile` no longer ran `SeatWatch::arrive`**, so the per-profile player cells
+  were never restored at a seat change. Boot restores only the `Unseated` fallback, which is the
+  type's default (Medium/Low etc.), so every cold boot reset quality, Direct Play, subtitle
+  size/position/tone, HDR overlay, next-episode mode, skip interval, deck press, under-posters,
+  audio enhancements and trailer autoplay to their defaults. The arm restores again, computing the
+  seat from the publication itself.
+- **`app::playback::commit_track` discarded every `memo`**, calling the plain
+  `commit_audio_selection`/`commit_subtitle_selection`, and its `SubtitleForcedOnly` arm was empty.
+  The route writes the per-show track memory only through `commit_audio_pick` /
+  `commit_subtitle_and_sidecar` / `commit_forced_only_and_sidecar`, so the player menu's audio and
+  subtitle picks (including Off) were never saved, and Forced only did nothing. `commit_track` now
+  hands each pick to its remembering commit; a source-pin test grades the three arms.
+
+Verified on the simulator: Extra Large picked in Settings > Playback survives a cold boot. The
+hostsim regression `restore_characterisation_tests::stored_boot_restores_the_seated_profiles_own_values`
+was RED (all cells at defaults) and is green with the seat restore. A stale `player_requests` call
+in `run.rs`'s hostsim tests was adapted so that suite compiles again; its
+`play_automatically_publishes_direct_play_auto_once` failure is a separate pre-existing
+double-publish and is not this work.
+
 ## Recomputing
 
 ```sh
