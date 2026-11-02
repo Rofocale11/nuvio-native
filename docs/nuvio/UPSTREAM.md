@@ -527,6 +527,11 @@ with its worktree on 2026-11-02), plus the stale `docs/upstream-policy` and
 `feature-nuvio-test-p11-merge` lanes. `origin/nuvio-v0.9-p11` is the remaining remote p11 line;
 `forward-port/v0.9-hq` does not contain it.
 
+Other `origin/*` branches — `ci-metrics`, `drvitality-stremio`, `plx-stremio`, `v0.8-plex-dts`,
+`v9-plx-dts` — are experiments/backups from the fork's first weeks (their tips are commits like
+`test123` and `bug`). **None is merged into the working line and none is maintained.** Do not cut
+from them, build them, or treat them as a source of fixes.
+
 Merge commits into `nuvio-native` are normal here. `AGENTS.md`'s inherited "`main` takes SQUASH
 merges only" is the origin project's policy, not this repository's.
 
