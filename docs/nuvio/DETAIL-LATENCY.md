@@ -271,12 +271,15 @@ focus (cold).
   rust-modules/Cargo.toml --lib --no-default-features` passes. `ci/check-module-layers.py` still
   reports the 15 pre-existing unlayered `plx_data` modules (`catalog`, `viewledger`, `watchlist`, …)
   on both the base and this tree; the Stage 1 modules themselves are covered.
-- **Simulator (`ui-sim`):** correctness and visible behaviour only. WSL/desktop timing is host
-  network, not the TV, so do not report latency from it. Use it to confirm the detail page still
-  paints, the placeholder Part still plays, and prefetch fires on dwell (`detail: warm rk=… —
-  focus prefetch` in the event log). **Not run on the WSL checkout that implemented Stage 1** (no
-  DISPLAY or GL stack there); the sim target is built, the behaviour is pinned by the host tests
-  above, and the live check is owed on a simulator host or the TV.
+- **Simulator (`ui-sim`), run 2026-11-03 on WSLg** (host network — correctness and relative
+  timings only, never a TV number): prefetch fires on focus rest (`detail: warm rk=… — focus
+  prefetch`); a warm open after it completed logged `ms=7` and `ms=5`; a cold boot straight to a
+  detail (`plxnative-detail=10066`, empty shim cache, no prefetch) logged `ms=828` with `subs=0`,
+  and the page painted (screenshot: logo, cast, `Direct Play`) — under the old code that open also
+  paid the stream wait. One open where the prefetch GET was still in flight logged `ms=832` with
+  `subs=0 audio=0`: prefetch start is not single-flight yet (Stage 2), and the read still paid
+  only the meta/TMDB path. Host tests and the sim target build are green; the TV measurement
+  below is still owed.
 - **TV:** acquire the `tv-lock`, deploy a debug build, and measure the `detail:` line:
   1. cold: relaunch, open a card immediately → `ms=`;
   2. warm: rest on a card > 1 s, then OK → `ms=`;
