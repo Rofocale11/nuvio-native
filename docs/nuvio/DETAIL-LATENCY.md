@@ -1,7 +1,7 @@
 # Detail-page latency — plan
 
-**Status:** Stage 0, Stage 1 (1A–1C) and Stage 2B implemented (2026-11-03), host + simulator
-verified. Written 2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
+**Status:** Stage 0, Stage 1 (1A–1C), Stage 2A and Stage 2B implemented (2026-11-03), host +
+simulator verified. Written 2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
 **Owner:** whoever picks this up next.
 **Scope:** wall-clock from pressing OK on a Home/Library card to a painted movie/show detail page,
 on the television. Not the player, not Home's own first paint, not poster throughput.
@@ -239,11 +239,18 @@ focus (cold).
 
 ### Stage 2 — stop losing the cache (~1 day)
 
-- **2A. Persist the shim meta cache.** Today a restart makes the first open cold again. Write the
-  meta rows (type/id → parsed `Meta`, with fetch timestamp) to the runtime directory, bounded
-  (e.g. 400 entries / a few MB, LRU), load at boot, honour `META_TTL`. Do not persist the raw
-  `Value` stream slots. Where: the shim's store (`shim_store.rs`) or a small JSON cache beside
-  `keys.tsv`; the runtime dir is per-instance, which keeps sim and TV separate.
+- **2A. Persist the shim meta cache — implemented.** `MetaCache` (`shim_store.rs`) replaces the
+  bare `metas` map. Rows are appended as they land to `meta-cache.jsonl` beside `keys.tsv`
+  (one JSON line per fetch; the last line for a key wins at load, and a torn last line is
+  skipped), so the write is small and runs on the shared persistence worker. `META_TTL` (6 h)
+  decides what is loaded, the in-memory map keeps 400 rows (oldest fetch evicted first), and
+  once the log passes 8 MiB it is rewritten down to the newest rows under 4 MiB. `clear()`
+  (the addons-changed path) removes the file too. **The boot path had to learn the difference
+  between applying an addon override and changing one**: `app/nuvio.rs` applied the session's
+  enable/disable overrides and called `addons_changed()` unconditionally, which wiped the rows
+  it had just loaded. It now replaces the set and clears only when a flag actually changed.
+  The boot log says `shim: meta cache warm-start with N row(s), M unreadable`, which is the line
+  to read on the television before opening anything.
 - **2B. Single-flight the meta and TMDB fetches — implemented.** `plx_base::flight::Flight`
   (`rust-modules/base/src/flight.rs`) is a per-key gate: one caller leads the fetch, the rest wait
   and then re-read their cache; a failed or panicking lead drops the claim and releases the next
@@ -291,8 +298,10 @@ focus (cold).
   tmdb_ms=948 total_ms=1066`, app `meta_ms=1068 … ms=1072`; re-opened warm: shim `total_ms=0`,
   app `ms=2`. The Stage 2B single-flight was then measured on the overlap it targets: `back` to the
   rail, `right`, OK 350 ms later, cold — the prefetch's shim line `tmdb_ms=732 total_ms=732`, the
-  click's `tmdb_ms=355 total_ms=355`, app `ms=359`. Host tests and the sim target build are green;
-  the TV measurement below is still owed.
+  click's `tmdb_ms=355 total_ms=355`, app `ms=359`. With the Stage 2A warm start, a restart that
+  boots straight to the same detail loads 72 rows (0 unreadable) and answers `meta_ms=0`; the
+  remaining `tmdb_ms=932` is TMDB, which is not persisted (see §8). Host tests and the sim target
+  build are green; the TV measurement below is still owed.
 
   Recipe (one runtime root, WSLg display exported as the `ui-sim` skill says):
 
@@ -346,21 +355,26 @@ focus (cold).
 | HTTP transport (no reuse) | `rust-modules/net/src/net.rs:928`, serial fallback `:2164` |
 | Home focus / tick / prefetch | `rust-modules/screens/src/home/mod.rs:1641`, `:2407`, `:2428` (`tick_prefetch`) |
 | Single-flight primitive | `rust-modules/base/src/flight.rs` (`Flight::claim`), used by `shim_pms.rs` `meta()` and `addons_tmdb.rs` `cached_json` |
+| Persisted meta cache | `rust-modules/pmsshim/src/shim_store.rs` (`MetaCache`), file `meta-cache.jsonl` in the shim data dir; boot override applied in `rust-modules/src/app/nuvio.rs:239` |
 | Design docs | `docs/nuvio/ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md` |
 
 ## 8. Working state (2026-11-03) — resume point
 
 - **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 0 commit: `8a8ffb51`; Stage 1 commits:
   `ca2de133` (1A), `a2b43791` (1B), `e270e61f` (1C), plus docs `01cacbb9`, `04af6099` and
-  `4c1cf564`; Stage 2B is the commit that adds `base/src/flight.rs`.
+  `4c1cf564`; Stage 2B is `becd2905`; Stage 2A is the commit that adds `MetaCache` and the
+  boot-clear fix.
 - **Verified:** host suites and the shipping feature check are green; the WSLg simulator showed
   prefetch firing, warm opens `ms=5–7`, a cold boot-to-detail `ms=828` with `subs=0`, and the
   Stage 0 split putting ~95% of a cold shim answer in TMDB enrichment (`tmdb_ms=948` of
   `total_ms=1066`). With single-flight, the cold overlap (OK 350 ms after focus) went from the
-  Stage 1 `ms=832` to `ms=359` — the click waits only for the fetch already in flight. TV is not
-  measured.
-- **Next, in order:** Stage 2A persisted meta cache → owner tests on the TV (warm ≤300 ms,
-  cold ≤800 ms). Do not push until the owner asks.
+  Stage 1 `ms=832` to `ms=359`. With the persisted meta cache, a restart's `meta_ms` is 0 and the
+  whole open is `ms=936`, of which `tmdb_ms=932`. TV is not measured.
+- **Next, in order:** owner tests on the TV (warm ≤300 ms, cold ≤800 ms) — read `shim: meta cache
+  warm-start` and the `detail:` pair. If a fast click (no dwell, so no prefetch) is still too slow
+  on the set, the next lever is TMDB: persist its response cache like `MetaCache`, or take Stage 3A
+  (connection reuse), since `tmdb_ms` is now essentially the whole cold open. Stage 2C stays
+  conditional on seeing `/find` calls in the log. Do not push until the owner asks.
 
 ## 9. Open questions to settle before coding
 

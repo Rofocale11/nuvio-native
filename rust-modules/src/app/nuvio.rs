@@ -236,17 +236,25 @@ pub(crate) fn boot() {
     }
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
-    // Apply session-scoped addon enable/disable overrides from nuvio-session.json.
+    // Apply session-scoped addon enable/disable overrides from nuvio-session.json. Only a real
+    // change may drop the shim's caches: at boot this runs before the first request, and clearing
+    // there would throw away the meta rows loaded from the warm-start log every launch.
     {
         let account = &handle.shim.account;
         let mut set = backend.snapshot();
+        let mut changed = false;
         for a in set.addons.iter_mut() {
             if let Some(b) = account.addon_enabled_override(&a.transport_url) {
-                a.disabled = !b;
+                if a.disabled != !b {
+                    a.disabled = !b;
+                    changed = true;
+                }
             }
         }
-        backend.replace(set);
-        handle.shim.addons_changed();
+        if changed {
+            backend.replace(set);
+            handle.shim.addons_changed();
+        }
     }
     // Expose addon control to Settings (screens layer cannot name pmsshim directly).
     {

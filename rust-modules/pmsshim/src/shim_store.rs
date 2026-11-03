@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The first ratingKey handed out. Section keys are 1 and 2; keeping items far above them means a
 /// stray `/library/metadata/1` can never alias a section.
@@ -248,9 +250,274 @@ impl WatchState {
     }
 }
 
+/// How long a fetched addon meta stays usable — in memory and in the persisted log.
+pub const META_TTL: Duration = Duration::from_secs(6 * 3600);
+/// The most titles kept in memory; past it the oldest fetch is dropped.
+const META_ROWS: usize = 400;
+/// Rewrite the log once it passes this, down to about [`META_COMPACT`] bytes.
+const META_LOG_LIMIT: u64 = 8 * 1024 * 1024;
+const META_COMPACT: usize = 4 * 1024 * 1024;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MetaRow {
+    #[serde(rename = "type")]
+    type_: String,
+    id: String,
+    /// Unix seconds when the addon answered.
+    at: i64,
+    meta: plx_stremio::model::Meta,
+    /// The addons-changed generation this row was fetched under; rows from an older generation
+    /// are dropped rather than appended after a `clear`.
+    #[serde(skip, default)]
+    generation: u64,
+}
+
+/// The addon-meta cache, with a warm-start copy on disk.
+///
+/// A restart used to make every detail open cold. The rows are the expensive part (a series meta
+/// can be ~65 KB), so they are appended to `meta-cache.jsonl` as they land — the last line for a
+/// key wins at load — and the log is rewritten down to [`META_COMPACT`] when it grows past
+/// [`META_LOG_LIMIT`]. Appending one small line is what keeps this off the request path; the
+/// write itself runs on the shared persistence worker.
+pub struct MetaCache {
+    file: Option<PathBuf>,
+    rows: Mutex<HashMap<(String, String), (i64, Arc<plx_stremio::model::Meta>)>>,
+    /// Fetched rows not yet appended to the log.
+    unsaved: Mutex<Vec<MetaRow>>,
+    /// One writer at a time: appends and a compaction both take it.
+    write: Mutex<()>,
+    pending: AtomicBool,
+    generation: AtomicU64,
+}
+
+impl MetaCache {
+    pub fn open(dir: Option<&Path>) -> Arc<MetaCache> {
+        let file = dir.map(|d| d.join("meta-cache.jsonl"));
+        let now = now_secs();
+        let mut rows = HashMap::new();
+        let mut skipped = 0;
+        if let Some(text) = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()) {
+            for line in text.lines() {
+                // A torn last line (the app died mid-append) is skipped, not fatal to the cache.
+                let Ok(row) = serde_json::from_str::<MetaRow>(line) else {
+                    skipped += 1;
+                    continue;
+                };
+                if now.saturating_sub(row.at) >= META_TTL.as_secs() as i64 {
+                    continue;
+                }
+                rows.insert((row.type_, row.id), (row.at, Arc::new(row.meta)));
+            }
+        }
+        if file.is_some() {
+            plx_base::eventlog::log(&format!(
+                "shim: meta cache warm-start with {} row(s), {skipped} unreadable",
+                rows.len()
+            ));
+        }
+        Arc::new(MetaCache {
+            file,
+            rows: Mutex::new(rows),
+            unsaved: Mutex::new(Vec::new()),
+            write: Mutex::new(()),
+            pending: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+        })
+    }
+
+    pub fn get(&self, type_: &str, id: &str) -> Option<Arc<plx_stremio::model::Meta>> {
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, meta) = rows.get(&(type_.to_string(), id.to_string()))?;
+        (now_secs().saturating_sub(*at) < META_TTL.as_secs() as i64).then(|| Arc::clone(meta))
+    }
+
+    pub fn insert(self: &Arc<Self>, type_: &str, id: &str, meta: Arc<plx_stremio::model::Meta>) {
+        let at = now_secs();
+        let key = (type_.to_string(), id.to_string());
+        {
+            let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            if !rows.contains_key(&key) && rows.len() >= META_ROWS {
+                if let Some(oldest) = rows.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone()) {
+                    rows.remove(&oldest);
+                }
+            }
+            rows.insert(key, (at, Arc::clone(&meta)));
+        }
+        if self.file.is_none() {
+            return;
+        }
+        self.unsaved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(MetaRow {
+                type_: type_.to_string(),
+                id: id.to_string(),
+                at,
+                meta: (*meta).clone(),
+                generation: self.generation.load(Ordering::SeqCst),
+            });
+        self.schedule_save();
+    }
+
+    /// Forget everything — the addon set changed, so the metas may describe other content.
+    pub fn clear(self: &Arc<Self>) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.rows.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.unsaved.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let Some(file) = &self.file else { return };
+        let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = std::fs::remove_file(file);
+    }
+
+    fn schedule_save(self: &Arc<Self>) {
+        if self.pending.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let cache = Arc::clone(self);
+        if plx_base::storage_worker::submit(move || cache.save_pending()).is_err() {
+            self.pending.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Append whatever is queued, and keep going if fetches landed while the write ran. `pending`
+    /// is cleared under the `unsaved` lock, so a row that arrives during that moment either is in
+    /// the batch just written or sees `pending == false` and schedules the next write.
+    fn save_pending(&self) {
+        loop {
+            let batch = std::mem::take(&mut *self.unsaved.lock().unwrap_or_else(|e| e.into_inner()));
+            if !batch.is_empty() {
+                self.append(batch);
+            }
+            let unsaved = self.unsaved.lock().unwrap_or_else(|e| e.into_inner());
+            if unsaved.is_empty() {
+                self.pending.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
+
+    fn append(&self, batch: Vec<MetaRow>) {
+        let Some(file) = &self.file else { return };
+        let generation = self.generation.load(Ordering::SeqCst);
+        let mut out = String::new();
+        for row in batch.into_iter().filter(|row| row.generation == generation) {
+            if let Ok(line) = serde_json::to_string(&row) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
+            return;
+        }
+        let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        if std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+            .and_then(|mut f| f.write_all(out.as_bytes()))
+            .is_err()
+        {
+            return;
+        }
+        if std::fs::metadata(file).map(|m| m.len()).unwrap_or(0) > META_LOG_LIMIT {
+            self.compact();
+        }
+    }
+
+    /// Rewrite the log with one line per held row, newest first, under [`META_COMPACT`].
+    fn compact(&self) {
+        let Some(file) = &self.file else { return };
+        let mut newest: Vec<(i64, String, String, Arc<plx_stremio::model::Meta>)> = self
+            .rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|((type_, id), (at, meta))| (*at, type_.clone(), id.clone(), Arc::clone(meta)))
+            .collect();
+        newest.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
+        let mut out = String::new();
+        for (at, type_, id, meta) in newest {
+            let row = MetaRow { type_, id, at, meta: (*meta).clone(), generation: 0 };
+            let Ok(line) = serde_json::to_string(&row) else { continue };
+            if out.len() + line.len() + 1 > META_COMPACT {
+                break;
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        let tmp = file.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, out).is_ok() {
+            let _ = std::fs::rename(&tmp, file);
+        }
+    }
+
+    /// Run the queue now. Tests only: production must not write the log on a request thread.
+    #[cfg(test)]
+    fn flush_for_test(&self) {
+        self.save_pending();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn meta(id: &str, name: &str) -> plx_stremio::model::Meta {
+        plx_stremio::model::Meta { id: id.into(), type_: "movie".into(), name: name.into(), ..Default::default() }
+    }
+
+    fn meta_scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pmsshim-meta-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_fetched_meta_is_there_after_a_restart() {
+        let dir = meta_scratch("restart");
+        let cache = MetaCache::open(Some(&dir));
+        cache.insert("movie", "tt1", Arc::new(meta("tt1", "Kept")));
+        cache.flush_for_test();
+        drop(cache);
+        let reopened = MetaCache::open(Some(&dir));
+        let got = reopened.get("movie", "tt1").expect("the row survived the restart");
+        assert_eq!(got.name, "Kept");
+    }
+
+    #[test]
+    fn expired_rows_and_a_torn_line_are_skipped_on_load() {
+        let dir = meta_scratch("expiry");
+        let stale = MetaRow {
+            type_: "movie".into(),
+            id: "tt2".into(),
+            at: now_secs() - META_TTL.as_secs() as i64 - 60,
+            meta: meta("tt2", "Stale"),
+            generation: 0,
+        };
+        let fresh = MetaRow { type_: "movie".into(), id: "tt3".into(), at: now_secs(), meta: meta("tt3", "Fresh"), generation: 0 };
+        let text = format!(
+            "{}\n{}\n{{\"type\":\"movie\",\"id\":\"tt4\",\"at\":0",
+            serde_json::to_string(&stale).unwrap(),
+            serde_json::to_string(&fresh).unwrap(),
+        );
+        std::fs::write(dir.join("meta-cache.jsonl"), text).unwrap();
+        let cache = MetaCache::open(Some(&dir));
+        assert!(cache.get("movie", "tt2").is_none(), "past META_TTL");
+        assert_eq!(cache.get("movie", "tt3").unwrap().name, "Fresh");
+    }
+
+    #[test]
+    fn clearing_the_cache_forgets_the_file_too() {
+        let dir = meta_scratch("clear");
+        let cache = MetaCache::open(Some(&dir));
+        cache.insert("movie", "tt5", Arc::new(meta("tt5", "Gone")));
+        cache.flush_for_test();
+        assert!(dir.join("meta-cache.jsonl").exists());
+        cache.clear();
+        assert!(cache.get("movie", "tt5").is_none());
+        assert!(!dir.join("meta-cache.jsonl").exists(), "the warm-start copy is gone with the memory");
+    }
 
     #[test]
     fn keys_persist_and_are_stable() {

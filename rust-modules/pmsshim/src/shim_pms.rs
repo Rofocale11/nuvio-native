@@ -5,7 +5,7 @@ use crate::shim_backend::{Backend, CatalogInfo};
 use crate::shim_core::{Config, MACHINE_ID};
 use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
-use crate::shim_store::{now_secs, Ident, Keys, Watch, WatchState};
+use crate::shim_store::{now_secs, Ident, Keys, MetaCache, Watch, WatchState};
 use plx_stremio::addons_tmdb::{
     TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
     TmdbPerson, TmdbShow, TmdbShowDetails, TmdbVideo,
@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 /// would be a call per ten seconds for the length of a film.
 const WATCH_PUSH_INTERVAL: Duration = Duration::from_secs(60);
 
-const META_TTL: Duration = Duration::from_secs(6 * 3600);
 const CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 /// How long `/hubs` waits for catalogs that are not cached yet; late ones land in the cache for the
 /// next fetch rather than holding Home up.
@@ -339,7 +338,9 @@ pub struct Shim {
     /// When each item's resume point was last mirrored to the Nuvio account, so a playing report
     /// (the app sends one every few seconds) does not become one API call every few seconds.
     watch_pushes: Mutex<HashMap<i64, Instant>>,
-    metas: Mutex<HashMap<(String, String), (Instant, Arc<Meta>)>>,
+    /// The addon metas this session has fetched, with the last few hours persisted beside the key
+    /// table so a restart does not make the first detail open cold.
+    metas: Arc<MetaCache>,
     /// One addon-meta fetch per `(type, id)` at a time: the focus prefetch and the detail click
     /// it was warming would otherwise each ask the addon for the same title.
     meta_flight: plx_base::flight::Flight,
@@ -1654,7 +1655,7 @@ impl Shim {
             watch: WatchState::open(dir.as_deref()),
             watch_pushes: Mutex::new(HashMap::new()),
             cfg,
-            metas: Mutex::new(HashMap::new()),
+            metas: MetaCache::open(dir.as_deref()),
             meta_flight: plx_base::flight::Flight::default(),
             catalogs: Mutex::new(HashMap::new()),
             catalog_list: Mutex::new(None),
@@ -1833,7 +1834,7 @@ impl Shim {
 
     /// Drop every cache that depends on the addon set (after Settings changed it).
     pub fn addons_changed(&self) {
-        self.metas.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.metas.clear();
         self.poster_fallbacks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1979,13 +1980,10 @@ impl Shim {
     }
 
     fn meta(&self, type_: &str, id: &str) -> Option<Arc<Meta>> {
-        let k = (type_.to_string(), id.to_string());
         let gate = format!("{type_}\u{0}{id}");
         loop {
-            if let Some((at, m)) = self.metas.lock().unwrap_or_else(|e| e.into_inner()).get(&k) {
-                if at.elapsed() < META_TTL {
-                    return Some(m.clone());
-                }
+            if let Some(m) = self.metas.get(type_, id) {
+                return Some(m);
             }
             // The focus prefetch and the click that follows it miss together; the second caller
             // waits here for the first fetch and then finds it in the cache. A refused read
@@ -1993,11 +1991,7 @@ impl Shim {
             // refusal as the title not existing.
             let Some(_turn) = self.meta_flight.claim(&gate) else { continue };
             let m = Arc::new(self.backend.meta(type_, id)?);
-            let mut g = self.metas.lock().unwrap_or_else(|e| e.into_inner());
-            if g.len() > 400 {
-                g.clear();
-            }
-            g.insert(k.clone(), (Instant::now(), m.clone()));
+            self.metas.insert(type_, id, Arc::clone(&m));
             return Some(m);
         }
     }
