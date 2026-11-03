@@ -294,7 +294,13 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   one of its three runs failed `account_to_settings_never_unfreezes_the_host`, a test that fails
   about one run in three when started alone in a fresh process (300 runs, with a shared and with a
   private runtime dir) and is hidden in the suite by the tests that run before it in the same
-  process. Adopting it would also need the tool on every machine and CI job.
+  process. Adopting it would also need the tool on every machine and CI job. **A single filtered
+  test is the exception**: `CARGO_TARGET_DIR=target-fast cargo nextest run -p plx_base -E
+  'test(flight)'` reuses the `test-fast` tree and answers in about a second, which is the quickest
+  inner loop when one module is all a change touches. It resolves only that package's default
+  features, so it is not a substitute for the suite. A run that goes quiet with the CPU idle and
+  prints `SLOW [> 60s]` is a HUNG test (a lock or a claim the test itself took twice), not a slow
+  build — `timeout` the run and fix the test.
 - `make test-hostsim [C=<crate>] [T=filter]` — the `hostsim`-feature unit tests
   (`#[cfg(all(test, feature = "hostsim"))]`: the application crate's `app/run.rs`
   `lifecycle_regression_tests`, the player-return rig; `plx_media`'s `player/engine.rs`, `pump.rs`,

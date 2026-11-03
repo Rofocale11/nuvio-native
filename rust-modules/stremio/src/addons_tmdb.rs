@@ -24,6 +24,17 @@ fn shared_cache() -> Arc<ResponseCache> {
 pub struct TmdbClient {
     api_key: String,
     cache: Arc<ResponseCache>,
+    /// One fetch per URL at a time: a detail prefetch and the click it warmed both miss this
+    /// cache for the same title, and the click must wait for the download already running
+    /// rather than start a second one.
+    flight: Arc<plx_base::flight::Flight>,
+}
+
+fn shared_flight() -> Arc<plx_base::flight::Flight> {
+    static FLIGHT: OnceLock<Arc<plx_base::flight::Flight>> = OnceLock::new();
+    FLIGHT
+        .get_or_init(|| Arc::new(plx_base::flight::Flight::default()))
+        .clone()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -266,6 +277,7 @@ impl TmdbClient {
         (!api_key.is_empty()).then(|| Self {
             api_key: api_key.to_string(),
             cache: shared_cache(),
+            flight: shared_flight(),
         })
     }
 
@@ -279,7 +291,7 @@ impl TmdbClient {
 
     fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let cache_key = (self.api_key.clone(), path.to_string());
-        let body = cached_json(&self.cache, cache_key, || {
+        let body = cached_json(&self.cache, &self.flight, cache_key, || {
             addon_http::get_json(&self.url(path), addon_http::ADDON)
         })?;
         serde_json::from_value(body).map_err(|error| Error::Parse(error.to_string()))
@@ -314,7 +326,7 @@ impl TmdbClient {
                 addon_http::encode_component(&self.api_key)
             );
             let cache_path = format!("/find/{id}?external_source=imdb_id");
-            let body = cached_json(&self.cache, (self.api_key.clone(), cache_path), || {
+            let body = cached_json(&self.cache, &self.flight, (self.api_key.clone(), cache_path), || {
                 addon_http::get_json(&format!("{API_BASE}{path}"), addon_http::ADDON)
             })?;
             let found: FindResponse =
@@ -386,7 +398,7 @@ impl TmdbClient {
             addon_http::encode_component(&self.api_key)
         );
         let cache_path = format!("/find/{id}?external_source=imdb_id");
-        let body = cached_json(&self.cache, (self.api_key.clone(), cache_path), || {
+        let body = cached_json(&self.cache, &self.flight, (self.api_key.clone(), cache_path), || {
             addon_http::get_json(&format!("{API_BASE}{path}"), addon_http::ADDON)
         })?;
         let found: FindResponse =
@@ -430,30 +442,42 @@ impl TmdbClient {
     }
 }
 
-fn cached_json<F>(cache: &ResponseCache, key: (String, String), fetch: F) -> Result<Value>
+fn cached_json<F>(
+    cache: &ResponseCache,
+    flight: &plx_base::flight::Flight,
+    key: (String, String),
+    mut fetch: F,
+) -> Result<Value>
 where
-    F: FnOnce() -> Result<Value>,
+    F: FnMut() -> Result<Value>,
 {
-    if let Some((at, value)) = cache
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .get(&key)
-    {
-        if at.elapsed() < CACHE_TTL {
-            return Ok(value.clone());
+    let flight_key = format!("{}\u{0}{}", key.0, key.1);
+    loop {
+        if let Some((at, value)) = cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+        {
+            if at.elapsed() < CACHE_TTL {
+                return Ok(value.clone());
+            }
         }
-    }
 
-    let value = fetch()?;
-    let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
-    if cache.len() >= 512 {
-        cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+        // A prefetch and the click it warmed both miss here for the same title; the second waits
+        // for the first download instead of starting its own. An error releases the key, so the
+        // waiter tries again rather than inheriting an answer it never saw.
+        let Some(_turn) = flight.claim(&flight_key) else { continue };
+        let value = fetch()?;
+        let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
         if cache.len() >= 512 {
-            cache.clear();
+            cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+            if cache.len() >= 512 {
+                cache.clear();
+            }
         }
+        cache.insert(key.clone(), (Instant::now(), value.clone()));
+        return Ok(value);
     }
-    cache.insert(key, (Instant::now(), value.clone()));
-    Ok(value)
 }
 
 #[cfg(test)]
@@ -503,6 +527,7 @@ mod tests {
         let client = TmdbClient {
             api_key: "key +".into(),
             cache: shared_cache(),
+            flight: shared_flight(),
         };
         assert_eq!(
             client.url("/movie/603/credits"),
@@ -624,15 +649,43 @@ mod tests {
     #[test]
     fn cached_json_reuses_a_fresh_response() {
         let cache = ResponseCache::default();
+        let flight = plx_base::flight::Flight::default();
         let key = ("test-key".into(), "/movie/603/credits".into());
-        let first = cached_json(&cache, key.clone(), || {
+        let first = cached_json(&cache, &flight, key.clone(), || {
             Ok(serde_json::json!({"cast": [{"name": "Actor"}]}))
         })
         .unwrap();
-        let second = cached_json(&cache, key, || {
+        let second = cached_json(&cache, &flight, key, || {
             panic!("fresh cached response must not trigger another fetch")
         })
         .unwrap();
         assert_eq!(first, second);
+    }
+
+    /// A prefetch and the click it warmed miss together for the same URL: the second waits for
+    /// the first download and reuses it, so TMDB sees one request, not two.
+    #[test]
+    fn concurrent_misses_share_one_fetch() {
+        let cache = ResponseCache::default();
+        let flight = plx_base::flight::Flight::default();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let key = ("test-key".to_string(), "/movie/603".to_string());
+        let started = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let (cache, flight, calls, key, started) = (&cache, &flight, &calls, &key, &started);
+                scope.spawn(move || {
+                    started.wait();
+                    let value = cached_json(cache, flight, key.clone(), || {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(100));
+                        Ok(serde_json::json!({"id": 603}))
+                    })
+                    .unwrap();
+                    assert_eq!(value["id"], 603);
+                });
+            }
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

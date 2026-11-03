@@ -26,6 +26,7 @@ pub mod surface; // what we are actually drawing into: drawable vs the 1920x1080
 pub mod local_server; // NuvioNative: the loopback PMS shim that stands in for Plex, set once at boot
 pub mod tile; // `Tile`: the shelf-tile trait the data layer implements and `ui` draws through
 pub mod hold; // `HOLD_ROWS`, `clamp_hold`: the rows a paged store keeps, which the store and `ui::cards::HoldBand` both apply
+pub mod flight; // one fetch per key at a time: a prefetch and the click it warms share it
 pub mod devtrig; // the /tmp trigger PRIMITIVES (`flag`, `read`, `latched_flag!`, `no_wan`...)
 pub mod diag; // the frame instruments (`heartbeat`, `spans`) and the zlib helper
 pub mod forkknobs; // FORK (RichiL10): playback knobs read from /media/developer/plxnative-fork.conf

@@ -1,7 +1,7 @@
 # Detail-page latency — plan
 
-**Status:** Stage 0 and Stage 1 (1A–1C) implemented (2026-11-03), host + simulator verified. Written
-2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
+**Status:** Stage 0, Stage 1 (1A–1C) and Stage 2B implemented (2026-11-03), host + simulator
+verified. Written 2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
 **Owner:** whoever picks this up next.
 **Scope:** wall-clock from pressing OK on a Home/Library card to a painted movie/show detail page,
 on the television. Not the player, not Home's own first paint, not poster throughput.
@@ -244,9 +244,15 @@ focus (cold).
   (e.g. 400 entries / a few MB, LRU), load at boot, honour `META_TTL`. Do not persist the raw
   `Value` stream slots. Where: the shim's store (`shim_store.rs`) or a small JSON cache beside
   `keys.tsv`; the runtime dir is per-instance, which keeps sim and TV separate.
-- **2B. Single-flight the meta and TMDB fetches.** Per-key in-flight map + condvar so a prefetch
-  and the real request share one network call. The current code checks-then-fetches with the lock
-  released (`shim_pms.rs:1894`, `addons_tmdb.rs:433`).
+- **2B. Single-flight the meta and TMDB fetches — implemented.** `plx_base::flight::Flight`
+  (`rust-modules/base/src/flight.rs`) is a per-key gate: one caller leads the fetch, the rest wait
+  and then re-read their cache; a failed or panicking lead drops the claim and releases the next
+  caller. Both caches now use it — `Shim::meta` (`shim_pms.rs`) and `cached_json`
+  (`addons_tmdb.rs`), whose fetch closure is `FnMut` so the waiter can retry. Measured in the
+  simulator, cold: the focus prefetch's `detail: shim` line took `tmdb_ms=732 total_ms=732`; the
+  click that arrived 350 ms later took `tmdb_ms=355 total_ms=355` (the wait for the fetch already
+  running) and the app's `ms=359` — instead of a second full TMDB fetch and the `ms=832` the
+  Stage 1 run recorded for the same overlap.
 - **2C. Make the IMDb→TMDB mapping permanent.** If 1B leaves any `/find` calls, cache the mapping
   without a 15-minute TTL — it never changes. A small persisted `imdb → (movie_id, tv_id)` map is
   enough.
@@ -283,8 +289,10 @@ focus (cold).
   `subs=0 audio=0`: prefetch start is not single-flight yet (Stage 2), and the read still paid
   only the meta/TMDB path. The Stage 0 split on the same cold open: shim `meta_ms=118 streams_ms=0
   tmdb_ms=948 total_ms=1066`, app `meta_ms=1068 … ms=1072`; re-opened warm: shim `total_ms=0`,
-  app `ms=2`. Host tests and the sim target build are green; the TV measurement below is still
-  owed.
+  app `ms=2`. The Stage 2B single-flight was then measured on the overlap it targets: `back` to the
+  rail, `right`, OK 350 ms later, cold — the prefetch's shim line `tmdb_ms=732 total_ms=732`, the
+  click's `tmdb_ms=355 total_ms=355`, app `ms=359`. Host tests and the sim target build are green;
+  the TV measurement below is still owed.
 
   Recipe (one runtime root, WSLg display exported as the `ui-sim` skill says):
 
@@ -337,21 +345,22 @@ focus (cold).
 | Meta model (`moviedb_id`) | `rust-modules/stremio/src/model.rs:160` |
 | HTTP transport (no reuse) | `rust-modules/net/src/net.rs:928`, serial fallback `:2164` |
 | Home focus / tick / prefetch | `rust-modules/screens/src/home/mod.rs:1641`, `:2407`, `:2428` (`tick_prefetch`) |
+| Single-flight primitive | `rust-modules/base/src/flight.rs` (`Flight::claim`), used by `shim_pms.rs` `meta()` and `addons_tmdb.rs` `cached_json` |
 | Design docs | `docs/nuvio/ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md` |
 
 ## 8. Working state (2026-11-03) — resume point
 
-- **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 0 commit: `Stage 0 — split the detail
-  latency`; Stage 1 commits: `ca2de133` (1A), `a2b43791` (1B), `e270e61f` (1C), plus docs
-  `01cacbb9`, `04af6099` and `4c1cf564`.
+- **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 0 commit: `8a8ffb51`; Stage 1 commits:
+  `ca2de133` (1A), `a2b43791` (1B), `e270e61f` (1C), plus docs `01cacbb9`, `04af6099` and
+  `4c1cf564`; Stage 2B is the commit that adds `base/src/flight.rs`.
 - **Verified:** host suites and the shipping feature check are green; the WSLg simulator showed
-  prefetch firing, warm opens `ms=5–7`, a cold boot-to-detail `ms=828` with `subs=0`, and one
-  `ms=832` open where the prefetch GET was still in flight. The Stage 0 split on a cold open
-  puts ~95% of the shim's answer in TMDB enrichment (`tmdb_ms=948` of `total_ms=1066`). TV is
-  not measured.
-- **Next, in order:** Stage 2B single-flight (the `ms=832` overlap and the cold TMDB cost) →
-  Stage 2A persisted meta cache → owner tests on the TV (warm ≤300 ms, cold ≤800 ms). Do not
-  push until the owner asks.
+  prefetch firing, warm opens `ms=5–7`, a cold boot-to-detail `ms=828` with `subs=0`, and the
+  Stage 0 split putting ~95% of a cold shim answer in TMDB enrichment (`tmdb_ms=948` of
+  `total_ms=1066`). With single-flight, the cold overlap (OK 350 ms after focus) went from the
+  Stage 1 `ms=832` to `ms=359` — the click waits only for the fetch already in flight. TV is not
+  measured.
+- **Next, in order:** Stage 2A persisted meta cache → owner tests on the TV (warm ≤300 ms,
+  cold ≤800 ms). Do not push until the owner asks.
 
 ## 9. Open questions to settle before coding
 

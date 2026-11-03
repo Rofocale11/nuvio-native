@@ -340,6 +340,9 @@ pub struct Shim {
     /// (the app sends one every few seconds) does not become one API call every few seconds.
     watch_pushes: Mutex<HashMap<i64, Instant>>,
     metas: Mutex<HashMap<(String, String), (Instant, Arc<Meta>)>>,
+    /// One addon-meta fetch per `(type, id)` at a time: the focus prefetch and the detail click
+    /// it was warming would otherwise each ask the addon for the same title.
+    meta_flight: plx_base::flight::Flight,
     catalogs: Mutex<HashMap<(String, Option<String>), Arc<Mutex<CatalogCache>>>>,
     catalog_list: Mutex<Option<(Instant, Vec<CatalogInfo>)>>,
     streams: Mutex<HashMap<i64, Arc<StreamSlot>>>,
@@ -1652,6 +1655,7 @@ impl Shim {
             watch_pushes: Mutex::new(HashMap::new()),
             cfg,
             metas: Mutex::new(HashMap::new()),
+            meta_flight: plx_base::flight::Flight::default(),
             catalogs: Mutex::new(HashMap::new()),
             catalog_list: Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
@@ -1976,18 +1980,26 @@ impl Shim {
 
     fn meta(&self, type_: &str, id: &str) -> Option<Arc<Meta>> {
         let k = (type_.to_string(), id.to_string());
-        if let Some((at, m)) = self.metas.lock().unwrap_or_else(|e| e.into_inner()).get(&k) {
-            if at.elapsed() < META_TTL {
-                return Some(m.clone());
+        let gate = format!("{type_}\u{0}{id}");
+        loop {
+            if let Some((at, m)) = self.metas.lock().unwrap_or_else(|e| e.into_inner()).get(&k) {
+                if at.elapsed() < META_TTL {
+                    return Some(m.clone());
+                }
             }
+            // The focus prefetch and the click that follows it miss together; the second caller
+            // waits here for the first fetch and then finds it in the cache. A refused read
+            // (`None` below) releases the key, so the waiter asks again rather than reading the
+            // refusal as the title not existing.
+            let Some(_turn) = self.meta_flight.claim(&gate) else { continue };
+            let m = Arc::new(self.backend.meta(type_, id)?);
+            let mut g = self.metas.lock().unwrap_or_else(|e| e.into_inner());
+            if g.len() > 400 {
+                g.clear();
+            }
+            g.insert(k.clone(), (Instant::now(), m.clone()));
+            return Some(m);
         }
-        let m = Arc::new(self.backend.meta(type_, id)?);
-        let mut g = self.metas.lock().unwrap_or_else(|e| e.into_inner());
-        if g.len() > 400 {
-            g.clear();
-        }
-        g.insert(k, (Instant::now(), m.clone()));
-        Some(m)
     }
 
     /// The (type, id) an item's streams are asked for, and its runtime.
@@ -4846,6 +4858,73 @@ fn _assert_send_sync() {
     fn f<T: Send + Sync>() {}
     f::<Shim>();
     let _ = now_secs;
+}
+
+#[cfg(test)]
+mod meta_flight_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    /// Counts the addon reads for one title and answers them slowly, so two callers released
+    /// together really are in flight at once.
+    struct SlowMetaBackend {
+        calls: AtomicUsize,
+    }
+
+    impl Backend for SlowMetaBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
+        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+            Ok(Vec::new())
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, type_: &str, id: &str) -> Option<Meta> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(150));
+            Some(Meta {
+                id: id.into(),
+                type_: type_.into(),
+                name: "Slow Meta".into(),
+                ..Default::default()
+            })
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
+    /// The focus prefetch and the click it was warming ask for the same title at the same time;
+    /// the addon must see one read, and both callers must get the answered meta.
+    #[test]
+    fn a_prefetch_and_a_detail_read_share_one_addon_meta_fetch() {
+        let backend = Arc::new(SlowMetaBackend { calls: AtomicUsize::new(0) });
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let started = Barrier::new(2);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let (shim, started) = (Arc::clone(&shim), &started);
+                scope.spawn(move || {
+                    started.wait();
+                    let meta = shim.meta("movie", "slow-meta").expect("the addon answered");
+                    assert_eq!(meta.name, "Slow Meta");
+                });
+            }
+        });
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "the second caller reused the fetch in flight");
+    }
 }
 
 #[cfg(test)]
