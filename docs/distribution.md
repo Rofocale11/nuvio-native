@@ -1330,11 +1330,14 @@ Homebrew manifest, the LGPL source asset, caches, the firmware-database gate) ap
 caller, `canary.yml`, existed the same way before nightly replaced it; its public prereleases
 remain on GitHub as history.)
 
-**The runner is forced.** `webosbrew/native-toolchain` publishes exactly three host builds for
-`webos-d7ed7ee.6` — `darwin-arm64`, `darwin-x86_64`, `linux-aarch64` — and **no linux-x86_64**.
-So the cross-build runs on **`ubuntu-24.04-arm`**. The old hardcoded `darwin-$(uname -m)` URL
+**The runner is arm64 by choice, not by necessity.** `webosbrew/native-toolchain` publishes three
+host builds for `webos-d7ed7ee.6` — `darwin-arm64`, `darwin-x86_64`, `linux-aarch64`. The
+`linux-x86_64` host build exists one level up, in the `openlgtv/buildroot-nc4` release of the same
+commit, and `ci/dependencies.json` pins it as a fourth asset so a local x86_64 Linux (WSL) box can
+cross-build; CI stays on **`ubuntu-24.04-arm`** because every cache key, timeout and measurement here
+was taken there. The old hardcoded `darwin-$(uname -m)` URL
 *resolved* on ubuntu-latest and quietly delivered a Mach-O toolchain that passed `test -x` and died
-much later with `Exec format error`; `make setup-env` now refuses that host by name. CI pins the
+much later with `Exec format error`; that is why every host is named explicitly and pinned. CI pins the
 **same NDK release the dev Mac uses** (sha256 `45a2d12f…`, verified 2026-08-01), and its sysroot was
 confirmed to carry all nine `LIBS_REAL` including `libAcbAPI`/`libplayerAPIs`/`libpf-1.0`.
 

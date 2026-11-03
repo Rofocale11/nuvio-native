@@ -61,6 +61,13 @@ rust-modules/target-sim-video/
 # pkg/plxnative-storage's own target dir, deliberately separate from $(RUST_TDIR) — see the
 # Makefile's STORAGE_TDIR comment. One glob for every RELEASE/LAB/SYMBOLS combination.
 rust-modules/target*-storage/
+# ...and the net under that whole list, which names one tree at a time. A hand-typed `--target-dir`
+# — the shape every one-off cargo experiment and `make test-crate` variant takes — invents a name
+# this file has never seen: `target-storage-test`, created while proving out the x86_64 Linux host,
+# matched nothing above and would have been staged by the next `git add -A`. Slashless for the same
+# reason the FFmpeg patterns are (a SYMLINKED target dir is still a target dir, and `target*/` does
+# not match a link). Nothing tracked in this repository begins with `rust-modules/target`.
+rust-modules/target*
 
 # dead prototype dir (code lives in rust-modules/ now)
 rust-poc/
@@ -216,3 +223,15 @@ pkg/*.so
 # Ignore downloaded vendor tarballs
 vendor/downloads/
 pkg/lib*
+
+# `npm ci --prefix tools` installs the pinned sentry-cli here — `make sentry-symbols` reads
+# tools/node_modules/.bin/sentry-cli, and the whole tree is derived from the tracked
+# tools/package.json + package-lock.json. Written as a bare name, not `/tools/node_modules/`,
+# because any future npm root (js-service/, a site tool) is the same class of build output;
+# nothing under a node_modules/ is tracked in this repository. NB neither npm consumer is live on
+# this fork: `make sentry-symbols` needs a SENTRY_AUTH_TOKEN this repo does not have (and its
+# SENTRY_ORG/SENTRY_PROJECT defaults are UPSTREAM's project — see the Makefile), and
+# issue-labels.yml installs the Copilot CLI only when COPILOT_GITHUB_TOKEN exists. So this tree
+# appears only when somebody deliberately runs an upload — which is exactly when a 40 MB npm tree
+# must not be one `git add -A` away.
+node_modules/

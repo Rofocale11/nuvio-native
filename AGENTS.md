@@ -219,12 +219,13 @@ fails the build on a forbidden edge.
   `.github/workflows/` or the module layout pastes a before/after `make build-bench` table
   in its body.
 - `make` performs the ARM cross-build only where the webOS NDK is installed
-  (`$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot`, as set up by the
-  `setup-environment` skill). On a host without it — including this WSL checkout — `make`,
-  `make deploy` and `make ipk` fail before the link, so a host-only green result proves
-  nothing about the target. Build the `.ipk` in CI (`.github/workflows/build-ipk.yml`,
-  `workflow_dispatch` on a pushed branch, or a `v*` tag), and never report an ARM result
-  you did not run.
+  (`$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot`, fetched by `make setup-env`, which
+  knows macOS, arm64 Linux and x86_64 Linux hosts — this WSL checkout included). On a host
+  without it, `make`, `make deploy` and `make ipk` fail before the link, so a host-only green
+  result proves nothing about the target. A local `make ipk` IS a real ARM package and runs the
+  packaging gates, but it is not a release: the release artifact is the one CI builds
+  (`.github/workflows/build-ipk.yml`, `workflow_dispatch` on a pushed branch, or a `v*` tag),
+  and never report an ARM result you did not run.
 - A plain local `make` / `make deploy` compiles with the fast `tvdev` cargo profile (no
   LTO); CI, `RELEASE=1`, `SYMBOLS=1` and `FLAVOR=stable|nightly` keep the fat-LTO
   `release` profile. Timing runs enforce `ARM_PROFILE=release`.

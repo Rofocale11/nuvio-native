@@ -71,6 +71,19 @@ set -eu
 # n9.0.2, fetched and hashed 2026-10-31.
 SHA256_GITHUB=6e374ed621e48faa40639307dff48ba6fe574a509977956d2cce9669b7cc27e9
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# `shasum` is the macOS spelling. A Linux host without perl's core scripts — a slim WSL box, most
+# containers — has only coreutils' `sha256sum`, and a MISSING hash command produced an empty string
+# that compared unequal to the pin, so the build died as "ffmpeg.org served bytes that do not match
+# the pinned sha256" about bytes it had never actually hashed. Both tools print "<hex>  <name>", so
+# every call site below goes through this one.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_of() { sha256sum "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_of() { shasum -a 256 "$@"; }
+else
+  echo "ffmpeg: neither sha256sum nor shasum is on PATH" >&2
+  exit 1
+fi
 # The pin (version, upstream URL, sha256) is declared once, in ci/dependencies.json; nothing here
 # carries a literal copy of it. ci/deps.py is also what downloads and verifies the tarball.
 DEPS="$ROOT/ci/deps.py"
@@ -300,9 +313,9 @@ if [ -n "$CACHE_ROOT" ]; then
   # later, clean checkout then reuses. One shell's codegen or SDK override, silently inherited by
   # every lane on the machine, in libraries that ship. They are in the key, which means such a
   # build gets its OWN tree rather than contaminating the shared one.
-  INHERITED="$(shasum -a 256 "$ROOT/ci/arm-cc.py" "$ROOT/ci/check-link-evidence.py" | cut -d' ' -f1)|${CFLAGS-}|${CPPFLAGS-}|${LDFLAGS-}|${CXXFLAGS-}|${PKG_CONFIG_PATH-}"
+  INHERITED="$(sha256_of "$ROOT/ci/arm-cc.py" "$ROOT/ci/check-link-evidence.py" | cut -d' ' -f1)|${CFLAGS-}|${CPPFLAGS-}|${LDFLAGS-}|${CXXFLAGS-}|${PKG_CONFIG_PATH-}"
   KEY=$(printf '%s|%s|%s|%s|%s|%s|%s|%s' "$VERSION" "$SHA256" "$ARCHTAG" "$CROSS" "$SYSROOT" "$TOOLCHAIN" "$INHERITED" "$FLAGS_ALL" \
-        | shasum -a 256 | cut -c1-16)
+        | sha256_of | cut -c1-16)
   WORK="$CACHE_ROOT/ffmpeg/$ARCHTAG-$VERSION-$KEY"
   # One tree, N checkouts, so two of them can arrive at once — a fleet launches its lanes
   # together, which is exactly the case that would have them configure over each other's
@@ -417,7 +430,7 @@ CACHED_TAR_GITHUB="$CACHE_ROOT/ffmpeg/ffmpeg-$VERSION-$(printf '%s' "$SHA256_GIT
 # first had just put there, failing that build's own verification a moment later. Everything
 # happens on a pid-local candidate; `mv` publishes it, and two processes publishing identical
 # verified bytes is harmless.
-tarball_ok() { [ -f "$1" ] && [ "$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ]; }
+tarball_ok() { [ -f "$1" ] && [ "$(sha256_of "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ]; }
 # ffmpeg.org times out and resets from both developer networks and GitHub's: `--retry-all-errors`
 # is required so a TLS reset (exit 35), not just a timeout, is retried.
 fetch() {
@@ -487,7 +500,7 @@ echo "ffmpeg: source $FFMPEG_SOURCE"
 # which is the case that must stop the build.
 want="$SHA256"
 case "$TAR" in *.tar.gz) want="$SHA256_GITHUB" ;; esac
-have=$(shasum -a 256 "$TAR" | cut -d' ' -f1)
+have=$(sha256_of "$TAR" | cut -d' ' -f1)
 if [ "$have" != "$want" ]; then
   echo "ffmpeg: SHA256 MISMATCH for $TAR" >&2
   echo "  expected $want" >&2

@@ -743,7 +743,7 @@ TELEMETRY_ENV += $(foreach v,$(NUVIO_ENV_VARS),$(if $($(v)),$(v)='$($(v))',))
 # baked in from whichever build happened to run first -- the same class of trap as
 # `make RELEASE=1 && make deploy`. The values are hashed rather than written, so the stamp file
 # (which is not gitignored) never contains a credential.
-TELEMETRY_CFG  = $(shell printf '%s|%s|%s|%s' '$(PLX_SENTRY_DSN)' '$(PLX_POSTHOG_KEY)' '$(PLX_SENTRY_DSN_DEV)' '$(PLX_POSTHOG_KEY_DEV)' | shasum | cut -c1-12)
+TELEMETRY_CFG  = $(shell printf '%s|%s|%s|%s' '$(PLX_SENTRY_DSN)' '$(PLX_POSTHOG_KEY)' '$(PLX_SENTRY_DSN_DEV)' '$(PLX_POSTHOG_KEY_DEV)' | $(SHA256SUM) | cut -c1-12)
 # `+nightly:<date>` carries PLX_NIGHTLY_DATE into the stamp itself, the same reason SYMBOLS and the
 # telemetry pair are in it and RELEASE already was: a nightly binary's REPORTED version is dated by
 # this value (`build.rs`'s PLX_CHANNEL=nightly arm), so `ci/check-package.py` needs the exact date a
@@ -990,11 +990,20 @@ STORAGE_TDIR = $(RUST_TDIR)-storage
 # "no app library" line.
 STORAGE_INPUTS := $(shell find rust-modules/storage rust-modules/build_support rust-modules/platform/src/storage_service -type f 2>/dev/null) rust-modules/platform/src/storage/state.rs rust-modules/.cargo/config.toml
 STORAGE_BIN = rust-modules/$(STORAGE_TDIR)/$(RUST_TARGET)/$(ARM_PROFILE)/plxnative-storage
+# `-fuse-ld=bfd` is for the x86_64 Linux host, and it is load-bearing there. This target's default
+# rustc linker flavor is `gnu-lld-cc`, and on an x86_64 host (whose rustup ships the `gcc-ld` shim
+# directory) rustc therefore drives the link with `-B …/gcc-ld -fuse-ld=lld` — measured here, absent
+# from the successful aarch64 CI log, which is why nothing noticed. rust-lld accepts the call but
+# answers with neither a GNU input map nor the `-t` trace, so ci/arm-cc.py's link evidence — the
+# attestation that no unlicensed archive got linked, and the same one the other 40-odd links in this
+# file produce — fails with "not a GNU linker input map". Naming bfd explicitly puts this link on the
+# same GNU ld the Makefile-driven links (the app, FFmpeg, libass, sentry) already use, on every host.
 pkg/plxnative-storage: LICENSE $(STORAGE_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.lock ci/install-identities.json Makefile ci/arm-cc.py ci/check-link-evidence.py
 	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \
 	  CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER='$(CC)' \
 	  cargo +$(RUST_TOOLCHAIN) rustc $(ARM_PROFILE_FLAG) --target $(RUST_TARGET) \
 	    -p plxnative-storage --bin plxnative-storage --target-dir $(STORAGE_TDIR) --no-default-features -- \
+	    -C link-arg=-fuse-ld=bfd \
 	    -C link-arg=--sysroot=$(SYSROOT) -L native=$(SYSROOT)/usr/lib \
 	    -C link-arg=-Wl,-rpath-link,$(SYSROOT)/usr/lib -C link-arg=-Wl,--build-id=sha1
 	cp $(STORAGE_BIN) $@
@@ -1054,17 +1063,23 @@ pkg/plxnative: $(OBJS) $(RUST_LIB) $(FFMPEG_STAGED) $(LIBASS_STAGED) $(SENTRY_NA
 # The release, the per-host asset URLs and their sha256 are declared once, in ci/dependencies.json
 # (entry `webos-ndk`); `ci/deps.py` downloads and verifies. Nothing here carries a literal copy.
 NDK_REL = $(shell python3 ci/deps.py get webos-ndk version)
-# Host-aware asset selection. webosbrew/native-toolchain publishes exactly THREE host builds for
-# the pinned release — darwin-arm64, darwin-x86_64, linux-aarch64 — and NO linux-x86_64. That is why CI
-# runs on `ubuntu-24.04-arm`: an x86_64 Linux runner cannot obtain this toolchain at all, and the
-# old hardcoded `darwin-$(uname -m)` name RESOLVED there (downloading a Mach-O toolchain that
-# passed the `test -x` guard below and died later with "Exec format error").
+# Host-aware asset selection. webosbrew/native-toolchain publishes THREE host builds for the pinned
+# release — darwin-arm64, darwin-x86_64, linux-aarch64 — and no linux-x86_64 of its own; the x86_64
+# Linux host build is the one its README points at instead, the upstream openlgtv/buildroot-nc4
+# release of the SAME commit (`webos-d7ed7ee`, the `.6` in NDK_REL is webosbrew's rebuild counter on
+# it), whose host tools are native x86_64 and whose sysroot carries the same 9 LG libraries. So an
+# x86_64 Linux box — a WSL checkout, an Intel/AMD CI runner — can cross-build here. What stays
+# forbidden is guessing: the old hardcoded `darwin-$(uname -m)` name RESOLVED on x86_64 Linux
+# (downloading a Mach-O toolchain that passed the `test -x` guard below and died later with
+# "Exec format error"), which is why every host is named explicitly and pinned.
 NDK_OS   := $(shell uname -s | tr A-Z a-z)
 NDK_HOST := $(shell uname -m)
 ifeq ($(NDK_OS),darwin)
   NDK_PLAT = darwin-$(if $(filter arm64,$(NDK_HOST)),arm64,x86_64)
 else ifeq ($(NDK_HOST),aarch64)
   NDK_PLAT = linux-aarch64
+else ifeq ($(NDK_HOST),x86_64)
+  NDK_PLAT = linux-x86_64
 else
   NDK_PLAT = UNSUPPORTED
 endif
@@ -1108,11 +1123,11 @@ setup-rust:
 setup-env: setup-rust
 	@test "$(NDK_PLAT)" != UNSUPPORTED || { \
 	  echo "no webOS NDK published for $(NDK_OS)-$(NDK_HOST) at $(NDK_REL)."; \
-	  echo "Available: darwin-arm64, darwin-x86_64, linux-aarch64."; exit 1; }
+	  echo "Available: darwin-arm64, darwin-x86_64, linux-aarch64, linux-x86_64."; exit 1; }
 	@test -x $(CC) && { echo "NDK already present at $(WEBOS_SDK)"; exit 0; } || true
 	mkdir -p $(dir $(WEBOS_SDK))
 	tarball=$$(python3 ci/deps.py fetch webos-ndk --asset $(NDK_PLAT) --into $(NDK_DL)) && \
-	  tar xjf "$$tarball" -C $(dir $(WEBOS_SDK))
+	  tar xf "$$tarball" -C $(dir $(WEBOS_SDK))
 	cd $(WEBOS_SDK) && ./relocate-sdk.sh
 	rm -rf $(NDK_DL)
 	@echo "NDK ready: $$($(CC) --version | head -1)"
@@ -2027,6 +2042,13 @@ symbols-libs: $(SO_SYMBOLS)
 # Validate and upload the exact debug file that matches `pkg/plxnative`. This is a separate target
 # so a development build used for an on-device crash test gets the same fail-closed pairing as CI.
 # `SENTRY_AUTH_TOKEN` is read only from the process environment and is never echoed or written.
+#
+# FORK: these are UPSTREAM's coordinates. `gleb-linnik`/`plx-native` is the Plex client's Sentry
+# project, and this repository has no Sentry or PostHog variables or token configured (checked
+# 2026-11-03: the only repository variables are the six Nuvio/TMDB ones), so `sentry-symbols` is
+# inert here by absence of a token rather than by a flag. Do not run it — or point it at a token —
+# until SENTRY_ORG/SENTRY_PROJECT are overridden to the fork's own project; a fork build's symbols
+# must not land in another project's crash data.
 SENTRY_ORG     ?= gleb-linnik
 # A local symbol build carries the development DSN, so its DIF belongs beside the events in the
 # development project. Release CI supplies SENTRY_PROJECT=plx-native explicitly; a checkout with

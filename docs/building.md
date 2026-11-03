@@ -14,8 +14,10 @@ subsystem has a guide of its own next to the code.
 
 ## Requirements
 
-The ARM/webOS product build requires macOS (x86_64 or arm64) or **arm64** Linux because the webOS
-NDK has no x86_64 Linux build. The UI-only simulator also builds on x86_64 Ubuntu through WSLg on
+The ARM/webOS product build runs on macOS (x86_64 or arm64) or on Linux, arm64 or x86_64 — the webOS
+NDK's host build for x86_64 Linux comes from the upstream `openlgtv/buildroot-nc4` release of the
+pinned commit rather than from webosbrew's own assets, and `make setup-env` picks the right one per
+host. The UI-only simulator also builds on x86_64 Ubuntu through WSLg on
 Windows and needs no webOS NDK; run `tools/sim.ps1 setup` there.
 
 - The **webOS NDK**, fetched by `make setup-env` (a few hundred MB, once).

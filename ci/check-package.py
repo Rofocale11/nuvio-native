@@ -1246,8 +1246,12 @@ BUILD = build_configuration(STAMP_TEXT)
 # documented one that stopped shipping still fails. Whether a RELEASE build really dropped them is
 # the separate, narrower check below.
 DEV_ONLY_SONAMES = {"libswscale-plx.so.10"}   # the dev capture stream's scaler; RELEASE=1 drops it
+# `*-host.*` is this file's own spelling for the SIMULATOR's copy (`LIBASS_HOST_NAME` in the
+# Makefile): on a Linux dev box the host libass is an ELF `.so.0` staged in pkg/ right beside the
+# ARM one, and it is by definition not payload. macOS hides this by naming it `.dylib`, and CI never
+# builds the simulator in the packaging job, so only a local Linux `make ipk` ever met it.
 shipped = {p.name for p in (ROOT / "pkg").glob("*.so.*")
-           if p.is_file() and p.read_bytes()[:4] == b"\x7fELF"}
+           if p.is_file() and "-host." not in p.name and p.read_bytes()[:4] == b"\x7fELF"}
 if shipped:
     named = set(re.findall(r"`(lib[a-z]+-plx\.so\.\d+)`", (ROOT / "THIRD-PARTY-NOTICES.md").read_text()))
     distributed = shipped - DEV_ONLY_SONAMES

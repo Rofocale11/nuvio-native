@@ -32,7 +32,8 @@ concurrency:
 
 jobs:
   build:
-    # The webOS NDK only ships for linux-aarch64, darwin-arm64, darwin-x86_64.
+    # The webOS NDK publishes host builds for linux-aarch64, darwin-arm64 and darwin-x86_64 (plus
+    # an x86_64 Linux one upstream, enough for a local WSL build).
     # ubuntu-24.04-arm gives us a native ARM64 Linux runner with the
     # linux-aarch64 toolchain, so `make setup-env` works as designed.
     # Free on public repos. Private repos need a paid plan for ARM64 runners.
@@ -114,6 +115,13 @@ jobs:
         shell: bash
         run: |
           source "$HOME/.cargo/env"
+          # make echoes the cargo recipe, and that line carries these values inline
+          # ($(TELEMETRY_ENV) in the Makefile). Variables are not auto-masked like secrets,
+          # so without this the keys sit in a public run log.
+          for name in NUVIO_SUPABASE_ANON_KEY TMDB_API_KEY; do
+            value="${!name-}"
+            if [ -n "$value" ]; then echo "::add-mask::$value"; fi
+          done
           FLAVOR="${{ github.event.inputs.flavor || 'stable' }}"
           echo "Building FLAVOR=$FLAVOR RELEASE=1"
           make FLAVOR="$FLAVOR" RELEASE=1 ipk

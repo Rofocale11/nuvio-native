@@ -3,11 +3,14 @@ description: >
   Cache, download, checksum, extract and relocate the webosbrew buildroot SDK pinned in
   ci/dependencies.json (`webos-ndk`), then prove its sysroot can satisfy LIBS_REAL before any build runs.
 
-# WHY runs-on MUST be an arm64 Linux runner (ubuntu-24.04-arm):
-# webosbrew/native-toolchain publishes exactly three host builds for the pinned release —
-# darwin-arm64, darwin-x86_64 and linux-aarch64. There is NO linux-x86_64 asset in this release
-# or the one before it. On ubuntu-latest (x86_64) the old hardcoded `darwin-$(uname -m)` URL
-# resolved and quietly delivered a Mach-O toolchain; the Makefile now refuses that host outright.
+# WHY the runner is still arm64 Linux (ubuntu-24.04-arm):
+# webosbrew/native-toolchain publishes three host builds for the pinned release — darwin-arm64,
+# darwin-x86_64 and linux-aarch64. The x86_64 Linux host build exists, but one level up: the
+# openlgtv/buildroot-nc4 release of the SAME commit, which is the asset ci/dependencies.json names
+# as `linux-x86_64` so a WSL or Intel/AMD box can cross-build locally. CI stays on arm64 because
+# every cache entry, measurement and timeout in these workflows was taken there. What remains
+# forbidden is guessing: the old hardcoded `darwin-$(uname -m)` URL resolved on ubuntu-latest and
+# quietly delivered a Mach-O toolchain, so every host is named explicitly and pinned.
 
 inputs:
   install-root:

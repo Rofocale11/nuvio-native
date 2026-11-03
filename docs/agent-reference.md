@@ -78,7 +78,10 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
 **`setup-environment` skill** (`.agents/skills/`) for the full one-time setup + troubleshooting.
 
 - `make setup-env` — download + extract + `relocate-sdk.sh` the webOS NDK into `$(WEBOS_SDK)`
-  (default `~/webos-ndk/…`). One-time; re-run `relocate-sdk.sh` if you move the SDK.
+  (default `~/webos-ndk/…`). One-time; re-run `relocate-sdk.sh` if you move the SDK. It selects the
+  asset by host — `darwin-arm64`, `darwin-x86_64`, `linux-aarch64` from webosbrew, and
+  `linux-x86_64` from the upstream `openlgtv/buildroot-nc4` release of the same pinned commit — so
+  the ARM build and `make ipk` run on a WSL/x86_64 Linux checkout too.
 - `tools/sim.ps1 setup|build|run|shot|send` — Windows 11 UI/Plex simulator through the existing
   Ubuntu 22.04 WSLg runtime. It uses GPU-accelerated desktop OpenGL, keeps build/runtime state on
   WSL's Linux filesystem, and stages fonts, their notice and the bundled ASS renderer into an isolated app directory. Its `make sim-wsl`
@@ -534,6 +537,13 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   exact binary/debug pair with source context; it requires `SENTRY_AUTH_TOKEN`. The release
   workflow treats a missing token, unusable DIF or failed upload as a release failure, because an
   accepted native event with no matching DIF is not a working crash report.
+  **FORK: this path is inert, and must be repointed before it is ever used.** `SENTRY_ORG` and
+  `SENTRY_PROJECT` default to upstream's `gleb-linnik` / `plx-native`, and this repository has no
+  Sentry or PostHog configuration at all — checked 2026-11-03, its only repository variables are the
+  six Nuvio/TMDB ones, and there is no `SENTRY_AUTH_TOKEN`. So the upload cannot run, and the app's
+  crash-report and analytics channels have nowhere to send. Never run `make sentry-symbols` with a
+  token until both variables are overridden to the fork's own project: a fork build's symbols must
+  not land in another project's crash data.
   **`make symbols-libs`** does the same for the bundled shared objects (the FFmpeg libraries and
   libass, which ship stripped): `pkg/symbols/<soname>.debug`, extracted from the unstripped link
   output (`vendor/ffmpeg-prefix/lib/unstripped/`, `vendor/libass-prefix/lib/`). Their links carry

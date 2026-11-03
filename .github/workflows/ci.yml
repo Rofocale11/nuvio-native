@@ -503,9 +503,11 @@ jobs:
     name: armv7 cross-build and artifact assertions
     needs: changes
     if: needs.changes.outputs.gated == 'true'
-    # MUST be arm64 Linux. webosbrew/native-toolchain publishes darwin-arm64, darwin-x86_64 and
-    # linux-aarch64 for this release — there is NO linux-x86_64 build, so ubuntu-latest cannot
-    # obtain the toolchain at all. See the Makefile's NDK bootstrap block.
+    # arm64 Linux, because every cache entry and timing in this job was measured there.
+    # webosbrew/native-toolchain publishes darwin-arm64, darwin-x86_64 and linux-aarch64 for this
+    # release; the x86_64 Linux host build comes from the upstream openlgtv release of the same
+    # commit (ci/dependencies.json asset `linux-x86_64`), which is what lets a local WSL box
+    # cross-build. See the Makefile's NDK bootstrap block.
     runs-on: ubuntu-24.04-arm
     # Measured max 5.0 min over the last 40 successful runs; limit ~2x, rounded up to 5 (unset = 360).
     # FORK (RichiL10): 40, because the RELEASE=1 build below lands in its own `target-release/`,

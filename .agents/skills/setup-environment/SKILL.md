@@ -2,7 +2,7 @@
 name: setup-environment
 description: >
   Set up (or repair) the cross-compile build environment for this native webOS TV
-  app on a macOS host — the webOS NDK toolchain, the pinned stable Rust toolchain
+  app on a macOS or Linux host — the webOS NDK toolchain, the pinned stable Rust toolchain
   (with its armv7 rust-std) needed for the static lib, and the sysroot the Makefile links against. Use this whenever
   the build environment isn't ready or is broken: a fresh clone, a new machine, a
   teammate onboarding, or errors like "arm-webos-linux-gnueabi-gcc: command not
@@ -16,7 +16,7 @@ description: >
 
 # Set up the webOS build environment
 
-This app is cross-compiled from macOS to a 32-bit ARM webOS TV. "Setting up the
+This app is cross-compiled from macOS or Linux to a 32-bit ARM webOS TV. "Setting up the
 environment" means getting three things in place so `make` works:
 
 1. **The webOS NDK** — a buildroot cross-toolchain (GCC 12, glibc 2.12, armv7-a
@@ -50,6 +50,11 @@ make setup-rust           # only the Rust half; `make -s print-rust-toolchain` p
 brew install cmake        # builds the pinned, statically linked Sentry Native capture backend
 brew install sshpass      # deploy/run fallback when the TV refuses your ssh key; skip if you won't touch the TV
 ```
+
+On Linux the same two host tools are `apt-get install cmake sshpass` (with `build-essential`,
+`pkg-config`, `xz-utils` and `bzip2` for the bundled FFmpeg and libass), and `make setup-env`
+fetches the x86_64 or aarch64 SDK for you — the whole loop below runs on a WSL box with no macOS
+involved.
 
 Now build:
 
@@ -101,8 +106,11 @@ doesn't Just Work.
 
 ## What `make setup-env` does (and how to do it by hand)
 
-The `setup-env` target downloads the webosbrew **native-toolchain** buildroot SDK
-for your Mac's arch (`darwin-arm64` on Apple Silicon, `darwin-x86_64` on Intel),
+The `setup-env` target downloads the buildroot SDK for your host — `darwin-arm64` on Apple
+Silicon, `darwin-x86_64` on Intel, `linux-aarch64` on arm64 Linux, and `linux-x86_64` on an
+x86_64 Linux box (a WSL checkout): the first three from webosbrew's **native-toolchain** release,
+the x86_64 Linux one from the upstream `openlgtv/buildroot-nc4` release of the *same pinned
+commit*, because webosbrew does not publish that host —
 extracts it to `$(WEBOS_SDK)`, and runs its `relocate-sdk.sh`. The relocate step
 is **required**: the SDK bakes absolute paths at build time, and `relocate-sdk.sh`
 rewrites them to wherever you extracted it. If you ever move the SDK directory,
@@ -113,7 +121,7 @@ Manual equivalent. The release, URLs and sha256 of each host build are pinned in
 
 ```bash
 mkdir -p ~/webos-ndk && cd ~/webos-ndk
-tar xjf "$(python3 <repo>/ci/deps.py fetch webos-ndk --asset darwin-arm64 --into .)"
+tar xf "$(python3 <repo>/ci/deps.py fetch webos-ndk --asset darwin-arm64 --into .)"
 cd arm-webos-linux-gnueabi_sdk-buildroot && ./relocate-sdk.sh
 ```
 

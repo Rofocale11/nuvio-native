@@ -249,7 +249,9 @@ class TheDirIsManaged(unittest.TestCase):
 
     def test_the_docs_spell_the_plx_media_loop_as_c_not_as_make_check_only(self):
         agents = (ROOT / "AGENTS.md").read_text()
-        self.assertIn("make test-hostsim\n  [C=<crate>] [T=filter]", agents)
+        # The flags must sit next to the target; the prose wraps, so match the whitespace rather
+        # than one fixed line break (docs/agent-reference.md, below, keeps it unwrapped).
+        self.assertRegex(agents, r"make test-hostsim\s+\[C=<crate>\] \[T=filter\]")
         self.assertIn("C=plx_media", agents)
         self.assertNotIn("pass alone", agents)
         self.assertIn("make test-hostsim [C=<crate>] [T=filter]", (ROOT / "docs" / "agent-reference.md").read_text())
