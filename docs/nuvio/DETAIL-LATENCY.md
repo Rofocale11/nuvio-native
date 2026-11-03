@@ -1,7 +1,7 @@
 # Detail-page latency — plan
 
-**Status:** Stage 0, Stage 1 (1A–1C), Stage 2A and Stage 2B implemented (2026-11-03), host +
-simulator verified. Written 2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
+**Status:** Stage 0, Stage 1 (1A–1C), Stage 2A, Stage 2B and Stage 2D implemented (2026-11-03),
+host + simulator verified. Written 2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
 **Owner:** whoever picks this up next.
 **Scope:** wall-clock from pressing OK on a Home/Library card to a painted movie/show detail page,
 on the television. Not the player, not Home's own first paint, not poster throughput.
@@ -265,16 +265,29 @@ focus (cold).
 - **2C. Make the IMDb→TMDB mapping permanent.** If 1B leaves any `/find` calls, cache the mapping
   without a 15-minute TTL — it never changes. A small persisted `imdb → (movie_id, tv_id)` map is
   enough.
-- **2D. Persist the TMDB enrichment (next).** `enrich_row` is now the whole cold open: the Stage 0
-  split put `tmdb_ms=948` of `total_ms=1066`, and after 2A it is `tmdb_ms=932` of `ms=936`. It
-  writes exactly two row fields — `Role[]` from the TMDB cast and `Extras` from the trailer — so
-  cache those two, keyed by `(type, id)`, in a JSONL beside `meta-cache.jsonl` with a 30-day TTL
-  (cast and trailer are stable for both movies and shows). On a hit, apply them and skip
-  `movie_details`/`videos` entirely. The TMDB client's own
-  15-minute response cache stays memory-only; this is the parsed result, not an HTTP cache. The
-  expected effect is that a restarted app opens a title it has enriched before with `tmdb_ms≈0`,
-  so even a fast click (no prefetch) costs only the meta + loopback. Test: a row survives a
-  restart, expires with the TTL, and `enrich_row` does not construct a TMDB client on a hit.
+- **2D. Persist the TMDB enrichment — implemented.** The Stage 0 split put `tmdb_ms=948` of
+  `total_ms=1066`; after 2A `tmdb_ms=932` of `ms=936`. `enrich_row` was the whole cold open, so
+  its answer is now kept: `EnrichCache` (`shim_store.rs`, `enrich-cache.jsonl` beside
+  `meta-cache.jsonl`, same append-only log, 30-day TTL) stores one entry per `(type, id)` with
+  everything the detail page needs from TMDB — the `Role[]` and `Extras` it writes, **the
+  `More Like This` titles**, and the franchise shelf's films. A hit applies the two row fields and
+  returns without constructing a `TmdbClient`; `related_hub` answers from the same entry, so the
+  shelf that follows the row is free too. Measuring only the row was not enough: after the first
+  cut, a restart went `tmdb_ms=0` but the page still paid ~950 ms in `related_ms`, because the
+  related route re-fetched the same TMDB details the enrichment had skipped. The related titles are
+  kept **as TMDB returned them**, not as rendered rows, and rebuilt per request — a row builder is
+  what registers the fallback `ratingKey` a click on that card needs, so a stored row would be a
+  dead card after a restart. Only a complete TMDB exchange is stored (no key, an unresolved id, or
+  a failed call falls back to the Cinemeta trailer and retries next time); an entry without the
+  related list is treated as incomplete and refreshed, so a build that predates the shelf
+  converges after one open. The franchise's films are attached by the related route once it
+  fetches them, which is also where that call already happened. The TMDB client's own 15-minute
+  response cache stays memory-only; this is the parsed result, not an HTTP cache. Measured in the
+  simulator after a restart: `detail: shim … meta_ms=0 streams_ms=0 tmdb_ms=0 total_ms=0`,
+  the app's `meta_ms=1 related_ms=1–3`, and a whole open at `ms=2–6` for a movie, a franchise
+  member (shelf intact, `collection=3`) and a series. Tests: an entry survives a restart, expires
+  with the TTL, `enrich_row` and `related_hub` answer with no TMDB key (the test binary has none),
+  and an old-shape entry is not taken as the answer.
 
 ### Stage 3 — transport and shows (optional, ~2–3 days)
 
@@ -312,8 +325,13 @@ focus (cold).
   rail, `right`, OK 350 ms later, cold — the prefetch's shim line `tmdb_ms=732 total_ms=732`, the
   click's `tmdb_ms=355 total_ms=355`, app `ms=359`. With the Stage 2A warm start, a restart that
   boots straight to the same detail loads 72 rows (0 unreadable) and answers `meta_ms=0`; the
-  remaining `tmdb_ms=932` is TMDB, which is not persisted (see §8). Host tests and the sim target
-  build are green; the TV measurement below is still owed.
+  remaining `tmdb_ms=932` of `ms=936` was TMDB, then not persisted. Stage 2D moved that too: after
+  the enrichment cache, a restart of the same movie answers shim `meta_ms=0 streams_ms=0 tmdb_ms=0
+  total_ms=0` and app `ms=3` (a second open `ms=2`), a franchise member (The Matrix) restores its
+  cast, `More Like This` and the 3-film collection shelf at `ms=5` (cold, its first open:
+  `meta_ms=96 tmdb_ms=825 related_ms=601 ms=1525`), and a series comes back at `ms=6` with its
+  season/episode chain intact. Host tests and the sim target build are green; the TV measurement
+  below is still owed.
 
   Recipe (one runtime root, WSLg display exported as the `ui-sim` skill says):
 
@@ -361,37 +379,44 @@ focus (cold).
 | Shim detail route + Media | `rust-modules/pmsshim/src/shim_pms.rs:3751`, `:3237` (`item_probed`), `:3239` (placeholder) |
 | Shim-side split log | `rust-modules/pmsshim/src/shim_pms.rs:3945` |
 | Detail stream wait (zero) | `shim_pms.rs:3268`, `:2138` (`ranked`), `:2055` (`slot`) |
-| TMDB enrichment | `shim_pms.rs:2368` (`enrich_row`), `:788`/`:803` (resolvers), `stremio/src/addons_tmdb.rs:289`/`:378`/`:433` |
+| TMDB enrichment | `shim_pms.rs:2386` (`enrich_row`), `:2502` (`related_hub`), `:2663` (`collection_hub`), `:788`/`:803` (resolvers), `stremio/src/addons_tmdb.rs:289`/`:378`/`:433` |
 | Cinemeta + addon meta selection | `rust-modules/stremio/src/addons.rs:21`, `:659`, `:730` |
 | Meta model (`moviedb_id`) | `rust-modules/stremio/src/model.rs:160` |
 | HTTP transport (no reuse) | `rust-modules/net/src/net.rs:928`, serial fallback `:2164` |
 | Home focus / tick / prefetch | `rust-modules/screens/src/home/mod.rs:1641`, `:2407`, `:2428` (`tick_prefetch`) |
 | Single-flight primitive | `rust-modules/base/src/flight.rs` (`Flight::claim`), used by `shim_pms.rs` `meta()` and `addons_tmdb.rs` `cached_json` |
-| Persisted meta cache | `rust-modules/pmsshim/src/shim_store.rs` (`MetaCache`), file `meta-cache.jsonl` in the shim data dir; boot override applied in `rust-modules/src/app/nuvio.rs:239` |
+| Persisted meta cache | `rust-modules/pmsshim/src/shim_store.rs:296` (`MetaCache`), file `meta-cache.jsonl` in the shim data dir; boot override applied in `rust-modules/src/app/nuvio.rs:239` |
+| Persisted TMDB enrichment | `rust-modules/pmsshim/src/shim_store.rs:542` (`EnrichCache`, `Enrichment`, `RelatedSource`), file `enrich-cache.jsonl` beside it |
 | Design docs | `docs/nuvio/ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md` |
 
 ## 8. Working state (2026-11-03) — resume point
 
 - **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 0 commit: `8a8ffb51`; Stage 1 commits:
   `ca2de133` (1A), `a2b43791` (1B), `e270e61f` (1C), plus docs `01cacbb9`, `04af6099` and
-  `4c1cf564`; Stage 2B is `becd2905`; Stage 2A is the commit that adds `MetaCache` and the
-  boot-clear fix; the per-kind TTL (movies 30 days, series 6 h) is the commit after it.
+  `4c1cf564`; Stage 2B is `becd2905`; Stage 2A is `b1873d09`; the per-kind TTL (movies 30 days,
+  series 6 h) is `64f565d6`; Stage 2D is the commit titled `perf(detail): keep the TMDB enrichment
+  and its shelf across a restart`.
 - **Verified:** host suites and the shipping feature check are green; the WSLg simulator showed
   prefetch firing, warm opens `ms=5–7`, a cold boot-to-detail `ms=828` with `subs=0`, and the
   Stage 0 split putting ~95% of a cold shim answer in TMDB enrichment (`tmdb_ms=948` of
   `total_ms=1066`). With single-flight, the cold overlap (OK 350 ms after focus) went from the
-  Stage 1 `ms=832` to `ms=359`. With the persisted meta cache, a restart's `meta_ms` is 0 and the
-  whole open is `ms=936`, of which `tmdb_ms=932`. TV is not measured.
+  Stage 1 `ms=832` to `ms=359`. With the persisted meta cache, a restart's `meta_ms` is 0. With
+  Stage 2D as well, a restarted app opens the same movie at `ms=3`, a franchise member at `ms=5`
+  with its collection shelf, and a series at `ms=6` — shim `tmdb_ms=0 total_ms=0` in every case.
+  A title the shim has never enriched is the cold case: 1525 ms for The Matrix (96 meta + 825
+  TMDB + 601 collection/details), i.e. the first open still pays TMDB once and everything after
+  it is local. TV is not measured.
 - **TTL policy (settled):** storage is not the constraint — the log is bounded regardless — so
   the TTL is about staleness. A movie row keeps 30 days; a series row keeps 6 h because its
-  `videos` array is the episode list and must refresh as episodes air. The 2D enrichment can use
-  30 days for both, since cast and trailer are stable.
-- **Next:** an agent resuming with **no TV numbers** should implement **2D** first — it is the
-  remaining cold cost (`tmdb_ms=932` of `ms=936`) and does not depend on the TV result — then
-  update §5 and hand back for the owner's TV run. With TV numbers in hand, act on them: a slow
-  warm open points at the prefetch, a slow fast click at TMDB (2D or Stage 3A), and any `/find`
-  line at 2C. The TV checklist is §5's; the boot line to read first is `shim: meta cache
-  warm-start`. Do not push until the owner asks.
+  `videos` array is the episode list and must refresh as episodes air. The 2D enrichment uses 30
+  days for both, since cast, trailer, recommendations and a franchise are stable.
+- **Both files are disposable:** deleting `meta-cache.jsonl` or `enrich-cache.jsonl` from the
+  shim data dir only makes the next opens cold again; nothing references them by identity.
+- **Next:** the owner's TV run is the gate (§5): warm open **≤ 300 ms**, cold open **≤ 800 ms**.
+  Read `shim: meta cache warm-start` / `shim: enrich cache warm-start` first; a slow warm open on
+  the set points at the title not being enriched yet (`related_ms` pays TMDB — open it twice), at
+  the prefetch dwell, or at Stage 3A's handshakes. Any `/find` line in the log means 2C; a show
+  whose chain is still serial in the log means 3B/3C. Do not push until the owner asks.
 
 ## 9. Open questions to settle before coding
 

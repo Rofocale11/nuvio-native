@@ -472,6 +472,263 @@ impl MetaCache {
     }
 }
 
+/// TMDB enrichment does not change once a title is out: a cast and a trailer are as stable as the
+/// movie's meta, so it is kept as long as a movie's meta is.
+pub const ENRICH_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+const ENRICH_ROWS: usize = 800;
+const ENRICH_LOG_LIMIT: u64 = 2 * 1024 * 1024;
+const ENRICH_COMPACT: usize = 1024 * 1024;
+
+/// The `More Like This` titles TMDB listed, in the shape each kind arrives in.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum RelatedSource {
+    Movies(Vec<plx_stremio::addons_tmdb::TmdbMovie>),
+    Shows(Vec<plx_stremio::addons_tmdb::TmdbShow>),
+}
+
+/// What the detail page's TMDB enrichment learned, as it was shaped for the Plex dialect. A value
+/// that is `None` means the fetch ran and produced nothing (TMDB knows no cast, or the title has
+/// no trailer) — an answer worth keeping, which is why it is not conflated with "never enriched"
+/// the way a missing cache entry is.
+///
+/// The related titles are kept as TMDB returned them and rebuilt into rows on each request: a row
+/// builder registers the fallback key a click on that card depends on, so a stored row would be a
+/// dead card after a restart.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Enrichment {
+    /// The TMDB id this answer belongs to.
+    pub tmdb_id: u64,
+    /// The `Role` array.
+    pub roles: Option<serde_json::Value>,
+    /// The `Extras` object.
+    pub extras: Option<serde_json::Value>,
+    /// The recommendation list (`None` on a row written before the shelf was kept).
+    pub related: Option<RelatedSource>,
+    /// The franchise `/movie/{id}` named, when it named one.
+    pub collection_ref: Option<plx_stremio::addons_tmdb::TmdbCollectionRef>,
+    /// The franchise's films, attached by the related route once it has fetched them.
+    pub collection: Option<plx_stremio::addons_tmdb::TmdbCollection>,
+}
+
+impl Enrichment {
+    pub fn apply(&self, row: &mut serde_json::Value) {
+        if let Some(roles) = &self.roles {
+            row["Role"] = roles.clone();
+        }
+        if let Some(extras) = &self.extras {
+            row["Extras"] = extras.clone();
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EnrichRow {
+    #[serde(rename = "type")]
+    type_: String,
+    id: String,
+    /// Unix seconds when TMDB answered.
+    at: i64,
+    enrich: Enrichment,
+    #[serde(skip, default)]
+    generation: u64,
+}
+
+/// The parsed TMDB enrichment, with a warm-start copy in `enrich-cache.jsonl`.
+///
+/// It is the same append-only log as [`MetaCache`] and for the same reason: without it the first
+/// open after every restart pays for TMDB again (`tmdb_ms≈930` in the simulator). Rows are small
+/// (a `Role[]` of at most ten people), so the compaction budget is a quarter of the meta log's.
+pub struct EnrichCache {
+    file: Option<PathBuf>,
+    rows: Mutex<HashMap<(String, String), (i64, Arc<Enrichment>)>>,
+    unsaved: Mutex<Vec<EnrichRow>>,
+    write: Mutex<()>,
+    pending: AtomicBool,
+    generation: AtomicU64,
+}
+
+impl EnrichCache {
+    pub fn open(dir: Option<&Path>) -> Arc<EnrichCache> {
+        let file = dir.map(|d| d.join("enrich-cache.jsonl"));
+        let now = now_secs();
+        let mut rows = HashMap::new();
+        let mut skipped = 0;
+        if let Some(text) = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()) {
+            for line in text.lines() {
+                let Ok(row) = serde_json::from_str::<EnrichRow>(line) else {
+                    skipped += 1;
+                    continue;
+                };
+                if now.saturating_sub(row.at) >= ENRICH_TTL.as_secs() as i64 {
+                    continue;
+                }
+                rows.insert((row.type_, row.id), (row.at, Arc::new(row.enrich)));
+            }
+        }
+        if file.is_some() {
+            plx_base::eventlog::log(&format!(
+                "shim: enrich cache warm-start with {} row(s), {skipped} unreadable",
+                rows.len()
+            ));
+        }
+        Arc::new(EnrichCache {
+            file,
+            rows: Mutex::new(rows),
+            unsaved: Mutex::new(Vec::new()),
+            write: Mutex::new(()),
+            pending: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+        })
+    }
+
+    pub fn get(&self, type_: &str, id: &str) -> Option<Arc<Enrichment>> {
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, enrich) = rows.get(&(type_.to_string(), id.to_string()))?;
+        (now_secs().saturating_sub(*at) < ENRICH_TTL.as_secs() as i64).then(|| Arc::clone(enrich))
+    }
+
+    pub fn insert(self: &Arc<Self>, type_: &str, id: &str, enrich: Enrichment) {
+        let at = now_secs();
+        let key = (type_.to_string(), id.to_string());
+        {
+            let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            if !rows.contains_key(&key) && rows.len() >= ENRICH_ROWS {
+                if let Some(oldest) = rows.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone()) {
+                    rows.remove(&oldest);
+                }
+            }
+            rows.insert(key, (at, Arc::new(enrich.clone())));
+        }
+        if self.file.is_none() {
+            return;
+        }
+        self.unsaved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(EnrichRow {
+                type_: type_.to_string(),
+                id: id.to_string(),
+                at,
+                enrich,
+                generation: self.generation.load(Ordering::SeqCst),
+            });
+        self.schedule_save();
+    }
+
+    /// Attach a franchise once the related route has fetched its films, so the next open builds
+    /// the shelf from disk. The entry may be gone (the addon set changed, or it expired): then
+    /// there is nothing to attach the films to.
+    pub fn remember_collection(
+        self: &Arc<Self>,
+        type_: &str,
+        id: &str,
+        parts: &plx_stremio::addons_tmdb::TmdbCollection,
+    ) {
+        let Some(current) = self.get(type_, id) else { return };
+        if current.collection.is_some() {
+            return;
+        }
+        let mut updated = (*current).clone();
+        updated.collection = Some(parts.clone());
+        self.insert(type_, id, updated);
+    }
+
+    /// Forget everything — the addon set changed, so a type and id may now name other content.
+    pub fn clear(self: &Arc<Self>) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.rows.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.unsaved.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let Some(file) = &self.file else { return };
+        let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = std::fs::remove_file(file);
+    }
+
+    fn schedule_save(self: &Arc<Self>) {
+        if self.pending.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let cache = Arc::clone(self);
+        if plx_base::storage_worker::submit(move || cache.save_pending()).is_err() {
+            self.pending.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn save_pending(&self) {
+        loop {
+            let batch = std::mem::take(&mut *self.unsaved.lock().unwrap_or_else(|e| e.into_inner()));
+            if !batch.is_empty() {
+                self.append(batch);
+            }
+            let unsaved = self.unsaved.lock().unwrap_or_else(|e| e.into_inner());
+            if unsaved.is_empty() {
+                self.pending.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
+
+    fn append(&self, batch: Vec<EnrichRow>) {
+        let Some(file) = &self.file else { return };
+        let generation = self.generation.load(Ordering::SeqCst);
+        let mut out = String::new();
+        for row in batch.into_iter().filter(|row| row.generation == generation) {
+            if let Ok(line) = serde_json::to_string(&row) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
+            return;
+        }
+        let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        if std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+            .and_then(|mut f| f.write_all(out.as_bytes()))
+            .is_err()
+        {
+            return;
+        }
+        if std::fs::metadata(file).map(|m| m.len()).unwrap_or(0) > ENRICH_LOG_LIMIT {
+            self.compact();
+        }
+    }
+
+    fn compact(&self) {
+        let Some(file) = &self.file else { return };
+        let mut newest: Vec<(i64, String, String, Arc<Enrichment>)> = self
+            .rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|((type_, id), (at, enrich))| (*at, type_.clone(), id.clone(), Arc::clone(enrich)))
+            .collect();
+        newest.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
+        let mut out = String::new();
+        for (at, type_, id, enrich) in newest {
+            let row = EnrichRow { type_, id, at, enrich: (*enrich).clone(), generation: 0 };
+            let Ok(line) = serde_json::to_string(&row) else { continue };
+            if out.len() + line.len() + 1 > ENRICH_COMPACT {
+                break;
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        let tmp = file.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, out).is_ok() {
+            let _ = std::fs::rename(&tmp, file);
+        }
+    }
+
+    /// Tests only: production must not write the log on a request thread.
+    #[cfg(test)]
+    fn flush_for_test(&self) {
+        self.save_pending();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +798,52 @@ mod tests {
         cache.clear();
         assert!(cache.get("movie", "tt5").is_none());
         assert!(!dir.join("meta-cache.jsonl").exists(), "the warm-start copy is gone with the memory");
+    }
+
+    fn enrich(tag: &str) -> Enrichment {
+        Enrichment {
+            roles: Some(serde_json::json!([{"name": tag}])),
+            extras: Some(serde_json::json!({"Video": [{"title": tag}]})),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_enrichment_is_there_after_a_restart() {
+        let dir = meta_scratch("enrich-restart");
+        let cache = EnrichCache::open(Some(&dir));
+        cache.insert("movie", "tt1", enrich("Kept Actor"));
+        cache.flush_for_test();
+        drop(cache);
+        let reopened = EnrichCache::open(Some(&dir));
+        let got = reopened.get("movie", "tt1").expect("the enrichment survived the restart");
+        assert_eq!(got.roles.as_ref().unwrap()[0]["name"], "Kept Actor");
+        assert_eq!(got.extras.as_ref().unwrap()["Video"][0]["title"], "Kept Actor");
+    }
+
+    #[test]
+    fn an_enrichment_expires_after_its_month() {
+        let dir = meta_scratch("enrich-expiry");
+        let row = |id: &str, at: i64| EnrichRow {
+            type_: "movie".into(),
+            id: id.into(),
+            at,
+            enrich: enrich(id),
+            generation: 0,
+        };
+        let month_ago = ENRICH_TTL.as_secs() as i64 + 3600;
+        let text = [
+            row("tt1", now_secs() - month_ago),
+            row("tt2", now_secs() - 3600),
+        ]
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(dir.join("enrich-cache.jsonl"), text).unwrap();
+        let cache = EnrichCache::open(Some(&dir));
+        assert!(cache.get("movie", "tt1").is_none(), "past the month");
+        assert!(cache.get("movie", "tt2").is_some(), "within it");
     }
 
     #[test]

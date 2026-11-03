@@ -5,7 +5,9 @@ use crate::shim_backend::{Backend, CatalogInfo};
 use crate::shim_core::{Config, MACHINE_ID};
 use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
-use crate::shim_store::{now_secs, Ident, Keys, MetaCache, Watch, WatchState};
+use crate::shim_store::{
+    now_secs, EnrichCache, Enrichment, Ident, Keys, MetaCache, RelatedSource, Watch, WatchState,
+};
 use plx_stremio::addons_tmdb::{
     TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
     TmdbPerson, TmdbShow, TmdbShowDetails, TmdbVideo,
@@ -341,6 +343,10 @@ pub struct Shim {
     /// The addon metas this session has fetched, with the last few hours persisted beside the key
     /// table so a restart does not make the first detail open cold.
     metas: Arc<MetaCache>,
+    /// Everything the detail page takes from TMDB — the cast and trailer `enrich_row` writes and
+    /// the `More Like This`/franchise data `related_hub` builds — persisted so a restart does not
+    /// pay for it again.
+    enrich: Arc<EnrichCache>,
     /// One addon-meta fetch per `(type, id)` at a time: the focus prefetch and the detail click
     /// it was warming would otherwise each ask the addon for the same title.
     meta_flight: plx_base::flight::Flight,
@@ -1656,6 +1662,7 @@ impl Shim {
             watch_pushes: Mutex::new(HashMap::new()),
             cfg,
             metas: MetaCache::open(dir.as_deref()),
+            enrich: EnrichCache::open(dir.as_deref()),
             meta_flight: plx_base::flight::Flight::default(),
             catalogs: Mutex::new(HashMap::new()),
             catalog_list: Mutex::new(None),
@@ -1835,6 +1842,7 @@ impl Shim {
     /// Drop every cache that depends on the addon set (after Settings changed it).
     pub fn addons_changed(&self) {
         self.metas.clear();
+        self.enrich.clear();
         self.poster_fallbacks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2371,10 +2379,23 @@ impl Shim {
 
     /// TMDB cast on a detail row (a movie also gets its TMDB trailer). One request per title:
     /// `movie_details` / `tv_details` already append `credits` (and `recommendations`).
+    ///
+    /// The result is cached under `(type, id)`, so a title opened before costs nothing after a
+    /// restart. Only a complete TMDB exchange is cached: no key, an unresolved id or a failed call
+    /// falls back to the Cinemeta trailer and is retried next time, rather than freezing a
+    /// transient failure for a month.
     fn enrich_row(&self, rk: i64, row: &mut Value) {
         let Some(Ident::Title { type_, id }) = self.keys.ident(rk) else {
             return;
         };
+        if let Some(cached) = self.enrich.get(&type_, &id) {
+            // A row written before the related shelf was kept has no recommendations in it: treat
+            // it as incomplete and refresh it, so an upgraded install converges after one open.
+            if cached.related.is_some() {
+                cached.apply(row);
+                return;
+            }
+        }
         let series = is_series(&type_);
         let Some(meta) = self.meta(&type_, &id) else {
             return;
@@ -2407,13 +2428,24 @@ impl Shim {
         };
 
         if series {
-            // A show's trailers come from Cinemeta; TMDB only supplies the cast here.
+            // A show's trailers come from Cinemeta; TMDB only supplies the cast and the related
+            // shelf here.
+            let mut learned = Enrichment { tmdb_id, ..Default::default() };
+            let mut complete = true;
             match client.tv_details(tmdb_id) {
-                Ok(details) => set_roles(row, &details.credits.cast),
-                Err(_) => {}
+                Ok(details) => {
+                    set_roles(row, &details.credits.cast);
+                    learned.roles = row.get("Role").cloned();
+                    learned.related = Some(RelatedSource::Shows(details.recommendations.results));
+                }
+                Err(_) => complete = false,
             }
             if let Some(youtube_id) = meta_trailer() {
                 row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
+                learned.extras = row.get("Extras").cloned();
+            }
+            if complete {
+                self.enrich.insert(&type_, &id, learned);
             }
             return;
         }
@@ -2424,9 +2456,16 @@ impl Shim {
             (details.join(), videos.join())
         });
 
+        let mut learned = Enrichment { tmdb_id, ..Default::default() };
+        let mut complete = true;
         match details {
-            Ok(Ok(details)) => set_roles(row, &details.credits.cast),
-            Ok(Err(_)) | Err(_) => {}
+            Ok(Ok(details)) => {
+                set_roles(row, &details.credits.cast);
+                learned.roles = row.get("Role").cloned();
+                learned.related = Some(RelatedSource::Movies(details.recommendations.results));
+                learned.collection_ref = details.movie.belongs_to_collection;
+            }
+            Ok(Err(_)) | Err(_) => complete = false,
         }
 
         let trailer = match videos {
@@ -2440,7 +2479,10 @@ impl Shim {
                     (youtube_id, title.to_string())
                 })
             }),
-            Ok(Err(_)) | Err(_) => None,
+            Ok(Err(_)) | Err(_) => {
+                complete = false;
+                None
+            }
         }
         .or_else(|| {
             meta.trailer_streams
@@ -2451,6 +2493,10 @@ impl Shim {
         });
         if let Some((youtube_id, title)) = trailer {
             row["Extras"] = trailer_extras(rk, &youtube_id, &title);
+            learned.extras = row.get("Extras").cloned();
+        }
+        if complete {
+            self.enrich.insert(&type_, &id, learned);
         }
     }
 
@@ -2474,6 +2520,58 @@ impl Shim {
         }
         let kind = if series { "show" } else { "movie" };
         let empty_hub = || related_hub_json(kind, Vec::new());
+        // A title this shim enriched before answers its shelf from the persisted enrichment — no
+        // TMDB call, and no key needed. The rows are still rebuilt through the normal builders,
+        // because building one is what registers the fallback key a click on that card needs.
+        if let Some(Ident::Title { type_, id }) = self.keys.ident(rk) {
+            if let Some(cached) = self.enrich.get(&type_, &id) {
+                if let Some(source) = &cached.related {
+                    let (kind, rows): (&str, Vec<Value>) = match source {
+                        RelatedSource::Movies(movies) => (
+                            "movie",
+                            movies
+                                .iter()
+                                .filter(|movie| {
+                                    movie.id > 0
+                                        && movie.id <= i64::MAX as u64 - TMDB_FALLBACK_KEY_BASE as u64
+                                })
+                                .take(10)
+                                .map(|movie| self.tmdb_recommendation_row(movie))
+                                .collect(),
+                        ),
+                        RelatedSource::Shows(shows) => (
+                            "show",
+                            shows
+                                .iter()
+                                .filter(|show| {
+                                    show.id > 0
+                                        && show.id <= i64::MAX as u64 - TMDB_SHOW_KEY_BASE as u64
+                                })
+                                .take(10)
+                                .map(|show| self.tmdb_show_recommendation_row(show))
+                                .collect(),
+                        ),
+                    };
+                    let mut hubs = vec![related_hub_json(kind, rows)];
+                    // The franchise shelf. Its films are attached by the fresh path below (and
+                    // reattached here when an older entry only kept the reference), so the next
+                    // open builds it from disk too.
+                    if let Some(parts) = cached.collection.as_ref() {
+                        self.remember_collection(parts);
+                        hubs.extend(self.collection_hub_json(parts, cached.tmdb_id, &parts.name));
+                    } else if let Some(collection) = &cached.collection_ref {
+                        if let Some(parts) = self.tmdb_collection(collection.id) {
+                            self.remember_collection(&parts);
+                            hubs.extend(
+                                self.collection_hub_json(&parts, cached.tmdb_id, &collection.name),
+                            );
+                            self.enrich.remember_collection(&type_, &id, &parts);
+                        }
+                    }
+                    return Response::json(&container(json!({"Hub": hubs})));
+                }
+            }
+        }
         let Some(client) = TmdbClient::from_env() else {
             return Response::json_status(
                 503,
@@ -2545,7 +2643,7 @@ impl Shim {
                 .take(10)
                 .map(|movie| self.tmdb_recommendation_row(movie))
                 .collect();
-            let hub = self.collection_hub(&details, &client);
+            let hub = self.collection_hub(rk, &details, &client);
             (rows, hub)
         };
         let mut hubs = vec![related_hub_json(kind, rows)];
@@ -2563,15 +2661,20 @@ impl Shim {
     /// app's collection store resolves; the franchise itself is kept in [`Shim::collections`] so
     /// the heading's page (`/library/sections/{s}/collections` → header → children) answers
     /// without a second TMDB round trip.
-    fn collection_hub(&self, details: &TmdbMovieDetails, client: &TmdbClient) -> Option<Value> {
+    fn collection_hub(&self, rk: i64, details: &TmdbMovieDetails, client: &TmdbClient) -> Option<Value> {
         let collection = details
             .movie
             .belongs_to_collection
             .as_ref()
             .filter(|collection| collection.id > 0)?;
         let parts = client.collection_details(collection.id).ok()?;
-        let hub = self.collection_hub_json(&parts, details.movie.id, &collection.name)?;
         self.remember_collection(&parts);
+        // Attach the films to the persisted enrichment, so the next open builds this shelf from
+        // disk instead of asking TMDB again.
+        if let Some(Ident::Title { type_, id }) = self.keys.ident(rk) {
+            self.enrich.remember_collection(&type_, &id, &parts);
+        }
+        let hub = self.collection_hub_json(&parts, details.movie.id, &collection.name)?;
         Some(hub)
     }
 
@@ -4918,6 +5021,114 @@ mod meta_flight_tests {
             }
         });
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "the second caller reused the fetch in flight");
+    }
+}
+
+#[cfg(test)]
+mod enrich_cache_tests {
+    use super::*;
+
+    /// Answers no metas: the test seeds the caches directly, so it exercises only the enrichment
+    /// decision (a cache hit must not depend on the addon or on TMDB).
+    struct NoBackend;
+
+    impl Backend for NoBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
+        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+            Ok(Vec::new())
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> {
+            None
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
+    /// A cached enrichment is the whole answer. The test binary has no TMDB key and the meta has
+    /// no trailer, so nothing on the fresh path could produce these two fields: if the cache were
+    /// not consulted first, the row would keep neither.
+    #[test]
+    fn a_cached_enrichment_is_applied_without_asking_tmdb() {
+        let shim = Arc::new(Shim::new(Arc::new(NoBackend), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt1".into() });
+        shim.metas.insert(
+            "movie",
+            "tt1",
+            Arc::new(Meta { id: "tt1".into(), type_: "movie".into(), name: "Title".into(), ..Default::default() }),
+        );
+        shim.enrich.insert(
+            "movie",
+            "tt1",
+            Enrichment {
+                roles: Some(json!([{"name": "Cached Actor"}])),
+                extras: Some(json!({"Video": [{"title": "Cached Trailer"}]})),
+                related: Some(RelatedSource::Movies(Vec::new())),
+                ..Default::default()
+            },
+        );
+        let mut row = json!({"ratingKey": rk});
+        shim.enrich_row(rk, &mut row);
+        assert_eq!(row["Role"][0]["name"], "Cached Actor");
+        assert_eq!(row["Extras"]["Video"][0]["title"], "Cached Trailer");
+    }
+
+    /// A row written before the related shelf was kept is treated as incomplete: applying it and
+    /// returning would leave that title with a live TMDB call on every shelf for a month.
+    #[test]
+    fn an_enrichment_without_the_shelf_is_refreshed() {
+        let shim = Arc::new(Shim::new(Arc::new(NoBackend), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt3".into() });
+        shim.metas.insert(
+            "movie",
+            "tt3",
+            Arc::new(Meta { id: "tt3".into(), type_: "movie".into(), name: "Title".into(), ..Default::default() }),
+        );
+        shim.enrich.insert("movie", "tt3", Enrichment::default());
+        let mut row = json!({"ratingKey": rk});
+        shim.enrich_row(rk, &mut row);
+        assert!(row.get("Role").is_none(), "the old-shape entry was not taken as the answer");
+    }
+
+    /// The `More Like This` shelf comes from the same persisted entry: a fresh fetch would need
+    /// the TMDB key this binary does not have, so a 200 with the row proves the cache answered.
+    #[test]
+    fn a_cached_enrichment_answers_the_related_shelf_without_tmdb() {
+        let shim = Arc::new(Shim::new(Arc::new(NoBackend), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt2".into() });
+        shim.enrich.insert(
+            "movie",
+            "tt2",
+            Enrichment {
+                tmdb_id: 999,
+                related: Some(RelatedSource::Movies(vec![TmdbMovie {
+                    id: 603,
+                    title: "Recommended".into(),
+                    ..Default::default()
+                }])),
+                ..Default::default()
+            },
+        );
+        let response = shim.related_hub(rk);
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        let hub = &body["MediaContainer"]["Hub"][0];
+        assert_eq!(hub["title"], "More Like This");
+        assert_eq!(hub["Metadata"][0]["title"], "Recommended");
     }
 }
 

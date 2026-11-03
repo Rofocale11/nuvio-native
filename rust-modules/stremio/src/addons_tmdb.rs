@@ -50,14 +50,14 @@ pub struct TmdbCast {
 
 /// A movie's franchise, as `/movie/{id}` names it: the id to ask `/collection/{id}` with, and the
 /// name the shelf is headed by until that answer arrives.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TmdbCollectionRef {
     pub id: u64,
     pub name: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TmdbMovie {
     pub id: u64,
@@ -73,7 +73,7 @@ pub struct TmdbMovie {
 }
 
 /// `/collection/{id}` — a franchise's name and every film in it, in TMDB's release order.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TmdbCollection {
     pub id: u64,
@@ -85,7 +85,7 @@ pub struct TmdbCollection {
 }
 
 /// A TV show, as TMDB spells it: `name`/`first_air_date` where a movie has `title`/`release_date`.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TmdbShow {
     pub id: u64,
@@ -113,7 +113,7 @@ pub struct TmdbPerson {
     pub profile_path: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TmdbGenre {
     pub id: u64,
