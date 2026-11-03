@@ -3781,8 +3781,13 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>) -> O
         ));
         return None;
     };
+    let meta_elapsed = t0.elapsed();
+    let mut seasons_elapsed = std::time::Duration::ZERO;
+    let mut streams_elapsed = std::time::Duration::ZERO;
     if d.is_show {
+        let seasons_at = std::time::Instant::now();
         load_show_seasons(sid, rk, &mut d, prefer);
+        seasons_elapsed = seasons_at.elapsed();
         // A show carries no streams itself — backfill from ONE episode: the one the hero is
         // about, which is the one Play starts (`on_deck` when the show has been started, else
         // its first). Everything downstream reads this as "the show's" media, so borrowing from
@@ -3791,7 +3796,9 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>) -> O
         let hero_ep = d.on_deck.as_ref().map(|e| e.rk.clone());
         let ep = hero_ep.or_else(|| d.episodes.first().map(|e| e.rk.clone()));
         if let Some(ep_rk) = ep {
+            let streams_at = std::time::Instant::now();
             fetch_item_streams(sid, &ep_rk, &mut d);
+            streams_elapsed = streams_at.elapsed();
             // NB `part`/`vcodec`/`acodec` are deliberately NOT backfilled. They are the item's OWN
             // playable file, and "a show has an empty part" is load-bearing elsewhere — `app.rs`'s
             // play trigger reads it as "this is a show, take the episode's resume point instead",
@@ -3805,6 +3812,7 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>) -> O
     // Episode/season pages never show the Trailer control, so they must not pay extras I/O.
     // Spawn failure omits the trailer rather than adding a serial extras hop behind related.
     let extras_src: &'static str;
+    let related_at = std::time::Instant::now();
     if extras_wanted(&d.kind) {
         let (related, extras) = std::thread::scope(|s| {
             let extras_h = std::thread::Builder::new()
@@ -3846,16 +3854,23 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>) -> O
         d.related_tail = related.tail;
         d.collection = related.collection;
     }
+    let related_elapsed = related_at.elapsed();
     // The item's IDENTITY and the SHAPE of what came back — never its title. `scrub_local` runs
     // on every line in every build, but nothing in a line distinguishes a programme title from
     // ordinary prose (`eventlog::scrub`'s `a_bare_quoted_title_is_explicitly_out_of_scope_for_the_scrubber`),
     // so the only mechanism for viewing content is that no call site writes it. This one did,
     // from the day it was added until phase 11 — `'{}'` with `d.title` in it, on every detail
     // open, in a log the maintainer routinely pastes into a public issue.
+    //
+    // Stage 0's split: `ms=` stays the whole chain, and the four phases name where it went. Each
+    // is wall time on the main-thread worker, so the phases plus parsing account for `ms=`;
+    // `meta_ms=` includes everything the shim did to build the row, which its own `detail: shim`
+    // line decomposes into addon meta, stream wait and TMDB enrichment.
     plx_base::eventlog::log(&format!(
-        "detail: sid={} rk={} show={} genres={} cast={} crew={} seasons={} eps={} related={} collection={} audio={} subs={} trailer={} extras={} ms={}",
+        "detail: sid={} rk={} show={} genres={} cast={} crew={} seasons={} eps={} related={} collection={} audio={} subs={} trailer={} extras={} meta_ms={} seasons_ms={} streams_ms={} related_ms={} ms={}",
         d.sid.raw(), d.rk, d.is_show, d.genres.len(), d.cast.len(), d.crew.len(), d.seasons.len(), d.episodes.len(),
-        d.related.len(), d.collection.as_ref().map_or(0, |c| c.members.len()), d.audio.len(), d.subs.len(), u8::from(d.trailer().is_some()), extras_src, t0.elapsed().as_millis()
+        d.related.len(), d.collection.as_ref().map_or(0, |c| c.members.len()), d.audio.len(), d.subs.len(), u8::from(d.trailer().is_some()), extras_src,
+        meta_elapsed.as_millis(), seasons_elapsed.as_millis(), streams_elapsed.as_millis(), related_elapsed.as_millis(), t0.elapsed().as_millis()
     ));
     Some(d)
 }

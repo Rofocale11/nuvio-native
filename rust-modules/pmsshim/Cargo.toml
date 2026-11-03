@@ -15,6 +15,9 @@ name = "pmsshim-serve"
 path = "src/bin/serve.rs"
 
 [dependencies]
+# The event log (`plx_base::eventlog`): the detail read's own timing line lands in the same log
+# the app writes, so one grep on the television shows both sides of the loopback.
+plx_base = { path = "../base" }
 plx_net = { path = "../net" }
 # The app's own bounded artwork cache (`imgcache`): a cropped title logo is stored there once
 # instead of re-decoding and re-encoding the same PNG on every request.

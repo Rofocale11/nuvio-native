@@ -3231,11 +3231,18 @@ impl Shim {
     /// The full item: the row plus, for a playable leaf, its `Media[]`. Media whose stream was
     /// probed already carry the real fields; `probe_index` probes that Media now (the decision
     /// path) and returns the verdict beside the row.
+    ///
+    /// The third element is the time spent waiting on the stream slot, so the metadata route can
+    /// say what the detail read actually spent and what it spent it on (Stage 0's split).
     fn item_probed(
         &self,
         rk: i64,
         probe_index: Option<usize>,
-    ) -> Option<(Value, Option<Result<crate::shim_probe::ProbeInfo, String>>)> {
+    ) -> Option<(
+        Value,
+        Option<Result<crate::shim_probe::ProbeInfo, String>>,
+        Duration,
+    )> {
         let ident = self.keys.ident(rk);
         let fallback = if ident.is_none() {
             self.tmdb_fallback_movie(rk)
@@ -3260,6 +3267,7 @@ impl Shim {
             },
         };
         let mut verdict = None;
+        let mut streams_wait = Duration::ZERO;
         if self.stream_target(&ident).is_some() {
             let dur = row["duration"].as_i64().unwrap_or(0);
             // A detail read paints without Media: the placeholder Part below stands in while the
@@ -3270,8 +3278,10 @@ impl Shim {
             } else {
                 Duration::ZERO
             };
+            let ranked_at = Instant::now();
             let (ranked, subs, done) =
                 self.ranked(rk, &ident, u32::try_from(dur / 1000).ok(), wait, probe_index.is_some());
+            streams_wait = ranked_at.elapsed();
             let mut media = Vec::with_capacity(ranked.len().max(1));
             // Pre-probe the leading stream once the list is complete, off this request: the play that
             // usually follows a detail page then finds real fields (and a warmed source) waiting.
@@ -3344,11 +3354,11 @@ impl Shim {
             }
             row["Media"] = Value::Array(media);
         }
-        Some((row, verdict))
+        Some((row, verdict, streams_wait))
     }
 
     fn item(&self, rk: i64) -> Option<Value> {
-        self.item_probed(rk, None).map(|(row, _)| row)
+        self.item_probed(rk, None).map(|(row, _, _)| row)
     }
 
     fn decision(&self, req: &Request) -> Response {
@@ -3376,7 +3386,7 @@ impl Shim {
                 "transcodeDecisionCode": 4005, "transcodeDecisionText": why, "mdeDecisionCode": 2000, "Metadata": []}),
             ))
         };
-        let Some((mut row, verdict)) = self.item_probed(rk, Some(index)) else {
+        let Some((mut row, verdict, _)) = self.item_probed(rk, Some(index)) else {
             return refuse("This title is no longer available from your addons.".into());
         };
         if row["Media"].as_array().is_some_and(Vec::is_empty) {
@@ -3899,14 +3909,24 @@ impl Shim {
                         };
                     }
                 }
+                let rows_at = Instant::now();
+                let mut streams_wait = Duration::ZERO;
                 let mut rows: Vec<Value> = rk
                     .split(',')
                     .filter_map(|x| x.parse().ok())
-                    .filter_map(|k| self.person_row(k).or_else(|| self.item(k)))
+                    .filter_map(|k| match self.person_row(k) {
+                        Some(row) => Some(row),
+                        None => self.item_probed(k, None).map(|(row, _, wait)| {
+                            streams_wait += wait;
+                            row
+                        }),
+                    })
                     .collect();
                 if rows.is_empty() {
                     return Response::json_status(404, &container(json!({"Metadata": []})));
                 }
+                let meta_elapsed = rows_at.elapsed();
+                let enrich_at = Instant::now();
                 for row in &mut rows {
                     if let Some(key) = row["ratingKey"]
                         .as_str()
@@ -3914,6 +3934,20 @@ impl Shim {
                     {
                         self.enrich_row(key, row);
                     }
+                }
+                let tmdb_elapsed = enrich_at.elapsed();
+                // Stage 0's split, on the shim's side of the loopback: the app's own `detail:`
+                // line times the whole GET it made, which cannot say whether the shim spent it
+                // fetching addon meta, waiting on a stream slot, or enriching from TMDB. One key
+                // in the URL is a detail read; a CSV is a listing and has no single split.
+                if let Ok(key) = rk.parse::<i64>() {
+                    plx_base::eventlog::log(&format!(
+                        "detail: shim rk={key} meta_ms={} streams_ms={} tmdb_ms={} total_ms={}",
+                        meta_elapsed.saturating_sub(streams_wait).as_millis(),
+                        streams_wait.as_millis(),
+                        tmdb_elapsed.as_millis(),
+                        (meta_elapsed + tmdb_elapsed).as_millis(),
+                    ));
                 }
                 Response::json(&container(json!({"Metadata": rows})))
             }
@@ -4464,7 +4498,7 @@ impl Shim {
             .unwrap_or(-1);
         // The play is about to start: wait for the streams and probe the lead, so the queue's row
         // carries the real fields rather than the detail page's early guesses.
-        let Some((first, _)) = self.item_probed(rk, Some(0)) else {
+        let Some((first, _, _)) = self.item_probed(rk, Some(0)) else {
             return Response::json(&container(json!({"Metadata": [], "playQueueID": 1})));
         };
         let mut rows = vec![first];

@@ -1,7 +1,7 @@
 # Detail-page latency — plan
 
-**Status:** Stage 1 (1A–1C) implemented (2026-11-03), host + simulator verified. Written 2026-11-02 on
-`forward-port/v0.9-hq` (`7e79e57e`).
+**Status:** Stage 0 and Stage 1 (1A–1C) implemented (2026-11-03), host + simulator verified. Written
+2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
 **Owner:** whoever picks this up next.
 **Scope:** wall-clock from pressing OK on a Home/Library card to a painted movie/show detail page,
 on the television. Not the player, not Home's own first paint, not poster throughput.
@@ -10,7 +10,7 @@ on the television. Not the player, not Home's own first paint, not poster throug
 
 On the TV, a cold detail open takes roughly **1–3 s**. Other Stremio/Nuvio clients on the same
 television, same network, feel instant. The fork's own log already records the total
-(`detail: … ms=`, `rust-modules/data/src/metadata.rs:3805`), so measure before trusting any
+(`detail: … ms=`, `rust-modules/data/src/metadata.rs:3870`), so measure before trusting any
 number here — the split below is structural, not measured on the set yet.
 
 **Verdict: the shim architecture is not wrong.** Keeping the Plex dialect so the ported UI and
@@ -37,7 +37,7 @@ App side:
 2. The detail screen enters and emits `MetadataCmd::RequestDetail` the same frame
    (`rust-modules/screens/src/detail/mod.rs:2099`; a restored enter only re-requests when
    `self.detail(meta)` is empty, `:2094`).
-3. `request_detail` spawns the `"detail"` worker (`rust-modules/data/src/metadata.rs:3950`,
+3. `request_detail` spawns the `"detail"` worker (`rust-modules/data/src/metadata.rs:4016`,
    dispatched at `:4001`), which runs `fetch_full` (`:3699`).
 
 Shim side, for `/library/metadata/{rk}` (`rust-modules/pmsshim/src/shim_pms.rs:3751`; the
@@ -116,20 +116,27 @@ all the work inside the click, over cold connections, with a memory-only cache.
 
 ## 4. The plan
 
-### Stage 0 — make the split visible (not done; Stage 1 landed first on the owner's direction)
+### Stage 0 — make the split visible — **implemented**
 
-`detail: … ms=` already exists (`metadata.rs:3805`) and is the number to compare across every
-stage. Extend it with the three phases so the TV, not inference, says what dominates:
+`detail: … ms=` already existed (`metadata.rs:3760`) and is the number to compare across every
+stage. It now carries the phases, and the shim prints its own side of the loopback:
 
 ```
-detail: … meta=<ms> streams=<ms> tmdb=<ms> total=<ms>
+detail: sid=0 rk=… … meta_ms=<fetch_detail> seasons_ms=<show only> streams_ms=<show backfill> related_ms=<related/extras> ms=<total>
+detail: shim rk=… meta_ms=<row build minus stream wait> streams_ms=<ranked wait> tmdb_ms=<enrich_row> total_ms=<whole shim answer>
 ```
 
-- Time the `fetch_detail` call, the `fetch_item_streams`/`ranked` contribution, and the related/
-  extras block. The shim can log its own side too (`meta_ms`, `streams_ms`, `tmdb_ms`) from
-  `item_probed`; keep both — the app number includes loopback + parsing.
-- Read it on the TV with `./tools/ai-tv-log.sh grep "detail:"`.
-- Acceptance: one cold open after an app relaunch shows the split. Do not proceed on guesses.
+- App side (`fetch_full`, `metadata.rs:3760`): `meta_ms` is the one `fetch_detail` GET; `seasons_ms`
+  and `streams_ms` are the show path's two extra GETs; `related_ms` is the extras/related block.
+  All four are main-thread wall time, so they plus parsing account for `ms=`.
+- Shim side (`shim_pms.rs:3945`, metadata route): `item_probed` now returns the time it spent in
+  `ranked` (usually zero for a detail read since 1A), and `enrich_row` is timed separately. One key
+  in the URL is a detail read; a CSV listing has no single split and is not logged.
+- Measured in the WSLg simulator, empty shim cache, boot straight to a detail: `detail: shim
+  rk=10066 meta_ms=118 streams_ms=0 tmdb_ms=948 total_ms=1066` and the app's `meta_ms=1068 …
+  ms=1072`. The same title re-opened: shim `total_ms=0`, app `ms=2`. **TMDB enrichment, not the
+  addon meta fetch or the stream slot, is what a cold detail pays.**
+- Read it on the TV with `./tools/ai-tv-log.sh grep "detail:"`; one grep shows both lines.
 
 ### Stage 1 — the three changes for tomorrow (the big win)
 
@@ -200,7 +207,7 @@ the detail request is a cache hit. This is what makes the other clients feel ins
 Implemented as "warm the caches, not the UI state":
 
 - `MetadataCmd::WarmDetail { sid, rk }` (`rust-modules/data/src/stores/metadata.rs:175`).
-  `metadata::run` dispatches it to `warm_detail` (`rust-modules/data/src/metadata.rs:4038`), which
+  `metadata::run` dispatches it to `warm_detail` (`rust-modules/data/src/metadata.rs:4053`), which
   issues the same shim GET as `fetch_detail` (`client_for(sid)?.metadata(rk)?`) on a short-lived
   `detail-warm` worker and **drops the body**. It installs no `Detail`, does not touch `current()`
   and does not move the generation counters.
@@ -263,14 +270,10 @@ focus (cold).
 
 ## 5. Verification
 
-- **Host:** the crates the Stage 1 diff touches: `make test-crate C=plx_pmsshim` (65 passed),
-  `C=plx_stremio` (57), `C=plx_screens` (1703), `C=plx_data` (1121 passed, 4 failed — all four
-  reproduce on `5db3b9dc`: the two known concurrency reds plus
-  `committed_fixture_detail_replies_stay_canonical` and `a_headshot_is_served_only_for_a_person`).
-  Shipping feature set: `CARGO_INCREMENTAL=0 cargo +nightly check --manifest-path
-  rust-modules/Cargo.toml --lib --no-default-features` passes. `ci/check-module-layers.py` still
-  reports the 15 pre-existing unlayered `plx_data` modules (`catalog`, `viewledger`, `watchlist`, …)
-  on both the base and this tree; the Stage 1 modules themselves are covered.
+- **Host (Stage 0 update):** `make test-crate C=plx_pmsshim` (65 passed); the shipping feature
+  check and `make lint`'s clippy gate were re-run. `make lint` still fails on
+  `rust-modules/src/app/input.rs:1493` (`if_same_then_else` on an untouched `if` chain) — a
+  pre-existing red on the committed tree, not this diff.
 - **Simulator (`ui-sim`), run 2026-11-03 on WSLg** (host network — correctness and relative
   timings only, never a TV number): prefetch fires on focus rest (`detail: warm rk=… — focus
   prefetch`); a warm open after it completed logged `ms=7` and `ms=5`; a cold boot straight to a
@@ -278,8 +281,10 @@ focus (cold).
   and the page painted (screenshot: logo, cast, `Direct Play`) — under the old code that open also
   paid the stream wait. One open where the prefetch GET was still in flight logged `ms=832` with
   `subs=0 audio=0`: prefetch start is not single-flight yet (Stage 2), and the read still paid
-  only the meta/TMDB path. Host tests and the sim target build are green; the TV measurement
-  below is still owed.
+  only the meta/TMDB path. The Stage 0 split on the same cold open: shim `meta_ms=118 streams_ms=0
+  tmdb_ms=948 total_ms=1066`, app `meta_ms=1068 … ms=1072`; re-opened warm: shim `total_ms=0`,
+  app `ms=2`. Host tests and the sim target build are green; the TV measurement below is still
+  owed.
 
   Recipe (one runtime root, WSLg display exported as the `ui-sim` skill says):
 
@@ -291,10 +296,10 @@ focus (cold).
   exec 3<> "$D/plxnative-remote"; printf 'down ok ' >&3
   # cold: stop, boot straight to a detail with an empty shim cache, then remove the trigger
   printf '10066' > "$D/plxnative-detail"             # any ratingKey from keys.tsv
-  rg "detail:" "$D/plxnative-events.log"             # warm lines + `ms=`
+  rg "detail:" "$D/plxnative-events.log"             # warm lines, the split, and `ms=`
   ```
-- **TV:** acquire the `tv-lock`, deploy a debug build, and measure the `detail:` line:
-  1. cold: relaunch, open a card immediately → `ms=`;
+- **TV:** acquire the `tv-lock`, deploy a debug build, and measure the `detail:` pair:
+  1. cold: relaunch, open a card immediately → `ms=` and the shim's `meta_ms/streams_ms/tmdb_ms`;
   2. warm: rest on a card > 1 s, then OK → `ms=`;
   3. leave and re-enter the same detail → `ms=`.
   Acceptance targets: warm open **≤ 300 ms**, cold open **≤ 800 ms** on the set (pick the numbers
@@ -321,11 +326,13 @@ focus (cold).
 
 | Concern | Where |
 |---|---|
-| Detail request / fetch chain | `rust-modules/data/src/metadata.rs:3699` (`fetch_full`), `:3950` (`request_detail`), `:4038` (`warm_detail`) |
+| Detail request / fetch chain | `rust-modules/data/src/metadata.rs:3760` (`fetch_full`), `:4016` (`request_detail`), `:4053` (`warm_detail`) |
+| App-side split log | `rust-modules/data/src/metadata.rs:3870` |
 | Detail screen's request | `rust-modules/screens/src/detail/mod.rs:2099` |
-| Shim detail route + Media | `rust-modules/pmsshim/src/shim_pms.rs:3751`, `:3151` (`item_probed`), `:3239` (placeholder) |
-| Detail stream wait (zero) | `shim_pms.rs:3268`, `:2055` (`ranked`), `:1961` (`slot`) |
-| TMDB enrichment | `shim_pms.rs:2285` (`enrich_row`), `:788`/`:803` (resolvers), `stremio/src/addons_tmdb.rs:289`/`:378`/`:433` |
+| Shim detail route + Media | `rust-modules/pmsshim/src/shim_pms.rs:3751`, `:3237` (`item_probed`), `:3239` (placeholder) |
+| Shim-side split log | `rust-modules/pmsshim/src/shim_pms.rs:3945` |
+| Detail stream wait (zero) | `shim_pms.rs:3268`, `:2138` (`ranked`), `:2055` (`slot`) |
+| TMDB enrichment | `shim_pms.rs:2368` (`enrich_row`), `:788`/`:803` (resolvers), `stremio/src/addons_tmdb.rs:289`/`:378`/`:433` |
 | Cinemeta + addon meta selection | `rust-modules/stremio/src/addons.rs:21`, `:659`, `:730` |
 | Meta model (`moviedb_id`) | `rust-modules/stremio/src/model.rs:160` |
 | HTTP transport (no reuse) | `rust-modules/net/src/net.rs:928`, serial fallback `:2164` |
@@ -334,14 +341,17 @@ focus (cold).
 
 ## 8. Working state (2026-11-03) — resume point
 
-- **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 1 commits: `ca2de133` (1A), `a2b43791`
-  (1B), `e270e61f` (1C), plus docs `01cacbb9` and `04af6099` (simulator run + WSLg how-to).
+- **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 0 commit: `Stage 0 — split the detail
+  latency`; Stage 1 commits: `ca2de133` (1A), `a2b43791` (1B), `e270e61f` (1C), plus docs
+  `01cacbb9`, `04af6099` and `4c1cf564`.
 - **Verified:** host suites and the shipping feature check are green; the WSLg simulator showed
   prefetch firing, warm opens `ms=5–7`, a cold boot-to-detail `ms=828` with `subs=0`, and one
-  `ms=832` open where the prefetch GET was still in flight. TV is not measured.
-- **Next, in order:** Stage 0 split (`meta=/streams=/tmdb=` on the `detail:` line) → Stage 2B
-  single-flight → Stage 2A persisted meta cache → owner tests on the TV (warm ≤300 ms,
-  cold ≤800 ms). Do not push until the owner asks.
+  `ms=832` open where the prefetch GET was still in flight. The Stage 0 split on a cold open
+  puts ~95% of the shim's answer in TMDB enrichment (`tmdb_ms=948` of `total_ms=1066`). TV is
+  not measured.
+- **Next, in order:** Stage 2B single-flight (the `ms=832` overlap and the cold TMDB cost) →
+  Stage 2A persisted meta cache → owner tests on the TV (warm ≤300 ms, cold ≤800 ms). Do not
+  push until the owner asks.
 
 ## 9. Open questions to settle before coding
 
