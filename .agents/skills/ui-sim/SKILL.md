@@ -79,6 +79,50 @@ can report 60 swaps while Windows visibly updates at only a few FPS. The launche
 state. Close other WSL work, run `wsl.exe --shutdown`, and retry; accept the run only after it says
 `use_gfxredir = 1`.
 
+### Native Linux inside WSLg (no PowerShell)
+
+An agent shell started inside the WSL distro often does **not** inherit WSLg's display variables,
+so the binary looks headless even though WSLg is running. Check `/tmp/.X11-unix/X0` and
+`/run/user/$(id -u)/wayland-0`, then export:
+
+```sh
+export DISPLAY=:0
+export WAYLAND_DISPLAY=wayland-0
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+```
+
+Do **not** set `SDL_VIDEODRIVER=dummy` to "make it headless": SDL creates no GL window and the app
+logs `CreateWindow failed` (the rest of boot still runs). Build and launch the native target:
+
+```sh
+make -j10 sim-linux
+D=/tmp/sim-$USER-a                       # one root per agent/session
+PLXNATIVE_APP_DIR=$PWD/pkg PLXNATIVE_RUNTIME_DIR=$D \
+  rust-modules/target-sim/release/plxnative-sim
+```
+
+`tools/ai-sim.sh` execs that same binary (and blocks forever), so run it in the background when an
+agent must drive the UI. The runtime root is the instance: session, triggers, FIFO and event log.
+
+- **First boot without a session goes to QR sign-in** (`boot: no session — starting QR sign-in`).
+  A human can sign in through the WSLg window; the session persists in `$D/state`, so later
+  launches go straight to Home. Never sign in an account that must not be written to.
+- **Drive it through the FIFO, opened read-write** (a plain `>` blocks until the app reads):
+
+  ```sh
+  exec 3<> "$D/plxnative-remote"
+  printf 'down right ok ' >&3
+  printf 'shot ' >&3                 # writes $D/shot-N.png
+  exec 3>&-
+  ```
+
+- **Boot straight to a screen** with a trigger file, e.g. `printf '10066' > $D/plxnative-detail`
+  (also `plxnative-library`, `plxnative-login`). Remove the trigger after the run: a stale one
+  silently changes the next boot (and `plxnative-detail` also makes the first `detail:` read cold).
+- **The event log is truncated on every launch** (`$D/plxnative-events.log`); its first line is the
+  `sim:` banner. Grep it for route/`detail:` lines rather than relying on the terminal.
+- Timing read here is host network and host GPU. It is never a television number.
+
 **Ask for `SIM_W=1920 SIM_H=1080` on any shot you intend to JUDGE.** The window is otherwise sized
 to fit the display (`app::boot::desktop_window_size`), and on a 1x screen that divisor lands on 2, so
 every screenshot comes back 960x540 — half the canvas the UI is authored at. A 1px edge-sheen, a

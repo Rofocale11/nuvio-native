@@ -280,6 +280,19 @@ focus (cold).
   `subs=0 audio=0`: prefetch start is not single-flight yet (Stage 2), and the read still paid
   only the meta/TMDB path. Host tests and the sim target build are green; the TV measurement
   below is still owed.
+
+  Recipe (one runtime root, WSLg display exported as the `ui-sim` skill says):
+
+  ```sh
+  D=/tmp/sim-detail; make -j10 sim-linux
+  PLXNATIVE_APP_DIR=$PWD/pkg PLXNATIVE_RUNTIME_DIR=$D \
+    rust-modules/target-sim/release/plxnative-sim &   # sign in once; session persists
+  # warm: rest focus >1 s (watch for `detail: warm rk=`), then
+  exec 3<> "$D/plxnative-remote"; printf 'down ok ' >&3
+  # cold: stop, boot straight to a detail with an empty shim cache, then remove the trigger
+  printf '10066' > "$D/plxnative-detail"             # any ratingKey from keys.tsv
+  rg "detail:" "$D/plxnative-events.log"             # warm lines + `ms=`
+  ```
 - **TV:** acquire the `tv-lock`, deploy a debug build, and measure the `detail:` line:
   1. cold: relaunch, open a card immediately → `ms=`;
   2. warm: rest on a card > 1 s, then OK → `ms=`;
