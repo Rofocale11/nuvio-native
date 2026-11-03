@@ -15,7 +15,17 @@ fn key_press(key: Key) -> ScreenEvent<TestHost> {
 
 /// A settled grid page (no hub shelves) of `libraries` libraries with the first row focused.
 fn grid_page(libraries: usize) -> (Fixture, LibraryScreen, FocusEngine<u32>) {
-    let fixture = Fixture::new(libraries, 36, 0);
+    grid_page_with_catalogs(libraries, test_catalogs(), Some(TEST_CATALOGS[0].0))
+}
+
+/// A library page whose section answered `list` (with `current` in force) BEFORE it was first
+/// synced — what a section that advertises exactly that looks like on arrival. Setting the answer
+/// after the first sync is a different question: the control then holds for the library already on
+/// the row, so it never drops (see `refresh_header`).
+fn grid_page_with_catalogs(libraries: usize, list: Vec<plx_data::browse::CatalogEntry>, current: Option<&str>)
+    -> (Fixture, LibraryScreen, FocusEngine<u32>) {
+    let mut fixture = Fixture::new(libraries, 36, 0);
+    fixture.listing = fixture.listing.clone().with_catalogs(list, current);
     let mut page = fixture.screen();
     page.initial = false;
     let mut engine = FocusEngine::new();
@@ -55,11 +65,13 @@ fn the_catalogs_control_is_on_the_row_only_when_the_section_advertises_catalogs(
     assert_eq!(page.toolbar_elems(), [CATALOGS, RECOMMENDED, SORTFILTER]);
     assert_eq!(built(&page), Some(None), "the control is on the row, wearing its label alone");
     assert!(<LibraryScreen as Focusable<TestHost>>::place(&page, &CATALOGS, &fixture.cx(&engine), At::Drawn).is_some());
-    // The section advertises none (a cold answer, or an addon set with no catalog for it).
-    fixture.listing = fixture.listing.clone().with_catalogs(Vec::new(), None);
-    page.sync(&fixture.cx(&engine));
-    assert_eq!(page.toolbar_elems(), [RECOMMENDED, SORTFILTER], "nothing to pick: no control");
-    assert_eq!(built(&page), None, "and it is not laid out");
+    // The section advertised none on arrival (an addon set with no catalog for it): nothing to
+    // pick, so no control — and no room reserved.
+    let mut bare = Fixture::new(1, 36, 0);
+    bare.listing = bare.listing.clone().with_catalogs(Vec::new(), None);
+    let bare = bare.screen();
+    assert_eq!(bare.toolbar_elems(), [RECOMMENDED, SORTFILTER], "nothing to pick: no control");
+    assert_eq!(built(&bare), None, "and it is not laid out");
     // Another catalog picked: the stop and the row are what they were (the pick is the menu's).
     fixture.listing = fixture.listing.clone().with_catalogs(test_catalogs(), Some(TEST_CATALOGS[2].0));
     page.sync(&fixture.cx(&engine));
@@ -81,8 +93,7 @@ fn every_gap_of_the_right_cluster_is_one_gap_whatever_the_catalog_is() {
         ("the first", test_catalogs(), Some(TEST_CATALOGS[0].0), 3),
         ("the widest title", test_catalogs(), Some(TEST_CATALOGS[2].0), 3),
     ] {
-        let (mut fixture, mut page, engine) = grid_page(2);
-        fixture.listing = fixture.listing.clone().with_catalogs(list, current);
+        let (fixture, mut page, engine) = grid_page_with_catalogs(2, list, current);
         page.sync(&fixture.cx(&engine));
         let row = page.header.row().unwrap();
         let cluster: Vec<_> = row.layout.items.iter()
@@ -619,9 +630,7 @@ fn ok_on_the_control_opens_the_catalog_menu() {
 #[test]
 fn the_control_joins_the_row_when_the_catalogs_land() {
     let _guard = plx_base::testlock::serial();
-    let (mut fixture, mut page, engine) = grid_page(2);
-    fixture.listing = fixture.listing.clone().with_catalogs(Vec::new(), None);
-    page.sync(&fixture.cx(&engine));
+    let (mut fixture, mut page, engine) = grid_page_with_catalogs(2, Vec::new(), None);
     assert!(!page.toolbar_elems().contains(&CATALOGS), "premise: no answer yet, no control");
     fixture.listing = fixture.listing.clone().with_catalogs(test_catalogs(), Some(TEST_CATALOGS[0].0));
     page.sync(&fixture.cx(&engine));

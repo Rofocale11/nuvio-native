@@ -434,11 +434,7 @@ fn the_plus_n_list_and_sort_filter_both_lift_their_opener() {
             name: "s12-sort-filter",
             setup: library,
             start: "header:catalogs",
-            steps: {
-                let mut steps = to_sort_filter();
-                steps.push(press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"));
-                steps
-            },
+            steps: to_unwatched(),
             end: sort,
         },
     ]);
@@ -456,7 +452,7 @@ fn the_sort_filter_pill_is_painted_after_the_panel_in_the_dispatchers_own_draw()
     use plx_ui::frame::backdrop::Z;
     let mut w = World::movies_library("route-sort-lift-order", false);
     w.climb_into_header();
-    for (key, at) in [(Key::Right, "header:recommended"), (Key::Right, "header:sort"), (Key::Ok, "menu:unwatched")] {
+    for (key, at) in [(Key::Right, "header:recommended"), (Key::Right, "header:sort"), (Key::Ok, "menu:type:0")] {
         w.press(key);
         w.frames(30);
         assert_eq!(here(&w), at, "premise: {key:?} lands on {at}");
@@ -488,6 +484,19 @@ fn to_sort_filter() -> Vec<Step> {
     ]
 }
 
+/// OK on the Sort & Filter control, then down to the Filter section's Unwatched row. The panel
+/// opens on the Show section's first row (the library's own type, checked), and the two rows above
+/// Unwatched are that type and the Collections page.
+fn to_unwatched() -> Vec<Step> {
+    let mut steps = to_sort_filter();
+    steps.extend([
+        press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:type:0"),
+        press(Key::Down, "", "library", "menu:collections"),
+        press(Key::Down, "", "library", "menu:unwatched"),
+    ]);
+    steps
+}
+
 fn with_genres(w: &mut World) {
     w.open_library();
     w.climb_into_header();
@@ -505,7 +514,6 @@ fn a_filter_shows_n_of_m_beside_the_control_and_clears_when_reset() {
     let unwatched = |from: Vec<Step>| {
         let mut steps = from;
         steps.extend([
-            press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"),
             // A toggle keeps the menu up…
             press(Key::Ok, "", "library", "menu:unwatched"),
             // …and Back closes it onto the control that opened it. The filtered answer is not in
@@ -513,8 +521,10 @@ fn a_filter_shows_n_of_m_beside_the_control_and_clears_when_reset() {
             press(Key::Back, "", "library", "header:sort*"),
             // The server answered: 37 of the library's 120.
             after(films_answered::<37>, press(Key::Right, "", "library", "header:sort [37 of 120 films]")),
-            // Reset it, from the same control.
-            press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"),
+            // Reset it, from the same control (which seats its Show section again).
+            press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:type:0"),
+            press(Key::Down, "", "library", "menu:collections"),
+            press(Key::Down, "", "library", "menu:unwatched"),
             press(Key::Ok, "", "library", "menu:unwatched"),
             press(Key::Back, "", "library", "header:sort*"),
             after(films_answered::<120>, press(Key::Right, "", "library", "header:sort")),
@@ -522,15 +532,14 @@ fn a_filter_shows_n_of_m_beside_the_control_and_clears_when_reset() {
         steps
     };
     run(vec![
-        Row { name: "r6-unwatched", setup: library, start: "header:catalogs", steps: unwatched(to_sort_filter()), end: no_checks },
+        Row { name: "r6-unwatched", setup: library, start: "header:catalogs", steps: unwatched(to_unwatched()), end: no_checks },
         Row {
             name: "r6-genre",
             setup: with_genres,
             start: "header:catalogs",
             steps: {
-                let mut steps = to_sort_filter();
+                let mut steps = to_unwatched();
                 steps.extend([
-                    press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"),
                     press(Key::Down, "", "library", "menu:genre"),
                     // The Genre row opens the genre list in place; a pick closes the menu.
                     press(Key::Ok, "", "library", "menu:genre:all"),

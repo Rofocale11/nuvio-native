@@ -36,6 +36,8 @@ enum Action {
     Genre,
     Select(SectionAddress),
     Recheck,
+    /// Push another listing of this library over the page (the Collections page).
+    Open(crate::library::Listing),
 }
 
 /// A menu's rows: identity string per focusable row (the stable name focus follows across a
@@ -404,9 +406,13 @@ fn filter_section(unwatched: bool, genre: Option<&GenreEntry>, genres_supported:
 }
 
 /// **The one Sort & Filter menu** (redesign spec, "Header"): Show, Sort and Filter in one popover.
-/// Show lists the types the library offers besides Collections (which has its own control) and is
-/// absent when only one remains; Sort is the server's declared list; Filter is the genre and the
-/// Unwatched toggle.
+/// Show lists the listing types the library offers and is absent when only one remains. Seasons and
+/// Episodes have no listing behind them (the shim's `/library/sections/{k}/all` reads no `?type=`,
+/// so either choice draws the shows again), so neither is offered here: a row that does nothing is
+/// worse than a row that is not there. Collections is the library's Collections page, a page of its
+/// own rather than a type of this one, and it is the only way in since the header's old
+/// "Collections · N" control was deleted. Sort is the server's declared list; Filter is the genre
+/// and the Unwatched toggle.
 fn sort_filter_draft(
     section_kind: SecKind,
     current: LibraryType,
@@ -420,11 +426,19 @@ fn sort_filter_draft(
     stamp.tag(14);
     let mut selected = None;
     let mut form = MenuForm::new();
-    let shown: Vec<LibraryType> = LibraryType::offered(section_kind).iter().copied()
-        .filter(|kind| *kind != LibraryType::Collections).collect();
-    if shown.len() > 1 {
-        form = form.section(type_section(plx_platform::i18n::msg::library_header_show(), section_kind,
-            current, &shown, &mut stamp, &mut selected));
+    let offered = LibraryType::offered(section_kind);
+    let shown: Vec<LibraryType> = offered.iter().copied()
+        .filter(|kind| !matches!(kind,
+            LibraryType::Collections | LibraryType::Seasons | LibraryType::Episodes)).collect();
+    let collections = offered.contains(&LibraryType::Collections);
+    if shown.len() + usize::from(collections) > 1 {
+        let mut section = type_section(plx_platform::i18n::msg::library_header_show(), section_kind,
+            current, &shown, &mut stamp, &mut selected);
+        if collections {
+            section = choice(section, "collections".into(), Action::Open(crate::library::Listing::Collections),
+                Row::new(LibraryType::Collections.title(section_kind)));
+        }
+        form = form.section(section);
     }
     form = form.section(sort_section(plx_platform::i18n::msg::browse_library_sort(), sorts, sort_index,
         sort_desc, &mut stamp, &mut selected));
@@ -688,6 +702,15 @@ impl LibraryMenu {
                 StoreId::Browse,
                 StoreCmd::Browse(BrowseCmd::RecheckShares),
             ))),
+            Action::Open(listing) => {
+                fx.push(Fx::Deliver(
+                    MachineId::Instance(self.arg.host),
+                    Delivery::Screen(ScreenEvent::App(AppMsg::Library(
+                        crate::registry::LibraryCmd::OpenListing(listing),
+                    ))),
+                ));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
+            }
         }
     }
 }
@@ -1559,9 +1582,10 @@ mod tests {
         plx_ui::table::assert_no_fit_failures(&out);
     }
 
-    /// **The one Sort & Filter popover's sections** (redesign spec, "Header"): Show appears only when
-    /// the library offers more than one type besides Collections (TV: Shows / Seasons / Episodes),
-    /// and never lists Collections itself; Sort and Filter always follow.
+    /// **The one Sort & Filter popover's sections** (redesign spec, "Header"): Show, Sort and Filter
+    /// for both kinds of library. Show offers the one listing type the library has plus the
+    /// Collections page; Seasons and Episodes are not offered, because the shim's section route
+    /// reads no `?type=` and either would draw the shows already on screen again.
     #[test]
     fn sort_and_filter_menu_sections_follow_the_library_kind() {
         let sorts = vec![SortEntry { key: "titleSort".into(), desc_key: String::new(), title: "Title".into(), default_desc: false }];
@@ -1570,10 +1594,17 @@ mod tests {
         let movie = titles(sort_filter_draft(SecKind::Movie, LibraryType::Primary, &sorts, 0, false, None, false));
         assert_eq!(show.len(), 3, "TV libraries open Show, Sort and Filter");
         assert_eq!(show[0], plx_platform::i18n::msg::library_header_show());
-        assert_eq!(movie.len(), 2, "a Movies library has one type to show, so no Show section");
-        assert_eq!(movie[0], plx_platform::i18n::msg::browse_library_sort());
+        assert_eq!(movie.len(), 3, "a Movies library opens Show, Sort and Filter too");
+        assert_eq!(movie[0], plx_platform::i18n::msg::library_header_show());
         let laid = lay(sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, false));
-        assert!(!laid.rows.iter().any(|(id, ..)| id == &format!("type:{}", LibraryType::Collections.code())), "Collections has its own control");
+        assert_eq!(laid.sections[0].rows.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(),
+            ["TV Shows", "Collections"]);
+        assert!(matches!(laid.rows[1].1, Action::Open(crate::library::Listing::Collections)),
+            "the Collections row pushes the page, it is not a type of this one");
+        for kind in [LibraryType::Seasons, LibraryType::Episodes] {
+            assert!(!laid.rows.iter().any(|(id, ..)| id == &format!("type:{}", kind.code())),
+                "{kind:?} is not offered: there is no listing behind it");
+        }
         assert_ne!(sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, false).stamp,
             sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, true).stamp);
     }

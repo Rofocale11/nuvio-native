@@ -138,9 +138,9 @@ input, while every other screen handles clicks.
 
 **C. Library browse is a permanent type destination.** We ship Movies and TV Shows grids; the
 reference ships Recommended (the
-section's own hubs), Library, Collections and Categories. The Collections page exists but has no
-entry control since the Library header's "Collections · N" button was replaced by a Catalogs
-dropdown; it is a pushed "Films > Collections" page, never a tab of its own. There is no category
+section's own hubs), Library, Collections and Categories. The Collections page exists and the Sort
+& Filter menu's Show section carries the row that opens it, beside the library's own listing type;
+it is a pushed "Films > Collections" page, never a tab of its own. There is no category
 browse axis beyond genre, and the filter menu exposes **1 facet out of the server's ~27** —
 `Meta.Type[].Filter[]` is not even parsed, so the server's own menu is discarded on arrival.
 Additional same-type libraries are addressed through the Source panel rather than extra top pills.
@@ -819,10 +819,10 @@ player, transport and tracks auditors, and is counted once in the themes above.
   *Verified:* CONFIRMED. `Client::search` exists at plex/hubs.rs:23-29 (`GET /hubs/search?query=&limit=`) and is dead code — `rg -n "search" rust-modules/src` yields only that definition, the plex/mod.rs:13 admission ("the ops written ahead of a UI feature (search/browse/leaves — no callers yet)"), and unrelated byte/binary-search helpers in stream.rs:37, text.rs:327/357, remote.rs:76/119/138, plus `av_opt_set`'s `search_flags` param name in ff.rs:272. app.rs:586-594 `enum Route` = Login/Profiles/Home/Account/Library/Detail/Player{overlay} — no Search arm, and no Search entry in `modal_of` (app.rs:608). ui/
 
 - **Collections: no filter facet and no detail-page link yet** — `minor` / `medium` — **in progress under #205.**
-  The official Library screen shows a section's collections as poster cards that drill into the collection's children, its type dropdown offers Collections, and a movie's detail page links to its collection. What now exists: `plex/collections.rs` has typed reads for `GET /library/sections/{k}/collections` (`section_collections`), a collection's own metadata (`collection`) and its members (`collection_children`), each returning a `CollectionOutcome` that keeps a denied section, a missing collection and a transport failure apart. A collection row parses to its own `KIND_COLLECTION` kind, so it never opens a fake Detail page, offers Play, or scrobbles (#270). The Collections page itself exists for movie and TV libraries (`all?type=18`, the poster grid under a "Films > Collections" crumb, an "N films" / "N shows" caption under the focused tile, a smart-collection mark, a neutral glyph-and-name tile for a collection without artwork), and OK on a collection card opens the collection page. **Its way in is the command, not a header control**: the header's old "Collections · N" button was deleted — it showed a count the shim fabricated (50 cached rows plus a page-size hint) and spun forever — and its slot now holds a *Catalogs* control that opens the section's addon-catalog menu (`LibraryMenuKind::Type`), which the shim already splits by tab (movie catalogs on Movies, show catalogs on TV Shows). So the Collections page is reachable by `--screen`, a restored view, or a script, and a person cannot currently open it. Restoring an entry point is the open item here.
-  Still missing: a `collection=<tag>` facet in the filter menu, the detail-page link from a movie to the collections it belongs to (see "Collections the item belongs to are never shown" above, which covers that half), and any header/entry control for the Collections page.
+  The official Library screen shows a section's collections as poster cards that drill into the collection's children, its type dropdown offers Collections, and a movie's detail page links to its collection. What now exists: `plex/collections.rs` has typed reads for `GET /library/sections/{k}/collections` (`section_collections`), a collection's own metadata (`collection`) and its members (`collection_children`), each returning a `CollectionOutcome` that keeps a denied section, a missing collection and a transport failure apart. A collection row parses to its own `KIND_COLLECTION` kind, so it never opens a fake Detail page, offers Play, or scrobbles (#270). The Collections page itself exists for movie and TV libraries (`all?type=18`, the poster grid under a "Films > Collections" crumb, an "N films" / "N shows" caption under the focused tile, a smart-collection mark, a neutral glyph-and-name tile for a collection without artwork), and OK on a collection card opens the collection page. **Its way in is the Sort & Filter menu's Show section**: the header's old "Collections · N" button was deleted — it showed a count the shim fabricated (50 cached rows plus a page-size hint) and spun forever — and its slot now holds a *Catalogs* control that opens the section's addon-catalog menu (`LibraryMenuKind::Type`), which the shim already splits by tab (movie catalogs on Movies, show catalogs on TV Shows). The Show section's Collections row pushes the page (`Action::Open(Listing::Collections)`); `--screen`, a restored view and a script still reach it too.
+  Still missing: a `collection=<tag>` facet in the filter menu and the detail-page link from a movie to the collections it belongs to (see "Collections the item belongs to are never shown" above, which covers that half).
   *Where:* the filter menu (`screens/library/menu.rs`) and Detail.
-  *Verified:* `LibraryType::offered` lists Collections for both section kinds and `LibraryType::plex_type` sends `type=18`; the filter menu still offers only Unwatched and Genre; `screens/library/toolbar.rs` declares `CATALOGS`, not `COLLECTIONS`, and `screens/library/header.rs` pushes the Catalogs item only.
+  *Verified:* `LibraryType::offered` lists Collections for both section kinds and `LibraryType::plex_type` sends `type=18`; the filter menu still offers only Unwatched and Genre; `screens/library/menu.rs`'s `sort_filter_draft` pushes the Collections row into its Show section and `screens/library/toolbar.rs` declares `CATALOGS`, not `COLLECTIONS`.
 
 - **No "Categories" browse (by genre / year / director / actor / country / content rating)** — `major` / `large`
   The official client's Categories tab is a browsable index: pick an axis (Genre, Year, Decade, Director, Actor, Country, Content Rating, Studio, Resolution…), see the values as tiles, drill into one to get the filtered grid. We only ever fetch ONE axis (`genre`) and only as a flat single-select filter list — there is no category browse view, and no other axis is reachable at all.
@@ -866,12 +866,17 @@ player, transport and tracks auditors, and is counted once in the themes above.
   *Verified:* The playback decision chain (`transcoder.rs` `/video/:/transcode/universal/decision`) is PMS-only and nothing models a non-PMS content source; the catalog page plays nothing.
 
 - **Folder views remain unavailable** — `minor` / `medium`
-  TV libraries pick Shows, Seasons or Episodes in the header's Sort & Filter menu
-  (`screens/library/menu.rs` `type_section`); Collections is the separate Collections page the
-  header control pushes, not a type in that menu. The query still sends `type=2|3|4|18` (a
-  movie library's films stay untyped), reloads the selected type's sort options, and displays
-  episodes as landscape stills. Folder views remain open; they are not an option in that menu.
-  *Where:* `browse::LibraryType`, `screens/library/menu.rs` (`type_section`), and `screens/library/layout.rs`.
+  The header's Sort & Filter menu lets a library pick its own listing type and open the
+  Collections page (`screens/library/menu.rs` `sort_filter_draft`). **Seasons and Episodes were
+  withdrawn 2026-11-03**: the shim's `/library/sections/{k}/all` reads no `?type=`, so both
+  answered with the very show catalog already on screen and the rows did nothing. The client half
+  is intact — the query still sends `type=2|3|4|18` (a movie library's films stay untyped), a type
+  change still reloads that type's sort options, and episodes still draw as landscape stills — so a
+  restored view or a command can still reach those listings, but no menu offers them. The Show
+  section therefore lists two rows in either kind of library: the library's own type (checked) and
+  Collections, which is a page pushed over this one rather than a type of it. Folder views remain
+  open; they are not an option in that menu either.
+  *Where:* `browse::LibraryType`, `screens/library/menu.rs` (`sort_filter_draft`), and `screens/library/layout.rs`.
 
 - **The grid's watched/progress state goes stale after playback — its per-owner retained listing publication is not refreshed** — `minor` / `small`
   Play a movie from the Library grid, finish it, press BACK: the poster can still show the amber unwatched angle and no resume bar because playback invalidates the Bridge-owned section-hub shelves, not that owner's retained listing publication. The official client's grid reflects watched state the moment you return.
