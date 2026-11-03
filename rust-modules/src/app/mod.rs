@@ -291,6 +291,11 @@ pub(crate) struct App {
     pub(crate) menu_play_await: Option<MenuPlayAwait>,
     pub(crate) prev: u32,
     pub(crate) refresh_hubs_at: u32,
+    /// The shim's content generation this app has already re-read Home for. A Nuvio sign-in
+    /// installs its addons and merges its resume points on workers, after Home may already have
+    /// fetched `/hubs`; the loop compares this against `nuvio::content_generation()` and queues
+    /// one refetch per change. Initialised to the boot value, so boot's own bumps do not count.
+    pub(crate) content_gen_seen: u64,
     /// The Detail page a playback returned to, waiting for the stop report to land so it can
     /// re-read the item (`content::refresh_after_playback`).
     /// The HTTPS retry for servers on a plaintext grant (`plex::grant::UpgradeRetry`), stepped

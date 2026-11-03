@@ -1491,6 +1491,34 @@ fn playback_may_run(app: &App) -> bool {
     app.window_activity.allow_present(true) && !app.player.lifecycle.awaiting_load()
 }
 
+/// What a frame owes Home: a re-read after playback, after account content arrived, or both.
+/// Separate bits so the loop consumes the flag and the generation it covers in one step and can
+/// say which trigger asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HomeRefresh {
+    playback: bool,
+    account: bool,
+}
+
+/// **The frame's Home re-read decision**, pure so both trigger paths are gradeable on the host.
+///
+/// `on_player` withholds BOTH on purpose. Playback's own exit refresh re-reads the same hubs, and
+/// a content change that lands mid-playback is covered by it; leaving the generation unseen is
+/// what makes that exit refresh consume it exactly once instead of twice.
+fn home_refresh_due(
+    refresh_hubs_at: u32,
+    now: u32,
+    on_player: bool,
+    content_gen: Option<u64>,
+    content_gen_seen: u64,
+) -> HomeRefresh {
+    let playback = refresh_hubs_at != 0
+        && now.wrapping_sub(refresh_hubs_at) < 0x8000_0000
+        && !on_player;
+    let account = !on_player && content_gen.is_some_and(|gen| gen != content_gen_seen);
+    HomeRefresh { playback, account }
+}
+
 /// The playback side of an iteration before the tick: the engine pump, the foreground load
 /// poll, the reporter, EOS / Up Next, the hub refresh, the held key, the scrubber and the paused
 /// seek — everything that reads `fr.now` and no `dt`.
@@ -1611,24 +1639,50 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 }
             }
         }
-        // post-playback home refresh (armed by every exit_player): refetch the hubs so
-        // Continue Watching shows the new resume point / next episode; the small delay lets
-        // the final timeline PUT land server-side first. The request is worker-only; the
-        // landing logs the resulting item count when it actually commits.
-        if app.refresh_hubs_at != 0
-            && fr.now.wrapping_sub(app.refresh_hubs_at) < 0x8000_0000
-            && !matches!(app.route(), AppArg::Player)
-        {
-            app.refresh_hubs_at = 0;
+        // **Two reasons to re-read Home, one refetch.**
+        //
+        // 1. post-playback (armed by every exit_player): the hubs are refetched so Continue
+        //    Watching shows the new resume point / next episode; the small delay lets the final
+        //    timeline PUT land server-side first.
+        // 2. account content that arrived on a worker. A Nuvio sign-in installs the profile's
+        //    addon set and merges its resume points well after Home may have asked for `/hubs`,
+        //    so that first answer can be the default addon set or an empty Continue Watching
+        //    row. The shim counts every real change; this is the app's one read of that count,
+        //    and the refresh below is what makes the rows appear without a relaunch.
+        //
+        // The count is deliberately left stale while the Player is up: playback's own exit
+        // refresh re-reads the same hubs, and consuming both here keeps it to ONE request.
+        let content_gen = super::nuvio::content_generation();
+        let due = home_refresh_due(
+            app.refresh_hubs_at,
+            fr.now,
+            matches!(app.route(), AppArg::Player),
+            content_gen,
+            app.content_gen_seen,
+        );
+        if due.playback || due.account {
+            if due.playback {
+                app.refresh_hubs_at = 0;
+            }
+            if due.account {
+                if let Some(gen) = content_gen {
+                    app.content_gen_seen = gen;
+                }
+            }
             super::bridge::execute_endpoint_outcomes(
                 &mut app.pages,
                 app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints,
             );
             // …and every library's OWN shelves, for the same reason and at the same moment:
-            // a finished playback moves Continue Watching and watch state, so invalidate each
-            // Bridge-owned Browse store through `Bridge::browse_run`.
+            // a finished playback moves Continue Watching and watch state, and a new addon set
+            // moves the catalogs themselves, so invalidate each Bridge-owned Browse store
+            // through `Bridge::browse_run`.
             app.bridge.browse_run(plx_data::stores::browse::BrowseCmd::HubsInvalidateAll);
-            log("home: hubs refresh queued after playback");
+            log(if due.playback {
+                "home: hubs refresh queued after playback"
+            } else {
+                "home: hubs refresh queued after account content changed"
+            });
         }
         // (The lost-keyup safety net and the CLIENT-SIDE LONG-PRESS REPEAT stood here — the one
         // hold-to-move path for every discrete focus list, driven by `App::held_key` at 110 ms so
@@ -3106,6 +3160,7 @@ mod lifecycle_regression_tests {
             menu_play_await: Default::default(),
             prev: Default::default(),
             refresh_hubs_at: Default::default(),
+            content_gen_seen: Default::default(),
             plaintext_upgrade: Default::default(),
             ev: [0; 128],
             remote: Default::default(),
@@ -4789,6 +4844,66 @@ mod pump_wiring_tests {
             no_intervening_fn,
             "pump_detail() and pump_season() must be pumped from the same function — found what \
              looks like an intervening function boundary between them"
+        );
+    }
+}
+
+/// **The frame's Home re-read decision**, over the two independent triggers. `playback_tick`'s
+/// body cannot be driven on the host (it needs a live SDL window), so the decision it reads is a
+/// pure function and these are its cases.
+#[cfg(test)]
+mod home_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn an_unchanged_generation_and_no_flag_owe_home_nothing() {
+        assert_eq!(
+            home_refresh_due(0, 1_000, false, Some(4), 4),
+            HomeRefresh { playback: false, account: false }
+        );
+    }
+
+    #[test]
+    fn a_changed_generation_asks_home_to_read_again() {
+        assert_eq!(
+            home_refresh_due(0, 1_000, false, Some(5), 4),
+            HomeRefresh { playback: false, account: true }
+        );
+    }
+
+    #[test]
+    fn no_shim_means_no_account_trigger() {
+        assert_eq!(
+            home_refresh_due(0, 1_000, false, None, 4),
+            HomeRefresh { playback: false, account: false }
+        );
+    }
+
+    /// Playback's exit refresh re-reads the same hubs, so a content change that lands while the
+    /// player is up is left unseen and consumed by that one refresh instead of firing underneath
+    /// the picture.
+    #[test]
+    fn the_player_defers_both_triggers() {
+        assert_eq!(
+            home_refresh_due(1, 1_000, true, Some(5), 4),
+            HomeRefresh { playback: false, account: false }
+        );
+    }
+
+    #[test]
+    fn both_triggers_in_one_frame_are_one_refetch() {
+        assert_eq!(
+            home_refresh_due(1, 1_000, false, Some(5), 4),
+            HomeRefresh { playback: true, account: true }
+        );
+    }
+
+    /// The stamp is a wrapping `fr.now`; a value half the space old is not "due now" forever.
+    #[test]
+    fn a_stale_playback_stamp_is_not_due() {
+        assert_eq!(
+            home_refresh_due(1, 1u32.wrapping_add(0x8000_0000), false, None, 0),
+            HomeRefresh { playback: false, account: false }
         );
     }
 }

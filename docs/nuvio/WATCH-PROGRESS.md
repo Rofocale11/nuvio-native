@@ -106,6 +106,19 @@ changes nothing locally. The local write already happened; losing the mirror is 
 - whenever a profile is selected, because a profile's history is its own — switching profiles must
   not leave the previous one's resume points on screen.
 
+**The profile's addons are installed before that pull fires** (`Account::load_profile`). That order
+is load-bearing: the pull builds each resume point's row through the addon backend (`Shim::row`),
+and `WatchState::in_progress` drops an entry whose row snapshot is missing. Pulling first stored the
+position with no row, so Continue Watching stayed empty until the next boot pulled it again against
+the real addons. The load also re-checks the library generation after the manifest fetch, so a
+profile picked while an older load was still in flight neither installs its set nor pulls its
+history.
+
+**The pull also tells the client when it changed something.** A non-zero merge bumps
+`Shim::content_generation`; the app polls that count and re-reads Home's hubs once per observed
+value. Without it the merge landed after Home's first `/hubs` and the row only appeared on the next
+launch.
+
 Each row is filtered cheapest-first: a zero position is dropped, the local stamp is compared before
 any row snapshot is fetched, and only a merge that lands pays for `me.row(rk)` and a bind.
 

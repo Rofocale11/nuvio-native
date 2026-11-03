@@ -138,6 +138,17 @@ see "The P2P streaming server" below.
   URL) is stored under `preferences.addonEnabled` in `nuvio-session.json` and applied on top of the
   account's own `enabled` flag whenever a profile's addons are loaded; the running `AddonBackend`
   is swapped and its caches cleared so disabled addons disappear immediately.
+- **A sign-in's content arrives after Home's first read, and Home is told to read again.** The
+  profile's addon set and its resume points are fetched on workers (manifests take up to the 15 s
+  deadline), so the first `/hubs` answer can predate either. `Shim::content_generation` counts
+  every change that makes the answer stale — the addon set replaced, a pull that actually merged a
+  resume point, and a finished `warm()` that filled catalog caches `/hubs`' 4 s budget had missed —
+  and the app compares that count once per frame, refetching the hubs (and invalidating the
+  library shelves) once per observed value. `Account::load_profile` installs the addons **before**
+  it fires the watch pull: the pull resolves each resume point's row through the addon backend, and
+  a position merged with no row snapshot is invisible in Continue Watching. The fetch is also
+  generation-checked again after the network call, so a profile picked while an older load's
+  manifests were out cannot install the wrong set or pull the wrong history.
 - **Account preferences live in one file, with one writer.** `defaultAudioLanguage`,
   `defaultSubtitleLanguage`, `autoSelectSubtitle` and `defaultSubtitleForced` sit under
   `preferences` in `nuvio-session.json`. `GET/PUT /api/v2/user/profile` on the shim is the editor

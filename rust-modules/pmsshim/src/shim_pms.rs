@@ -16,7 +16,7 @@ use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -383,6 +383,11 @@ pub struct Shim {
     p2p_enabled: AtomicBool,
     /// Audio codecs this TV decodes (`devcaps`); empty = unknown, rank on video alone.
     audio_codecs: std::sync::RwLock<Vec<String>>,
+    /// A monotonic count of changes the client should re-read: the addon set was replaced, a
+    /// profile's resume points merged, or a boot warm filled the catalog caches. The app polls
+    /// this once a frame (a worker may not touch the dispatcher) and refetches Home when it moves.
+    /// Unlike a boolean it cannot lose a change that lands between two frames.
+    content_gen: AtomicU64,
     /// Set by [`Shim::bind_self`]: background work started from a `&self` method.
     me: std::sync::OnceLock<std::sync::Weak<Shim>>,
     /// plex.tv's account surface, answered by the Nuvio account (`account.rs`).
@@ -1680,6 +1685,7 @@ impl Shim {
             torrent_server: std::sync::RwLock::new(cfg_ts),
             p2p_enabled: AtomicBool::new(cfg_p2p),
             audio_codecs: std::sync::RwLock::new(Vec::new()),
+            content_gen: AtomicU64::new(0),
             me: std::sync::OnceLock::new(),
             account: crate::shim_account::Account::new(dir.as_deref(), &cfg_token),
         }
@@ -1769,10 +1775,19 @@ impl Shim {
                     merged += 1;
                 }
             }
-            if merged > 0 {
-                plx_stremio::nuvio::log_account_event(&format!("nuvio account: merged {merged} resume point(s)"));
-            }
+            me.account_watch_merged(merged);
         });
+    }
+
+    /// The end of an account pull: a real merge changes what Continue Watching should show, and
+    /// the client's first hub read may already have landed with the empty row. A pull that
+    /// changed nothing says nothing, so a steady-state boot does not make Home read twice.
+    fn account_watch_merged(&self, merged: usize) {
+        if merged == 0 {
+            return;
+        }
+        self.bump_content();
+        plx_stremio::nuvio::log_account_event(&format!("nuvio account: merged {merged} resume point(s)"));
     }
 
     /// The local ratingKey an account resume point belongs to: what this device pushed that item
@@ -1839,6 +1854,19 @@ impl Shim {
             .clear();
     }
 
+    /// **The count a client polls to learn that account content arrived.** A sign-in loads its
+    /// addons on a worker and its watch history on another, so Home's first hub read can land
+    /// before either; the app re-reads the hubs when this moves. Monotonic, and only ever bumped
+    /// by real changes (see [`Shim::bump_content`]'s callers).
+    pub fn content_generation(&self) -> u64 {
+        self.content_gen.load(Ordering::Relaxed)
+    }
+
+    /// Record that the content behind Home changed. Cheap enough for a worker thread.
+    fn bump_content(&self) {
+        self.content_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Drop every cache that depends on the addon set (after Settings changed it).
     pub fn addons_changed(&self) {
         self.metas.clear();
@@ -1856,6 +1884,9 @@ impl Shim {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // LAST, not first: a client that sees the new generation must never read a cache this
+        // call has not cleared yet.
+        self.bump_content();
     }
 
     // ---- data access ------------------------------------------------------------------------
@@ -3904,6 +3935,10 @@ impl Shim {
             .spawn(move || {
                 let _ = me.account.saved_library(false);
                 let _ = me.catalog_hubs(|_| true, 12, true, Duration::from_secs(60));
+                // `/hubs` gives each catalog 4 s and leaves the late ones out of that answer.
+                // A client that already asked may be holding one of those partial answers, so a
+                // finished warm is itself a content change worth re-reading.
+                me.bump_content();
             });
     }
 
@@ -5913,6 +5948,58 @@ mod continue_watching_paging_tests {
         assert_eq!(hub["size"], 2);
         assert_eq!(hub["totalSize"], 5);
         assert_eq!(hub["more"], true);
+    }
+}
+
+/// The count the app polls to learn that content arrived after its first Home read. Each of
+/// these is a path that changes what `/hubs` should answer; a steady-state boot must not move it.
+#[cfg(test)]
+mod content_generation_tests {
+    use super::*;
+
+    fn shim() -> Arc<Shim> {
+        Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()))
+    }
+
+    #[test]
+    fn replacing_the_addon_set_asks_home_to_read_again() {
+        let shim = shim();
+        let before = shim.content_generation();
+        shim.addons_changed();
+        assert_eq!(shim.content_generation(), before + 1);
+    }
+
+    #[test]
+    fn a_pull_that_merged_nothing_does_not_ask_home_to_read_again() {
+        let shim = shim();
+        let before = shim.content_generation();
+        shim.account_watch_merged(0);
+        assert_eq!(shim.content_generation(), before);
+    }
+
+    #[test]
+    fn a_pull_that_merged_a_resume_point_asks_home_to_read_again() {
+        let shim = shim();
+        let before = shim.content_generation();
+        shim.account_watch_merged(2);
+        assert_eq!(shim.content_generation(), before + 1);
+    }
+
+    /// `/hubs` omits catalogs that miss its 4 s budget. A finished warm has those rows cached, so
+    /// the client that saw the partial answer must be told to ask again.
+    #[test]
+    fn a_finished_warm_asks_home_to_read_again() {
+        let shim = shim();
+        let before = shim.content_generation();
+        shim.warm();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shim.content_generation() == before && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            shim.content_generation() > before,
+            "a finished warm must be announced"
+        );
     }
 }
 

@@ -29,9 +29,15 @@ static HANDLE: OnceLock<plx_pmsshim::Handle> = OnceLock::new();
 static BACKEND: OnceLock<Arc<plx_pmsshim::AddonBackend>> = OnceLock::new();
 
 /// The running shim, for Settings screens that change addons.
-#[allow(dead_code)]
 pub(crate) fn handle() -> Option<&'static plx_pmsshim::Handle> {
     HANDLE.get()
+}
+
+/// The shim's count of content changes the client should re-read: the account addon set was
+/// installed, a profile's resume points merged, or a boot warm filled the catalog caches. `None`
+/// on a controlled/replay boot, where there is no shim to ask.
+pub(crate) fn content_generation() -> Option<u64> {
+    handle().map(|h| h.shim.content_generation())
 }
 
 fn data_dir() -> PathBuf {

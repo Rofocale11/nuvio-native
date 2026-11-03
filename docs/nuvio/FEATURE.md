@@ -85,8 +85,9 @@ file is a running catalog of what the fork adds on top of upstream; companion do
   confirmed-write refresh.
 - `/nuvio/library` and `/hubs/nuvio/list` shelf paging; UI runs requests on a worker and refreshes
   Home after a confirmed reply.
-- Watch progress mirrored to the Nuvio account (push on timeline, pull/merge on boot or profile
-  switch); Continue Watching becomes the account's, not the device's.
+- Watch progress mirrored to the Nuvio account (push on timeline; pull/merge on boot or profile
+  switch, after that profile's addons are installed so every resume point can build its row); the
+  client re-reads Home when the merge lands, so Continue Watching does not wait for a relaunch.
 - TMDB↔IMDb ID translation for My List sync, related items, and every addon-facing stream/subtitle
   request whose title is TMDB-only (`tmdb:<id>` → `tt…`, episode tails preserved).
 

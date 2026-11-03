@@ -475,23 +475,60 @@ impl Account {
             // The sink's merge path pulls the account's resume points, which wants `library`:
             // drop the guard first or the two deadlock.
             drop(context);
-            if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation { return; }
-            if let Some(watch) = watch_sink {
-                watch();
-            }
-            if let Ok(mut addons) = plx_stremio::nuvio::addons(&session, &pid) {
-                if !addons.is_empty() {
-                    // Apply session-scoped enable/disable overrides from nuvio-session.json.
-                    let overrides = prefs.lock().unwrap_or_else(|e| e.into_inner()).get("addonEnabled").and_then(Value::as_object).cloned().unwrap_or_default();
-                    for a in addons.iter_mut() {
-                        if let Some(b) = overrides.get(&a.transport_url).and_then(Value::as_bool) {
-                            a.disabled = !b;
-                        }
-                    }
-                    sink(plx_stremio::addons::AddonSet { addons });
+            activate_loaded_profile(
+                &library, generation, &prefs, &sink, watch_sink,
+                || plx_stremio::nuvio::addons(&session, &pid),
+            );
+        });
+    }
+}
+
+/// **The half of [`Account::load_profile`] that installs what the profile resolved.** `fetch` is
+/// the addon lookup, injected so the ordering and the supersession rule can be graded on the host
+/// without a backend.
+///
+/// **The profile's addons are installed BEFORE the watch pull**, and that order is load-bearing:
+/// `pull_account_watch` builds each resume point's row through the addon backend (`Shim::row`),
+/// and `WatchState::in_progress` drops an entry whose row snapshot is missing. Pulling first
+/// stored the position with no row, so Continue Watching stayed empty until a restart ran the
+/// pull against the real addons.
+fn activate_loaded_profile<F>(
+    library: &Mutex<LibraryContext>,
+    generation: u64,
+    prefs: &Mutex<serde_json::Map<String, Value>>,
+    sink: &AddonSink,
+    watch_sink: Option<WatchSink>,
+    fetch: F,
+) where
+    F: FnOnce() -> plx_stremio::model::Result<Vec<plx_stremio::model::Addon>>,
+{
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
+        return;
+    }
+    // The fetch can take the manifest deadline (15 s), so a newer profile load may land while it
+    // is out. Nothing this worker resolved belongs to the current profile any more, so install
+    // neither set and pull neither history.
+    let addons = fetch();
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
+        return;
+    }
+    if let Ok(mut addons) = addons {
+        if !addons.is_empty() {
+            // Apply session-scoped enable/disable overrides from nuvio-session.json.
+            let overrides = prefs.lock().unwrap_or_else(|e| e.into_inner()).get("addonEnabled").and_then(Value::as_object).cloned().unwrap_or_default();
+            for a in addons.iter_mut() {
+                if let Some(b) = overrides.get(&a.transport_url).and_then(Value::as_bool) {
+                    a.disabled = !b;
                 }
             }
-        });
+            sink(plx_stremio::addons::AddonSet { addons });
+        }
+    }
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
+        return;
+    }
+    if let Some(watch) = watch_sink {
+        watch();
     }
 }
 
@@ -604,6 +641,90 @@ mod tests {
             "a signed-out install keeps no preferences"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_addon() -> plx_stremio::model::Addon {
+        plx_stremio::model::Addon {
+            transport_url: "https://addon.example".into(),
+            manifest: Default::default(),
+            disabled: false,
+            display_name: None,
+        }
+    }
+
+    /// **Addons first, watch pull second.** The pull builds each resume point's row through the
+    /// addon backend; pulling first stored positions whose row snapshot was missing, and
+    /// Continue Watching dropped them until a restart.
+    #[test]
+    fn a_profile_load_installs_its_addons_before_it_pulls_watch() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Mutex::new(LibraryContext { profile: Some("1".into()), generation: 7, cached: None });
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), || Ok(vec![test_addon()]));
+
+        assert_eq!(*order.lock().unwrap(), ["addons", "watch"]);
+    }
+
+    /// An account with no addons still has a watch history to merge, so an empty answer installs
+    /// nothing but must not suppress the pull.
+    #[test]
+    fn an_empty_addon_answer_still_pulls_watch() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Mutex::new(LibraryContext { profile: None, generation: 7, cached: None });
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), || Ok(Vec::new()));
+
+        assert_eq!(*order.lock().unwrap(), ["watch"]);
+    }
+
+    /// A newer profile load wins even when it lands before this worker fetches anything.
+    #[test]
+    fn a_superseded_profile_load_fetches_nothing() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Mutex::new(LibraryContext { profile: None, generation: 8, cached: None });
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch),
+            || -> plx_stremio::model::Result<Vec<plx_stremio::model::Addon>> {
+                panic!("a superseded load must not fetch")
+            });
+
+        assert!(order.lock().unwrap().is_empty());
+    }
+
+    /// The fetch can take the 15 s manifest deadline. A profile picked while it is out owns the
+    /// backend and the history; the older worker must not install its set or pull its watch state.
+    #[test]
+    fn a_profile_superseded_while_fetching_installs_and_pulls_nothing() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Arc::new(Mutex::new(LibraryContext { profile: Some("1".into()), generation: 7, cached: None }));
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+        let newer = Arc::clone(&library);
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), move || {
+            newer.lock().unwrap().generation = 8;
+            Ok(vec![test_addon()])
+        });
+
+        assert!(order.lock().unwrap().is_empty(), "a superseded fetch must not install or pull");
     }
 }
 
