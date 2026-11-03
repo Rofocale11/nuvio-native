@@ -1,6 +1,6 @@
 # Detail-page latency — plan
 
-**Status:** 1A implemented (2026-11-03); 1B–1C planned. Written 2026-11-02 on
+**Status:** 1A–1B implemented (2026-11-03); 1C planned. Written 2026-11-02 on
 `forward-port/v0.9-hq` (`7e79e57e`).
 **Owner:** whoever picks this up next.
 **Scope:** wall-clock from pressing OK on a Home/Library card to a painted movie/show detail page,
@@ -53,8 +53,9 @@ single-key route falls through to the comma-list branch at `:3815`, which maps e
    on it: a detail read passes `Duration::ZERO` (`:3182`) and paints with the placeholder Part
    while the slot keeps answering in the background.
 6. `enrich_row` (`:2285`, called at `:3829`) resolves the TMDB id and fetches cast/trailer/logo
-   **synchronously**: `/find` first (`rust-modules/stremio/src/addons_tmdb.rs:289` for movies,
-   `:378` for series), then `/movie/{id}?append_to_response=credits,recommendations,images` and
+   **synchronously**: since 1B the id comes from Cinemeta's `moviedb_id`, with `/find`
+   (`rust-modules/stremio/src/addons_tmdb.rs:289` for movies, `:378` for series) only as the
+   fallback; then `/movie/{id}?append_to_response=credits,recommendations,images` and
    `/movie/{id}/videos` on a sibling thread (`shim_pms.rs:2332`).
 7. The app then requests `/extras` (local empty answer) and `/related` (TMDB recommendations,
    usually a cache hit from step 6; `/collection/{id}` when the film has a franchise), plus
@@ -160,40 +161,34 @@ let wait = if probe_index.is_some() {
   hero chips). If an empty/placeholder Part hides something important, either keep a small
   `DETAIL_WAIT` (e.g. 150 ms) or ensure the screen refreshes when streams land.
 
-#### 1B. Use Cinemeta's `moviedb_id` instead of `/find`
+#### 1B. Use Cinemeta's `moviedb_id` instead of `/find` — **implemented**
 
-**Where:**
+`Meta` now decodes Cinemeta's `moviedb_id` (`rust-modules/stremio/src/model.rs:198`):
 
-- `rust-modules/stremio/src/model.rs:160` — add to `Meta`:
+```rust
+/// TMDB's id, carried by Cinemeta. Saves one `/find` round trip per title.
+#[serde(rename = "moviedb_id", deserialize_with = "crate::lenient::opt_u64")]
+pub moviedb_id: Option<u64>,
+```
 
-  ```rust
-  /// TMDB's id, carried by Cinemeta. Saves one `/find` round trip per title.
-  #[serde(rename = "moviedb_id", deserialize_with = "crate::lenient::opt_u64")]
-  pub moviedb_id: Option<u64>,
-  ```
+`resolve_tmdb_movie_id` / `resolve_tmdb_series_id` (`rust-modules/pmsshim/src/shim_pms.rs:801`,
+`:821`) take it first and only fall back to the client lookup (then to the IMDb id):
 
-  `opt_u64` already exists (`rust-modules/stremio/src/lenient.rs:35`). `rename` is required because
-  the struct is `rename_all = "camelCase"` and the wire name has an underscore.
-- `rust-modules/pmsshim/src/shim_pms.rs:788` / `:803` — `resolve_tmdb_movie_id` and
-  `resolve_tmdb_series_id` take the meta's id first:
+```rust
+fn resolve_tmdb_movie_id(client, id, imdb_id, moviedb_id: Option<u64>) -> … {
+    if let Some(id) = moviedb_id.filter(|id| *id > 0) { return Ok(Some(id)); }
+    // client.movie_id(id), then the imdb fallback
+}
+```
 
-  ```rust
-  fn resolve_tmdb_movie_id(client, id, imdb_id, moviedb_id: Option<u64>) -> … {
-      if let Some(id) = moviedb_id.filter(|id| *id > 0) { return Ok(Some(id)); }
-      // existing client.movie_id(id) → imdb fallback
-  }
-  ```
+`enrich_row` and both related-hub resolvers pass `meta.moviedb_id`. `/find` remains the fallback
+for addons that do not send it, and a `tmdb:` id still needs no lookup at all.
 
-  Pass `meta.moviedb_id` from `enrich_row` (`:2285`) and from every other caller (search
-  `resolve_tmdb_movie_id` / `resolve_tmdb_series_id`; `related_hub` at `:2368` also resolves).
-- Keep `/find` as the fallback: not every addon sends `moviedb_id`, and a `tmdb:` id needs no
-  lookup at all (already handled at `addons_tmdb.rs:289`).
-- **Normalize to IMDb first when possible.** The common case is a title whose Stremio id is
-  `tt…`, so `moviedb_id` is the answer. For `tmdb:` ids `movie_id` returns without HTTP already.
-- **Test:** a `Meta` fixture with `moviedb_id: 603` and a `TmdbClient` pointed at an unreachable
-  base must resolve 603 without any HTTP; a fixture without it still falls back to `/find`.
-- **Docs:** update `docs/nuvio/TMDB.md` §"One request per title" — it currently implies `/find` is
-  always paid. Also update the field-mapping list.
+- **Test:** `a_meta_that_names_its_tmdb_id_skips_the_find_lookup` decodes the field (number and
+  string shapes), resolves it through a lookup that panics if consulted, and proves a meta without
+  it still uses the lookup. Both take a `TmdbIdLookup`, implemented by `TmdbClient` and by the
+  test stubs.
+- **Docs:** `docs/nuvio/TMDB.md` §"One request per title" and the field-mapping list are updated.
 
 #### 1C. Prefetch the focused card (the felt fix)
 
@@ -305,7 +300,7 @@ focus (cold).
 | Detail stream wait (zero) | `shim_pms.rs:3182`, `:2055` (`ranked`), `:1961` (`slot`) |
 | TMDB enrichment | `shim_pms.rs:2285` (`enrich_row`), `:788`/`:803` (resolvers), `stremio/src/addons_tmdb.rs:289`/`:378`/`:433` |
 | Cinemeta + addon meta selection | `rust-modules/stremio/src/addons.rs:21`, `:659`, `:730` |
-| Meta model (add `moviedb_id`) | `rust-modules/stremio/src/model.rs:160` |
+| Meta model (`moviedb_id`) | `rust-modules/stremio/src/model.rs:160` |
 | HTTP transport (no reuse) | `rust-modules/net/src/net.rs:928`, serial fallback `:2164` |
 | Home focus / tick | `rust-modules/screens/src/home/mod.rs:1641`, `:2407` |
 | Design docs | `docs/nuvio/ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md` |

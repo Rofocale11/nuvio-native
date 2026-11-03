@@ -782,11 +782,32 @@ fn preview_from_meta(meta: &Meta, id: &str) -> MetaPreview {
     }
 }
 
+/// The TMDB id lookups the resolvers need, so a test can prove an id that the meta already
+/// carries never reaches the network.
+trait TmdbIdLookup {
+    fn movie_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>>;
+    fn series_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>>;
+}
+
+impl TmdbIdLookup for TmdbClient {
+    fn movie_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>> {
+        TmdbClient::movie_id(self, id)
+    }
+    fn series_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>> {
+        TmdbClient::series_id(self, id)
+    }
+}
+
 fn resolve_tmdb_movie_id(
-    client: &TmdbClient,
+    client: &impl TmdbIdLookup,
     id: &str,
     imdb_id: Option<&str>,
+    moviedb_id: Option<u64>,
 ) -> plx_stremio::model::Result<Option<u64>> {
+    // Cinemeta names the TMDB id; `/find` is the fallback, not the default.
+    if let Some(tmdb_id) = moviedb_id.filter(|id| *id > 0) {
+        return Ok(Some(tmdb_id));
+    }
     let tmdb_id = client.movie_id(id)?;
     if let Some(tmdb_id) = tmdb_id {
         return Ok(Some(tmdb_id));
@@ -798,10 +819,14 @@ fn resolve_tmdb_movie_id(
 }
 
 fn resolve_tmdb_series_id(
-    client: &TmdbClient,
+    client: &impl TmdbIdLookup,
     id: &str,
     imdb_id: Option<&str>,
+    moviedb_id: Option<u64>,
 ) -> plx_stremio::model::Result<Option<u64>> {
+    if let Some(tmdb_id) = moviedb_id.filter(|id| *id > 0) {
+        return Ok(Some(tmdb_id));
+    }
     let tmdb_id = client.series_id(id)?;
     if let Some(tmdb_id) = tmdb_id {
         return Ok(Some(tmdb_id));
@@ -815,6 +840,67 @@ fn resolve_tmdb_series_id(
 #[cfg(test)]
 mod tmdb_metadata_tests {
     use super::*;
+
+    #[test]
+    fn a_meta_that_names_its_tmdb_id_skips_the_find_lookup() {
+        let meta: Meta = serde_json::from_value(json!({
+            "id": "tt0133093", "type": "movie", "name": "The Matrix", "moviedb_id": 603
+        }))
+        .unwrap();
+        assert_eq!(meta.moviedb_id, Some(603));
+        assert_eq!(
+            resolve_tmdb_movie_id(&PanicLookup, &meta.id, None, meta.moviedb_id).unwrap(),
+            Some(603),
+            "Cinemeta's id answers without asking /find"
+        );
+        // Some addons spell numbers as strings; the lenient decoder takes both.
+        let lenient: Meta = serde_json::from_value(json!({
+            "id": "x", "type": "movie", "moviedb_id": "603"
+        }))
+        .unwrap();
+        assert_eq!(lenient.moviedb_id, Some(603));
+        // A meta without it still resolves through the lookup (the /find fallback).
+        let without: Meta = serde_json::from_value(json!({
+            "id": "tt0133093", "type": "movie"
+        }))
+        .unwrap();
+        assert_eq!(without.moviedb_id, None);
+        assert_eq!(
+            resolve_tmdb_movie_id(&StubLookup, &without.id, None, without.moviedb_id).unwrap(),
+            Some(603)
+        );
+        assert_eq!(
+            resolve_tmdb_series_id(&PanicLookup, "tt0944947", None, Some(1399)).unwrap(),
+            Some(1399)
+        );
+        assert_eq!(
+            resolve_tmdb_series_id(&StubLookup, "tt0944947", None, None).unwrap(),
+            Some(1399)
+        );
+    }
+
+    /// Any lookup is a failure: the meta's own id must answer first.
+    struct PanicLookup;
+
+    impl TmdbIdLookup for PanicLookup {
+        fn movie_id(&self, _id: &str) -> plx_stremio::model::Result<Option<u64>> {
+            panic!("the meta's TMDB id must not be looked up")
+        }
+        fn series_id(&self, _id: &str) -> plx_stremio::model::Result<Option<u64>> {
+            panic!("the meta's TMDB id must not be looked up")
+        }
+    }
+
+    struct StubLookup;
+
+    impl TmdbIdLookup for StubLookup {
+        fn movie_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>> {
+            Ok((id == "tt0133093").then_some(603))
+        }
+        fn series_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>> {
+            Ok((id == "tt0944947").then_some(1399))
+        }
+    }
 
     struct TmdbMetaBackend;
 
@@ -2300,9 +2386,9 @@ impl Shim {
             return;
         };
         let tmdb_id = match if series {
-            resolve_tmdb_series_id(&client, &id, meta.imdb_id.as_deref())
+            resolve_tmdb_series_id(&client, &id, meta.imdb_id.as_deref(), meta.moviedb_id)
         } else {
-            resolve_tmdb_movie_id(&client, &id, meta.imdb_id.as_deref())
+            resolve_tmdb_movie_id(&client, &id, meta.imdb_id.as_deref(), meta.moviedb_id)
         } {
             Ok(id) => id,
             Err(_) => None,
@@ -2607,10 +2693,10 @@ impl Shim {
         else {
             return Ok(None);
         };
-        let imdb_id = self
-            .meta("movie", &id)
-            .and_then(|meta| meta.imdb_id.clone());
-        resolve_tmdb_movie_id(client, &id, imdb_id.as_deref())
+        let meta = self.meta("movie", &id);
+        let imdb_id = meta.as_ref().and_then(|meta| meta.imdb_id.clone());
+        let moviedb_id = meta.as_ref().and_then(|meta| meta.moviedb_id);
+        resolve_tmdb_movie_id(client, &id, imdb_id.as_deref(), moviedb_id)
     }
 
     fn related_show_tmdb_id(
@@ -2628,10 +2714,10 @@ impl Shim {
         else {
             return Ok(None);
         };
-        let imdb_id = self
-            .meta("series", &id)
-            .and_then(|meta| meta.imdb_id.clone());
-        resolve_tmdb_series_id(client, &id, imdb_id.as_deref())
+        let meta = self.meta("series", &id);
+        let imdb_id = meta.as_ref().and_then(|meta| meta.imdb_id.clone());
+        let moviedb_id = meta.as_ref().and_then(|meta| meta.moviedb_id);
+        resolve_tmdb_series_id(client, &id, imdb_id.as_deref(), moviedb_id)
     }
 
     fn tmdb_recommendation_row(&self, movie: &TmdbMovie) -> Value {

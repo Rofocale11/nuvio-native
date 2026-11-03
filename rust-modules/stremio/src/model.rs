@@ -195,6 +195,9 @@ pub struct Meta {
     /// IMDb id when the meta's own id is not one (`tmdb:…` catalogs carry it here).
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_id: Option<String>,
+    /// TMDB's id, carried by Cinemeta. Saves one `/find` round trip per title.
+    #[serde(rename = "moviedb_id", deserialize_with = "crate::lenient::opt_u64")]
+    pub moviedb_id: Option<u64>,
     pub trailers: Vec<serde_json::Value>,
     pub trailer_streams: Vec<serde_json::Value>,
     pub behavior_hints: serde_json::Value,

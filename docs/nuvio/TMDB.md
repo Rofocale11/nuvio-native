@@ -54,12 +54,16 @@ pub fn series_id(&self, id: &str) -> Result<Option<u64>> {
 }
 ```
 
+- The shim's `resolve_tmdb_movie_id` / `resolve_tmdb_series_id` check the `Meta`'s own
+  `moviedb_id` before either helper, so a Cinemeta title never reaches `/find`.
 - Using `movie_id()` for a series returns `None`, which silently drops the cast — always pick the
   helper that matches the kind.
 - `content_level_id()` strips episode suffixes first, so an episode id resolves to its series.
 
 ## Field mapping
 
+- **TMDB id:** Cinemeta's `moviedb_id` → `Meta::moviedb_id` (`moviedb_id` on the wire; absent from
+  most other addons, hence the `/find` fallback). It is the first thing the id resolvers read.
 - **Cast:** `credits.cast` → the Plex `Role` array (`tag`, `role`, `thumb`, `id`), capped at 10
   entries, for both `movie_details` and `tv_details`. `id` is the synthetic person key that makes
   the headshot clickable.
