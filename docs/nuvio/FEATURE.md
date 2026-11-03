@@ -22,6 +22,12 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   when not; Title/Rating/Release Date sorts are computed in memory and Popularity is the catalog's
   own order. Real PMS servers and failed addon loads omit `catalogKey`, so the client keeps its
   original hardcoded Type menu as the fallback.
+- **The Library header's Catalogs control opens that menu.** The header slot that used to hold a
+  "Collections · N" button now holds a *Catalogs* control (label only — a catalog title in the
+  value blew the header's width budget, so the menu's own check is the read-out). It opens
+  `LibraryMenuKind::Type`, so it is tab-dependent for free: Movies offers the section's movie
+  catalogs, TV Shows its show catalogs. The Collections button was deleted rather than fixed: its
+  count was fabricated (cached rows plus a page-size hint) and it spun forever.
 - **The Library tab is grid-only.** It does not fetch or draw the section's horizontal hub rows;
   Movies/TV Shows open with Type/Sort/Filter directly above the grid. Home shelves are unaffected.
 - **TMDB baseline for the Filter and Sort menus.** The genre list merges the catalog's declared

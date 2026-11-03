@@ -140,13 +140,11 @@ fn up_then_down_is_a_round_trip_on_every_page() {
     assert!(fails.is_empty(), "{} pages do not return to the remembered cell:\n{}", fails.len(), fails.join("\n"));
 }
 
-/// The Collections page opened with OK on the Library header's control, its listing NOT answered:
-/// the frames after the press run with the page dissolved in and nothing to show yet.
+/// The Collections page pushed by its command, its listing NOT answered: the frames after the push
+/// run with the page dissolved in and nothing to show yet.
 fn collections_awaiting_its_listing(name: &str) -> World {
     let mut w = World::movies_library(name, false);
-    w.walk_header_to(8);
-    w.tap(Key::Ok, 0);
-    w.frames(90);
+    w.open_collections();
     assert!(w.on(&AppArg::LibraryCollections { section: 0 }), "premise: the Collections page is on top");
     w
 }

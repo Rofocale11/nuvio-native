@@ -59,7 +59,7 @@ fn the_collections_page_repays_its_loan_on_back_and_asks_again_for_the_library_s
     assert_eq!(listed(&w), (LibraryType::Primary, Some(film_club)), "premise: the switch landed on Film Club's films");
 
     // Its Collections page asks for ITS collections, not the ones the first library was lent.
-    w.open_from_header(8, AppArg::LibraryCollections { section: FILM_CLUB as u32 });
+    w.open_collections();
     w.frames(60);
     assert_eq!(listed(&w), (LibraryType::Collections, Some(film_club)), "the page asked again, for the library switched to");
 }

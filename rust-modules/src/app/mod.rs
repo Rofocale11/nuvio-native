@@ -126,7 +126,6 @@ mod preferences;
 pub(crate) mod input;
 pub(crate) mod bridge;
 pub(crate) mod page_title;
-mod collections_probe;
 pub(crate) mod chrome;
 pub(crate) mod content;
 pub(crate) mod run;

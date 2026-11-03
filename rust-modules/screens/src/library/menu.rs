@@ -319,7 +319,14 @@ fn type_draft_with_catalogs(
     catalogs: &[plx_data::browse::CatalogEntry],
     selected_catalog: Option<&str>,
 ) -> MenuDraft {
-    let mut section = MenuSection::new(plx_platform::i18n::msg::browse_library_filter_by());
+    // The panel is the Catalogs control's menu when the section advertised any, and the plain type
+    // list (what a section with no catalogs offers) headed the way it always was otherwise.
+    let title = if catalogs.is_empty() {
+        plx_platform::i18n::msg::browse_library_filter_by()
+    } else {
+        plx_platform::i18n::msg::library_header_catalogs()
+    };
+    let mut section = MenuSection::new(title);
     let mut selected = None;
     let mut stamp = Stamp::default();
     stamp.tag(13);

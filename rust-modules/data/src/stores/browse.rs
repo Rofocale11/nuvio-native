@@ -274,6 +274,13 @@ impl BrowseStore {
         crate::browse::seed_items_for_owner_test(&mut self.state, count);
     }
 
+    /// The section's catalogs as the server advertised them, and the one its listing shows: the
+    /// Library header's Catalogs control (its menu lists these) is on the row when there are any.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_catalogs_for_test(&mut self, catalogs: Vec<crate::browse::CatalogEntry>, shown: Option<&str>) {
+        crate::browse::seed_catalogs_for_owner_test(&mut self.state, catalogs, shown);
+    }
+
     /// [`seed_items_for_test`](Self::seed_items_for_test) with `count` collections: the listing a
     /// section answers on `type=18`.
     #[cfg(any(test, feature = "test-support"))]

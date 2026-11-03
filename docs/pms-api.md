@@ -137,12 +137,15 @@ spec's "Media Queries" section documents the full query language.
   tag id, while its `guid` is shared with search hits and member `Collection[]` tags. Adding
   `includeCollections=1` to `/hubs/search` yields full collection `Metadata[]` rows rather than
   tag-shaped `Directory[]` hits.
-- **Collections count (the Library header's "Collections · N"):** `GET
-  /library/sections/{key}/all?type=18` with `X-Plex-Container-Start=0` and `X-Plex-Container-Size=0`
-  returns no rows and the section's collection count as `totalSize` (the same count the
-  `/collections` listing and `firstCharacter?type=18` total to). The client reads three answers apart:
-  a number (a real `0` included), a refusal (401/403 — an unshared section, as the listing above),
-  and unknown (404, transport failure, malformed body). Collection rows also carry `subtype` (`movie`, `show`, …), `smart`
+- **Collections count:** `GET /library/sections/{key}/all?type=18` with
+  `X-Plex-Container-Start=0` and `X-Plex-Container-Size=0` returns no rows and the section's
+  collection count as `totalSize` (the same count the `/collections` listing and
+  `firstCharacter?type=18` total to). The count is a number (a real `0` included), a refusal
+  (401/403 — an unshared section, as the listing above), or unknown (404, transport failure,
+  malformed body) — three answers worth keeping apart. **This app does not ask**: its Library
+  header carries a *Catalogs* control, not a collection count (the shim's `type=18` count was a
+  fabrication — cached rows plus a page-size hint — and the control showed it spinning forever).
+  The protocol note stays for anyone re-adding the count against a real PMS. Collection rows also carry `subtype` (`movie`, `show`, …), `smart`
   (`"1"` for a smart collection — a saved filter whose `childCount` is its current match count, not a
   hand-picked set), `childCount` and `addedAt`; a show row's `childCount` is its season count.
 - **Collection routes and hubs:** `/library/collections/{rk}/children` and `/items` return the same

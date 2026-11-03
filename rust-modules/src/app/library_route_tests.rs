@@ -12,7 +12,7 @@
 //! was (`Bridge::library_selection` read only the plain grid), is a red row here.
 //!
 //! Rows are declarative: a mount, the keys, and where focus and the page on top should be, in the
-//! words `here` prints (`header:collections`, `grid:2,3`, `shelf:0,1`, `rail:M`, `nav:movies`, `menu:unwatched`).
+//! words `here` prints (`header:catalogs`, `grid:2,3`, `shelf:0,1`, `rail:M`, `nav:movies`, `menu:unwatched`).
 
 use super::*;
 use super::test_support::World;
@@ -166,6 +166,24 @@ fn run(rows: Vec<Row>) {
 
 // ---- data a performed request would have brought back -------------------------------------------
 
+/// Open the Collections page over the Library by its command. The page has no header control any
+/// more (the header's first control is Catalogs), so its ways in are the command's: the dev
+/// `--screen` boot, a restored view, or a script.
+fn open_collections(w: &mut World) { w.open_collections(); }
+
+/// The Library, settled, with the Collections page on top (its listing unanswered).
+fn collections_page(w: &mut World) {
+    w.open_library();
+    w.open_collections();
+}
+
+/// The Collections page with its listing ANSWERED, so the page has taken its arrival seat in the
+/// first tile (an unanswered page is up but unseated, see r7).
+fn collections_seated(w: &mut World) {
+    collections_page(w);
+    collections_answered(w);
+}
+
 /// The Collections page's own listing answered: `n` collections.
 fn collections_answered(w: &mut World) {
     w.bridge.stores.browse.borrow_mut().seed_collections_for_test(12);
@@ -195,19 +213,19 @@ fn films_answered<const N: usize>(w: &mut World) {
 // ---- R7 + R8: Collections, and the chain to a film and back --------------------------------------
 
 #[test]
-fn the_collections_page_opens_from_its_control_and_back_returns_to_it() {
+fn back_from_the_collections_page_returns_to_the_library_header() {
     run(vec![Row {
         name: "r7-collections",
-        setup: library,
-        start: "header:collections",
+        setup: collections_page,
+        // The listing has not answered in this rig, and a page whose listing is loading HOLDS its
+        // arrival (`PageRegions::unseat`): the page is up with nothing focused. BACK is the
+        // container's from there, and it pops to the Library.
+        start: "none",
         steps: vec![
-            // The listing has not answered in this rig, so the page reads Failed and arrives on its
-            // Retry (the content region's first stop); BACK leaves the page from there.
-            press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
-            press(Key::Back, "content:Back", "library", "header:collections"),
-            // …and again: the control is still the one that opens it.
-            press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
-            press(Key::Back, "content:Back", "library", "header:collections"),
+            // BACK leaves the page from its unseated arrival.
+            press(Key::Back, "content:Back", "library", "header:catalogs"),
+            // …and again: the page is still the one the command mounts.
+            after(open_collections, press(Key::Back, "content:Back", "library", "header:catalogs")),
         ],
         end: |w| {
             let mut fails = Vec::new();
@@ -224,21 +242,21 @@ fn the_collections_page_opens_from_its_control_and_back_returns_to_it() {
 fn a_collection_opens_from_the_collections_page_to_a_film_and_every_back_returns_to_where_it_left() {
     run(vec![Row {
         name: "r8-chain",
-        setup: library,
-        start: "header:collections",
+        setup: collections_page,
+        // Unseated until its listing lands (see r7).
+        start: "none",
         steps: vec![
-            /* 0 */ press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
             // The answer lands under the page's own seat, which follows it into the first tile.
-            /* 1 */ after(collections_answered, press(Key::Right, "", "collections", "grid:0,1")),
-            /* 2 */ press(Key::Ok, "library:Detail", "collection", "page:0"),
+            /* 0 */ after(collections_answered, press(Key::Right, "", "collections", "grid:0,1")),
+            /* 1 */ press(Key::Ok, "library:Detail", "collection", "page:0"),
             // The screen opens on its header (elem 0) until its members arrive; its grid numbers
             // them from 4096, six to a row.
-            /* 3 */ after(members_answered, press(Key::Down, "", "collection", "page:4102")),
-            /* 4 */ press(Key::Right, "", "collection", "page:4103"),
-            /* 5 */ press(Key::Ok, "content:Push", "detail", "page:0"),
-            /* 6 */ press(Key::Back, "content:Back", "collection", "@5"),
-            /* 7 */ press(Key::Back, "content:Back", "collections", "@2"),
-            /* 8 */ press(Key::Back, "content:Back", "library", "@0"),
+            /* 2 */ after(members_answered, press(Key::Down, "", "collection", "page:4102")),
+            /* 3 */ press(Key::Right, "", "collection", "page:4103"),
+            /* 4 */ press(Key::Ok, "content:Push", "detail", "page:0"),
+            /* 5 */ press(Key::Back, "content:Back", "collection", "@4"),
+            /* 6 */ press(Key::Back, "content:Back", "collections", "@1"),
+            /* 7 */ press(Key::Back, "content:Back", "library", "header:catalogs"),
         ],
         end: no_checks,
     }]);
@@ -251,7 +269,7 @@ fn recommended_opens_a_film_and_back_returns_to_the_card_then_the_control() {
     run(vec![Row {
         name: "r9-recommended",
         setup: library,
-        start: "header:collections",
+        start: "header:catalogs",
         steps: vec![
             /* 0 */ press(Key::Right, "", "library", "header:recommended"),
             /* 1 */ press(Key::Ok, "library:OpenListing { listing: Recommended", "recommended", "shelf:0,0"),
@@ -272,21 +290,22 @@ fn the_crumb_root_pops_to_the_library_and_up_from_it_is_the_movies_pill() {
     run(vec![
         Row {
             name: "r10-crumb-collections",
-            setup: library,
-            start: "header:collections",
+            // Its listing answered, so the page stands in its content and the column above it is
+            // the crumb's (an unanswered page is up but unseated, see r7).
+            setup: collections_seated,
+            start: "grid:0,0",
             steps: vec![
-                press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
                 press(Key::Up, "", "collections", "header:crumb"),
                 press(Key::Up, "", "collections", "nav:movies"),
                 press(Key::Down, "", "collections", "header:crumb"),
-                press(Key::Ok, "content:Back", "library", "header:collections"),
+                press(Key::Ok, "content:Back", "library", "header:catalogs"),
             ],
             end: no_checks,
         },
         Row {
             name: "r10-crumb-recommended",
             setup: library,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: vec![
                 press(Key::Right, "", "library", "header:recommended"),
                 press(Key::Ok, "library:OpenListing { listing: Recommended", "recommended", "shelf:0,0"),
@@ -414,7 +433,7 @@ fn the_plus_n_list_and_sort_filter_both_lift_their_opener() {
         Row {
             name: "s12-sort-filter",
             setup: library,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 let mut steps = to_sort_filter();
                 steps.push(press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"));
@@ -457,30 +476,6 @@ fn the_sort_filter_pill_is_painted_after_the_panel_in_the_dispatchers_own_draw()
     assert_eq!(pills.len(), 1, "the pill is drawn once, by the lift (the page pass left it out): {words:?}");
     assert!(pills[0] > panel_last && panel_first < panel_last,
         "the pill's run ({}) comes after the panel's rows ({panel_first}..={panel_last}): {words:?}", pills[0]);
-}
-
-/// **A library the server says has no collections has no Collections stop** (the rig's probe is
-/// seeded per section, `collections_probe::seed_for_test`, so the app tier models what the live
-/// probe reports): none, or a refusal (HTTP 403), puts nothing on the header, and the arrows walk
-/// Recommended then Sort & Filter. With the rig's count the control is the first stop.
-#[test]
-fn a_library_without_collections_has_no_collections_stop() {
-    use plx_plex::plex::collections::CollectionsCount;
-    for (name, answer, collections) in [
-        ("route-no-collections-none", CollectionsCount::Count(0), false),
-        ("route-no-collections-403", CollectionsCount::Forbidden, false),
-        ("route-no-collections-unknown", CollectionsCount::Unknown, false),
-        ("route-collections-some", CollectionsCount::Count(7), true),
-    ] {
-        let mut w = World::movies_library_answering(name, answer);
-        let stops: Vec<&str> = w.library().probe_header_stops().into_iter().map(|(stop, _)| stop).collect();
-        assert_eq!(stops.contains(&"collections"), collections, "{name}: the header's stops are {stops:?}");
-        w.climb_into_header();
-        assert_eq!(here(&w), if collections { "header:collections" } else { "header:recommended" }, "{name}");
-        w.press(Key::Right);
-        w.frames(10);
-        assert_eq!(here(&w), if collections { "header:recommended" } else { "header:sort" }, "{name}");
-    }
 }
 
 // ---- R6: Sort & Filter and the "N of M" read-out ---------------------------------------------------
@@ -527,11 +522,11 @@ fn a_filter_shows_n_of_m_beside_the_control_and_clears_when_reset() {
         steps
     };
     run(vec![
-        Row { name: "r6-unwatched", setup: library, start: "header:collections", steps: unwatched(to_sort_filter()), end: no_checks },
+        Row { name: "r6-unwatched", setup: library, start: "header:catalogs", steps: unwatched(to_sort_filter()), end: no_checks },
         Row {
             name: "r6-genre",
             setup: with_genres,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 let mut steps = to_sort_filter();
                 steps.extend([
@@ -574,7 +569,7 @@ fn the_rail_is_entered_only_from_the_last_column_and_walks_over_empty_letters() 
         Row {
             name: "r11-walk",
             setup: lettered,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 let mut steps = vec![
                     // The page arrived on its first poster, so Down from the header returns to it.
@@ -601,7 +596,7 @@ fn the_rail_is_entered_only_from_the_last_column_and_walks_over_empty_letters() 
         Row {
             name: "r11-left-returns",
             setup: lettered,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 // Down from the header returns to the cell Up left from, the page's first poster;
                 // column 3 is reached by walking.
@@ -630,11 +625,11 @@ fn the_rail_is_entered_only_from_the_last_column_and_walks_over_empty_letters() 
             // asks the server for the first letters of whatever type the page lists, collections
             // included), and so are its doors.
             name: "r11-collections",
-            setup: library,
-            start: "header:collections",
+            setup: collections_page,
+            // Unseated until its listing lands (see r7).
+            start: "none",
             steps: {
                 let mut steps = vec![
-                    press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
                     // The answer lands under the page's own seat, which follows it into the first tile.
                     after(collections_lettered, press(Key::Right, "", "collections", "grid:0,1")),
                 ];
@@ -675,8 +670,7 @@ fn the_three_library_pages_wear_one_route_word_and_the_tab_bar() {
     w.open_library();
     w.climb_into_header();
     let mut fails = wears_the_library_route(&w, "the grid");
-    w.press(Key::Ok);
-    w.frames(40);
+    open_collections(&mut w);
     assert!(w.on(&AppArg::LibraryCollections { section: 0 }), "premise: the Collections page is up");
     fails.extend(wears_the_library_route(&w, "Collections"));
     w.press(Key::Back);
@@ -695,19 +689,20 @@ fn opening_collections_again_does_not_stack_a_second_page() {
     w.open_library();
     w.climb_into_header();
     let base = w.d.nav.tabs.stack.depth();
-    // A double press: the second OK lands while the first push is still on its way.
-    w.tap(Key::Ok, 0);
-    w.tap(Key::Ok, 0);
+    // A double ask: the second lands while the first push is still on its way.
+    let open = |w: &mut World| Bridge::library_command(&mut w.d, plx_screens::registry::LibraryCmd::OpenListing(plx_screens::library::Listing::Collections));
+    open(&mut w);
+    open(&mut w);
     w.frames(80);
     assert!(w.on(&AppArg::LibraryCollections { section: 0 }), "premise: the Collections page is up, not {}", top(&w));
-    assert_eq!(w.d.nav.tabs.stack.depth(), base + 1, "two OKs opened one page");
+    assert_eq!(w.d.nav.tabs.stack.depth(), base + 1, "two asks opened one page");
     // One Back is home, and opening it afterwards leaves exactly one page again: nothing of the
     // first visit is left on the stack to be stacked upon.
     for visit in 0..2 {
         w.press(Key::Back);
         w.frames(60);
         assert_eq!((top(&w), w.d.nav.tabs.stack.depth()), ("library", base), "visit {visit}: one Back leaves the page");
-        w.press(Key::Ok);
+        open(&mut w);
         w.frames(60);
         assert_eq!((top(&w), w.d.nav.tabs.stack.depth()), ("collections", base + 1), "visit {visit}: the page opens once");
     }

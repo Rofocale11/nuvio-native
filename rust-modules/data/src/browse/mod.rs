@@ -4017,6 +4017,18 @@ pub fn seed_letter_counts_for_owner_test(
     }
 }
 
+/// The section's catalogs as the server advertised them (its `includeMeta` answer) and the one its
+/// listing shows: what the Library header's Catalogs control and its menu are built from.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_catalogs_for_owner_test(state: &mut BrowseState, catalogs: Vec<CatalogEntry>, shown: Option<&str>) {
+    plx_base::testlock::assert_held("an owned browse section table (seed_catalogs_for_test)");
+    let current = state.cur();
+    if let Some(section) = state.state_mut(current) {
+        section.catalogs = Arc::new(catalogs);
+        section.catalog = shown.map(str::to_owned);
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn seed_query_choices_for_owner_test(
     state: &mut BrowseState,

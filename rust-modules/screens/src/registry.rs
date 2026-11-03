@@ -338,7 +338,10 @@ pub enum LibraryReq {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibraryMenuKind {
-    Sort, Filter, Genre, Sources, Type,
+    Sort, Filter, Genre, Sources,
+    /// The header's Catalogs control's menu: the addon catalogs this section can list (the plain
+    /// type list for a section that advertises none).
+    Type,
     /// The header's one Sort & Filter popover: Show / Sort / Filter sections. `Sort`, `Filter` and
     /// `Type` remain as the single-purpose menus the scripted pipeline names.
     SortFilter,
@@ -1310,19 +1313,6 @@ pub trait LibraryLike: AppLike<Memory = PageMemory> + Sized {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a>;
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a>;
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a>;
-    /// How many collections the directory's section `section` (an index into
-    /// `directory(cx).sections()`, which names the server as well as the section key) holds, from
-    /// the `type=18` `Size:0` probe of `/library/sections/{id}/all` (`totalSize`). `None` = not
-    /// known yet (the Collections control is then not on the row); `Some(Err(Forbidden))` = the
-    /// server answered HTTP 403 (hidden); `Some(Ok(0))` = none (hidden). Any section of the
-    /// directory may be asked about, not only the current one: the app warms them all when the
-    /// directory lands, so a switch finds its answer already there.
-    ///
-    /// CONTRACT FREEZE: a provided method so every existing host compiles; `AppHost`
-    /// (`src/app/bridge.rs`) implements it over the probe.
-    fn collections_count(_cx: &Cx<'_, Self>, _section: usize) -> Option<Result<u32, Forbidden>> {
-        None
-    }
 }
 
 /// The server refused the collections listing (HTTP 401/403): the answer is final for the identity

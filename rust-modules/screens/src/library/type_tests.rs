@@ -36,11 +36,11 @@ fn every_library_kind_offers_the_header_controls_and_sort_filter_opens_its_menu(
     let _guard = plx_base::testlock::serial();
     let movies = Fixture::new();
     let movie_page = movies.screen();
-    assert_eq!(movie_page.toolbar_elems(), [COLLECTIONS, RECOMMENDED, SORTFILTER]);
+    assert_eq!(movie_page.toolbar_elems(), [CATALOGS, RECOMMENDED, SORTFILTER]);
     assert!(<LibraryScreen as Focusable<HostFixture>>::place(&movie_page, &SORTFILTER, &movies.cx(None), At::Drawn).is_some());
     let fixture = tv_fixture(LibraryType::Primary, 36);
     let mut page = tv_page(&fixture);
-    assert_eq!(page.toolbar_elems(), [COLLECTIONS, RECOMMENDED, SORTFILTER]);
+    assert_eq!(page.toolbar_elems(), [CATALOGS, RECOMMENDED, SORTFILTER]);
     let mut right = MARGIN_X;
     for &elem in page.toolbar_elems() {
         let rect = <LibraryScreen as Focusable<HostFixture>>::place(&page, &elem, &fixture.cx(None), At::Drawn).unwrap().rect;
@@ -136,7 +136,7 @@ fn a_collections_listing_keeps_the_header_controls() {
     let fixture = collections_fixture(36);
     let page = fixture.screen();
     assert_eq!(page.listed(), LibraryType::Collections);
-    assert_eq!(page.toolbar_elems(), [COLLECTIONS, RECOMMENDED, SORTFILTER]);
+    assert_eq!(page.toolbar_elems(), [CATALOGS, RECOMMENDED, SORTFILTER]);
 }
 
 /// An empty Collections answer is the ordinary empty read-out, worded for what was asked for, and

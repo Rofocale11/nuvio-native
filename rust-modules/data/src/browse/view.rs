@@ -81,6 +81,17 @@ impl ListingSnapshot {
         self
     }
 
+    /// The server's catalogs for this section and the one the listing is showing: what the
+    /// header's Catalogs control names. A snapshot with none is a section that advertised none.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_catalogs(mut self, catalogs: Vec<super::CatalogEntry>, current: Option<&str>) -> Self {
+        if let Some(data) = &mut self.data {
+            data.catalogs = Arc::new(catalogs);
+            data.catalog = current.map(str::to_owned);
+        }
+        self
+    }
+
     /// A QUERY EDIT's publication: the same section under a new `ListingId::query`. A membership
     /// re-query does not move it (`BrowseState::requery_stale` bumps only the fetch generation).
     #[cfg(any(test, feature = "test-support"))]

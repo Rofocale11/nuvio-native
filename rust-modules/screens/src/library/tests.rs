@@ -36,12 +36,23 @@ impl LibraryLike for HostFixture {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> { cx.views.listing }
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> { cx.views.directory }
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> { cx.views.hubs }
-    /// The fixture's libraries all hold collections, and their probe has said so: the Collections
-    /// control is on the row only with a known count, and these tests are about a row that has it.
-    fn collections_count(_cx: &Cx<'_, Self>, _section: usize) -> Option<Result<u32, crate::registry::Forbidden>> { Some(Ok(4)) }
 }
 const ENTRY: EntryId = EntryId(81);
 const OWNER: InputOwner = InputOwner::Entry(ENTRY);
+
+/// The catalogs the fixtures' sections advertise (a movie section's addon set). The first is the
+/// one their listings show, the way the shim resolves a section's default, so a listing that has
+/// catalogs always names one.
+pub(super) const TEST_CATALOGS: [(&str, &str); 3] = [
+    ("cine/movie/top", "Popular"),
+    ("cine/movie/imdbRating", "Top Rated"),
+    ("netflix/movie", "Netflix Movies"),
+];
+pub(super) fn test_catalogs() -> Vec<plx_data::browse::CatalogEntry> {
+    TEST_CATALOGS.iter().enumerate().map(|(i, (key, title))| plx_data::browse::CatalogEntry {
+        key: (*key).to_string(), title: (*title).to_string(), active: i == 0,
+    }).collect()
+}
 
 /// Return memory is captured several times per frame. A 1,200-item catalog must share its
 /// unchanged keys across those snapshots, while later reconciliation cannot mutate a saved
@@ -1101,7 +1112,8 @@ impl Fixture {
         let sid = plx_plex::plex::ServerId::from_raw(0);
         let listing = plx_data::browse::view::ListingSnapshot::fixture(sid, (0..36).map(|i|
             Some(plx_data::pms::PmsMovie { sid, rk: format!("{}", i + 1), title: format!("s{i:04x}"), ..Default::default() })).collect(),
-            vec![("A".into(), 18), ("Z".into(), 18)]);
+            vec![("A".into(), 18), ("Z".into(), 18)])
+            .with_catalogs(test_catalogs(), Some(TEST_CATALOGS[0].0));
         let directory = plx_data::browse::view::DirectorySnapshot::fixture(1, 0, vec![
             plx_data::browse::view::SectionView { sid: Some(sid), key: 1, kind: SecKind::Movie,
                 row: plx_data::browse::SrcRow { section: 0, title: "Cinema".into(), pinned: true, current: true, ..Default::default() } }]);

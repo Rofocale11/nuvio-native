@@ -1,5 +1,6 @@
 //! Owned engine ports for requested kinds, source-row seating and document navigation.
 use super::*;
+use crate::library::tests::{test_catalogs, TEST_CATALOGS};
 use plx_ui::fixture::{FixtureArg, FixtureMeasure};
 use plx_ui::focus::{FocusEngine, Outcome};
 use plx_machine::machine::{Host, InputOwner, Tick};
@@ -31,27 +32,6 @@ impl LibraryLike for TestHost {
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> {
         cx.views.hubs
     }
-    /// The app's probe, in the one respect the header cares about: it answers for ANY section of
-    /// the directory the probe has learned (`collections_probe::count`, which the app warms for
-    /// every section when the directory lands), and only once a test has said the probe landed
-    /// ([`land_collections`]). A section the test has not landed is the probe that has not answered
-    /// yet: `None`, whichever library the row names.
-    fn collections_count(cx: &Cx<'_, Self>, section: usize) -> Option<Result<u32, crate::registry::Forbidden>> {
-        let key = u32::try_from(cx.views.directory.sections().get(section)?.key).ok()?;
-        COLLECTION_ANSWERS.with(|answers| answers.borrow().iter().find(|(seen, _)| *seen == key).map(|(_, answer)| *answer))
-    }
-}
-thread_local! {
-    /// What the fixture's collections probe has learned, by section key.
-    static COLLECTION_ANSWERS: std::cell::RefCell<Vec<(u32, Result<u32, crate::registry::Forbidden>)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-/// The fixture's probe for section `key` returns: `Ok(0)` / `Err` hide the control, `Ok(n)` counts.
-fn land_collections(key: u32, answer: Result<u32, crate::registry::Forbidden>) {
-    COLLECTION_ANSWERS.with(|answers| {
-        let mut answers = answers.borrow_mut();
-        answers.retain(|(seen, _)| *seen != key);
-        answers.push((key, answer));
-    });
 }
 const ENTRY: EntryId = EntryId(81);
 const OWNER: InputOwner = InputOwner::Entry(ENTRY);
@@ -140,7 +120,8 @@ impl Fixture {
                 ("Z".into(), items as i64 - items as i64 / 2),
             ],
         )
-        .with_section(self.epoch, current as i64 + 1);
+        .with_section(self.epoch, current as i64 + 1)
+        .with_catalogs(test_catalogs(), Some(TEST_CATALOGS[0].0));
     }
     fn cx(&self, engine: &FocusEngine<u32>) -> Cx<'_, TestHost> {
         Cx {

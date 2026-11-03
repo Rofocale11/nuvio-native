@@ -73,7 +73,7 @@ struct Row {
 
 const ROWS: [Row; 4] = [
     Row {
-        name: "Library", mount: movies_library, arrival: Place::Content, up_lands: Some("collections"), own_pill: TAB_KEY_MOVIES,
+        name: "Library", mount: movies_library, arrival: Place::Content, up_lands: Some("catalogs"), own_pill: TAB_KEY_MOVIES,
         back_from_content: &[Out::Stay(Place::Content), Out::Stay(Place::Header), Out::Stay(Place::Nav), Out::Leave("library:BackToHome")],
         back_from_header: &[Out::Stay(Place::Nav), Out::Leave("library:BackToHome")],
         back_from_nav: &[Out::Leave("library:BackToHome")],
@@ -84,7 +84,7 @@ const ROWS: [Row; 4] = [
         back_from_content: &[Out::Stay(Place::Content), Out::Leave("content:Back")],
         back_from_header: &[Out::Leave("content:Back")],
         back_from_nav: &[Out::Leave("content:Back")],
-        leaves_to: AppArg::Library, opener: Some("collections"),
+        leaves_to: AppArg::Library, opener: Some("catalogs"),
     },
     Row {
         name: "Recommended", mount: recommended, arrival: Place::Content, up_lands: Some("crumb"), own_pill: TAB_KEY_MOVIES,
@@ -120,7 +120,6 @@ impl Rig {
     /// Two registered servers, 120 films in the store and six shelves of three cards.
     fn new() -> Rig {
         plx_plex::plex::reset_servers_for_test();
-        crate::app::collections_probe::clear_seeds_for_test();
         let own = plx_plex::plex::register_for_test("regions-own", "127.0.0.1", 9, "synthetic", "fixture");
         let shared = plx_plex::plex::register_for_test("regions-shared", "127.0.0.1", 10, "synthetic", "fixture");
         plx_plex::plex::set_current(own);
@@ -128,10 +127,14 @@ impl Rig {
         let mut bridge = Bridge::for_test(|| 0);
         bridge.stores.browse.borrow_mut().seed_registered_table_for_test([own, shared]);
         bridge.refresh_browse_directory();
-        bridge.seed_collections_for_test(plx_plex::plex::collections::CollectionsCount::Count(super::test_support::RIG_COLLECTIONS));
         bridge.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
         {
             let mut browse = bridge.stores.browse.borrow_mut();
+            browse.seed_catalogs_for_test(
+                super::test_support::RIG_CATALOGS.iter().enumerate().map(|(i, (key, title))| plx_data::browse::CatalogEntry {
+                    key: (*key).to_string(), title: (*title).to_string(), active: i == 0,
+                }).collect(),
+                Some(super::test_support::RIG_CATALOGS[0].0));
             browse.seed_items_for_test(120);
             browse.seed_shelves_for_test(0, &["One", "Two", "Three", "Four", "Five", "Six"], 3);
             browse.seed_landscape_for_test(0, "Synthetic show");
@@ -231,10 +234,17 @@ fn movies_library() -> Rig {
     r
 }
 
-/// The Collections page, opened with OK on the Library header's Collections control.
+/// The Collections page, pushed by its command (it has no header control any more), from the seat
+/// the header's first control holds, so BACK returns to it.
 fn collections() -> Rig {
     let mut r = movies_library();
-    r.open_from_header("collections", AppArg::LibraryCollections { section: 0 });
+    for _ in 0..3 {
+        if r.region() == Some(Place::Header) { break; }
+        r.press(Key::Up);
+    }
+    Bridge::library_command(&mut r.d, plx_screens::registry::LibraryCmd::OpenListing(plx_screens::library::Listing::Collections));
+    r.frames(60);
+    assert!(r.on(&AppArg::LibraryCollections { section: 0 }), "premise: the Collections page is on top");
     // The page asked the store for its own listing; its answer is what it shows.
     r.bridge.stores.browse.borrow_mut().seed_items_for_test(120);
     r.frames(60);

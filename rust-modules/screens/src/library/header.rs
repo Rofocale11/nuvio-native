@@ -7,10 +7,11 @@
 //! group are the ui's (`plx_ui::page_header`), the same ones the Collections, Recommended and
 //! Watchlist pages wear. The names are packed against the room the right cluster leaves
 //! (`PageHeader::layout`'s `left_budget`, sized from the cluster's widest case), so the names never
-//! shift when a value changes, the Collections answer (unknown, none, a count of up to three digits)
-//! included; a library whose count needs a fourth digit widens its own budget once; the
-//! controls inside the cluster stand by what they draw, one gap apart. The row's MOTION (`header_capsules`, `header_pop`) lives on the screen, not in the
-//! row: a library switch replaces the whole row, and the pill must travel across it.
+//! shift when a value changes, the filter read-out included, and the Catalogs control (which draws
+//! no value, only its label) comes and goes with the section's answer. The controls inside the
+//! cluster stand by what they draw, one gap apart. The row's MOTION (`header_capsules`,
+//! `header_pop`) lives on the screen, not in the row: a library switch replaces the whole row, and
+//! the pill must travel across it.
 use super::*;
 use plx_ui::hstack::{self, Align, HStack};
 use plx_ui::page_header::{self, HeaderFocus, HeaderItem, HeaderRow, PageHeader, PageHeaderSpec, Slot};
@@ -119,7 +120,6 @@ impl LibraryScreen {
     /// value does.
     pub(super) fn header_right<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> (Vec<HeaderItem>, Vec<HeaderItem>) {
         use plx_platform::i18n::msg;
-        let locale = plx_platform::i18n::current();
         let mut right = Vec::new();
         let mut widest = Vec::new();
         if let Some(readout) = self.filtered_readout(cx) {
@@ -127,28 +127,15 @@ impl LibraryScreen {
             widest.push(item.clone());
             right.push(item);
         }
-        // The control is on the row only with its count: an unknown answer lays out as none (see
-        // [`CollectionsControl`]), so "Collections" is never drawn bare. The slot is the widest
-        // count the cluster's BUDGET allows for (THREE digits; a library whose count needs more
-        // widens only its own slot, here and in the widest case). It is no air inside the row: the
-        // control is placed by the text it draws, so the gap to "Recommended" is the row's one gap
-        // whatever the count is. The budget reserves it for EVERY answer, a library with none
-        // included: a cold cache reads Unknown for a round trip and then Hidden, and the names
-        // must not repack between the two (the room they pack into is measured once and never
-        // moves).
-        let slot_of = |count: u32| Some(locale.number(i64::from(count.max(999))));
-        let control = |value, slot| HeaderItem { value, value_slot: slot, ..item(msg::library_header_collections()) };
-        match self.collections {
-            CollectionsControl::Count(count) => {
-                let slot = slot_of(count);
-                right.push(HeaderItem { selected_plate: self.listing == Listing::Collections,
-                    ..control(Some(locale.number(i64::from(count))), slot.clone()) });
-                widest.push(control(slot.clone(), slot));
-            }
-            CollectionsControl::Unknown | CollectionsControl::Hidden => {
-                let slot = slot_of(0);
-                widest.push(control(slot.clone(), slot));
-            }
+        // The Catalogs control: the menu of the addon catalogs this section can list (films on
+        // Movies, shows on TV, as the server splits them). It draws NO value, unlike Sort & Filter:
+        // a catalog's title is a phrase ("Netflix Movies", "Prime Video Series") and the cluster's
+        // budget must leave the library names 40% of the row in every shipped language, which a
+        // title this long eats. The menu is where the catalog in force is read, from its check.
+        // The control is on the row only for a section that advertised any ([`Self::catalogs`]).
+        if self.catalogs {
+            right.push(item(msg::library_header_catalogs()));
+            widest.push(item(msg::library_header_catalogs()));
         }
         right.push(HeaderItem { selected_plate: self.listing == Listing::Recommended,
             ..item(msg::library_header_recommended()) });
@@ -171,7 +158,6 @@ impl LibraryScreen {
         let directory = H::directory(cx);
         (std::ptr::from_ref(plx_platform::i18n::current()) as usize).hash(&mut h);
         self.view_section(cx).hash(&mut h);
-        self.collections.hash(&mut h);
         self.listing.hash(&mut h);
         self.listed.code().hash(&mut h);
         matches!(self.kind, SecKind::Movie).hash(&mut h);
@@ -183,6 +169,7 @@ impl LibraryScreen {
         (listing.id().map(|id| (id.epoch, id.section, id.query)), listing.sort_index(), listing.sort_desc(),
             listing.unwatched(), listing.genre().map(|genre| genre.id.as_str()), listing.total(),
             listing.fetch() == SecFetch::Ready, listing.sorts().len(), self.unfiltered.as_ref().map(|(_, total)| *total)).hash(&mut h);
+        listing.catalogs().len().hash(&mut h);
         match self.pending.grid().filter(|(target, _)| target.matches(listing)).map(|(_, action)| action) {
             Some(GridAction::Sort { key, desc }) => (1u8, key.as_str(), *desc).hash(&mut h),
             Some(GridAction::Unwatched { desired }) => (2u8, *desired).hash(&mut h),
@@ -194,30 +181,25 @@ impl LibraryScreen {
         h.finish()
     }
 
-    /// Rebuild everything the header row is made of: the Collections control's state, the names
-    /// that fit (`self.libraries`), and the cached geometry.
+    /// Rebuild everything the header row is made of: whether it carries the Catalogs control, the
+    /// names that fit (`self.libraries`), and the cached geometry.
     ///
-    /// **The control is the answer for THIS library, and nothing else.** [`Self::view_section`] is
-    /// the library the row names (a switch's target from the moment it is chosen), so the answer
-    /// read is that library's and a switch never carries the one it left: while the new library's
-    /// count is not known the control is not on the row, and a count that lands later fades in
-    /// through the row's [`HeaderSwap`] (the probe is warmed for every library when the directory
-    /// lands, so it is usually known before the switch is drawn, and the control is then in the
-    /// new row's first frame). The control the library left is not drawn on the new one at all,
-    /// not even fading out ([`HeaderSwap::begin_switch`]). The one thing carried is this SAME
-    /// library's own last count across a read of nothing (see below), never another's.
+    /// **The control is on the row when the published listing advertised catalogs for its
+    /// section**, and it draws no value: the menu reads the list (and the catalog in force, from
+    /// its check), the row carries the way in. A section with none has nothing to pick and gets no
+    /// control. A library switch draws the outgoing section's answer for the frames before the new
+    /// listing commits — the same stretch the Sort control's value has always shown the section the
+    /// page is leaving.
     pub(super) fn refresh_header<H: LibraryLike>(&mut self, cx: &Cx<'_, H>) {
-        let view = self.view_section(cx);
-        let of = view.and_then(|index| H::directory(cx).sections().get(index)).map(|section| (section.sid, section.key));
-        let read = view.map_or(CollectionsControl::Unknown, |index| CollectionsControl::of(H::collections_count(cx, index)));
-        // The probe reading nothing AGAIN for the library the row already names (its server was
-        // re-pointed at a new client, so the cache missed for a round trip) is not news: the count
-        // the row has stays, with its focus stop, until an answer replaces it. Across a switch it
-        // never does (`of` is another library's), so a count is only ever one this library gave.
-        self.collections = match (read, self.collections) {
-            (CollectionsControl::Unknown, held @ CollectionsControl::Count(_)) if of == self.header_of => held,
-            (read, _) => read,
-        };
+        let of = self.view_section(cx).and_then(|index| H::directory(cx).sections().get(index))
+            .map(|section| (section.sid, section.key));
+        // The answer is this library's, and a read of NOTHING for the library the row already names
+        // is not news: the store holds one listing per section, and a page pushed over this one
+        // (the Collections page) re-points it, so the covered row would otherwise drop the control
+        // and come back without it. Across a switch it is another library's answer, so a control is
+        // only ever one this library gave.
+        let read = !H::listing(cx).catalogs().is_empty();
+        self.catalogs = read || (of == self.header_of && self.catalogs);
         self.note_unfiltered(cx);
         // `sync` runs every frame; the row (text measurement, packing) is rebuilt only when one
         // of the things it is made of changed.

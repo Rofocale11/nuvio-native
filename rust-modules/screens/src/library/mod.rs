@@ -62,7 +62,7 @@ use plx_ui::{Rect, Spring};
 use plx_ui::xfade::Xfade;
 use identity::{KeyRegistry, KeyRegion, region_of_elem};
 use layout::{Layout, Block, CONTENT_TOP};
-use toolbar::{CollectionsControl, COLLECTIONS, CRUMB_ROOT, RECOMMENDED, SORTFILTER};
+use toolbar::{CATALOGS, CRUMB_ROOT, RECOMMENDED, SORTFILTER};
 #[cfg(test)]
 use layout::COLS;
 use parts::{GridPart, RailPart, GRID_GROUP, RAIL_GROUP};
@@ -164,22 +164,22 @@ pub struct LibraryScreen {
     /// them over: the capsule travels from the old stop to the new.
     header_capsules: plx_ui::widgets::TabStrip,
     header_pop: plx_ui::widgets::CtlPop<1>,
-    /// The row's content swap: the Collections count cross-fading in place when a rebuilt row
-    /// changes it, the control fading out when the same library's row loses it and in when its
-    /// count lands (or dissolving between two x when the count's digits move it). A library
-    /// SWITCH cuts instead: the control the old library had is not drawn on the new page. Held beside the capsules
-    /// for the same reason (a library switch replaces the row), but unlike them it is NOT hashed
-    /// into the canon: the capsules' position steers the next frame, while `collections` is no part
-    /// of the screen's shape (a recording never probes), so the swap has nothing to be a function of.
+    /// The row's content swap: the read-out and the Catalogs value cross-fading in place when a
+    /// rebuilt row changes them, a control fading in when its answer lands. A library SWITCH cuts
+    /// instead: the controls the old library had are not drawn on the new page. Held beside the
+    /// capsules for the same reason (a library switch replaces the row), but unlike them it is NOT
+    /// hashed into the canon: the capsules' position steers the next frame, while the swap is no
+    /// part of the screen's shape, so it has nothing to be a function of.
     header_swap: plx_ui::page_header::HeaderSwap,
     /// The library (server, section key) the row in `header` was built for: a rebuild for another
     /// library is a switch (`HeaderSwap::begin_switch`), for the same one the page's own row
     /// changing (`HeaderSwap::begin`). A projection, not canon.
     header_of: Option<(Option<plx_plex::plex::ServerId>, i64)>,
-    /// What the Collections control knows (`LibraryScreen::refresh_header` reads
-    /// `LibraryLike::collections_count` for the library on view each `sync`): the same library's
-    /// last count is held across a read of nothing, another library's never is.
-    collections: CollectionsControl,
+    /// Does the row carry the Catalogs control? True only while the published listing advertised
+    /// catalogs for its section (`LibraryScreen::refresh_header` reads
+    /// `ListingView::catalogs` each `sync`): a library with none has nothing to pick. A projection,
+    /// not canon — `toolbar_elems` reads it.
+    catalogs: bool,
     /// The Collections page's header carries the Sort control (the server declared two or more
     /// sorts for the collections listing). A projection of `header`, read by `toolbar_elems`.
     collections_sort: bool,
@@ -277,7 +277,7 @@ impl LibraryScreen {
                 MasterDetailGroups { master: RAIL_GROUP, detail: GRID_GROUP },
                 MasterDetailPolicy::new(MasterSide::Right, Follow::Live), Regions,
             ),
-            libraries: Vec::new(), folded: Vec::new(), header: plx_ui::page_header::RowCache::new(), header_capsules: plx_ui::widgets::TabStrip::new(), header_pop: plx_ui::widgets::CtlPop::new(), header_swap: plx_ui::page_header::HeaderSwap::new(), header_of: None, collections: CollectionsControl::Unknown, collections_sort: false, collections_asked: None,
+            libraries: Vec::new(), folded: Vec::new(), header: plx_ui::page_header::RowCache::new(), header_capsules: plx_ui::widgets::TabStrip::new(), header_pop: plx_ui::widgets::CtlPop::new(), header_swap: plx_ui::page_header::HeaderSwap::new(), header_of: None, catalogs: false, collections_sort: false, collections_asked: None,
             type_before_collections: None, unfiltered: None,
             switched: false, enter_remembered: false, section: None, epoch: None, query: None, grid_reset_pending: false,
             layout, target_layout: layout,
@@ -324,7 +324,7 @@ impl LibraryScreen {
     #[cfg(any(test, feature = "test-support"))]
     pub fn probe_header_stops(&self) -> Vec<(&'static str, u32)> {
         self.header_elems().into_iter().map(|elem| (match elem {
-            toolbar::COLLECTIONS => "collections",
+            toolbar::CATALOGS => "catalogs",
             toolbar::RECOMMENDED => "recommended",
             toolbar::SORTFILTER => "sort",
             toolbar::CRUMB_ROOT => "crumb",
@@ -915,8 +915,9 @@ impl LibraryScreen {
         // `MORE` is the only way into the Sources menu: an ordinary library name below always
         // requests a section transition, never a menu.
         match elem {
-            // The Collections page lists the library's collections (type 18).
-            COLLECTIONS => { self.open_listing(Listing::Collections, cx, fx); return Handled::Yes; }
+            // The Catalogs control opens the menu of the catalogs this library can list: the
+            // server's own list, which it splits by kind (films on Movies, shows on TV).
+            CATALOGS => { self.open_menu(crate::registry::LibraryMenuKind::Type, elem, cx, fx); return Handled::Yes; }
             // The Recommended page lists the server's hubs for the library.
             RECOMMENDED => { self.open_listing(Listing::Recommended, cx, fx); return Handled::Yes; }
             // The crumb's root link: back to the library page below.
@@ -1054,6 +1055,7 @@ impl LibraryScreen {
                 use crate::registry::LibraryMenuKind as Kind;
                 let anchor = match kind {
                     // The scripted single-purpose menus hang off the one control that replaced them.
+                    Kind::Type if self.catalogs => CATALOGS,
                     Kind::Type | Kind::Sort | Kind::Filter | Kind::SortFilter => SORTFILTER,
                     Kind::Sources if self.libraries.iter().any(|(elem, _)| *elem == MORE) => MORE,
                     Kind::Sources | Kind::Genre => return Handled::No,
