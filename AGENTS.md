@@ -169,23 +169,32 @@ fails the build on a forbidden edge.
   sim-linux`, which needs the host libass staged under `pkg/`) and launches the app with the
   standard env; `make -j10 sim-linux` alone builds and links it. That is what a widget, layout,
   player or FFI change needs — it compiles and renders the real thing. For logic, use the
-  cheapest loop that reaches the code: `make test-crate C=<crate> [T=filter]` for one crate,
-  `./tools/ai-test.sh` for the crates a diff touches.
+  cheapest loop that reaches the code: `./tools/ai-test.sh` for the crates a diff touches, or
+  `cargo nextest` for one crate. `cargo-nextest` is the loop here because it prints per-test
+  progress, so a slow run never looks stuck; install it with
+  `cargo install cargo-nextest --locked` on a machine that lacks it.
 - `make check` still exists — the 16-binary host unit suite, lint and the `ci/` python/shell
   gates, ~5 minutes, bounded machine-wide to two runs. It is NOT part of the loop and NOT a
   required step before a push: run it deliberately when a change needs the whole suite, in the
   background, and do not sit on it. Packaging (`make ipk`, run in CI where the ARM toolchain
   lives, and so `ci/check-package.py`) is the one place the full set runs on every artifact.
-- While iterating on one crate, `make test-crate C=plx_ui [T=filter] [DEPS=1]` builds and
-  runs only that crate's lib tests. It is a loop, not a gate.
-- `make test-crate` does NOT enable `hostsim`. Those tests run through
-  `make test-hostsim
-  [C=<crate>] [T=filter]`, which builds into the gitignored `rust-modules/target-hostsim`
-  (inside the checkout, so `make disk`'s sweep and `tools/build-gc.sh` own it) and gives each
-  run a fresh `PLXNATIVE_RUNTIME_DIR`. Spell the crate as for `test-crate` — `C=plx_media`,
-  `C=media`, several allowed — and pass `--require-match`: a filter that matches no test
-  fails the run instead of reporting "0 tests" as success. Do not hand-write a cargo
-  invocation with a target dir outside the checkout.
+- **One crate, with nextest.** From `rust-modules/`:
+  `PATH="$HOME/.cargo/bin:$PATH" CARGO_TARGET_DIR=target-fast PLXNATIVE_RUNTIME_DIR="$(mktemp -d)" cargo nextest run -p plx_pmsshim [filter]`.
+  `CARGO_TARGET_DIR=target-fast` reuses the incremental tree; the throwaway runtime dir keeps
+  tests out of the real app state. Spell the package name (`plx_pmsshim`, `plxnative-modules`
+  for the application). A bare nextest run resolves only the named package's default features,
+  so a layer crate can run fewer tests than the unified suite — in particular the
+  `devtriggers`-gated ones. `make test-crate C=<crate> [T=filter] [DEPS=1]` still exists for
+  that exact feature parity and is the right command when a missing gated test matters; it is
+  not the inner loop because it prints nothing until the run finishes.
+- `make test-crate` does NOT enable `hostsim`, and neither does `cargo nextest`. Those tests
+  run through `make test-hostsim [C=<crate>] [T=filter]`, which builds into the gitignored
+  `rust-modules/target-hostsim` (inside the checkout, so `make disk`'s sweep and
+  `tools/build-gc.sh` own it) and gives each run a fresh `PLXNATIVE_RUNTIME_DIR`. Spell the
+  crate as for `test-crate` — `C=plx_media`, `C=media`, several allowed — and pass
+  `--require-match`: a filter that matches no test fails the run instead of reporting
+  "0 tests" as success. Do not hand-write a cargo invocation with a target dir outside the
+  checkout.
 - Known pre-existing reds are recorded in `docs/nuvio/UPSTREAM.md` (the `plx_data`
   concurrency tests, `play_automatically_publishes_direct_play_auto_once`). Reproduce a red
   on the pre-change tree before attributing it to your diff.
@@ -246,7 +255,8 @@ forbidden by the TV rules above.
 - **Memory snapshot (on device):** `./tools/ai-tv-log.sh mem` — reads `VmRSS`/`VmHWM`/`VmSwap`
   for the app process (read-only, requires TV lock for device access).
 - **Change-scoped tests:** `./tools/ai-test.sh` — runs `cargo nextest` only for crates touched
-  by uncommitted changes (inner loop); `make check` is the outer-loop gate.
+  by uncommitted changes (inner loop). Install nextest with
+  `cargo install cargo-nextest --locked` if it is missing; `make check` is the outer-loop gate.
 - **Hostsim tests:** `./tools/ai-test-hostsim.sh [filter]` wraps `make test-hostsim` (same
   `C=`/`T=` spelling, same in-checkout `rust-modules/target-hostsim`): the `cfg(hostsim)` lib
   tests, with a fresh `PLXNATIVE_RUNTIME_DIR` per run.

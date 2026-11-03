@@ -270,8 +270,14 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   `CARGO_INCREMENTAL=0` only when `.git` is a file; the main checkout keeps its cache);
   `ci/test_test_fast.py` pins that the `check*` and `lint` recipes never name `CARGO_INCREMENTAL=1`
   or `target-fast`, and that `tools/cargo-seed.py` and `tools/build-gc.sh` treat the dir correctly.
-- `make test-crate C=plx_ui [T=filter] [DEPS=1]` — **test what you touched**: builds and runs only
-  the named crate's lib tests (several crates: `C='plx_ui plx_plex'`; the application crate is
+- **The one-crate loop is `cargo nextest` (owner direction, 2026-11-03).** From
+  `rust-modules/`, `CARGO_TARGET_DIR=target-fast PLXNATIVE_RUNTIME_DIR="$(mktemp -d)"
+  cargo nextest run -p <package> [filter]` reuses the `test-fast` tree and prints each test as it
+  starts, so a slow run never looks hung. A bare nextest run resolves only that package's default
+  features, so it can run fewer tests than the unified suite (the `devtriggers` ones in `plx_plex`:
+  458 against 466); `make test-crate` remains the exact-feature-parity path.
+- `make test-crate C=plx_ui [T=filter] [DEPS=1]` — **test what you touched, at exact feature
+  parity**: builds and runs only the named crate's lib tests (several crates: `C='plx_ui plx_plex'`; the application crate is
   `C=app`; `plx_` is optional) in the SAME `target-fast` tree and with the same environment as
   `test-fast`. An edit in a low crate makes `test-fast` rebuild and relink every dependent's test
   binary; this builds the one crate. `DEPS=1` adds the workspace crates that DIRECTLY depend on it,
@@ -289,18 +295,18 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   tree warm; "build only" is `T=` naming no test): an edit in `plx_base` costs `make test-fast`
   27.2 s (10.0 s build only) and `make test-crate C=plx_base` 1.7 s (1.2 s build only); an edit in
   `plx_screens` costs 22.7 s (3.4 s) and 8.3 s (3.1 s); `DEPS=1` on `plx_base` pulls in the
-  application crate and costs 24.2 s. **`cargo-nextest` was measured and is not used**: 33-40 s for
-  the same suite against the wrapper's 14 s (it runs each of the 5758 tests in its own process), and
-  one of its three runs failed `account_to_settings_never_unfreezes_the_host`, a test that fails
-  about one run in three when started alone in a fresh process (300 runs, with a shared and with a
-  private runtime dir) and is hidden in the suite by the tests that run before it in the same
-  process. Adopting it would also need the tool on every machine and CI job. **A single filtered
-  test is the exception**: `CARGO_TARGET_DIR=target-fast cargo nextest run -p plx_base -E
-  'test(flight)'` reuses the `test-fast` tree and answers in about a second, which is the quickest
-  inner loop when one module is all a change touches. It resolves only that package's default
-  features, so it is not a substitute for the suite. A run that goes quiet with the CPU idle and
-  prints `SLOW [> 60s]` is a HUNG test (a lock or a claim the test itself took twice), not a slow
-  build — `timeout` the run and fix the test.
+  application crate and costs 24.2 s. **The nextest loop is the owner's choice despite its
+  measured cost**: 33-40 s for the full suite against the wrapper's 14 s (it runs each of the 5758
+  tests in its own process), and one isolated run failed
+  `account_to_settings_never_unfreezes_the_host`, a test that fails about one run in three when
+  started alone in a fresh process (300 runs, with a shared and with a private runtime dir) and is
+  hidden in the suite by the tests that run before it in the same process. The trade is visible
+  progress and a prompt first failure; use `make test-crate` when the gated tests matter. **A
+  single filtered module** — `CARGO_TARGET_DIR=target-fast cargo nextest run -p plx_base -E
+  'test(flight)'` — is the quickest inner loop when one module is all a change touches. It resolves
+  only that package's default features, so it is not a substitute for the suite. A run that goes
+  quiet with the CPU idle and prints `SLOW [> 60s]` is a HUNG test (a lock or a claim the test
+  itself took twice), not a slow build — `timeout` the run and fix the test.
 - `make test-hostsim [C=<crate>] [T=filter]` — the `hostsim`-feature unit tests
   (`#[cfg(all(test, feature = "hostsim"))]`: the application crate's `app/run.rs`
   `lifecycle_regression_tests`, the player-return rig; `plx_media`'s `player/engine.rs`, `pump.rs`,
