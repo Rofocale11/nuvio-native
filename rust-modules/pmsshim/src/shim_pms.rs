@@ -34,9 +34,6 @@ const STREAM_TTL: Duration = Duration::from_secs(30 * 60);
 /// Rows a catalog listing reports beyond what it has fetched while the catalog is not exhausted,
 /// so a grid keeps asking for the next page.
 const MORE_HINT: i64 = 50;
-/// How long a DETAIL request waits for streams. The page must not hang on addons; a play waits
-/// the full deadline at `/decision` / the Part instead.
-const DETAIL_WAIT: Duration = Duration::from_millis(800);
 /// The Part index that means "whichever stream leads when this is played".
 const BEST_PART: usize = PART_STRIDE as usize - 1;
 const DEFAULT_EPISODE_MS: i64 = 45 * 60_000;
@@ -3179,10 +3176,13 @@ impl Shim {
         let mut verdict = None;
         if self.stream_target(&ident).is_some() {
             let dur = row["duration"].as_i64().unwrap_or(0);
+            // A detail read paints without Media: the placeholder Part below stands in while the
+            // slot's background fetch keeps answering, and a play waits the full deadline at
+            // `/decision` instead. Blocking the page on addons was the 800 ms in the click.
             let wait = if probe_index.is_some() {
                 self.cfg.stream_deadline
             } else {
-                DETAIL_WAIT
+                Duration::ZERO
             };
             let (ranked, subs, done) =
                 self.ranked(rk, &ident, u32::try_from(dur / 1000).ok(), wait, probe_index.is_some());
@@ -4731,6 +4731,98 @@ fn _assert_send_sync() {
 #[cfg(test)]
 mod playback_regressions {
     use super::*;
+
+    /// A movie whose stream addon answers late: the detail read must not wait for it.
+    struct SlowStreamBackend;
+
+    impl Backend for SlowStreamBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
+        fn catalog_page(
+            &self,
+            _key: &str,
+            _skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
+            Ok(Vec::new())
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, type_: &str, id: &str) -> Option<Meta> {
+            (type_ == "movie" && id == "slow-movie").then(|| Meta {
+                id: id.into(),
+                type_: type_.into(),
+                name: "Slow Movie".into(),
+                runtime: Some("2 h".into()),
+                ..Default::default()
+            })
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            std::thread::sleep(Duration::from_millis(400));
+            vec![Stream {
+                url: Some("https://example.invalid/slow.mkv".into()),
+                name: Some("Slow\n1080p".into()),
+                addon_name: "Slow".into(),
+                addon_id: "slow".into(),
+                ..Default::default()
+            }]
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_detail_read_does_not_wait_for_a_slow_stream_addon() {
+        let shim = Arc::new(Shim::new(Arc::new(SlowStreamBackend), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "slow-movie".into(),
+        });
+        let get = || Request {
+            method: "GET".into(),
+            path: format!("/library/metadata/{rk}"),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+        let started = Instant::now();
+        let response = shim.handle(&get());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "a detail read waited {elapsed:?} for streams"
+        );
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        let media = body["MediaContainer"]["Metadata"][0]["Media"]
+            .as_array()
+            .unwrap();
+        assert_eq!(media.len(), 1, "the placeholder Part stands in");
+        assert_eq!(media[0]["title"], "Finding streams…");
+        assert_eq!(media[0]["addon_name"], "", "the placeholder names no addon");
+
+        // The slot's background fetch keeps running; once it lands, the same read has the real
+        // Media instead of the placeholder.
+        for _ in 0..100 {
+            let body: Value = serde_json::from_slice(&shim.handle(&get()).body).unwrap();
+            let media = body["MediaContainer"]["Metadata"][0]["Media"]
+                .as_array()
+                .unwrap();
+            if media[0]["addon_name"] == "Slow" {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the background stream fetch never reached the detail row");
+    }
 
     #[test]
     fn an_inflight_stream_list_cannot_direct_play_a_placeholder() {

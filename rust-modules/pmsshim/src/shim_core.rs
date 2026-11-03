@@ -19,7 +19,7 @@ pub struct Config {
     /// client has no engine for is a pick that cannot start, so it is not listed. The app's
     /// Settings > Playback switch sets this at boot (`nuvio::restore_p2p`).
     pub p2p_enabled: bool,
-    /// How long a detail request waits for addons' streams at most.
+    /// How long a stream slot waits for addons at most (a play waits this; a detail read does not).
     pub stream_deadline: Duration,
     /// Once one playable stream has arrived, how much longer to wait for the rest.
     pub stream_grace: Duration,

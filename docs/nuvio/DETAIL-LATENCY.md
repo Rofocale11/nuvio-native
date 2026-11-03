@@ -1,6 +1,7 @@
 # Detail-page latency — plan
 
-**Status:** planned, not implemented. Written 2026-11-02 on `forward-port/v0.9-hq` (`7e79e57e`).
+**Status:** 1A implemented (2026-11-03); 1B–1C planned. Written 2026-11-02 on
+`forward-port/v0.9-hq` (`7e79e57e`).
 **Owner:** whoever picks this up next.
 **Scope:** wall-clock from pressing OK on a Home/Library card to a painted movie/show detail page,
 on the television. Not the player, not Home's own first paint, not poster throughput.
@@ -17,7 +18,8 @@ player run unmodified is the right call. The latency comes from three separable 
 on top of it:
 
 1. one shim request composites three unrelated data sources and the screen waits for all of them;
-2. the detail route pays up to **800 ms** waiting for streams it does not need to paint;
+2. the detail route used to pay up to **800 ms** waiting for streams it does not need to paint
+   (fixed by 1A);
 3. every outbound HTTPS call is a **fresh DNS + TCP + TLS handshake** (no connection or DNS reuse),
    and nothing is prefetched on focus.
 
@@ -47,8 +49,9 @@ single-key route falls through to the comma-list branch at `:3815`, which maps e
    `https://v3-cinemeta.strem.io/meta/{type}/{id}.json` (`addons.rs:21`). Candidates are tried
    **serially** (`addons.rs:659` order: id-prefix owners, then every addon serving the type, then
    the inferred type).
-5. `item_probed` starts the stream slot (`shim_pms.rs:1961`) and **blocks up to `DETAIL_WAIT` =
-   800 ms** (`:39`, used at `:3182`) while every stream addon answers.
+5. `item_probed` starts the stream slot (`shim_pms.rs:1961`) and — since 1A — **no longer blocks**
+   on it: a detail read passes `Duration::ZERO` (`:3182`) and paints with the placeholder Part
+   while the slot keeps answering in the background.
 6. `enrich_row` (`:2285`, called at `:3829`) resolves the TMDB id and fetches cast/trailer/logo
    **synchronously**: `/find` first (`rust-modules/stremio/src/addons_tmdb.rs:289` for movies,
    `:378` for series), then `/movie/{id}?append_to_response=credits,recommendations,images` and
@@ -129,25 +132,21 @@ detail: … meta=<ms> streams=<ms> tmdb=<ms> total=<ms>
 
 Keep each change a separate commit so it can be reverted alone.
 
-#### 1A. Stop waiting 800 ms for streams on a detail read
+#### 1A. Stop waiting 800 ms for streams on a detail read — **implemented**
 
 **Where:** `rust-modules/pmsshim/src/shim_pms.rs:3182`.
 
-Today:
+The play path (`probe_index.is_some()`) keeps waiting the full `stream_deadline`. The detail read
+passes `Duration::ZERO` (`DETAIL_WAIT` is gone), so it paints immediately from whatever the slot
+has landed — usually the placeholder Part.
 
 ```rust
 let wait = if probe_index.is_some() {
     self.cfg.stream_deadline
 } else {
-    DETAIL_WAIT
+    Duration::ZERO
 };
 ```
-
-The play path (`probe_index.is_some()`) must keep waiting the full deadline. A detail read does
-not need streams to paint, and the placeholder Part already covers the empty case.
-
-Change the non-probe arm to `Duration::ZERO`. Keep `DETAIL_WAIT` for now only if a compromise is
-wanted (a 150–250 ms bribe for fast addons); start with zero and measure.
 
 - The background slot fetch still runs, so a follow-up play or a second open is a cache hit.
 - If the stream list is empty and not done, the row still gets `"Finding streams…"` as its Part
@@ -303,7 +302,7 @@ focus (cold).
 | Detail request / fetch chain | `rust-modules/data/src/metadata.rs:3699` (`fetch_full`), `:3950` (`request_detail`) |
 | Detail screen's request | `rust-modules/screens/src/detail/mod.rs:2099` |
 | Shim detail route + Media | `rust-modules/pmsshim/src/shim_pms.rs:3751`, `:3151` (`item_probed`), `:3239` (placeholder) |
-| 800 ms stream wait | `shim_pms.rs:39`, `:3182`, `:2055` (`ranked`), `:1961` (`slot`) |
+| Detail stream wait (zero) | `shim_pms.rs:3182`, `:2055` (`ranked`), `:1961` (`slot`) |
 | TMDB enrichment | `shim_pms.rs:2285` (`enrich_row`), `:788`/`:803` (resolvers), `stremio/src/addons_tmdb.rs:289`/`:378`/`:433` |
 | Cinemeta + addon meta selection | `rust-modules/stremio/src/addons.rs:21`, `:659`, `:730` |
 | Meta model (add `moviedb_id`) | `rust-modules/stremio/src/model.rs:160` |
