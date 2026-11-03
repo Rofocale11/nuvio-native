@@ -332,7 +332,18 @@ focus (cold).
 | Home focus / tick / prefetch | `rust-modules/screens/src/home/mod.rs:1641`, `:2407`, `:2428` (`tick_prefetch`) |
 | Design docs | `docs/nuvio/ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md` |
 
-## 8. Open questions to settle before coding
+## 8. Working state (2026-11-03) — resume point
+
+- **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 1 commits: `ca2de133` (1A), `a2b43791`
+  (1B), `e270e61f` (1C), plus docs `01cacbb9` and `04af6099` (simulator run + WSLg how-to).
+- **Verified:** host suites and the shipping feature check are green; the WSLg simulator showed
+  prefetch firing, warm opens `ms=5–7`, a cold boot-to-detail `ms=828` with `subs=0`, and one
+  `ms=832` open where the prefetch GET was still in flight. TV is not measured.
+- **Next, in order:** Stage 0 split (`meta=/streams=/tmdb=` on the `detail:` line) → Stage 2B
+  single-flight → Stage 2A persisted meta cache → owner tests on the TV (warm ≤300 ms,
+  cold ≤800 ms). Do not push until the owner asks.
+
+## 9. Open questions to settle before coding
 
 1. What exactly does the detail screen read from `Media[]`, and what does it show when the row
    carries only the `"Finding streams…"` Part?
