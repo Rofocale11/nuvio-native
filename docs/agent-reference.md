@@ -3,14 +3,21 @@
 This is the long-form architecture, build, portability, and verification reference shared by all
 coding agents. The concise, always-loaded project contract is `AGENTS.md`; Claude imports both.
 
+> **FORK STATE (2026-11-03).** The upstream release/site/simulator workflows were removed:
+> `release.yml`, `rc.yml`, `nightly.yml`, `build-package.yml`, `site-video.yml`, `pages.yml`,
+> `build-bench.yml`, `ci-metrics.yml`, `simulators.yml`. The fork's only release path is
+> `tools/cut-release.sh` -> `build-ipk.yml`. Paragraphs elsewhere that mention those workflows are
+> upstream history; do not run them. The local tools (`make build-bench`, the simulator) still work.
+
 ## What this is
 
-A **real, native Plex client for LG webOS 4.5 TVs** — built toward production quality, not a
+A **native LG webOS client for Stremio/Nuvio addons** — built toward production quality, not a
 throwaway. **Build proper, reusable, well-factored components and finish them** — a shortcut is
 never justified by "it's only a demo." See `rust-modules/ui/src/CLAUDE.md` for how the UI is
-expected to be built. It's cross-compiled from macOS and sideloaded onto a rooted 32-bit ARM TV,
-renders an Apple-TV-style gallery/shelf UI with SDL2 + OpenGL ES 2, and plays video from a Plex
-Media Server (PMS) entirely in-app.
+expected to be built. It keeps PlxNative's GPU-rendered UI and Starfish/ACB player, but the Plex
+data layer is replaced by the in-process `plx_pmsshim` over Stremio addons and the Nuvio account:
+there is no plex.tv credential and no PMS. Cross-compiled to 32-bit ARM and sideloaded onto a
+rooted TV; see `docs/nuvio/ARCHITECTURE.md`.
 
 **Almost everything is Rust** in `rust-modules/` (UI, event loop, input, player orchestration,
 the streaming/demux pipeline, and the Plex data layer), compiled to a static lib and linked in
@@ -39,9 +46,9 @@ Wake-on-LAN needs it. A target that needs a TV with none configured fails saying
 (`ci/test_tv_config.py` grades the resolver and its readers; `ci/test_tv_ssh.py` the ssh wrapper). The ssh password
 `alpine` lives in `tools/tv-ssh`, not the Makefile, and is tried only after this machine's ssh key is
 refused. It is webosbrew's *published* dev-mode root password, identical on every rooted TV, so it
-identifies nobody and removing it would break the loop for key-less machines. App id `com.beb.plxnative` — and since 2026-08-21 a second
-install, `com.beb.plxnative.debug`, can sit beside it on the same set (`FLAVOR`, below;
-`docs/two-installs.md`).
+identifies nobody and removing it would break the loop for key-less machines. This fork's app ids
+are `com.nuvionative.app` and `com.nuvionative.app.debug`, which can sit beside each other on the
+same set (`FLAVOR`, below).
 
 ## Non-Rust dependencies (`ci/dependencies.json`)
 
@@ -383,36 +390,8 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
     the failing message says the same. Run it locally with
     `python3 ci/check-build-budgets.py --graph --src rust-modules/src` plus one `--src` per layer crate,
     as `ci.yml` spells it (add `--binary <path>` to grade a stripped binary); `ci/test_build_budgets.py` covers pass, fail, warn and the json schema.
-  - *Live chart.* https://plxnative.com/ci/ (`site/ci/index.html`, noindex, not linked from the
-    landing page) is the working instrument for what a developer waits on: a "now" block (each
-    metric's 7-day median, its change against the previous 7 days and 30 days ago: worse ones first,
-    then the waits, the local loop and the longest jobs; a job under a minute, a part of a whole and a
-    healthy no-op build are behind a disclosure), the slowest CI jobs and the slowest local steps
-    right now (two lists: the benchmark runner is not comparable with CI), any regression of the last week with the commits in it, and the
-    time series behind them. It reads three files from the orphan `ci-metrics` branch
-    (raw.githubusercontent.com): `ci-history.json` (runs), `build-history.json` (the daily
-    benchmark, written by the benchmark workflow) and `ci-summary.json` (derived: `tools/ci-summary.py`
-    computes the "now" rows with their order and selection, the two slowest lists and the regressions as pure functions, so a later
-    alerting job can reuse them; per-class thresholds and the noise they were chosen from are in its
-    docstring). Nothing names a job: every series is derived from the rows, so a job added or removed
-    shows as a new or ended line and a missing job in one run is a gap, not a zero.
-    `.github/workflows/ci-metrics.yml` runs `tools/ci-history.py` and `tools/ci-summary.py` after
-    every finished CI / Simulator CI / Nightly run that is a push to `main` or a pull request (one
-    short ubuntu job, `concurrency`-collapsed, `actions: read` + `contents: write`; it checks out
-    only three tool files (the collector, the summary and the reader it imports) and never runs pull-request code, so a fork's pull request is recorded too,
-    with `pr: null`). Rows carry `event` (absent = a push to main), the PR number, `conclusion`,
-    `attempt`, `wall` (created to last update, for a re-run: what the developer waited) and the green
-    jobs (`failed` names the others); the nightly is recorded for pull requests only; cancelled runs
-    get no row and are counted per day in `cancelled`. Per-run rows are kept 90 days, then folded
-    into one `daily` entry per workflow, event and day. The runs listing's `status=success` filter is
-    stale, so the tool filters `conclusion` and `event` itself, and the listing can repeat or skip a
-    run across pages, so an occasional gap is closed with `gh workflow run ci-metrics.yml -f
-    full=true` (which also fills the `cancelled` days an incremental pass leaves empty, backfills a
-    branch that does not exist yet and finds old red runs). `python3 tools/ci-history.py --in
-    <ci-history.json> --dry-run [--full]` prints how many rows a real run would add and writes
-    nothing. `tools/test_ci_history.py` and `tools/test_ci_summary.py`, in `check-python`, use a fake
-    `gh` and synthetic series. To look at local data files, serve `site/` with the files beside the
-    page and open `/ci/?data=ci-history.json` (a same-origin relative path only).
+  - *Live chart (upstream, retired).* The `ci-metrics` workflow and the plxnative.com/ci/ page
+    were removed in this fork. The local `make build-bench` below is still the benchmark to use.
 - `make build-bench [ARGS='--runs 5 --json out.json']` / `make build-bench-quick` — the repeatable
   local **build benchmark** (`tools/build-bench.py`), so a build-affecting change pastes a
   before/after table instead of an ad-hoc scratch-script number. It prints a Markdown table (median /
@@ -464,196 +443,12 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   `ci/test_build_bench.py` (a fake cargo, a scratch repository) pins the table and JSON shape, the
   restore-on-failure and dirty-target refusal, the skips, and that the mirrored cargo subcommand
   skeletons still equal the Makefile's recipes.
-- **The daily build-time series** (`.github/workflows/build-bench.yml`, `tools/build-history.py`).
-  Every day at 04:17 UTC, and on `gh workflow run build-bench.yml` (a same-day run replaces that day's
-  record; `-f only=noop,leaf` narrows it), GitHub-hosted macOS runners build main's tip and time, with
-  this benchmark, on three runners side by side: the `base` leg (a no-op host build and the
-  edit-rebuild of `plx_base` and `plx_ui`), the `top` leg (the edit-rebuild of `plx_screens` and the
-  app crate, and the unit suite), each the median of 3 runs with min and max, and the `gate` job,
-  `make check` once with its cargo and python branches (the opt-in scenario: `make build-bench
-  ARGS='--only check --runs 1'` times it locally; it runs `check-unlocked`, because the benchmark
-  already holds the check lock). The legs exist because one runner took 29 of its 35 minutes on the
-  first run: 11 of them were untimed rebuilds that followed every edit row, since putting the edited
-  file back with the time of the put-back made cargo (which judges a path package by mtime) see it as
-  changed. The benchmark now restores the file's original mtime, so only the first build of a run is
-  an untimed warm-up. One record per day is appended to `build-history.json` on the `ci-metrics`
-  branch (the same branch as `ci-history.json`, pushed with a retry because `ci-metrics.yml` writes it
-  too) and summarised into `ci-summary.json` beside it; the page at plxnative.com/ci/ reads those
-  files. The numbers are for the trend of one runner type (3 vCPUs of a shared Apple M1 virtual
-  machine; the record names it and the page prints that next to the charts), not the absolute time on
-  a dev Mac. **Failures are loud and cost only their own rows.** A build that failed, or a leg that
-  left no document, records nothing. A red `make check` makes the `gate` job, and so the run, red (no
-  `continue-on-error`; the failing steps' own output is in the job log), and a red unit suite makes
-  its leg red, but the record still files the day's other rows and lists `check` or `tests` in
-  `failed` with a one-line `failure_notes` reason, which the page prints ("make check failed on the
-  runner on <date>"). **Noise is a property of a row**, judged by `tools/build-history.py` from the
-  row's own runs: `spread` = (max - min) / median, `noisy` when it is above 0.5 and the runs differ
-  by at least 2 s (provisional: the first record's rows spread 26% to 57% because each row's first
-  round ran 40-55% slower than the other two; a one-run row has no spread). The load and swap
-  warnings are kept as the raw count `warnings` and decide nothing, because a 3-core runner running a
-  parallel build always exceeds its core count. The rule is applied again to every stored row on each
-  write, so retuning the constants retunes the history. `ci/test_build_history.py` pins the record,
-  the rule and the merge, `ci/test_build_bench.py` the restore and the failure reports, and
-  `ci/test_ci_workflows.py` the workflow's triggers (no pull-request trigger), guards, permissions,
-  legs and timeouts.
-- **How the site demo video updates itself** (`.github/workflows/site-video.yml`, the last job of
-  `release.yml`, `site_video.py`'s `release-ref` / `needs-render` / `adopt`). The
-  film refreshes AFTER A STABLE RELEASE and after nothing else: `release.yml`'s final job
-  (`site-video`, `continue-on-error`, `actions: write` as its only write scope) dispatches
-  `site-video.yml` ON THE NEW TAG (`gh workflow run site-video.yml --ref vX.Y.Z`) once the release is
-  published (a `workflow_dispatch` is the one event a `GITHUB_TOKEN` may start a run with). There is
-  no schedule and no pull-request or push trigger; a release candidate, a nightly, a branch or a
-  commit are refused by `release-ref` (`tests/test_site_video.py`, `ReleaseRefGuard`, holds the
-  repository's real tags), and a maintenance-line patch (not on main) is skipped by the hook and
-  refused by the workflow. **The workflow renders its own checkout and no input names a ref**: a run
-  on a tag has caches of its own (a cache is restorable only by runs of the ref that wrote it and the
-  branches below it, never by main), so the cache steps that restore into the tree being rendered
-  cannot poison anything main runs (CodeQL reads a checkout of a ref an input names, followed by cache
-  steps, as "cache poisoning via execution of untrusted code"). Five jobs (`stills`, the film's sibling, is the next bullet).
-  `decide` (`contents: read`) reads `github.ref`: a tag must be a stable `vX.Y.Z` whose commit is an
-  ancestor of main for the run to publish, `refs/heads/main` (a maintainer's manual dispatch) may
-  publish, and a branch renders as a dry run only (a tag that is not a stable `vX.Y.Z` on main fails `decide`
-  at once, before any rendering, unless `-f publish=false` makes it a dry run too); it then asks `needs-render`: if the git trees
-  of everything that can change a pixel (`TREE_PATHS`) equal the `tree_hash.combined` recorded in the
-  committed `site/media/feel.manifest.json` AND the stills' inputs equal their own committed manifest, the run ends GREEN without rendering. `render`
-  (`contents: read`) renders the checkout and applies every gate below; any failure leaves the site as
-  it was and the run red. `publish` (`contents: write`, the only write token in the workflow) checks
-  out `main` (a literal `ref: main`; a dry run checks out the dispatched ref instead and keeps no
-  credential), downloads the artifact (data) and runs MAIN's tool, never the rendered ref's code:
-  `site_video.py adopt <artifact dir> --write --derive --expect-rev <sha>`. It verifies the artifact
-  (`linux-ci`, sha256s, gates passed, clean tree, and that it was rendered from that commit's
-  inputs), and when the six media files differ from main's it copies them with the manifest,
-  regenerates the feel glows and the credits page, REWRITES the `codecs=` strings of
-  `site/index.html` from the new files' own `avcC` / `av1C` boxes (a re-encode that moves a profile or
-  level must not leave the page declaring the old one, which `CommittedSiteMedia` would catch on main),
-  checks that only the film's and the stills' files changed, and commits as github-actions[bot] (`Site: demo video
-  re-rendered for vX.Y.Z`, or `demo video and stills` / `stills` for what changed, `main@<sha>` for a manual dispatch; the body carries the gates' summary and
-  the run URL), rebasing onto the tip of main and retrying the push (never forcing). A film
-  byte-identical to the committed one commits nothing and writes nothing, the manifest included, so the
-  manifest keeps naming the tree the film was last rendered for (the next release with changed inputs
-  renders again; a release rarely comes twice a week). `pages` DISPATCHES `pages.yml` on main (`gh
-  workflow run pages.yml --ref main`): a push with `GITHUB_TOKEN` does not start it, and the
-  `github-pages` environment admits deployments from the `main` branch only, so a run on a tag cannot
-  call it; the deploy is its own run ("Deploy landing page"), where a failed deploy shows. **It never
-  blocks a release**: it is a separate run, dispatched after the release exists; if it fails the
-  release stays, the site keeps what it had (a failed `render` keeps the old film; a failed `stills` with a green
-  `render` lands the film and keeps the old stills), and the red "Site video" run is the notice. **Taste is
-  not gated**: the gates prove the film is deterministic and well encoded, not that it is good, so look
-  at the site after a release. Operate it: re-run for a tag `gh workflow run site-video.yml --ref
-  vX.Y.Z`; render anyway (and publish) `gh workflow run site-video.yml --ref main -f force=true`; a
-  dry run (everything but the push and the deploy, printing the `git diff --stat` it would commit)
-  `-f publish=false`, which is how a change to the workflow is proved from its branch (`--ref
-  my-branch`; a branch never publishes whatever `publish` says); a bad film is `git revert <the bot's
-  commit>` (it takes the stills with it) and a push to main (the push triggers `pages.yml`). Turn it off by deleting the `site-video`
-  job at the end of `release.yml`. A render costs about 55 runner minutes (measured on run
-  37805253785).
-- **How the site's stills update themselves** (`site-video.yml`'s `stills` job, `tools/site_stills.py`,
-  `tests/test_site_stills.py`; the same run, workflow and bot commit as the film above, not a second workflow).
-  Every still a SIMULATOR makes, found by reading the generating tools (`site_stills.py files` lists them:
-  `tests/screenshots/scenes.json`'s outputs with their `CREDITS.md`, then the WebP and phone copies of
-  `render-site-variants.py` and the glows of `render-site-glows.py`), refreshes after a stable release when the
-  git objects of their inputs (`TREE_PATHS`, recorded as `tree_hash.combined` in `site/media/stills.manifest.json`)
-  moved, or on `force`; an app whose inputs did not move renders nothing and commits no stills, whatever the
-  renderer's noise. `decide` asks `needs-render`; `stills` (`contents: read`, its own checkout, the pinned
-  `ubuntu-24.04`, Xvfb, llvmpipe, the host FFmpeg built with `HOST=1 ci/build-ffmpeg.sh` and copied into `pkg/`
-  AFTER `make screenshots-sim` (on a fresh checkout the Makefile's `RUST_CFG` stamp deletes `pkg/lib*-plx.so.*`
-  while parsing, and without them `ff.rs` finds no FFmpeg and every stream ends at once: the player scenes'
-  "EOS pushed at true EOF"), the BtbN ffmpeg from `site_video.py ffmpeg-fetch` first on PATH as the ONE encoder,
-  `CHROME_ARGS=--no-sandbox` for the runner's Chrome that composes the link card) renders every scene with
-  `tools/screenshots.py --check-determinism --retry-unstable --report`: each scene is captured TWICE and the second
-  must agree with the first within the scene's noise bound; the first is adopted. **The bound is "stable", not
-  "byte-identical": llvmpipe's blur and glass passes round differently from run to run (a handful of scenes differ on
-  a few to a few hundred pixels, by one level), so demanding identical bytes fails nearly every run.** The bound is the
-  scene manifest's `max_delta` (default 1, `site-up-next` 2, each with its `tolerance_reason`) on the raw PNG captures,
-  where one level of rounding is one level (a JPEG spreads it over a block, up to 6 levels). Measured on the runner
-  (4 full renders, 16 scenes, and 28 isolated pairs of `site-tiles`): every pair within 1 level on 0 to 498 pixels,
-  except that in two of the four full renders ONE 3x scene (`site-tiles`, then `site-glass`) had a capture that
-  settled 2 to 4 s late and differed by 13 levels on 364 thousand of its 18.7 million pixels (a stalled runner, caught
-  mid-fade). So a pair that disagrees takes a THIRD capture and the first capture another agrees with is adopted
-  (`stable_capture`); three that never agree in any pair fail the job. A missing poster, a card that popped late or a
-  different row is tens of levels off in every capture that has it (`tests/test_site_stills.py` proves the bound on
-  synthetic captures). A failed `stills` job names the scene and its files, leaves the run red, does not block
-  the film's `publish` (a failed film blocks everything), and the committed stills stand; re-run it. `publish` runs
-  main's `site_stills.py adopt DIR --write --expect-rev` (refuses a non-`linux-ci` platform, a set that is not
-  exactly `output_files()`, a wrong sha256, a missing or over-bound verdict for any scene (the bound re-read from
-  main's `scenes.json`), other inputs), checks the path allow-list, and makes ONE commit with the film. Identical
-  output commits nothing, the manifest included. Every simulator scene is automated, the two player scenes
-  included. `docs/screenshots/navblur-transition.jpg` is a photograph of the panel and is regenerated by nobody.
-  `MANUAL_SCENES` stays as the place to put a scene the runner cannot make, with its reason. Operate as the
-  film: `gh workflow run site-video.yml --ref my-branch -f publish=false -f force=true` is the dry run.
-- **The site demo video's render** (`.github/workflows/site-video.yml`, `render`; `contents:
-  read`, one artifact kept 30 days). It is the CANONICAL render: `ubuntu-24.04` (pinned, never
-  `-latest`), the same libass caches and `./.github/actions/apt-install` action as
-  `simulators.yml`'s Linux job, with that job's SDL/GL/Xvfb package list plus `mesa-utils` (`glxinfo`,
-  which the manifest reads) and, in a second step, the apt `ffmpeg` and `python3-pil` that derive the demo art. It renders under Xvfb 1920x1080 on Mesa llvmpipe
-  (`LIBGL_ALWAYS_SOFTWARE=1`, `GALLIUM_DRIVER=llvmpipe`, `LP_NATIVE_VECTOR_WIDTH=256`, `LC_ALL=C`, `TZ=UTC`). It builds `make
-  site-video-sim`, fetches and derives the demo library (`tools/demo_library.py fetch` + `derive`,
-  the sources cached on the hash of `assets.json`, `derive` run cold every time; `fetch` backs
-  off on a wikimedia 429), fetches the pinned tool ffmpeg, runs `site_video.py render --storyboard`
-  (the film below) TWICE in separate processes, fails unless the two `frames.tsv` agree in columns 1-4 AND the two masters decode to the
-  same frames (a `framemd5` list; container byte equality is reported beside it), runs
-  `site_video.py hold-gate --storyboard` (the film with and without seeded extra held repeats, two more
-  renders, their masters deleted at once), rescans for the sentinel, then `encode`, `contact-sheet`,
-  `gates` and `manifest`. The manifest's `environment`
-  records the runner image version, OS, CPU model, Mesa and LLVM versions (`glxinfo -B`), the
-  packages behind them and the variables above, because the video is defined as what this pinned
-  stack renders; a new image is a new fingerprint, not a failure. `adopt` takes the artifact (a zip,
-  or the directory `download-artifact` unpacked; `--derive` also regenerates the feel glows and the
-  credits page). It reads no private file and holds no secret beyond the run's `GITHUB_TOKEN`.
-- **What the site demo video films, and how to make it.** One command, after `make site-video-sim`
-  and `python3 tools/demo_library.py fetch derive`:
-  `python3 tools/site_video.py render --out DIR --storyboard`, then `encode`, `gates` (see the
-  workflow above for the full sequence). A macOS render is a preview; only the Linux workflow's
-  artifact is adoptable. The film is `tests/video/feel.json`: positions and durations, never titles
-  (the demo catalog's order, `tests/demo_library/catalog.json`, decides what is under each position).
-  It is the Home hero held, `right` to the hero's Info button, `right` again (the carousel turns
-  forward to the second page), `left` to Continue and `left` again (back to the first page), `down`
-  onto the Continue Watching row, `right` twice to its third card and `ok` for that title's Detail
-  held about 4 s (the shelf's `ok` opens details, the default Continue Watching setting; nothing
-  plays), `back` (the shelf, that card focused), `up` `up` to the profile chip and on to the Movies
-  tab, `ok` for the Movies library (hub shelves), two `right`s, `back`, then `down` onto Continue,
-  about 27 s: the last frame equals the first to within 1/255 per channel (`storyboard.loop` in `render.json` and `feel.manifest.json` counts the pixels that differ). Every
-  hero page it shows passes `demo_library.py hero-report` and is not `not_in_video`, and the title
-  whose Detail it opens is not one whose hero page it shows. NOT filmed: scrolling on Detail, any
-  popover or modal, any title flagged `not_in_video` opened (`gates` checks the mock's request log,
-  and that no stream, transcode, timeline, scrobble or play-queue request was made), and the
-  hold-hint capsule: the film is shot with the hint taught. The capsule is a one-time teaching
-  overlay (it stands after 1.5 s of rest on a card, once per resting place on Home and once per run
-  on the other card screens, and for the length of an `ok` held on a card), and a film has no
-  viewer to teach, so `render --storyboard` writes the `plxnative-hintoff` trigger
-  (`HINT_OFF` in `site_video.py`; the app reads it once at boot, in `devtriggers` builds only, and
-  calls `hold_hint::teach_all_for_dev`, which marks the hint learned and shown on every screen
-  kind) and `render.json` records `hold_hint: suppressed`. The hint's own timing is unchanged,
-  and no card rest in the film is capped by it. `up` from the hero always
-  lands on the profile chip, so before the film boots the launcher runs a prep boot of the simulator
-  with the `plxnative-login` trigger: the app's own QR sign-in completes against the mock (served
-  with `authorize_after=2`) and stores a "Demo" account, which is what the chip reads when focus
-  passes it (never "Sign in"). Gates specific to the film: `storyboard/rest` (every beat's last 12
-  frames differ from the first of them by at most 3/255 in every channel, or by more in at most
-  0.01 % of the pixels; the spring tails), `storyboard/opened`, `storyboard/no-playback`,
-  `storyboard/loop` (read from `end.match_first_frame` in `feel.json`: the last frame differs from
-  the first by at most 1/255 in every channel; `storyboard.loop` in the manifest records the count) and `hero-pool` (fail closed: every hero page the film SHOWED, read from the app's event log
-  (`home: hero page slot N rk=R`, one line per page turn, plus the pinned page), is in the
-  hero-report pass set and not `not_in_video`; `render.json` records them under `hero_pool`).
-  A page push or pop dips through about three flat frames of the backdrop between the outgoing fade
-  and the incoming one: that is the app's own page transition, not a hold. The AV1 encodes use CRF 22 with a keyframe every 8 s (`AV1_CODEC`; the 720p one every 12 s,
-  `AV1_720_GOP`, to stay under the 1.25x size limit). They were re-tuned for HEADROOM
-  after the first Linux render read min VMAF 79.69 against the 80.0 floor on the 1080p one (macOS 80.10, at CRF 28 / 2 s; the 720p one, at CRF 25 / 4 s, read SSIM min 0.9709
-  against 0.97): the macOS preview then read VMAF min 84.5 and 85.3, SSIM min 0.9796
-  and 0.9746; the committed Linux film's own numbers are the `vmaf/*` and `ssim/*` gates in `site/media/feel.manifest.json`. The floors did not move; a lower CRF is paid for by the longer GOP, never by a looser gate. The H.264 encodes declare the lowest level
-  their picture needs (`H264_LEVELS`: 720p60 High@3.2 with 5 refs, 1080p60 High@4.2 with 4), because x264's veryslow preset
-  uses 16 reference frames and left to itself writes High@5.0 / High@5.1, which several phone decoders refuse and which is the
-  fallback path where AV1 is missing. Measured on the macOS master: the capped files are 1.2 % and 0.8 % larger and read the
-  same quality (VMAF mean 97.10 / 97.10, min 89.34 / 89.96 against the floors 93 / 80; SSIM min 0.9857 / 0.9853 against 0.97).
-  `adopt --write` rewrites the `codecs=` strings of `site/index.html` from the adopted files' boxes, so the page follows
-  the files. The SSIM and VMAF gates pair frames by index in ONE time base
-  (`BY_INDEX`, `settb=1/60,setpts=N`): pairing in each file's own time base rounded two frames of
-  this film onto their neighbours and read them as SSIM 0.66 and VMAF 0.
-  A page pushed in a dump is never a held image: the dip re-captures it every frame and it is live the
-  frame the dip ends (`PageImage::step_filmed`), so the Library's cards pop and its focused caption
-  fade in under the dip, with no cut at the end of it.
-- `make test` — `deploy` then `run` (the normal iteration command).
-- `make kill` — close the app on the TV.
+- **The daily build-time series and the site demo video (upstream, retired).** The
+  `build-bench.yml`, `ci-metrics.yml`, `site-video.yml` and `pages.yml` workflows were removed
+  in this fork, along with the `ci-metrics`-branch charts and the automatic film/stills refresh.
+  The local tools remain: `make build-bench` (above) is still the benchmark a build-affecting
+  change uses, and `tools/site_video.py` / `tools/site_stills.py` still render on demand. Nothing
+  in the fork's release path (`tools/cut-release.sh` -> `build-ipk.yml`) touches the site.
 - **`make SYMBOLS=1 symbols`** — build with DWARF and split it into **`pkg/plxnative.debug`**, the
   file that turns an address in a stranger's crash report into a source line. The binary users get
   is stripped, so the only thing that can pair the two is the **GNU build id** — an allocated note
@@ -774,14 +569,11 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   the recipe (its module doc names the three ways a Mac bundle silently ships broken);
   `docs/macos-app.md` is the design note, and `docs/macos-app-readme.md` is what ships beside the
   zip for the recipient.
-- **`FLAVOR`** selects **WHICH INSTALL** every TV-facing target talks to. Three builds live on one
-  television: `stable` (`com.beb.plxnative` — the app users install, the id in every release,
-  manifest and channel listing), `debug` (`com.beb.plxnative.debug` — the day-to-day developer
-  build beside it, with its own launcher tile, its own sign-in and its own runtime root), and
-  `nightly` (`com.beb.plxnative.nightly` — a third install beside both, tile "PlxNative Nightly",
-  own sign-in, own runtime root, but ALWAYS a `RELEASE=1` build — `release-guard` refuses one
-  without it, with no `ALLOW_DEV_ON_STABLE`-shaped hatch, because nightly ships no dev-trigger
-  surface ever).
+- **`FLAVOR`** selects **WHICH INSTALL** every TV-facing target talks to. This fork has two:
+  `stable` (`com.nuvionative.app` — the app users install, the id in every release) and `debug`
+  (`com.nuvionative.app.debug` — the day-to-day developer build beside it, with its own launcher
+  tile, its own sign-in and its own runtime root). The upstream nightly *workflow* was retired; the
+  `nightly` flavour still exists in the build for local use.
   **`FLAVOR ?= debug` in the tracked Makefile, and `stable`/`nightly` have to be TYPED.** That
   asymmetry is the safety argument, not a preference: every command in this repo's muscle memory is
   spelled `make deploy` / `make run` / `./tests/run.py` with no flavour, and each one used to
@@ -1250,6 +1042,7 @@ every thin back-edge with `file:line` (the work list for breaking it up); `--dot
   2026-08-29**: the note is the body CI publishes, written for a television owner and deliberately
   short; the audit is the evidence (package facts, hashes, `DT_NEEDED`, payload inventory,
   provenance, firmware matrix, LGPL position), whose measurable half `ci/gen-release-audit.py`
+
   READS OUT OF THE .ipk during the release run rather than anyone typing it. Each directory carries
   its own standard as a README, and `ci/check-package.py` gates both documents — including, for
   notes, that prose is NOT hard-wrapped and every link is absolute, because a release body is
@@ -1258,10 +1051,9 @@ every thin back-edge with `file:line` (the work list for breaking it up); `--dot
 - `docs/install-and-verify.md` — the invariant half a release note used to repeat every time:
   which asset is which, both install routes and why the Homebrew Channel wins, how to check the
   sha256 per platform, and what the app writes, reads and reaches on your television.
-- `site/` — the landing page (`index.html`/`styles.css`/`site.js`/`CNAME`); `.github/workflows/
-  pages.yml` stages its screenshots, logo and fonts from their existing README/app locations
-  rather than copying them into `site/`. The close-up stills `site/media/closeup-*.jpg` and the
-  link-preview card `site/media/og-card.jpg` are `make screenshots` outputs (the page shows `closeup-glass` and `closeup-tiles` in its Features look panels; phones crop the wide `closeup-glass` rather than use `closeup-glass-narrow`; `closeup-player` and the narrow glass cut are no longer referenced, though still rendered and staged; the page's four app screenshots are `docs/screenshots/{home,library,search,player}.jpg`, staged by `pages.yml`) (`ui-sim` skill,
+- `site/` — upstream's landing page (`index.html`/`styles.css`/`site.js`/`CNAME`). This fork does
+  not deploy it; the `pages.yml` and `site-video.yml` workflows were retired. The close-up stills `site/media/closeup-*.jpg` and the
+  link-preview card `site/media/og-card.jpg` are `make screenshots` outputs (the page shows `closeup-glass` and `closeup-tiles` in its Features look panels; phones crop the wide `closeup-glass` rather than use `closeup-glass-narrow`; `closeup-player` and the narrow glass cut are no longer referenced, though still rendered and staged; the page's four app screenshots are `docs/screenshots/{home,library,search,player}.jpg`) (`ui-sim` skill,
   "Documentation screenshots"): the card is `site/og/card.html` (not deployed) rendered around
   the home figure by `tools/render-og-card.sh`; re-render after editing the card. Their WebP and
   phone (`-narrow`) copies come from those JPEGs through `tools/render-site-variants.py`, and the
@@ -1640,7 +1432,7 @@ every thin back-edge with `file:line` (the work list for breaking it up); `--dot
   access.
 
   ```text
-  identity schema=1 seq=2 app_id=com.beb.plxnative flavour=stable version=0.6.0 uid=6303 euid=6303 gid=5000 egid=5000
+  identity schema=1 seq=2 app_id=com.nuvionative.app flavour=stable version=0.6.0 uid=6303 euid=6303 gid=5000 egid=5000
   groups values=29,44,505,509,777,5000 errno=0 truncated=false
   dir label=tmp uid=0 gid=0 mode=1777 readonly=false open_errno=0 stat_errno=0 mount_errno=0 create_errno=0 write_errno=0 close_errno=0 unlink_errno=0
   dir label=runtime uid=6303 gid=5000 mode=0700 readonly=false open_errno=0 stat_errno=0 mount_errno=0 create_errno=0 write_errno=0 close_errno=0 unlink_errno=0
@@ -2266,7 +2058,7 @@ path. Never run only this one before a release. `tests/README.md` has the tier t
   lists the ones worth knowing by name. **The ROOT moved for flavoured installs and ONLY for
   them:** the stable install keeps `/tmp` byte for byte, so every `/tmp/plxnative-*` path written
   out below stays literally true for the app users get, while a flavoured install puts the SAME
-  names under `/tmp/<app id>` (`/tmp/com.beb.plxnative.debug/plxnative-library`). Nothing was
+  names under `/tmp/<app id>` (`/tmp/com.nuvionative.app.debug/plxnative-library`). Nothing was
   renamed — not the ~40 triggers, not the `plxnative-remote` FIFO, not the runtime logs, not
   `dev::DIAG`; only the directory they sit in. `make -s print-rundir FLAVOR=<f>` is how a tool asks
   rather than restating the rule, and the root is created **1777, mkdir THEN an explicit chmod**
@@ -2531,7 +2323,8 @@ path. Never run only this one before a release. `tests/README.md` has the tier t
   lives only as a GitHub secret. A RELEASE build does carry two **write-only ingest credentials**
   (`PLX_SENTRY_DSN`, `PLX_POSTHOG_KEY`, compiled in via `option_env!`): they permit sending to a
   project and reading nothing from it, `strings` finds them, `ci/gen-release-audit.py` prints them
-  into the audit on purpose, and `release.yml` REFUSES to publish without them. The distinction is
+  into an audit, but the fork's release path (`tools/cut-release.sh` + `build-ipk.yml`) does not
+  require one. The distinction is
   the point, and this line read "NO credentials" flatly — which stops a reader before they reach
   it. A build with no credential compiled in cannot report at all, which is the guarantee that
   replaced the cargo feature that used to claim it. PMS access comes

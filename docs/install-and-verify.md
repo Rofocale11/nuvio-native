@@ -1,5 +1,9 @@
 # Install Plex on LG webOS TV with PlxNative
 
+> **FORK NOTE.** This page describes upstream PlxNative. This fork (`com.nuvionative.app`) has no
+> published release yet; `build-ipk.yml` builds the `.ipk` and `tools/cut-release.sh` is the release
+> procedure. Treat the PlxNative/Homebrew-Channel links below as upstream references.
+
 PlxNative is an unofficial, open-source Plex app for LG webOS TVs. It is not yet available in the LG Content Store, but you can install it on a regular LG webOS TV using LG's Developer Mode and a computer. **No root is required.** If something goes wrong, see [troubleshooting](troubleshooting.md).
 
 ## Already have Homebrew Channel?

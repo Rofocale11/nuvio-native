@@ -1,5 +1,8 @@
 # Release audits: the standard
 
+> **This fork retired the upstream release workflow.** The standard below describes the archived
+> audits, not the current release path (`tools/cut-release.sh` -> `build-ipk.yml`).
+
 A release of this app is **a claim made to strangers about an unsigned binary** they are about to install on a television. The notes assert a hash and a compatibility range; the channel manifest asserts a size; the `.ipk` asserts what it contains. Anyone can check all of it, and when one of those claims is wrong there is no update mechanism to correct it.
 
 `docs/release-notes/vX.Y.Z.md` is what the television owner reads. **This directory is where the claim is actually made good.** One audit per release, `docs/release-audits/vX.Y.Z.md`, holding the evidence: what was built, from what, by whom, containing what, verified how.

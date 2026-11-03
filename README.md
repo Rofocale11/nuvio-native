@@ -1,14 +1,21 @@
 # Nuvio Native
 
 A native LG webOS client for Stremio/Nuvio addons, maintained by [Chris](https://github.com/current).
-This is a fork of [PlxNative](https://github.com/GLinnik21/plx-native); its upstream authors and GPL license are retained.
+This is a fork of [RichiL10/plx-native](https://github.com/RichiL10/plx-native), itself based on
+[PlxNative](https://github.com/GLinnik21/plx-native); the upstream authors' work and the GPL
+license are retained.
 
 See [architecture](docs/nuvio/ARCHITECTURE.md), [ID management](docs/nuvio/ID-MANAGEMENT.md),
 [TMDB enrichment](docs/nuvio/TMDB.md), [playback](docs/nuvio/PLAYBACK.md) and
 [watch progress](docs/nuvio/WATCH-PROGRESS.md) for this fork's design, build and TV instructions.
 The native debug and stable app IDs are `com.nuvionative.app.debug` and `com.nuvionative.app`.
 
-The following documentation describes the upstream Plex client and may not apply to the Nuvio addon backend.
+**Release status (this fork):** no release is published yet. `build-ipk.yml` builds the `.ipk` on
+demand or on a `v*` tag, and `tools/cut-release.sh` is the release procedure. Use the fork app id
+`com.nuvionative.app` (`com.nuvionative.app.debug` for debug builds).
+
+The following documentation describes the upstream Plex client and may not apply to the Nuvio addon
+backend.
 
 ## Upstream PlxNative
 
@@ -132,7 +139,7 @@ remove that requirement. The guide explains [how to renew the session](docs/inst
 For manual `.ipk` downloads, [verify the release checksum](docs/install-and-verify.md#verifying-the-package)
 before installing. Homebrew Channel verifies catalogue downloads for you.
 
-## Nightly builds
+## Nightly builds (upstream, historical)
 
 Every day `main` moves, CI cuts a nightly `.ipk` from wherever it stands. It installs beside the
 regular app as **"PlxNative Nightly"** — its own tile, its own sign-in — so trying it never touches
@@ -152,7 +159,7 @@ it with Dev Manager; a package installed that way does not update itself.
 release does, but nobody has watched it play. Each nightly is deleted 30 days after it is
 published, so link to a specific `.ipk` at your own risk.
 
-## Release candidates
+## Release candidates (upstream, historical)
 
 Before a release, CI may publish a release candidate as a
 [prerelease](https://github.com/GLinnik21/plx-native/releases?q=rc) named like `PlxNative 0.8.0-rc.1`.

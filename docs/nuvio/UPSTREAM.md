@@ -6,26 +6,37 @@ This repository is the product of three codebases, and confusing them is the sin
 to reason wrong about it. Read this before deciding whether an upstream change can be taken.
 
 ```
-GLinnik21/plx-native      origin: UI, GPU render path, Starfish/ACB, device portability
+GLinnik21/plx-native          the original project: UI, GPU render path, Starfish/ACB,
+        │                     device portability
+        ▼
+RichiL10/plx-native           the HQ fork this repository builds on: in-app AC3 encode
+        │                     lane, Dolby Vision P7→8.1, routing, subtitles
         │
         ▼
-  release 0.8.0  acca94a4 — the lineage fork point: both HQ lines branch here
+   release 0.8.0  acca94a4 — the common ancestor: both HQ lines branch here
         │
-        ├── feature/v0.8-hq ───────────────► THIS FORK (the trunk, the product)
-        │     AC3 encode lane, DV, route,       + DTS -> AC3 in the encode lane
-        │     subtitles.  tip 2026-10-12        + the Nuvio/Stremio backend:
-        │     no longer maintained                loopback PMS shim, addons,
-        │                                          account, watch progress
+        ├── feature/v0.8-hq ───────────────► THIS FORK (Rofocale11/nuvio-native)
+        │     tip 0c53dc41, 2026-10-12;        cut from that tip
+        │     no longer maintained             + DTS → AC3 in the encode lane
+        │                                      + the Nuvio/Stremio backend:
+        │                                        loopback PMS shim, addons,
+        │                                        account, watch progress
         │
         └── feature/v0.9-hq ───────────────► what this fork ABSORBS FROM
               the same HQ work, rebuilt        contains v0.9.0 and upstream/main
-              on top of 0.9.0                  still maintained.  tip 2026-11-01
+              on top of 0.9.0; maintained       tip 2026-11-01
 ```
 
-**The lineage fork point is not the current base.** Since the tier-C forward-port the trunk
-contains `d12e8659` (Package 11), so the computed merge-base with `v0.9-hq` is now that commit.
-`acca94a4` is where the two HQ lines diverged; `d12e8659` is where this fork re-joined the
-reference line. For any "what is left" question, use the computed base (below), not the diagram.
+**The direct upstream is RichiL10/plx-native, not GLinnik21/plx-native.** The `upstream` git
+remote is RichiL10/plx-native; that repository is itself based on `GLinnik21/plx-native`, the
+original project. This fork was cut from RichiL10's `feature/v0.8-hq` tip `0c53dc41` (2026-10-12),
+not from the 0.8.0 release. `acca94a4` is where the two HQ lines diverge, and it is the common
+ancestor used for distance measurements, not the branch this fork was cut from.
+
+**The fork point is not the current base.** Since the tier-C forward-port the trunk contains
+`d12e8659` (Package 11), so the computed merge-base with `v0.9-hq` is now that commit. `0c53dc41`
+is where this fork was cut; `d12e8659` is where it re-joined the reference line. For any "what is
+left" question, use the computed base (below), not the diagram.
 
 **`v0.8-hq` and `v0.9-hq` are siblings, not parent and child.** Neither contains the other: both
 branch from `0.8.0`, and Richi rebuilt the HQ work on top of the 0.9.0 release rather than
@@ -43,24 +54,25 @@ Two consequences worth knowing before touching any of this:
   difference, so this fork's DTS delta reapplies against essentially unchanged code. The tier-A
   merge is cheap exactly where the fork cares most.
 
-`feature/v0.8-hq` is spent — its tip is 2026-10-12 and nothing after it exists. It is the fork
-point, not a line to follow.
+`feature/v0.8-hq` is spent — its tip is `0c53dc41` (2026-10-12) and nothing after it exists. It
+is the branch this fork was cut from, not a line to follow.
 
 The fork's own additions (the right-hand annotation) exist nowhere upstream. And the
-HQ branch is why this fork exists at all: PlxNative could not transcode DTS or TrueHD on the TV's
-CPU, and Richi's fork added that.
+HQ line is why this fork exists at all: PlxNative could not transcode DTS or TrueHD on the TV's
+CPU, and RichiL10/plx-native added that.
 
 ## The reference branch is `upstream/feature/v0.9-hq`
 
 "The reference branch" means **what this fork absorbs work from**, which is not the same as the
-branch it was **cut from**. The fork point is `feature/v0.8-hq`; the target is `feature/v0.9-hq`,
+branch it was **cut from**. The fork point is RichiL10/plx-native's `feature/v0.8-hq` (tip
+`0c53dc41`); the target is `feature/v0.9-hq`,
 because `v0.8-hq` stopped on 2026-10-12 while `v0.9-hq` is still being maintained and carries the
 0.9.0 release on top of the same HQ work.
 
 Not `upstream/main`. Richi's HQ branch **contains** it (verified: the `upstream/main` head
 `0b0b2209` is an ancestor of `feature/v0.9-hq`, as is the `v0.9.0` release), so it is a superset
 of the origin project's line plus the audio/DV/routing fork. Measuring against `upstream/main`
-therefore *understates* what is available — from the lineage fork point `acca94a4`, `upstream/main`
+therefore *understates* what is available — from the common ancestor `acca94a4`, `upstream/main`
 has 268 commits and the HQ branch 526 (both measured 2026-11-02); against today's computed base
 the HQ line alone is 166 commits ahead — and it points at files the HQ branch has already moved
 past.
@@ -73,14 +85,16 @@ the package-12 merge (`fb05279e`) but has three commits the tip does not.
 The base is the **merge-base of the trunk with the reference branch**, computed and never
 remembered:
 
+<!-- BEGIN docs-fresh:base-stats -->
 | | |
 |---|---|
 | reference | `upstream/feature/v0.9-hq` (`c2138acb`, 2026-11-01) |
-| merge-base with `nuvio-native` and `forward-port/v0.9-hq` | `d12e8659` — Package 11, 2026-10-22 |
-| commits on our side since the base | 211 |
+| merge-base with `nuvio-native` and `forward-port/v0.9-hq` | `d12e8659` — Package 11: adapt four tests to the fork after the 0.9.0 merge, 2026-10-22 |
+| commits on our side since the base | 228 |
 | commits on the reference side since the base | 166 |
 
-(Measured 2026-11-02; `drift` is the authority when this drifts.)
+(Generated by `tools/ai-docs-refresh.sh`; `drift` is the authority when this drifts.)
+<!-- END docs-fresh:base-stats -->
 
 ## What this fork adds on top of Richi's branch
 
@@ -100,19 +114,22 @@ Two deltas, of very different size and very different merge cost:
 
 ## What taking upstream work costs
 
-Measured against the base on 2026-11-02. These numbers drift; `tools/upstream-seam.sh` recomputes
-them, and the command is right when this file disagrees.
+Measured against the base. These numbers drift; `tools/ai-docs-refresh.sh` rewrites them, and the
+command is right when this file disagrees.
 
+<!-- BEGIN docs-fresh:cost-stats -->
 | | |
 |---|---|
-| files this fork changed | 423 |
+| files this fork changed | 437 |
 | files the reference branch changed | 875 |
-| **contested** — changed on **both** sides | 226 |
+| **contested** — changed on **both** sides | 230 |
 | of those, under `rust-modules/screens` or `rust-modules/media` | 39 |
-| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 180 |
-| upstream-owned source **added** (the fork's own crates) | 33 |
+| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 181 |
+| upstream-owned source **added** (the fork's own crates) | 34 |
+<!-- END docs-fresh:cost-stats -->
 
-Added files cannot conflict: they did not exist upstream. The 180 edited files are the seam, and
+Added files cannot conflict: they did not exist upstream. The
+<!-- docs-fresh:edited -->181<!-- /docs-fresh:edited --> edited files are the seam, and
 it is concentrated where the Plex coupling had to be cut — `screens`, `media`, `appkit`, `plex`,
 `platform`, `data`, `src`. Two entries in the raw churn are not hand-written code and are tagged as
 such by the script: `js-service/server.js` (~102k lines, vendored Stremio server) and
@@ -123,9 +140,9 @@ such by the script: `js-service/server.js` (~102k lines, vendored Stremio server
 **Richi's HQ line is the source of everything: origin work, audio, Dolby Vision, routing. The
 Nuvio backend is ours. There is no third kind of change.**
 
-- A fix that touches the player, decoder, route or UI: take it **from `feature/v0.9-hq`**, against
-  `upstream/main`. If it is one commit and its files are absent from `contested`, cherry-pick it
-  (`git cherry-pick -x`).
+- A fix that touches the player, decoder, route or UI: take it **from `feature/v0.9-hq`**, not
+  `upstream/main` (the HQ branch contains it). If it is one commit and its files are absent from
+  `contested`, cherry-pick it (`git cherry-pick -x`).
 - A fix that touches the **data boundary** — anything that assumes a PMS answered — is a
   re-implementation in the shim's terms, not a pick. Reusing an upstream code path the fork no
   longer runs is debt; matching the behaviour is the goal.
@@ -136,8 +153,10 @@ Nuvio backend is ours. There is no third kind of change.**
 - **Never** resolve a conflict by deleting fork behaviour to match upstream. If the only way to
   take a fix is to restore a PMS assumption, the fix does not apply here.
 - Verify at the tier the change can reach (`which-tier`): host tests for addon/shim code,
-  captures for UI, the television for playback. 39 of the 226 contested files are
-  `screens`/`media` (2026-11-02), so a pick there is a UI or playback change.
+  captures for UI, the television for playback.
+  <!-- docs-fresh:contested-screens -->39<!-- /docs-fresh:contested-screens --> of the
+  <!-- docs-fresh:contested -->230<!-- /docs-fresh:contested --> contested files are
+  `screens`/`media`, so a pick there is a UI or playback change.
 
 ### Taking a fix, in order
 
@@ -514,12 +533,12 @@ already has as `1bcf30b2`. Taking it would replace working code with its twin.
 
 | branch | what it is |
 |---|---|
-| `nuvio-native` | **the trunk.** This is the product. Feature branches merge into it. It carries tier C and the `forward-port/v0.9-hq` line through `541a5ad9` (the 2026-11-02 fast-forward). Three commits are deliberately left on the working line — `1443fc03` (the two follow-ups), `66375ded` (branch-topology docs) and `7e79e57e` (the poster cap) — so the trunk is three commits behind it. |
+| `nuvio-native` | **the trunk, the product, and the GitHub default branch.** Feature branches merge into it. It carries tier C and the `forward-port/v0.9-hq` line through `541a5ad9` (the 2026-11-02 fast-forward). The working line is <!-- docs-fresh:ahead -->20<!-- /docs-fresh:ahead --> commits ahead of it; run `git log --oneline nuvio-native..forward-port/v0.9-hq` for the list. |
 | `origin/nuvio-native` | the pushed trunk. |
 | `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the working line (`forward-port/v0.9-hq`, or the trunk) so an experiment cannot break it. May lag. |
 | `main` | **not this project.** It holds upstream-side history and none of the fork's commits. Never cut work from it; never build or ship it. |
 | `upstream/feature/v0.9-hq` | Richi's HQ line — the reference for upstream work. Read-only. |
-| `forward-port/v0.9-hq` | **the working line since 2026-11-02** (the owner directed new work here): the A+B merge (`656e0cb2`), tier C on top (`5297c0aa`), the port fixes, the actor page (`1f692378`), the two follow-ups (`1443fc03`), the branch-topology docs (`66375ded`) and the poster cap (`7e79e57e`). Fast-forwarded into `nuvio-native` at `541a5ad9`; now three commits ahead of the trunk. Still the line the stable `.ipk` is built from. |
+| `forward-port/v0.9-hq` | **the working line since 2026-11-02** (the owner directed new work here): the A+B merge (`656e0cb2`), tier C on top (`5297c0aa`), the port fixes, the actor page (`1f692378`), the two follow-ups (`1443fc03`), the branch-topology docs (`66375ded`) and the poster cap (`7e79e57e`). Fast-forwarded into `nuvio-native` at `541a5ad9`; now <!-- docs-fresh:ahead -->20<!-- /docs-fresh:ahead --> commits ahead of the trunk. Still the line the stable `.ipk` is built from. |
 | ~~`tier-c/ui`~~ | tier C ported on top of the A+B merge (`741def78`), plus the port fixes through `f41d84a5`. Merged into `forward-port/v0.9-hq` and verified on the television on 2026-11-02, then **deleted** (local and `origin`) on 2026-11-02. `f41d84a5` stays in `forward-port/v0.9-hq`'s history. |
 
 The p11 merge attempts are gone too: `nuvio-native-p11-merge` (a failed merge attempt, deleted
@@ -532,8 +551,8 @@ Other `origin/*` branches — `ci-metrics`, `drvitality-stremio`, `plx-stremio`,
 `test123` and `bug`). **None is merged into the working line and none is maintained.** Do not cut
 from them, build them, or treat them as a source of fixes.
 
-Merge commits into `nuvio-native` are normal here. `AGENTS.md`'s inherited "`main` takes SQUASH
-merges only" is the origin project's policy, not this repository's.
+Merge commits into `nuvio-native` are normal here. The origin project's "`main` takes squash
+merges only" policy is not this repository's.
 
 ## What would change this policy
 
@@ -657,8 +676,8 @@ double-publish and is not this work.
 the tier-C port was cut from) to `c2138acb` (Package 13, 2026-11-01). The new span is **166
 commits / 875 files**; against the base the fork and the reference now change **585 / 1581**
 files with **484 contested**. *(Measured before tier C merged into the trunk. After the merge the
-computed base is `d12e8659`, and the current figures are 211 / 166 commits, 423 / 875 files,
-**226 contested** — `drift` and `contested` are the authority; the 484 is pre-merge history.)* The tier-C branch already contains `d12e8659`, so this is not
+computed base is `d12e8659`; the live figures are the generated table under "What taking upstream
+work costs", and `drift`/`contested` are the authority. The 484 is pre-merge history.)* The tier-C branch already contains `d12e8659`, so this is not
 "merge and resolve": taking it is a port against the already-ported UI. Measured with
 `git merge-tree --write-tree f41d84a5 upstream/feature/v0.9-hq` (the tier-c/ui tip, since
 deleted), it is **87 conflicted files**

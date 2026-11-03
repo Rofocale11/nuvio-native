@@ -9,16 +9,24 @@
 # That is a deliberate, structural divergence, and it means the origin project is NOT a branch this
 # fork can merge wholesale. The policy that follows from that lives in docs/nuvio/UPSTREAM.md.
 #
-# This fork has THREE lineages, and the default ref is the middle one, not `upstream/main`:
+# This fork has THREE repositories in its lineage, and the default ref is the HQ fork's maintained
+# branch, not `upstream/main`:
 #
-#   GLinnik21/plx-native  ->  RichiL10/plx-native feature/v0.9-hq  ->  this fork
-#   (origin: UI, GPU,         (HQ fork: the in-app AC3 encode lane,      (DTS->AC3, plus the
-#    Starfish/ACB, devices)    DV P7->8.1, routing, subtitles)           Nuvio/Stremio shim)
+#   GLinnik21/plx-native  ->  RichiL10/plx-native  ->  this fork
+#   (origin: UI, GPU,         (HQ fork this fork       (DTS->AC3 in the encode lane,
+#    Starfish/ACB, devices)    was cut from: the         plus the Nuvio/Stremio shim)
+#                             in-app AC3 encode lane,
+#                             DV P7->8.1, routing,
+#                             subtitles)
+#
+# The fork was cut from RichiL10's `feature/v0.8-hq` (tip 0c53dc41, 2026-10-12). The branch it
+# ABSORBS work from is `feature/v0.9-hq` — the same HQ work rebuilt on 0.9.0 and still maintained.
 #
 # `feature/v0.9-hq` CONTAINS `upstream/main` — origin's main and the v0.9.0 release are ancestors
 # of it — so it is a superset of both lineages, and measuring against `upstream/main` understates
-# what is available (268 commits there, 360 on the HQ branch). That is why the default is the HQ
-# branch; `--ref upstream/main` still works, and is a good way to see why it is the wrong one.
+# what is available (268 commits there, 526 on the HQ branch, both from the common ancestor
+# acca94a4). That is why the default is the HQ branch; `--ref upstream/main` still works, and is a
+# good way to see why it is the wrong one.
 #
 # The problem this script solves is smaller but it is the one that actually bites: nobody knows
 # WHICH files are the seam. Without that list, every upstream fix is a coin flip — is it a
@@ -31,11 +39,11 @@
 # WHY THE BASE IS COMPUTED AND NOT PINNED
 # ---------------------------------------
 # AGENTS.md used to name `4e454ea` as the fork's base. It is not: that commit is an UPSTREAM commit
-# dated 2026-10-11 that this fork's history does not contain, so diffing against it silently
-# reports upstream's own later work as though it were ours. The only defensible base is the
-# merge-base with the upstream ref, which git computes. `check` compares that against the base
-# recorded in docs/nuvio/UPSTREAM.md and says when the two disagree — which is the moment someone
-# needs to decide whether the fork just moved or the document went stale.
+# dated 2026-10-11 (VP9 direct-play) that the forward-port has since brought into this history, so
+# diffing against it silently reports upstream's own later work as though it were ours. The only
+# defensible base is the merge-base with the upstream ref, which git computes. `check` compares
+# that against the base recorded in docs/nuvio/UPSTREAM.md and says when the two disagree — which
+# is the moment someone needs to decide whether the fork just moved or the document went stale.
 #
 # SUBCOMMANDS
 # -----------

@@ -1,5 +1,8 @@
 # Release notes: the standard
 
+> **This fork retired the upstream release workflow.** The standard below describes the archived
+> notes, not the current release path (`tools/cut-release.sh` -> `build-ipk.yml`).
+
 A release note is what a television owner reads when their Homebrew Channel offers them an update. It is not the record of what was built, verified and shipped — that is [`docs/release-audits/`](../release-audits/README.md), and the split between the two is the point of this standard.
 
 **This is binding for the note's content**, and parts of it are enforced by `ci/check-package.py` rather than by review. Every note is committed to this directory as `docs/release-notes/vX.Y.Z.md` before the release is published; `.github/workflows/release.yml` publishes that file as the release body.

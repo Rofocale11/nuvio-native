@@ -103,14 +103,6 @@ python3 ci/test_libass_fetch.py
 # it would be too late to learn otherwise. It also cross-checks the three copies of the app id
 # (here, ci/flavor.py, rust-modules/base/src/paths.rs), which no compiler can.
 python3 ci/flavor.py --selftest
-# The nightly workflow's pure logic (version/label/tag arithmetic, the skip decision, the
-# release-note template, and the latest.json/prune field mapping) — no git repository, no
-# network, so a broken `ci/nightly.py` is caught here rather than at 03:00 UTC in the
-# scheduled run nobody is watching.
-python3 ci/nightly.py --selftest
-# The release-candidate workflow's pure logic (numbering, the version/line rule it shares
-# with release.yml, the prerelease body) — same reason: a candidate is cut by hand, rarely.
-python3 ci/rc.py --selftest
 # The issue labeler's pure logic (.github/workflows/issue-labels.yml): what survives a model
 # answer, the keyword fallback, `user-report` from the author's association. No network.
 python3 ci/label-issue.py --selftest
@@ -326,3 +318,6 @@ python3 ci/test_disk_preflight.py
 # self-test runs on synthetic trees in a private temp dir and fails if the gate line above it is dropped.
 python3 ci/test_check_ffi_symbols.py
 python3 ci/check-ffi-symbols.py
+# The derived branch/commit/file counts in AGENTS.md and docs/nuvio/UPSTREAM.md: read-only, exits 1
+# when a marked number no longer matches git. `tools/ai-docs-refresh.sh` (no argument) rewrites them.
+./tools/ai-docs-refresh.sh check

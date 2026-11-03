@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GITHUB = ROOT / ".github"
-# Generous ceiling: the largest limit in use is 50 minutes (the macOS simulator).
+# Generous ceiling: the largest limit in use is 60 minutes (the ARM release build).
 MAX_MINUTES = 120
 
 
@@ -104,9 +104,9 @@ class CiTimeouts(unittest.TestCase):
     def test_the_gates_see_something(self):
         # A parser that silently matched nothing would pass everything above.
         names = {f.name for f in yaml_files()}
-        self.assertTrue({"ci.yml", "simulators.yml", "build-package.yml", "action.yml"} <= names)
+        self.assertTrue({"ci.yml", "build-ipk.yml", "action.yml"} <= names)
         total = sum(len(re.findall(r"^    timeout-minutes:", f.read_text(), re.M)) for f in yaml_files())
-        self.assertGreaterEqual(total, 18)
+        self.assertGreaterEqual(total, 6)
 
 
 class CheckersGoRed(unittest.TestCase):
@@ -125,9 +125,9 @@ class CheckersGoRed(unittest.TestCase):
             self.assertEqual(len(job_problems("ci.yml", mutated)), 1, bad)
 
     def test_reusable_workflow_call_is_exempt(self):
-        text = (GITHUB / "workflows/nightly.yml").read_text()
-        self.assertIn("    uses: ./.github/workflows/build-package.yml", text)
-        self.assertEqual(job_problems("nightly.yml", text), [])
+        # A `uses:` job cannot carry timeout-minutes; GitHub rejects it. The checker must skip it.
+        text = "jobs:\n  call:\n    uses: ./.github/workflows/example.yml\n"
+        self.assertEqual(job_problems("example", text), [])
 
     def test_unwrapped_apt_update_is_caught(self):
         text = (GITHUB / "actions/apt-install/action.yml").read_text()

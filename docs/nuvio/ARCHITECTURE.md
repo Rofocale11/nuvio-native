@@ -1,8 +1,9 @@
 # NuvioNative architecture
 
-NuvioNative is a fork of PlxNative (GPL-3.0-or-later, upstream GLinnik21/plx-native@4e454ea) that
-browses and plays content from Stremio addons — the same addons a user configured in Nuvio — with
-PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
+NuvioNative is a fork of RichiL10/plx-native's `feature/v0.8-hq` branch, itself based on PlxNative
+(`GLinnik21/plx-native`, GPL-3.0-or-later); `UPSTREAM.md` records the computed base. It browses and
+plays content from Stremio addons — the same addons a user configured in Nuvio — with PlxNative's
+GPU-rendered UI and native Starfish/ACB video pipeline.
 
 Companion documents: `ID-MANAGEMENT.md` (numeric keys, the key table, synthetic keys),
 `TMDB.md` (detail enrichment, person pages, collections), `PLAYBACK.md` (the stream → decoder

@@ -3,6 +3,10 @@
 # Usage: ./tools/ai-sim.sh [make args...]
 # Builds with `make -j10 sim-linux`, then launches the sim binary with the
 # standard env vars. Extra args are forwarded to make.
+#
+# Needs a graphical session (WSLg/X11): the binary opens a real window and reads
+# DISPLAY from the calling shell. A non-interactive agent shell may have DISPLAY
+# unset even when the owner's desktop session has it.
 set -euo pipefail
 
 export PATH="$HOME/.cargo/bin:$PATH"

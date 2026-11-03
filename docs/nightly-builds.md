@@ -1,5 +1,8 @@
 # Nightly builds
 
+> **This fork has no nightly workflow.** The upstream nightly build was retired; this page is kept
+> as an upstream reference.
+
 A nightly is the newest PlxNative build from `main`, published on most days the code changes. It
 installs **beside** the regular app as **PlxNative Nightly** - its own launcher tile and its own
 sign-in - so trying it never touches the release you already trust.

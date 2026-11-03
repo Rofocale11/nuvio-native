@@ -25,8 +25,7 @@ SCRIPTS = [
     'ci/collect-source-inputs.py', 'ci/restore-source-inputs.py', 'ci/check-package.py', 'Makefile',
     '.github/actions/webos-ndk/action.yml', '.github/actions/host-rust/action.yml',
     'tools/fwcompat.py', 'rust-modules/build_support/host_link.rs',
-    '.github/workflows/ci.yml', '.github/workflows/build-package.yml',
-    '.github/workflows/simulators.yml', '.github/workflows/site-video.yml',
+    '.github/workflows/ci.yml', '.github/workflows/build-ipk.yml',
 ]
 SHA = re.compile(r'\b[0-9a-f]{64}\b')
 

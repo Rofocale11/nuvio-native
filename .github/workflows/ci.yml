@@ -8,9 +8,9 @@ name: CI
 # against the real television remains the only evidence for any of that.
 
 on:
-    # A maintenance line (`release/vX.Y`, cut from a tag for a patch release) is a trunk of its own
-    # for `release.yml`'s `line` input, so it gets the same push gate `main` does — otherwise the
-    # first time a hotfix's changes are compiled in a clean checkout is the release run itself.
+    # Inherited push filter. This fork's product branch is `nuvio-native` (excluded here) and its
+    # working line is `forward-port/v0.9-hq`; both are run by `workflow_dispatch` and by pull
+    # requests, and the release artifact is built separately by `build-ipk.yml` on a tag.
   push:
     branches:
       - main
@@ -53,8 +53,9 @@ on:
     # from this trigger defers it, it does not remove it. (This has always been true of the
     # `docs/**/*.md` and `site/**` excludes; it is written down here so the comment stays honest.)
     # Likewise `docs/release-notes/v*.md` and `docs/release-audits/v*.md` are linted by
-    # ci/check-package.py only for the STABLE flavour (release.yml and rc.yml); this workflow
-    # builds `FLAVOR=debug` (see the cross-build job), so they stay excluded.
+    # ci/check-package.py only for the STABLE flavour (the release artifact, built by
+    # build-ipk.yml); this workflow builds `FLAVOR=debug` (see the cross-build job), so they stay
+    # excluded.
     # There are no required status checks on `main` (branch protection allows merging without a
     # green run), so a run this filter skips can never wedge a PR waiting on it.
     paths: &ci_paths
@@ -83,9 +84,8 @@ on:
       # tools/test_ci_history.py (make check) reads the CI page's index.html and asserts that
       # milestones.json stays gone, so the whole directory is a trigger
       - 'site/ci/**'
-      # Site-build tooling: run only by pages.yml, which exercises it on every deploy. No gate
-      # here (make check, ci/, tests/) reads or imports these. NOT .github/workflows/pages.yml:
-      # ci/test_ci_timeouts.py reads every workflow file, so that one must stay a trigger.
+      # Site-build tooling: no gate here (make check, ci/, tests/) reads or imports these, and the
+      # upstream site workflows were retired in this fork.
       - '!tools/render-doc-page.py'
       - '!tools/subset-site-fonts.py'
       - '!tools/render-site-glows.py'
@@ -558,9 +558,8 @@ jobs:
         run: make RELEASE=1 WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}' -j"$(nproc)"
 
       - name: Package
-        # FORK (RichiL10): the user id (`com.beb.plxnative`, FLAVOR=stable) instead of the
-        # developer id, so the package installs OVER the regular PlxNative app. Upstream builds
-        # this configuration only in release.yml; `release-guard` accepts it because RELEASE=1.
+        # The release artifact is built by build-ipk.yml with FLAVOR=stable RELEASE=1; this job
+        # compiles the same configuration so a stable-only break is caught before a tag.
         run: make ipk FLAVOR=stable RELEASE=1 WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}'
 
       - name: Binary size budget

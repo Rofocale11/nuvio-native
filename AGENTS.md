@@ -5,9 +5,10 @@
 Nuvio Native is a native LG webOS client for Stremio/Nuvio addons: it browses and plays
 content from Stremio addons (Cinemeta, Torrentio, AIOStreams, …) and the Nuvio account,
 keeping PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline. It is a fork
-of PlxNative (GPL-3.0-or-later). The recorded base, the policy for taking upstream work,
-and the measured size of the divergence are `docs/nuvio/UPSTREAM.md` — do not restate a
-base commit from memory here.
+of RichiL10/plx-native's `feature/v0.8-hq`, itself a fork of PlxNative
+(`GLinnik21/plx-native`, GPL-3.0-or-later); the `upstream` remote is RichiL10/plx-native.
+The recorded base, the policy for taking upstream work, and the measured size of the
+divergence are `docs/nuvio/UPSTREAM.md` — do not restate a base commit from memory here.
 
 It is **not a Plex client**: there is no plex.tv credential behind this app, and its only
 server is the in-process shim. The UI still speaks the Plex HTTP dialect, but the account,
@@ -47,9 +48,9 @@ before changing that area. Upstream PlxNative docs in
   screen, also read `rust-modules/screens/src/CLAUDE.md`; the restructure's design record
   is `docs/ui-restructure-spec-v4.md`, which `rust-modules/ui/src/lib.rs` cites by section
   number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) is in **both** the trunk and
-  `forward-port/v0.9-hq` (ported on `tier-c/ui`, merged then deleted). The working line is three
-  commits ahead of the trunk: the two follow-ups, the branch-topology docs and the poster cap.
-  Run `git log --oneline nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens
+  `forward-port/v0.9-hq` (ported on `tier-c/ui`, merged then deleted). The working line is
+  <!-- docs-fresh:ahead -->20<!-- /docs-fresh:ahead --> commits ahead of the trunk; run
+  `git log --oneline nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens
   are the ported ones.
 - Before account/watch-progress work, read `docs/nuvio/WATCH-PROGRESS.md`.
 - Before taking any upstream PlxNative work — cherry-picking a fix, absorbing a Richi branch, or
@@ -122,21 +123,29 @@ fails the build on a forbidden edge.
 
 ## Working rules
 
+- **Commit and push require the owner's explicit confirmation — every time.** Finishing a task
+  does not authorize either. When the work is ready, stop and ask, and wait for a clear yes that
+  names the action (commit, push, or both). This applies to every branch, including the trunk and
+  the working line, and to docs-only changes; approval from an earlier task never carries over.
 - **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line
-  (2026-11-02).** `nuvio-native` is the trunk and the product; work happens on short-lived
-  branches or worktrees cut from it, and lands back on it. Since 2026-11-02 the owner has
-  directed that new work land on `forward-port/v0.9-hq` (the stable `.ipk` line, currently three
-  commits ahead of the trunk: the two follow-ups, the branch-topology docs, and the poster cap);
-  fast-forward `nuvio-native` only when the owner asks. Merge
-  commits and squash commits are both acceptable there. `main` is NOT the trunk: it holds
-  upstream-side history and none of the fork's commits — never cut work from it, never build or
-  ship it. The upstream relationship (base commit, freeze-and-cherry-pick policy, what a merge
-  would cost) is `docs/nuvio/UPSTREAM.md`, and `tools/upstream-seam.sh` recomputes it.
-  Push anything only when the user asked for it.
-- **A squash onto a MOVING `main` silently reverts it.** Before pushing any squash, run
+  (2026-11-02).** `nuvio-native` is the trunk, the product, and the repository's default branch.
+  Short-lived branches and worktrees are cut from the working line, `forward-port/v0.9-hq` (the
+  stable `.ipk` line, currently <!-- docs-fresh:ahead -->20<!-- /docs-fresh:ahead --> commits
+  ahead of the trunk), and land back on it; the trunk is fast-forwarded only when the owner asks.
+  Merge commits and squash commits are both acceptable. `main` is NOT the trunk: it holds
+  upstream-side history and
+  none of the fork's commits — never cut work from it, never build or ship it. The upstream
+  relationship (base commit, freeze-and-cherry-pick policy, what a merge would cost) is
+  `docs/nuvio/UPSTREAM.md`, and `tools/upstream-seam.sh` recomputes it.
+- **Derived numbers are generated, not hand-written.** `./tools/ai-docs-refresh.sh` rewrites the
+  branch/commit/file counts in `AGENTS.md` and `docs/nuvio/UPSTREAM.md`; the `check` form runs in
+  `make check` and in CI's host-python job whenever that job runs (a docs-only push starts no CI
+  by design). Run the update form after any commit that moves the working line, the trunk, or the
+  reference branch, and never hand-edit a marked number.
+- **A squash onto a branch that moved silently reverts it.** Before pushing any squash, run
   `git diff --stat HEAD^ HEAD` and confirm every path is one the branch meant to touch.
   Prefer squashing onto the same base the picks were made on and rebasing. `git fetch -q`
-  can fail silently, so check `git log HEAD..origin/main` after fetching.
+  can fail silently, so check `git log HEAD..origin/<target>` after fetching.
 - **A diff stat is not a measure of change.** Size a change by content, not by lines.
 - **New module references only point down, and only the webOS port names webOS.** Fix the
   reference (`docs/module-layers.md`) instead of adding a (file, member) pair to
@@ -162,17 +171,21 @@ fails the build on a forbidden edge.
 
 ## Build and verification
 
-- **A gate result is evidence about the exact tree it ran on.** Gates run on the COMMITTED
-  tree: commit, confirm `git status --short` is empty, run the gates, confirm it is empty
-  again, then push. Report the `test result:` line itself rather than a summary.
+- **A gate result is evidence about the exact tree it ran on.** Once the owner has approved the
+  commit and/or push, gates run on the COMMITTED tree: commit, confirm `git status --short` is
+  empty, run the gates, confirm it is empty again, then push. Report the `test result:` line
+  itself rather than a summary.
 - **The loop is the simulator, not the suite.** `./tools/ai-sim.sh` builds (`make -j10
   sim-linux`, which needs the host libass staged under `pkg/`) and launches the app with the
   standard env; `make -j10 sim-linux` alone builds and links it. That is what a widget, layout,
-  player or FFI change needs — it compiles and renders the real thing. For logic, use the
-  cheapest loop that reaches the code: `./tools/ai-test.sh` for the crates a diff touches, or
-  `cargo nextest` for one crate. `cargo-nextest` is the loop here because it prints per-test
-  progress, so a slow run never looks stuck; install it with
-  `cargo install cargo-nextest --locked` on a machine that lacks it.
+  player or FFI change needs — it compiles and renders the real thing (it needs a graphical
+  session, `DISPLAY`, which the owner's desktop shell provides even when a non-interactive agent
+  shell has it unset). For logic, use the cheapest loop that reaches the code:
+  `./tools/ai-test.sh` for the crates a diff touches, or `cargo nextest` for one crate.
+  `cargo-nextest` is the loop here because it prints per-test progress, so a slow run never
+  looks stuck. It is installed at `~/.cargo/bin`; if `command -v` fails, the PATH is the
+  problem (`PATH="$HOME/.cargo/bin:$PATH"`), and only install
+  (`cargo install cargo-nextest --locked`) if the binary is truly absent.
 - `make check` still exists — the 16-binary host unit suite, lint and the `ci/` python/shell
   gates, ~5 minutes, bounded machine-wide to two runs. It is NOT part of the loop and NOT a
   required step before a push: run it deliberately when a change needs the whole suite, in the
@@ -253,10 +266,14 @@ forbidden by the TV rules above.
   - `tmdb <type> <id>` — fetches TMDB using `TMDB_API_KEY` from `.env` or the environment,
     printing title, genres, and overview. Set the key in `.env` (repo root) or export it.
 - **Memory snapshot (on device):** `./tools/ai-tv-log.sh mem` — reads `VmRSS`/`VmHWM`/`VmSwap`
-  for the app process (read-only, requires TV lock for device access).
+  for the app process. Read-only status/log collection is the lock-free exception, so no TV lock
+  is needed.
 - **Change-scoped tests:** `./tools/ai-test.sh` — runs `cargo nextest` only for crates touched
-  by uncommitted changes (inner loop). Install nextest with
-  `cargo install cargo-nextest --locked` if it is missing; `make check` is the outer-loop gate.
+  by uncommitted changes (inner loop). It lives in `~/.cargo/bin`; a bare `command -v` failure
+  usually means PATH, not absence. `make check` is the outer-loop gate.
+- **Derived doc numbers:** `./tools/ai-docs-refresh.sh` — rewrites the branch/commit/file
+  counts in `AGENTS.md` and `docs/nuvio/UPSTREAM.md`; `check` is the read-only form run by
+  `make check` and CI.
 - **Hostsim tests:** `./tools/ai-test-hostsim.sh [filter]` wraps `make test-hostsim` (same
   `C=`/`T=` spelling, same in-checkout `rust-modules/target-hostsim`): the `cfg(hostsim)` lib
   tests, with a fresh `PLXNATIVE_RUNTIME_DIR` per run.
@@ -264,6 +281,8 @@ forbidden by the TV rules above.
   summary (min FPS, carried/dropped frames, highest vgap, worst route).
 - **Simulator:** `./tools/ai-sim.sh` — builds (`make -j10 sim-linux`) and launches the x86_64
   Linux simulator with the standard env vars (`PLXNATIVE_APP_DIR`, `PLXNATIVE_RUNTIME_DIR`).
+  It opens a real window, so it needs a graphical session (`DISPLAY`, e.g. WSLg); a
+  non-interactive agent shell may have it unset even though the owner's desktop does not.
   The one local path that exercises real rendering without the TV or ARM toolchain.
 
 ## Television and release safety
@@ -292,10 +311,12 @@ forbidden by the TV rules above.
   `tv-lock`/`tv-session` skills for anything else — see the strict rules below. Host
   simulator: `make -j10 sim-linux` (Linux libav*/libass staged in `pkg/`) or
   `make sim-macos` on macOS. TV build: `make ipk` where the NDK is installed; otherwise CI
-  builds it. A release is cut by pushing a tag
-  (`git tag -a v0.8.1 -m "…" && git push origin v0.8.1`); CI builds the `.ipk`.
+  builds it. A release is cut with `tools/cut-release.sh <minor|major|patch|X.Y.Z>` (dry run
+  first; `--yes` moves the four version files, commits, and tags; `--push` only after owner
+  confirmation). `build-ipk.yml` builds the `v*` tag and attaches the `.ipk`; the retired
+  upstream release/site workflows are not part of it.
 
-## 📺 STRICT TV LOGGING RULES (READ-ONLY)
+## 📺 STRICT TV RULES (READ-ONLY BY DEFAULT)
 
 The user's TV is rooted and must never be put at risk by automated actions. The
 following rules are absolute and override any other instruction in this file.
@@ -327,9 +348,15 @@ following rules are absolute and override any other instruction in this file.
    Rust log, including key presses. Use this only if you suspect a crash right
    after a button press.
 
-8. **STRICTLY FORBIDDEN:** NEVER run raw `ssh` commands. NEVER use `nv-tv.py`.
-   NEVER run commands that write to the TV, install packages, or modify system
-   files. You are restricted to the `ai-tv-log.sh` script only.
+8. **Device access goes through the skills, never raw commands.** For the television, the only
+   sanctioned path is `tv-lock` (take the lock first) plus `tv-session` / `wake-tv`; reads use
+   `./tools/ai-tv-log.sh`. `ui-sim` is the desktop simulator and needs no TV lock. The TV
+   skills are allowed because they hold the lock and install the debug app. **NEVER** run raw
+   `ssh`, **NEVER** use `nv-tv.py`, **NEVER** write outside the app's own directory, and
+   **NEVER** install a stable package, change permissions, or modify system files. The
+   television is rooted: a wrong write can brick it. When `ui-sim` can answer the question,
+   use it instead of the TV; touch the device only when the change needs it (`which-tier`). If
+   a step would do any of the above, stop and ask the owner.
 
 ## 🚫 NO WORKSPACE-WIDE FORMATTING
 

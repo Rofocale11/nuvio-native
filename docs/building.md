@@ -1,4 +1,8 @@
-# Building PlxNative
+# Building Nuvio Native
+
+> This fork keeps the upstream build steps; the app ids are `com.nuvionative.app` and
+> `com.nuvionative.app.debug`. Releases are built by `build-ipk.yml`, not the retired upstream
+> release workflows.
 
 The build, the two installs, the device loop and the test tiers — everything a contributor needs
 that a television owner does not. The
@@ -26,7 +30,7 @@ Windows and needs no webOS NDK; run `tools/sim.ps1 setup` there.
 make setup-env                    # the NDK, and `make setup-rust`: the pinned toolchain, clippy, rustfmt, armv7 std
 brew install cmake sshpass        # or your distribution's equivalent
 make                              # builds pkg/plxnative — a developer build
-make ipk                          # pkg/com.beb.plxnative.debug_<version>_arm.ipk
+make ipk                          # pkg/com.nuvionative.app.debug_<version>_arm.ipk
 ```
 
 ## Disk, and the build cache
@@ -64,7 +68,7 @@ fresh clone gets its own prefix in seconds rather than minutes.
 ## Two flavours, and the default is the developer one
 
 That is why the filename above says `.debug`. The app can be installed twice on one television:
-`com.beb.plxnative`, the id in every release and what users install, and `com.beb.plxnative.debug`
+`com.nuvionative.app`, the id in every release and what users install, and `com.nuvionative.app.debug`
 beside it, with its own launcher tile, sign-in and log. `FLAVOR` chooses which one every TV-facing
 target talks to, and the checked-in default is `debug`.
 
@@ -73,7 +77,7 @@ command typed from muscle memory should be able to overwrite it. So the shippabl
 asked for by name:
 
 ```sh
-make FLAVOR=stable RELEASE=1 ipk   # pkg/com.beb.plxnative_<version>_arm.ipk — what a release publishes
+make FLAVOR=stable RELEASE=1 ipk   # pkg/com.nuvionative.app_<version>_arm.ipk — what a release publishes
 ```
 
 `make FLAVOR=stable ipk` on its own is refused: the stable id is release-only. Add
@@ -105,14 +109,8 @@ Several simulators run side by side, which the television cannot — prefer it f
 data-layer work. It **cannot** answer frame rate (different GPU), text rasterization, or anything
 about LG's decoder and video plane. Those need the set.
 
-`.github/workflows/simulators.yml` links and launches the Linux and macOS variants when shared
-simulator inputs change. Linux runs a 1920x1080 screenshot smoke test under Xvfb; macOS performs
-the same smoke test through its native window server. The Windows job parses `tools/sim.ps1` with
-Windows PowerShell 5.1 and PowerShell 7. Hosted Windows runners cannot boot WSLg, so Linux runtime
-coverage is the runtime half of the Windows/WSLg path until a native Windows binary exists.
-The workflow is path-filtered, so do not make `Simulator CI` a required status check: GitHub leaves
-a path-skipped required workflow pending. If it must become required, first move the path decision
-inside an always-started workflow and report one aggregate status.
+The upstream `simulators.yml` CI workflow was retired in this fork. Use `./tools/ai-sim.sh` locally
+(or the `ui-sim` skill) instead; it opens a real window and needs `DISPLAY`.
 
 ## Developing against a real TV
 
