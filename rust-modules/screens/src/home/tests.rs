@@ -5843,3 +5843,65 @@ fn a_caption_input_that_changes_under_a_kept_row_reaches_the_drawn_block() {
     assert_eq!(block(&remounted, &state, row, col), video);
     TEST_UNDER_POSTERS.with(|cell| cell.set(None));
 }
+
+/// The felt fix for the detail page's click cost: a card the focus rests on warms the shim's
+/// caches, one command per rest, with a move restarting the dwell.
+#[test]
+fn a_focused_card_warms_its_detail_once_it_rests() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 3, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let view = snapshot.view();
+    let mut s = screen(view);
+    let first = first_card(&s);
+    let second = FocusKey { entry: s.entry, elem: s.rows[0].elems[1] };
+    let key_at = |focus: FocusKey<u32>| {
+        let context = cx(view, Some(focus));
+        let item = s.focused_item(Some(focus), &context).unwrap();
+        (item.sid, item.rk.clone())
+    };
+    let first_key = key_at(first);
+    let second_key = key_at(second);
+    let warm = |out: &[Stamped<TestHost>]| -> Vec<(plx_plex::plex::ServerId, String)> {
+        out.iter()
+            .filter_map(|stamped| match &stamped.fx {
+                Fx::App(AppFx::Store(
+                    StoreId::Metadata,
+                    StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmDetail {
+                        sid,
+                        rk,
+                    }),
+                )) => Some((*sid, rk.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let frame = |s: &mut HomeScreen, focus: FocusKey<u32>, ms: u32| {
+        let (_, out, _) = step(
+            s,
+            view,
+            Some(focus),
+            &ScreenEvent::Tick(Tick { ms, dt_us: 16_667 }),
+        );
+        warm(&out)
+    };
+
+    step(&mut s, view, Some(first), &ScreenEvent::FocusMoved { from: None, to: first, by: By::Dir });
+    assert!(frame(&mut s, first, 16).is_empty(), "no prefetch before the dwell");
+    let mut sent = Vec::new();
+    for n in 1..=20u32 {
+        sent.extend(frame(&mut s, first, 16 + n * 16));
+    }
+    assert_eq!(sent, vec![first_key], "one command once the card rests");
+    assert!(frame(&mut s, first, 600).is_empty(), "resting longer asks again never");
+
+    step(&mut s, view, Some(second), &ScreenEvent::FocusMoved { from: Some(first), to: second, by: By::Dir });
+    assert!(frame(&mut s, second, 700).is_empty(), "a move restarts the dwell");
+    let mut sent = Vec::new();
+    for n in 1..=20u32 {
+        sent.extend(frame(&mut s, second, 700 + n * 16));
+    }
+    assert_eq!(sent, vec![second_key], "the new card warms once it rests");
+}

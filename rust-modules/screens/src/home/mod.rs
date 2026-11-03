@@ -643,6 +643,9 @@ pub struct HomeScreen {
     /// The standing "Hold OK for options" capsule and its dwell/life schedule — a timer advanced by
     /// `Tick`, not logical state (it is not in `SHAPE`, the way `status_ms` is not).
     hold_hint: HoldHint,
+    /// The focus dwell that warms the shim's caches for the card under the cursor — a timer on
+    /// `Tick`, not logical state (no input/reveal decision reads it).
+    prefetch: PrefetchDwell,
     backdrop: Backdrop,
     grid: Grid,
 }
@@ -693,6 +696,7 @@ impl HomeScreen {
             hero_pop: CtlPop::new(),
             disc: HeroDisc::default(),
             hold_hint: HoldHint::new(),
+            prefetch: PrefetchDwell::default(),
             backdrop: Backdrop::new(),
             grid: Grid::new(),
         }
@@ -1641,6 +1645,7 @@ impl HomeScreen {
     fn tick<H: HomeLike>(&mut self, t: Tick, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
         let dt = t.dt();
         self.sync_catalog(cx);
+        self.tick_prefetch(cx, dt, fx);
         let view = H::hubs(cx);
         // A flip or an addressed command moves the carousel between publications, and
         // `sync_catalog` only reconciles on a new one: note where the hero stands every tick.
@@ -2417,6 +2422,30 @@ impl HomeScreen {
         }
     }
 
+    /// Warm the shim's caches for the card the focus is resting on, once per rest. A focus move
+    /// restarts the clock; the data layer drops a repeat ask for the same key inside its TTL, so
+    /// a later return to the card costs one command and no request.
+    fn tick_prefetch<H: HomeLike>(&mut self, cx: &Cx<'_, H>, dt: f32, fx: &mut Effects<'_, H>) {
+        let key = self
+            .focused_item(cx.focus.current, cx)
+            .map(|item| (item.sid, item.rk.clone()));
+        if key != self.prefetch.key {
+            self.prefetch.key = key;
+            self.prefetch.dwell = 0.0;
+            self.prefetch.sent = false;
+        }
+        let Some((sid, rk)) = self.prefetch.key.clone() else { return };
+        self.prefetch.dwell += dt;
+        if self.prefetch.sent || self.prefetch.dwell < PREFETCH_DWELL_S {
+            return;
+        }
+        self.prefetch.sent = true;
+        fx.push(Fx::App(AppFx::Store(
+            StoreId::Metadata,
+            StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmDetail { sid, rk }),
+        )));
+    }
+
     pub fn grid_position<H: HomeLike>(
         &self,
         focus: Option<FocusKey<u32>>,
@@ -2531,7 +2560,9 @@ impl LogicalState for HomeScreen {
             plaintext: _, plaintext_alert: _, clock: _,
             // The hold hint is a paint-only standing note on a `Tick` timer: no input, reveal or
             // focus decision reads it, and it is not hashed (the way `status_ms` is not).
-            hold_hint: _ } = self;
+            hold_hint: _,
+            // The prefetch dwell is the same kind of timer, and only ever issues a store command.
+            prefetch: _ } = self;
         c.f32(self.snap_target)
             .f32(self.snap.pos).f32(self.snap.vel)
             .f32(self.hero_flip_cd)
@@ -3472,6 +3503,18 @@ fn item_slots(item: &PmsMovie) -> ([usize; HERO_NBTN], usize) {
 /// menu does, because the disc's presence moves the focus row and must not appear a beat late.
 fn disc_hex(item: &PmsMovie) -> Option<[u8; 12]> {
     item.watchlist_subject().and_then(|(_, hex, _)| hex)
+}
+
+/// How long the focus must rest on one card before its detail page is worth warming. A move
+/// restarts the dwell; the data layer drops repeat asks for the same key.
+const PREFETCH_DWELL_S: f32 = 0.250;
+
+/// The card the focus rests on and how long it has been there. Fed by `Tick`; not logical state.
+#[derive(Default)]
+struct PrefetchDwell {
+    key: Option<(plx_plex::plex::ServerId, String)>,
+    dwell: f32,
+    sent: bool,
 }
 
 /// The bookmark disc's Home half: which title the shared [`plx_appkit::watchlist_disc::Disc`] is

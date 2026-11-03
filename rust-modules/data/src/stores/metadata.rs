@@ -170,6 +170,9 @@ use super::StoreEv;
 
 #[derive(Clone)]
 pub enum MetadataCmd {
+    /// Warm the shim's caches for a card the focus rests on: the same GET `RequestDetail` makes,
+    /// with the body dropped. Never lands in this store and raises no notice.
+    WarmDetail { sid: ServerId, rk: String },
     /// Supersede any in-flight load and fetch `(sid, rk)` off-thread; lands through `pump_detail`.
     RequestDetail { sid: ServerId, rk: String },
     /// Close the page: drop the item and supersede everything in flight.
@@ -325,11 +328,14 @@ impl MetadataStore {
             self.adapter = Arc::new(Default::default());
         }
         // An optimistic edit that matched no row (a server's `Facts`/`Offset` that agrees with what
-        // is drawn) raises no notice: a notice relayouts a mounted Detail page. Every other
-        // command bumps whatever it returned.
-        let view_edit = matches!(&cmd, MetadataCmd::ApplyView { .. });
+        // is drawn) raises no notice: a notice relayouts a mounted Detail page. A warm read lands
+        // nothing either. Every other command bumps whatever it returned.
+        let silent = matches!(
+            &cmd,
+            MetadataCmd::ApplyView { .. } | MetadataCmd::WarmDetail { .. }
+        );
         let changed = crate::metadata::run(&mut self.state, &self.adapter, cmd);
-        if changed || !view_edit {
+        if changed || !silent {
             self.bump();
         }
         changed

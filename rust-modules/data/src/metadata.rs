@@ -158,6 +158,49 @@ pub struct MetadataState {
     alt: AltStore,
 }
 
+/// The warm reads a focus prefetch has admitted, keyed by `(sid, rk)`. An entry is `None` while
+/// its GET is in flight, then the time it finished. A focus that jitters over a shelf therefore
+/// asks once, not once per frame.
+#[derive(Default)]
+struct WarmBook {
+    entries: std::sync::Mutex<std::collections::HashMap<(plx_plex::plex::ServerId, String), Option<std::time::Instant>>>,
+}
+
+impl WarmBook {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    fn claim(&self, sid: plx_plex::plex::ServerId, rk: &str, now: std::time::Instant) -> bool {
+        let mut g = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if g.len() > 64 {
+            g.retain(|_, at| at.is_none_or(|at| now.saturating_duration_since(at) < Self::TTL));
+        }
+        let key = (sid, rk.to_string());
+        match g.get(&key) {
+            Some(None) => false,
+            Some(Some(at)) if now.saturating_duration_since(*at) < Self::TTL => false,
+            _ => {
+                g.insert(key, None);
+                true
+            }
+        }
+    }
+
+    fn finish(&self, sid: plx_plex::plex::ServerId, rk: &str, now: std::time::Instant) {
+        let mut g = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = g.get_mut(&(sid, rk.to_string())) {
+            *slot = Some(now);
+        }
+    }
+
+    #[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+    fn release(&self, sid: plx_plex::plex::ServerId, rk: &str) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(sid, rk.to_string()));
+    }
+}
+
 /// The `Arc`'d worker half of one Metadata owner: the detail/season/alt-sources landing mailboxes,
 /// their generation counters, and (D3) the replay recorder's admission ledger over the detail
 /// landing. A worker captures a clone of the owning `Bridge`'s `Arc<MetadataAdapter>` before it
@@ -187,6 +230,11 @@ pub struct MetadataAdapter {
     /// worker thread — see [`MetadataAdapter::run_held_detail_fetches_for_test`].
     #[cfg(any(test, feature = "test-support"))]
     held_detail: std::sync::Mutex<Vec<(plx_plex::plex::ServerId, String, u32, Option<i64>)>>,
+    /// The focus prefetch's admitted keys ([`MetadataCmd::WarmDetail`]).
+    warm: WarmBook,
+    /// TEST ONLY: warm reads [`warm_detail`] admitted, parked here instead of on a worker.
+    #[cfg(any(test, feature = "test-support"))]
+    held_warm: std::sync::Mutex<Vec<(plx_plex::plex::ServerId, String)>>,
 }
 
 impl Default for MetadataAdapter {
@@ -209,6 +257,9 @@ impl Default for MetadataAdapter {
             tracker: std::sync::Mutex::new(record::Tracker::new(false)),
             #[cfg(any(test, feature = "test-support"))]
             held_detail: std::sync::Mutex::new(Vec::new()),
+            warm: WarmBook::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            held_warm: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -3980,6 +4031,42 @@ fn request_detail_with_spawn(adapter: &MetadataAdapter, sid: plx_plex::plex::Ser
     }
 }
 
+/// Warm the shim's caches for a card the focus is resting on. The GET is the one `fetch_detail`
+/// makes, but its body is dropped: nothing lands in the store and the loading state does not move.
+/// [`WarmBook`] drops a repeat ask for the same key within its TTL, and the shim's own meta/stream
+/// caches keep the answer for the click that follows.
+fn warm_detail(adapter: &std::sync::Arc<MetadataAdapter>, sid: plx_plex::plex::ServerId, rk: &str) {
+    if !adapter.warm.claim(sid, rk, std::time::Instant::now()) {
+        return;
+    }
+    plx_base::eventlog::log(&format!("detail: warm rk={rk} sid={sid:?} — focus prefetch"));
+    let rk = rk.to_string();
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        // No worker under test: settle the claim so the TTL branch, not the in-flight one, is
+        // what the next ask meets.
+        adapter.warm.finish(sid, &rk, std::time::Instant::now());
+        adapter
+            .held_warm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((sid, rk));
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let worker = std::sync::Arc::clone(adapter);
+        let key = rk.clone();
+        let spawned = plx_base::task::spawn_small("detail-warm", move || {
+            let _ = plx_plex::plex::client_for(sid).and_then(|client| client.metadata(&key));
+            worker.warm.finish(sid, &key, std::time::Instant::now());
+        });
+        if !spawned {
+            // The OS refused the worker: no GET happened, so do not hide the key for the TTL.
+            adapter.warm.release(sid, &rk);
+        }
+    }
+}
+
 fn finish_detail_fetch(
     adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId, rk: &str, gen: u32,
     fetch: impl FnOnce() -> Option<Detail> + std::panic::UnwindSafe,
@@ -3998,6 +4085,12 @@ fn finish_detail_fetch(
 pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, cmd: crate::stores::metadata::MetadataCmd) -> bool {
     use crate::stores::metadata::MetadataCmd;
     match cmd {
+        MetadataCmd::WarmDetail { sid, rk } => {
+            // Silent by design: warms the shim's caches without landing a Detail or moving the
+            // generation counters, so the page (and any open detail) sees no change.
+            warm_detail(adapter, sid, &rk);
+            false
+        }
         MetadataCmd::RequestDetail { sid, rk } => {
             let prefer = selected_season_number(state, sid, &rk);
             state.detail_stamp = state.ledger.stamp();
@@ -6197,5 +6290,50 @@ mod alt_runtime_tests {
         for k in ["show", "season", "artist", "album", "collection"] {
             assert!(!has_runtime(k), "{k}");
         }
+    }
+}
+
+#[cfg(test)]
+mod warm_tests {
+    use super::*;
+
+    #[test]
+    fn the_warm_book_admits_one_fetch_per_key_per_ttl() {
+        let book = WarmBook::default();
+        let t0 = std::time::Instant::now();
+        let sid = plx_plex::plex::ServerId::UNSET;
+        assert!(book.claim(sid, "42", t0));
+        assert!(!book.claim(sid, "42", t0), "the GET is still in flight");
+        book.finish(sid, "42", t0 + std::time::Duration::from_millis(5));
+        assert!(
+            !book.claim(sid, "42", t0 + std::time::Duration::from_secs(59)),
+            "a fresh answer suppresses another GET for the TTL"
+        );
+        assert!(
+            book.claim(sid, "42", t0 + std::time::Duration::from_secs(61)),
+            "the TTL has run out"
+        );
+        assert!(book.claim(sid, "7", t0), "a different key is independent");
+    }
+
+    #[test]
+    fn warm_detail_admits_one_get_and_lands_nothing() {
+        let mut state = MetadataState::default();
+        let adapter = std::sync::Arc::new(MetadataAdapter::default());
+        let sid = plx_plex::plex::ServerId::UNSET;
+        let warm = || crate::stores::metadata::MetadataCmd::WarmDetail {
+            sid,
+            rk: "42".into(),
+        };
+        assert!(!run(&mut state, &adapter, warm()));
+        assert!(!run(&mut state, &adapter, warm()));
+        let asked = adapter
+            .held_warm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert_eq!(asked, 1, "a second ask inside the TTL is dropped");
+        assert!(state.current.is_none(), "a warm read installs no Detail");
+        assert!(!detail_loading(&adapter), "and does not move the spinner");
     }
 }

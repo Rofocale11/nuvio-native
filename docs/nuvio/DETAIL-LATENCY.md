@@ -1,6 +1,6 @@
 # Detail-page latency — plan
 
-**Status:** 1A–1B implemented (2026-11-03); 1C planned. Written 2026-11-02 on
+**Status:** Stage 1 (1A–1C) implemented (2026-11-03), host + simulator verified. Written 2026-11-02 on
 `forward-port/v0.9-hq` (`7e79e57e`).
 **Owner:** whoever picks this up next.
 **Scope:** wall-clock from pressing OK on a Home/Library card to a painted movie/show detail page,
@@ -50,7 +50,7 @@ single-key route falls through to the comma-list branch at `:3815`, which maps e
    **serially** (`addons.rs:659` order: id-prefix owners, then every addon serving the type, then
    the inferred type).
 5. `item_probed` starts the stream slot (`shim_pms.rs:1961`) and — since 1A — **no longer blocks**
-   on it: a detail read passes `Duration::ZERO` (`:3182`) and paints with the placeholder Part
+   on it: a detail read passes `Duration::ZERO` (`:3268`) and paints with the placeholder Part
    while the slot keeps answering in the background.
 6. `enrich_row` (`:2285`, called at `:3829`) resolves the TMDB id and fetches cast/trailer/logo
    **synchronously**: since 1B the id comes from Cinemeta's `moviedb_id`, with `/find`
@@ -60,6 +60,8 @@ single-key route falls through to the comma-list branch at `:3815`, which maps e
 7. The app then requests `/extras` (local empty answer) and `/related` (TMDB recommendations,
    usually a cache hit from step 6; `/collection/{id}` when the film has a franchise), plus
    `/nuvio/library` for the watchlist state (60 s cache) and then the images.
+8. Since 1C, resting on a card for 250 ms has already issued the step-4–6 GET and dropped the
+   body, so pressing OK finds the shim's meta, TMDB and stream caches warm.
 
 The screen cannot paint until step 6 returns, because cast, trailer and logo all ride in the same
 JSON. The 800 ms of step 5 is inside that JSON too.
@@ -114,7 +116,7 @@ all the work inside the click, over cold connections, with a memory-only cache.
 
 ## 4. The plan
 
-### Stage 0 — make the split visible (do this first, ~½ day)
+### Stage 0 — make the split visible (not done; Stage 1 landed first on the owner's direction)
 
 `detail: … ms=` already exists (`metadata.rs:3805`) and is the number to compare across every
 stage. Extend it with the three phases so the TV, not inference, says what dominates:
@@ -135,7 +137,7 @@ Keep each change a separate commit so it can be reverted alone.
 
 #### 1A. Stop waiting 800 ms for streams on a detail read — **implemented**
 
-**Where:** `rust-modules/pmsshim/src/shim_pms.rs:3182`.
+**Where:** `rust-modules/pmsshim/src/shim_pms.rs:3268`.
 
 The play path (`probe_index.is_some()`) keeps waiting the full `stream_deadline`. The detail read
 passes `Duration::ZERO` (`DETAIL_WAIT` is gone), so it paints immediately from whatever the slot
@@ -190,37 +192,40 @@ for addons that do not send it, and a `tmdb:` id still needs no lookup at all.
   test stubs.
 - **Docs:** `docs/nuvio/TMDB.md` §"One request per title" and the field-mapping list are updated.
 
-#### 1C. Prefetch the focused card (the felt fix)
+#### 1C. Prefetch the focused card (the felt fix) — **implemented**
 
 **Goal:** by the time OK is pressed, the shim's meta / stream / TMDB caches are already warm, so
 the detail request is a cache hit. This is what makes the other clients feel instant.
 
-Recommended design — warm the caches, not the UI state:
+Implemented as "warm the caches, not the UI state":
 
-- Add `MetadataCmd::WarmDetail { sid, rk }` to `rust-modules/data/src/metadata.rs` (next to
-  `RequestDetail`, `:3950`/`:4001`).
-- The handler spawns a short-lived worker that issues the same shim GET as `fetch_detail`
-  (`client_for(sid)?.metadata(rk)?`, see the comment at `:3724`) and **drops the body**. Do not
-  install a `Detail`, do not touch `current()`, do not move the generation counters.
-- Dedup: keep a small in-flight/`already warmed at` set per `(sid, rk)` (60 s TTL) so a focus that
-  jitters does not spam requests. One in flight at a time per key.
-- Trigger: Home's `tick` already has `cx.focus` and `fx` (`rust-modules/screens/src/home/mod.rs:1641`;
-  `focused_item` at `:2407`). Track the focused ratingKey and the time it has been focused; after a
-  **250 ms** dwell with no focus change, push `Fx::App(AppFx::Store(StoreId::Metadata,
-  StoreCmd::Metadata(MetadataCmd::WarmDetail { … })))`. Reset the timer on every focus move.
-  Scope Stage 1 to Home; add the Library grid in a follow-up (same helper).
-- A `Screen` must not do networking itself; the command goes through the existing store/effects
-  path. Do not add a shim edge from `screens` to `pmsshim` (module layers).
+- `MetadataCmd::WarmDetail { sid, rk }` (`rust-modules/data/src/stores/metadata.rs:175`).
+  `metadata::run` dispatches it to `warm_detail` (`rust-modules/data/src/metadata.rs:4038`), which
+  issues the same shim GET as `fetch_detail` (`client_for(sid)?.metadata(rk)?`) on a short-lived
+  `detail-warm` worker and **drops the body**. It installs no `Detail`, does not touch `current()`
+  and does not move the generation counters.
+- Dedup is `WarmBook` (`metadata.rs:165`), a `(sid, rk) → Option<Instant>` map on the
+  `MetadataAdapter`: `None` while a GET is in flight, then its finish time, with a 60 s TTL. A
+  focus that jitters over a shelf asks once, not once per frame, and `Reset` (a profile switch)
+  rotates it with the rest of the adapter. A refused worker spawn releases the key, so a transient
+  `RLIMIT_NPROC` does not hide the card for the TTL.
+- Home triggers at `HomeScreen::tick_prefetch` (`rust-modules/screens/src/home/mod.rs:2428`): the
+  focused card's `(sid, rk)` with a **250 ms** dwell (`PREFETCH_DWELL_S`), reset on every focus
+  move, one command per rest. It pushes the existing store effect — no `screens → pmsshim` edge.
+  The dwell is a `Tick` timer (`PrefetchDwell`), not hashed logical state. Scoped to Home; the
+  Library grid is the same helper in a follow-up.
+- A warm command raises no store notice (the `run` arm treats it like an optimistic view edit
+  that changed nothing), so it cannot relayout a mounted Detail page.
 - **Why warm the shim rather than `fetch_full` into a data cache:** no new landing/refresh state,
   no risk of replacing an open detail, and the shim caches are the expensive part. The app still
   re-runs `fetch_full` on OK, but every hop is local.
 
 **Cost:** one Cinemeta meta (a series can be ~65 KB), one TMDB details, one stream fan-out per
-focused card the viewer rests on. Bound it: one card, 250 ms dwell, skip if already warm, skip in
-the player.
-**Test:** a data-layer test that `WarmDetail` issues exactly one GET for the same key within the
-TTL, and that it does not change `current()`/loading state; a screens test that focus dwell emits
-the command once and focus moves do not.
+focused card the viewer rests on. Bound it: one card, 250 ms dwell, one ask per key per 60 s.
+**Test:** `warm_detail_admits_one_get_and_lands_nothing` (data) pins the dedup, no `current()` and
+no loading movement; `the_warm_book_admits_one_fetch_per_key_per_ttl` pins the TTL and per-key
+independence; `a_focused_card_warms_its_detail_once_it_rests` (Home) pins one command per rest,
+none before the dwell, and a restart on focus move.
 **Acceptance (the real one):** on the TV, rest on a card for a second, press OK → the `detail`
 line's `ms=` drops to roughly a warm open. Compare against pressing OK immediately after moving
 focus (cold).
@@ -258,14 +263,20 @@ focus (cold).
 
 ## 5. Verification
 
-- **Host:** `CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=rust-modules/target-fast cargo nextest run
-  --manifest-path rust-modules/Cargo.toml -p plx_pmsshim -p plx_stremio -p plxnative-modules`
-  (adjust the crate list to the diff). Then the shipping feature check:
-  `CARGO_INCREMENTAL=0 cargo +nightly check --manifest-path rust-modules/Cargo.toml --lib
-  --no-default-features`.
+- **Host:** the crates the Stage 1 diff touches: `make test-crate C=plx_pmsshim` (65 passed),
+  `C=plx_stremio` (57), `C=plx_screens` (1703), `C=plx_data` (1121 passed, 4 failed — all four
+  reproduce on `5db3b9dc`: the two known concurrency reds plus
+  `committed_fixture_detail_replies_stay_canonical` and `a_headshot_is_served_only_for_a_person`).
+  Shipping feature set: `CARGO_INCREMENTAL=0 cargo +nightly check --manifest-path
+  rust-modules/Cargo.toml --lib --no-default-features` passes. `ci/check-module-layers.py` still
+  reports the 15 pre-existing unlayered `plx_data` modules (`catalog`, `viewledger`, `watchlist`, …)
+  on both the base and this tree; the Stage 1 modules themselves are covered.
 - **Simulator (`ui-sim`):** correctness and visible behaviour only. WSL/desktop timing is host
   network, not the TV, so do not report latency from it. Use it to confirm the detail page still
-  paints, the placeholder Part still plays, and prefetch fires on dwell (event-log line).
+  paints, the placeholder Part still plays, and prefetch fires on dwell (`detail: warm rk=… —
+  focus prefetch` in the event log). **Not run on the WSL checkout that implemented Stage 1** (no
+  DISPLAY or GL stack there); the sim target is built, the behaviour is pinned by the host tests
+  above, and the live check is owed on a simulator host or the TV.
 - **TV:** acquire the `tv-lock`, deploy a debug build, and measure the `detail:` line:
   1. cold: relaunch, open a card immediately → `ms=`;
   2. warm: rest on a card > 1 s, then OK → `ms=`;
@@ -294,15 +305,15 @@ focus (cold).
 
 | Concern | Where |
 |---|---|
-| Detail request / fetch chain | `rust-modules/data/src/metadata.rs:3699` (`fetch_full`), `:3950` (`request_detail`) |
+| Detail request / fetch chain | `rust-modules/data/src/metadata.rs:3699` (`fetch_full`), `:3950` (`request_detail`), `:4038` (`warm_detail`) |
 | Detail screen's request | `rust-modules/screens/src/detail/mod.rs:2099` |
 | Shim detail route + Media | `rust-modules/pmsshim/src/shim_pms.rs:3751`, `:3151` (`item_probed`), `:3239` (placeholder) |
-| Detail stream wait (zero) | `shim_pms.rs:3182`, `:2055` (`ranked`), `:1961` (`slot`) |
+| Detail stream wait (zero) | `shim_pms.rs:3268`, `:2055` (`ranked`), `:1961` (`slot`) |
 | TMDB enrichment | `shim_pms.rs:2285` (`enrich_row`), `:788`/`:803` (resolvers), `stremio/src/addons_tmdb.rs:289`/`:378`/`:433` |
 | Cinemeta + addon meta selection | `rust-modules/stremio/src/addons.rs:21`, `:659`, `:730` |
 | Meta model (`moviedb_id`) | `rust-modules/stremio/src/model.rs:160` |
 | HTTP transport (no reuse) | `rust-modules/net/src/net.rs:928`, serial fallback `:2164` |
-| Home focus / tick | `rust-modules/screens/src/home/mod.rs:1641`, `:2407` |
+| Home focus / tick / prefetch | `rust-modules/screens/src/home/mod.rs:1641`, `:2407`, `:2428` (`tick_prefetch`) |
 | Design docs | `docs/nuvio/ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md` |
 
 ## 8. Open questions to settle before coding
