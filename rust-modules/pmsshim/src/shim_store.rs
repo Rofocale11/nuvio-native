@@ -250,8 +250,22 @@ impl WatchState {
     }
 }
 
-/// How long a fetched addon meta stays usable — in memory and in the persisted log.
-pub const META_TTL: Duration = Duration::from_secs(6 * 3600);
+/// How long a series' meta stays usable — in memory and in the persisted log. Its `videos` array
+/// IS the episode list (`seasons_of`/`episodes_of` read it), so it has to refresh as episodes air.
+pub const META_TTL_SERIES: Duration = Duration::from_secs(6 * 3600);
+/// A movie's meta does not change once released, so the warm start may keep it far longer.
+pub const META_TTL_MOVIE: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// The TTL for one row. Anything that is not a series is treated as a movie: the addon types the
+/// shim serves are `movie` and `series` (`is_series` in `shim_pms`), and a longer life is the
+/// safer default for a type this cache does not know.
+fn meta_ttl(type_: &str) -> i64 {
+    if type_ == "series" {
+        META_TTL_SERIES.as_secs() as i64
+    } else {
+        META_TTL_MOVIE.as_secs() as i64
+    }
+}
 /// The most titles kept in memory; past it the oldest fetch is dropped.
 const META_ROWS: usize = 400;
 /// Rewrite the log once it passes this, down to about [`META_COMPACT`] bytes.
@@ -303,7 +317,7 @@ impl MetaCache {
                     skipped += 1;
                     continue;
                 };
-                if now.saturating_sub(row.at) >= META_TTL.as_secs() as i64 {
+                if now.saturating_sub(row.at) >= meta_ttl(&row.type_) {
                     continue;
                 }
                 rows.insert((row.type_, row.id), (row.at, Arc::new(row.meta)));
@@ -328,7 +342,7 @@ impl MetaCache {
     pub fn get(&self, type_: &str, id: &str) -> Option<Arc<plx_stremio::model::Meta>> {
         let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         let (at, meta) = rows.get(&(type_.to_string(), id.to_string()))?;
-        (now_secs().saturating_sub(*at) < META_TTL.as_secs() as i64).then(|| Arc::clone(meta))
+        (now_secs().saturating_sub(*at) < meta_ttl(type_)).then(|| Arc::clone(meta))
     }
 
     pub fn insert(self: &Arc<Self>, type_: &str, id: &str, meta: Arc<plx_stremio::model::Meta>) {
@@ -486,25 +500,35 @@ mod tests {
     }
 
     #[test]
-    fn expired_rows_and_a_torn_line_are_skipped_on_load() {
+    fn a_series_expires_in_hours_and_a_movie_keeps_for_a_month() {
         let dir = meta_scratch("expiry");
-        let stale = MetaRow {
-            type_: "movie".into(),
-            id: "tt2".into(),
-            at: now_secs() - META_TTL.as_secs() as i64 - 60,
-            meta: meta("tt2", "Stale"),
+        let hours_ago = META_TTL_SERIES.as_secs() as i64 + 3600;
+        let months_ago = META_TTL_MOVIE.as_secs() as i64 + 3600;
+        let row = |type_: &str, id: &str, name: &str, at: i64| MetaRow {
+            type_: type_.into(),
+            id: id.into(),
+            at,
+            meta: plx_stremio::model::Meta { type_: type_.into(), ..meta(id, name) },
             generation: 0,
         };
-        let fresh = MetaRow { type_: "movie".into(), id: "tt3".into(), at: now_secs(), meta: meta("tt3", "Fresh"), generation: 0 };
-        let text = format!(
-            "{}\n{}\n{{\"type\":\"movie\",\"id\":\"tt4\",\"at\":0",
-            serde_json::to_string(&stale).unwrap(),
-            serde_json::to_string(&fresh).unwrap(),
-        );
+        let text = [
+            // A show's episode list must refresh as episodes air; a movie's meta does not change.
+            row("series", "tt1", "Stale Show", now_secs() - hours_ago),
+            row("movie", "tt2", "Old Movie", now_secs() - hours_ago),
+            row("movie", "tt3", "Ancient Movie", now_secs() - months_ago),
+            row("series", "tt4", "Fresh Show", now_secs()),
+        ]
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .chain(std::iter::once("{\"type\":\"movie\",\"id\":\"tt5\",\"at\":0".into()))
+        .collect::<Vec<_>>()
+        .join("\n");
         std::fs::write(dir.join("meta-cache.jsonl"), text).unwrap();
         let cache = MetaCache::open(Some(&dir));
-        assert!(cache.get("movie", "tt2").is_none(), "past META_TTL");
-        assert_eq!(cache.get("movie", "tt3").unwrap().name, "Fresh");
+        assert!(cache.get("series", "tt1").is_none(), "a series past its hours");
+        assert_eq!(cache.get("movie", "tt2").unwrap().name, "Old Movie", "a movie keeps for a month");
+        assert!(cache.get("movie", "tt3").is_none(), "a movie past its month");
+        assert_eq!(cache.get("series", "tt4").unwrap().name, "Fresh Show");
     }
 
     #[test]

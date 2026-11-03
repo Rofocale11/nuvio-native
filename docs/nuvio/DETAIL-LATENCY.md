@@ -242,10 +242,12 @@ focus (cold).
 - **2A. Persist the shim meta cache — implemented.** `MetaCache` (`shim_store.rs`) replaces the
   bare `metas` map. Rows are appended as they land to `meta-cache.jsonl` beside `keys.tsv`
   (one JSON line per fetch; the last line for a key wins at load, and a torn last line is
-  skipped), so the write is small and runs on the shared persistence worker. `META_TTL` (6 h)
-  decides what is loaded, the in-memory map keeps 400 rows (oldest fetch evicted first), and
-  once the log passes 8 MiB it is rewritten down to the newest rows under 4 MiB. `clear()`
-  (the addons-changed path) removes the file too. **The boot path had to learn the difference
+  skipped), so the write is small and runs on the shared persistence worker. The TTL is per kind:
+  a series row lives 6 h because its `videos` array IS the episode list, while a movie row keeps
+  30 days because it does not change once released. The in-memory map keeps 400 rows (oldest
+  fetch evicted first), and once the log passes 8 MiB it is rewritten down to the newest rows
+  under 4 MiB. `clear()` (the addons-changed path) removes the file too. **The boot path had to
+  learn the difference
   between applying an addon override and changing one**: `app/nuvio.rs` applied the session's
   enable/disable overrides and called `addons_changed()` unconditionally, which wiped the rows
   it had just loaded. It now replaces the set and clears only when a flag actually changed.
@@ -266,8 +268,9 @@ focus (cold).
 - **2D. Persist the TMDB enrichment (next).** `enrich_row` is now the whole cold open: the Stage 0
   split put `tmdb_ms=948` of `total_ms=1066`, and after 2A it is `tmdb_ms=932` of `ms=936`. It
   writes exactly two row fields — `Role[]` from the TMDB cast and `Extras` from the trailer — so
-  cache those two, keyed by `(type, id)`, in a JSONL beside `meta-cache.jsonl` with the same 6 h
-  TTL. On a hit, apply them and skip `movie_details`/`videos` entirely. The TMDB client's own
+  cache those two, keyed by `(type, id)`, in a JSONL beside `meta-cache.jsonl` with a 30-day TTL
+  (cast and trailer are stable for both movies and shows). On a hit, apply them and skip
+  `movie_details`/`videos` entirely. The TMDB client's own
   15-minute response cache stays memory-only; this is the parsed result, not an HTTP cache. The
   expected effect is that a restarted app opens a title it has enriched before with `tmdb_ms≈0`,
   so even a fast click (no prefetch) costs only the meta + loopback. Test: a row survives a
@@ -372,13 +375,17 @@ focus (cold).
 - **Branch:** `forward-port/v0.9-hq`, not pushed. Stage 0 commit: `8a8ffb51`; Stage 1 commits:
   `ca2de133` (1A), `a2b43791` (1B), `e270e61f` (1C), plus docs `01cacbb9`, `04af6099` and
   `4c1cf564`; Stage 2B is `becd2905`; Stage 2A is the commit that adds `MetaCache` and the
-  boot-clear fix.
+  boot-clear fix; the per-kind TTL (movies 30 days, series 6 h) is the commit after it.
 - **Verified:** host suites and the shipping feature check are green; the WSLg simulator showed
   prefetch firing, warm opens `ms=5–7`, a cold boot-to-detail `ms=828` with `subs=0`, and the
   Stage 0 split putting ~95% of a cold shim answer in TMDB enrichment (`tmdb_ms=948` of
   `total_ms=1066`). With single-flight, the cold overlap (OK 350 ms after focus) went from the
   Stage 1 `ms=832` to `ms=359`. With the persisted meta cache, a restart's `meta_ms` is 0 and the
   whole open is `ms=936`, of which `tmdb_ms=932`. TV is not measured.
+- **TTL policy (settled):** storage is not the constraint — the log is bounded regardless — so
+  the TTL is about staleness. A movie row keeps 30 days; a series row keeps 6 h because its
+  `videos` array is the episode list and must refresh as episodes air. The 2D enrichment can use
+  30 days for both, since cast and trailer are stable.
 - **Next:** an agent resuming with **no TV numbers** should implement **2D** first — it is the
   remaining cold cost (`tmdb_ms=932` of `ms=936`) and does not depend on the TV result — then
   update §5 and hand back for the owner's TV run. With TV numbers in hand, act on them: a slow
