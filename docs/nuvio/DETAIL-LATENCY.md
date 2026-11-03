@@ -263,6 +263,15 @@ focus (cold).
 - **2C. Make the IMDb→TMDB mapping permanent.** If 1B leaves any `/find` calls, cache the mapping
   without a 15-minute TTL — it never changes. A small persisted `imdb → (movie_id, tv_id)` map is
   enough.
+- **2D. Persist the TMDB enrichment (next).** `enrich_row` is now the whole cold open: the Stage 0
+  split put `tmdb_ms=948` of `total_ms=1066`, and after 2A it is `tmdb_ms=932` of `ms=936`. It
+  writes exactly two row fields — `Role[]` from the TMDB cast and `Extras` from the trailer — so
+  cache those two, keyed by `(type, id)`, in a JSONL beside `meta-cache.jsonl` with the same 6 h
+  TTL. On a hit, apply them and skip `movie_details`/`videos` entirely. The TMDB client's own
+  15-minute response cache stays memory-only; this is the parsed result, not an HTTP cache. The
+  expected effect is that a restarted app opens a title it has enriched before with `tmdb_ms≈0`,
+  so even a fast click (no prefetch) costs only the meta + loopback. Test: a row survives a
+  restart, expires with the TTL, and `enrich_row` does not construct a TMDB client on a hit.
 
 ### Stage 3 — transport and shows (optional, ~2–3 days)
 
@@ -370,11 +379,12 @@ focus (cold).
   `total_ms=1066`). With single-flight, the cold overlap (OK 350 ms after focus) went from the
   Stage 1 `ms=832` to `ms=359`. With the persisted meta cache, a restart's `meta_ms` is 0 and the
   whole open is `ms=936`, of which `tmdb_ms=932`. TV is not measured.
-- **Next, in order:** owner tests on the TV (warm ≤300 ms, cold ≤800 ms) — read `shim: meta cache
-  warm-start` and the `detail:` pair. If a fast click (no dwell, so no prefetch) is still too slow
-  on the set, the next lever is TMDB: persist its response cache like `MetaCache`, or take Stage 3A
-  (connection reuse), since `tmdb_ms` is now essentially the whole cold open. Stage 2C stays
-  conditional on seeing `/find` calls in the log. Do not push until the owner asks.
+- **Next:** an agent resuming with **no TV numbers** should implement **2D** first — it is the
+  remaining cold cost (`tmdb_ms=932` of `ms=936`) and does not depend on the TV result — then
+  update §5 and hand back for the owner's TV run. With TV numbers in hand, act on them: a slow
+  warm open points at the prefetch, a slow fast click at TMDB (2D or Stage 3A), and any `/find`
+  line at 2C. The TV checklist is §5's; the boot line to read first is `shim: meta cache
+  warm-start`. Do not push until the owner asks.
 
 ## 9. Open questions to settle before coding
 
