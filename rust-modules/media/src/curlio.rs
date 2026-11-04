@@ -1212,7 +1212,23 @@ impl CurlSource {
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_LOW_SPEED_TIME, low_speed_time_s);
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_NOPROGRESS, 1);
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_TCP_NODELAY, 1);
-            plx_net::net::curl_easy_setopt_long(easy, CURLOPT_BUFFERSIZE, 65536);
+            // Debrid TTFF: libcurl's per-recv ceiling is the per-perform chunk the player
+            // drains (it only pumps when Xfer::buf is empty, bounded by WAIT_MS 200ms
+            // timer resolution). At 64 KiB a 1 Gbps debrid origin looks idle 4-5 s at
+            // start: each fill delivers <1 frame worth of bytes. 1 MiB matches the
+            // sink it feeds: ~89 ms at 90 Mbit/s (PLAYBACK.md queue note, 50 MiB
+            // video queue = ~4.4 s at 90 Mbit/s), ~8 ms at 1 Gbps, so one perform
+            // can deliver a coherent ~1 MiB block instead of 16 x 64 KiB round
+            // trips through curl_multi_wait. Memory: one live CurlSource at a
+            // time (module doc), so peak added heap is one transfers buffer.
+            // 1 MiB is 0.35% of requiredMemory 280 MB (PLAYBACK.md Memory:
+            // video 50 + audio 4 + grants 24/16 + poster 32 + subtitles 40 +
+            // Starfish 8/1 = ~166 MiB total budget, and the queues alone gave up
+            // ~46 MiB on 2026-11-01) — well inside the headroom. Xfer::buf is
+            // Vec-capped by this same ceiling, so no new bound is introduced.
+            // Prime thresholds, reconnect/heal budget, low-speed, TLS, redirects
+            // untouched: only BUFFERSIZE changed.
+            plx_net::net::curl_easy_setopt_long(easy, CURLOPT_BUFFERSIZE, 1048576);
             // NB no CURLOPT_TIMEOUT: a whole movie has no deadline. The low-speed pair above is
             // what bounds a stall, and unlike a total timeout it cannot kill a healthy transfer.
             // NB no CURLOPT_ACCEPT_ENCODING either — the demuxer wants the bytes the file has.
