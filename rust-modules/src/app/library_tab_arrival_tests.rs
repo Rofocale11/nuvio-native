@@ -1,14 +1,12 @@
 //! A Library page reached from a strip pill: where its first selection plays.
 //!
-//! The pill press mounts the page's fade at 0 and reveals it once its listing lands. The
-//! grid-only Library (since `6b05b404`) no longer has hub shelves: its document head is the
-//! Type/Sort/Filter control row, so that row is the pill arrival's seat and no poster is
-//! focused while the page is dark. The first poster is reached with DOWN after the page is
-//! opaque, and it lifts from rest there — the selection has to play out where it can be seen,
-//! not under the dissolve.
+//! The pill press mounts the page's fade at 0 and reveals it once its listing lands. The page's
+//! arrival seat is its first poster — the route table declares `Arrival::Content`, so the header
+//! is one Up away — but the seat is DORMANT while the page dissolves in: the grid holds it at
+//! rest until the first opaque frame, so the lift plays where it can be seen rather than under
+//! the fade.
 
 use super::*;
-use plx_ui::screen::Focusable;
 #[allow(unused_imports)]
 use super::test_support::*;
 use super::test_support::{frame};
@@ -42,58 +40,28 @@ fn a_pill_arrival_pops_its_head_tile_after_the_page_is_opaque_not_under_the_diss
         entry.inst.as_ref().unwrap().screen.as_any().unwrap()
             .downcast_ref::<plx_screens::library::LibraryScreen>().unwrap()
     }
-    // The first selection of the page: `(frame, page alpha, region the focus is in)`.
-    let mut arrival = Vec::new();
-    for i in 0..20 {
+    // The first selection of the page: `(frame, page alpha, the seated tile's drawn pop)`. `1.0`
+    // is rest and `focus_scale` is fully lifted; a dormant (still dissolving) grid probes rest.
+    let mut timeline = Vec::new();
+    for i in 0..90 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
-        let (alpha, _, _, _, _) = page(&d).probe_content();
-        arrival.push((i, alpha, page(&d).probe_viewport(d.focus()).0));
+        let (alpha, pop) = page(&d).probe_arrival(d.focus());
+        timeline.push((i, alpha, pop));
     }
-    assert!(!arrival.is_empty(), "the page never recorded an arrival");
-    let first_dark = arrival.iter().position(|(_, alpha, _)| *alpha < 1.0).expect("the page never dissolved in");
-    let opaque = arrival[first_dark..].iter().position(|(_, alpha, _)| *alpha >= 1.0)
+    assert!(!timeline.is_empty(), "the page never recorded an arrival");
+    let first_dark = timeline.iter().position(|(_, alpha, _)| *alpha < 1.0).expect("the page never dissolved in");
+    let opaque = timeline[first_dark..].iter().position(|(_, alpha, _)| *alpha >= 1.0)
         .map(|at| at + first_dark).expect("the page never became opaque");
-    assert!(opaque > first_dark, "the fixture must include the dissolve: {arrival:?}");
+    assert!(opaque > first_dark, "the fixture must include the dissolve: {timeline:?}");
+    assert_eq!(page(&d).probe_viewport(d.focus()).0, "grid", "the arrival seat is the first poster");
     assert!(
-        arrival[first_dark..opaque].iter().all(|(_, _, region)| *region != "grid"),
-        "a poster took focus under the dissolve: {arrival:?}"
+        timeline[first_dark..opaque].iter().all(|(_, _, pop)| *pop <= 1.01),
+        "the head tile grew while the page was still dissolving in: {timeline:?}"
     );
-    assert_eq!(
-        arrival[opaque].2, "toolbar",
-        "the grid-only Library's head seat is its Type/Sort/Filter row: {:?}",
-        arrival[opaque]
-    );
-    // DOWN enters the grid after the page is opaque. The first card's drawn pop (normalised so
-    // 1.0 is rest and `focus_scale` is fully lifted) must rise from rest, not be adopted whole.
-    let scale = plx_ui::cards::RowStyle::HOME.focus_scale;
-    assert_eq!(page(&d).probe_viewport(d.focus()).0, "toolbar", "premise: the head row is seated");
-    frame(&mut d, &mut rig, AppArg::Library, tick(20), script_key(Key::Down, tick(20)));
-    let mut lift = Vec::new();
-    for i in 21..90 {
-        frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
-        let page = page(&d);
-        let Some(key) = d.focus().filter(|_| page.probe_viewport(d.focus()).0 == "grid") else { continue };
-        let parts = CxParts {
-            tick: tick(i),
-            press: Default::default(),
-            focus: d.input.engine.read(InputOwner::Entry(key.entry)),
-            owner: InputOwner::Entry(key.entry),
-        };
-        let cx = parts.cx::<AppHost>(
-            rig.views_with(plx_media::route::idle_session_for_test()),
-            &rig.measure,
-        );
-        if let Some(placed) = page.place(&key.elem, &cx, At::Drawn) {
-            lift.push(placed.rect.w / placed.rest_rect.w * scale);
-        }
-    }
-    assert!(!lift.is_empty(), "the head tile never took focus");
-    let full = *lift.last().unwrap();
-    assert!(full > 1.02, "premise: the seated tile ends lifted: {full}");
-    assert!(
-        lift[0] < 1.0 + (full - 1.0) * 0.5,
-        "the lift is adopted whole on the frame the grid is entered: {} of {full}: {lift:?}",
-        lift[0]
-    );
-    assert!(lift.windows(2).all(|pair| pair[1] >= pair[0] - 1.0e-4), "the lift is not a monotone rise: {lift:?}");
+    let after = &timeline[opaque..];
+    assert!(after[0].2 < 1.01, "the tile was already up when the page turned opaque: {:?}", after[0]);
+    assert!(after.iter().any(|(_, _, pop)| *pop > 1.05),
+        "the tile never grew after the page turned opaque: {after:?}");
+    let ramp: Vec<f32> = after.iter().map(|(_, _, pop)| *pop).collect();
+    assert!(ramp.windows(2).all(|w| w[1] >= w[0] - 1.0e-4), "the pop must grow monotonically: {ramp:?}");
 }

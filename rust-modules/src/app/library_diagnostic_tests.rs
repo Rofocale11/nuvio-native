@@ -251,11 +251,12 @@ fn library_sweep_visits_the_whole_document_and_reverses_at_its_ends() {
         Bridge::library_command(&mut d, plx_screens::registry::LibraryCmd::Sweep);
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
-    // The grid-only document is the library row (two pinned favourites), the Type/Sort/Filter
-    // row and the 20-row poster grid. There is no shelf run between the head and the grid.
+    // The grid-only document is the header row (two pinned favourites and their controls, all one
+    // focus row at the header's y) and the 20-row poster grid. The controls share the names' row,
+    // so a vertical sweep has one header stop above the grid, with no separate toolbar row.
     assert_eq!(
         visited,
-        ["library", "toolbar", "grid"]
+        ["library", "grid"]
             .into_iter()
             .collect(),
         "{path:?}"

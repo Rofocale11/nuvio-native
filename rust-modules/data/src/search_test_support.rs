@@ -108,15 +108,28 @@ pub(super) fn hold_off(owner: &mut Owner) {
     owner.state.armed = false;
 }
 
-/// A registered loopback slot. The port is never dialled — `hold_off` parks every spawn — so
-/// this exists only to give [`slots`] a roster to fan out over. `register_for_test`, not the
+/// A loopback port with nothing listening, so a forged server's dial is REFUSED at once. A
+/// hard-coded low port is not portable: this WSL host silently drops connects to `:1` instead
+/// of resetting them, so the forty-server fan-out test (which does dial) stalled its four
+/// workers against the connect deadline and never reached the rest of the roster.
+pub(super) fn refused_port() -> i32 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port() as i32;
+    drop(listener);
+    port
+}
+
+/// A registered loopback slot. The port answers nothing, so a dial fails at once (see
+/// [`refused_port`]); most fixtures never dial at all — `hold_off` parks every spawn — and this
+/// exists only to give [`slots`] a roster to fan out over. `register_for_test`, not the
 /// public `register`: the latter mints and PERSISTS a device uuid.
 pub(super) fn register(owner: &mut Owner, n: usize) {
+    let port = refused_port();
     for i in 0..n {
         plx_plex::plex::register_for_test(
             &format!("search-test-{i}"),
             "127.0.0.1",
-            1,
+            port,
             "tok",
             "cid-search-test",
         );

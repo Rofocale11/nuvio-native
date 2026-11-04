@@ -41,7 +41,7 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
             .iter()
             .map(|member| member.elem)
             .collect::<Vec<_>>(),
-        vec![base + 4, base, base + 1, base + 2, base + 3]
+        vec![base + 4, base, base + 1, base + 2, base + 5, base + 3]
     );
     let seat = |d: &mut Dispatcher<AppHost>, elem| {
         d.emit(
@@ -126,7 +126,7 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
             .strip
             .iter()
             .position(|member| member.elem == search.elem),
-        Some(4),
+        Some(5),
         "Search's displayed slot is not its stable control identity"
     );
     rig.take_library_reqs();
@@ -180,7 +180,7 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
     assert_eq!(
         tabs,
         vec![(plx_screens::registry::HomeTab::Search, Some(search))],
-        "the emitted route and captured return focus name the armed pill, not display slot 4"
+        "the emitted route and captured return focus name the armed pill, not display slot 5"
     );
 
     let id = rig.listing.view().id().unwrap();

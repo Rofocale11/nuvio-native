@@ -5,7 +5,6 @@ import contextlib
 import io
 import json
 from pathlib import Path
-import re
 import tempfile
 import threading
 import time
@@ -226,18 +225,10 @@ class WindowTests(unittest.TestCase):
                 seen[label] = (runtime / 'win').read_text()
             self.assertEqual(seen, {'default': '1920x1080', 'small': '960x540'})
 
-    def test_the_macos_replay_step_passes_a_window_the_driver_accepts(self):
-        text = (self.ROOT / '.github/workflows/simulators.yml').read_text()
-        job = re.search(r'(?m)^  macos:\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$)', text, re.S).group(1)
-        step = re.search(r'(?m)^      - name: Replay all committed product recordings\n(.*?)(?=^      - name: )',
-                         job, re.S).group(1)
-        command = ' '.join(line for line in step.splitlines() if not line.lstrip().startswith('#'))
-        windows = re.findall(r'--window\s+(\S+)', command)
-        self.assertEqual(len(windows), 1, command)
-        self.assertEqual(replay.parse_window(windows[0]), windows[0])
-        # The launch step keeps its own full-size window, so CI still opens a 1080p one.
-        self.assertIn('Launch and capture 1080p frame', job)
-        self.assertNotIn('--window', job.split('Launch and capture 1080p frame')[1])
+    # No `test_the_macos_replay_step_...` here: this fork runs no macOS replay job, so there is no
+    # workflow step to grade (upstream's `simulators.yml` was retired with its site workflows).
+    # The committed recordings are gated on the host instead — `tests/focusfp.sh --targets/--resolve`
+    # against the Linux simulator, which is what re-recorded the three anchors.
 
 
 if __name__ == '__main__':

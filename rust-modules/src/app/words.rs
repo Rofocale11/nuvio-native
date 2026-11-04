@@ -28,12 +28,15 @@ pub(crate) fn route_word(route: &AppArg) -> &'static str {
         AppArg::Login => "login",
         AppArg::Profiles => "profiles",
         AppArg::Onboard => "onboard",
-        AppArg::Library => "library",
+        AppArg::Library
+        | AppArg::LibraryCollections { .. }
+        | AppArg::LibraryRecommended { .. } => "library",
         AppArg::Content(ContentArg::Detail { .. }) => "detail",
         // The filmography sheet answers `word::PERSON` too (`FilmographyScreen::name`): the test
         // manifest intentionally records that opaque modal as `route=person`.
         AppArg::Content(ContentArg::Person { .. } | ContentArg::Filmography { .. }) => "person",
         AppArg::Content(ContentArg::Collection(_)) => "collection",
+        AppArg::Content(ContentArg::Catalog { .. }) => "catalog",
         AppArg::Search => "search",
         AppArg::Watchlist => "watchlist",
         AppArg::Player => "player",
@@ -47,13 +50,13 @@ pub(crate) fn route_word(route: &AppArg) -> &'static str {
         | AppArg::LibraryMenu(_)
         | AppArg::AccountMenu
         | AppArg::ItemMenu(_)
+        | AppArg::WatchlistMenu(_)
         | AppArg::PlayerOverlay(_)
         | AppArg::AltSources(_)
         | AppArg::TracksPanel(_)
         | AppArg::AboutPanel
         | AppArg::PersonBio
         | AppArg::CollectionAbout => "",
-        _ => "",
     }
 }
 /// **Every PAGE argument, one per heartbeat word** — the domain [`route_word`] is applied over to DERIVE the
@@ -69,7 +72,7 @@ pub(crate) fn route_word(route: &AppArg) -> &'static str {
 /// holds one and asks about it. Its two readers are this module's word derivation and
 /// `app::bridge`'s argument tests, which used to keep a second copy of the same list.
 #[cfg(test)]
-pub(crate) fn every_route() -> [AppArg; 10] {
+pub(crate) fn every_route() -> [AppArg; 14] {
     use plx_screens::registry::ContentArg;
     let sid = plx_plex::plex::ServerId::UNSET;
     [
@@ -78,12 +81,16 @@ pub(crate) fn every_route() -> [AppArg; 10] {
         AppArg::Onboard,
         AppArg::Home,
         AppArg::Library,
+        AppArg::LibraryCollections { section: 0 },
+        AppArg::LibraryRecommended { section: 0 },
         AppArg::Content(ContentArg::Detail { sid, rk: String::new() }),
         AppArg::Content(ContentArg::Person {
             sid, key: String::new(), guid: String::new(), name: String::new(), thumb: String::new(),
         }),
         AppArg::Content(ContentArg::Collection(plx_plex::plex::collections::CollectionRef::by_tag(sid, 0, 1, ""))),
+        AppArg::Content(ContentArg::Catalog { hex: [0; 12] }),
         AppArg::Search,
+        AppArg::Watchlist,
         AppArg::Player,
     ]
 }

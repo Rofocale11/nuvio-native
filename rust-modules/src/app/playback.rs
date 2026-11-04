@@ -170,24 +170,20 @@ pub(crate) fn retry_failed_playback(
 /// **The failure read-out's fix for Force Direct Play** — `FailureAction::PlayAutomatically`.
 ///
 /// A PERSISTENT switch, deliberately, not a one-shot: Force is what made this play fail, and it
-/// would make the next unsupported file fail the same way. The preference moves to Auto now (the
-/// in-memory value every later resolve reads) and is saved on the storage worker exactly as the
-/// Settings row saves it (`app::preferences`' `DirectPlay` arm), since the frame may not block on
-/// storage. The retry resolves under Auto explicitly rather than inheriting the failed attempt's
+/// would make the next unsupported file fail the same way. It goes through the one write door
+/// (`route::choose`, `How::Optimistic`) like the player's tone and enhancement picks: the cell is
+/// published here, on the frame thread, and the profile write is queued behind the frame. The
+/// Confirm door would publish AGAIN on the storage worker when the write landed, which both plays
+/// the pick twice and lets an older completion overwrite a newer choice.
+/// The retry resolves under Auto explicitly rather than inheriting the failed attempt's
 /// Force, which a plain retry keeps on purpose.
 pub(crate) fn play_automatically(
     ps: &mut plx_media::route::PlaybackSession,
     pa: &mut plx_media::player::adapter::PlayerAdapter,
     meta: &mut plx_data::stores::metadata::MetadataStore,
 ) -> bool {
-    use plx_plex::plex::session::DirectPlayMode;
-    plx_media::route::restore_direct_play_mode(DirectPlayMode::Auto);
-    let _ = plx_base::storage_worker::submit_retained(|| {
-        if !plx_media::route::set_direct_play_mode(DirectPlayMode::Auto) {
-            log("play automatically: the Direct Play preference was not saved");
-        }
-        plx_machine::idle::invalidate();
-    });
+    use plx_plex::plex::session::{DirectPlayMode, DirectPlayModePref};
+    plx_media::route::choose::<DirectPlayModePref>(DirectPlayMode::Auto, plx_media::route::How::Optimistic(None));
     retry_failed_playback(ps, pa, meta, Some(DirectPlayMode::Auto), plx_media::player::report::AttemptOrigin::QualityChange)
 }
 

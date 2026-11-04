@@ -6,8 +6,12 @@ A directory here is one RECORDING (restructure spec §5.3): `manifest.json` (the
 (§5.5): `tools/plxnative-rec diff` compares two, `tools/plxnative-rec check` verifies one against
 `ALPHABET.json`, and `tests/test_harness.py` checks their schema and closed vocabulary on every
 `make check`. **`make check-replay` builds the macOS simulator and executes every committed
-recording in both Targets and Resolve modes.** The same driver (`tests/replay_fixtures.py`) gates
-the macOS Simulator CI job, with outbound networking denied, and retains each run's logs.
+recording in both Targets and Resolve modes.** The same driver (`tests/replay_fixtures.py`) runs it
+with outbound networking denied and each run's logs retained; **in this fork no CI job runs the
+driver** — upstream's macOS simulator workflow was retired with its site workflows — so the gate is
+run deliberately: `make check-replay` where a macOS simulator builds, or
+`python3 tests/replay_fixtures.py --sim <built simulator>` / `tests/focusfp.sh --targets` and
+`--resolve` against the Linux simulator on this host.
 It requires a successful process exit, exactly one clean summary, every difference counter zero,
 and frame/grade counts matching the complete committed ledger. Missing manifests or segments,
 refused fixtures, timeouts, and incomplete replay all fail; no fixture is quarantined or skipped.
@@ -415,3 +419,43 @@ The closed alphabet gains the Home Continue-Watching row's `Continue` pill
 (`locales/en/browse.json` `browse.home.continue`) and the two spelled-out duration
 shapes `plx_ui::fmt::duration_long` and `plx_ui::fmt::time_left` measure from
 `locales/en/core.json`: `s[0-9a-f]{8} · 32 min left` and `2 hr 24 min`.
+
+The forward-port's tier C and the Home work after it moved the recorded state shape from
+`14134545847820828830` to `18086715510016527203`, and taking the new anchors needed three fixes
+first — the recording door, the payload codec, and one read that had no business running there.
+The committed anchors were observed being refused by the loader (`replay: REFUSED — invalid or
+incompatible recording`, all three, both modes) and the host preflight failed at `Recording::parse`
+with `StateShape`.
+
+- **No controlled recording could be taken at all.** `app::bootstrap::effects`'s store-command
+  encoder still carried the pre-port Home vocabulary, so the ported Home's `HubsCmd::Hold`,
+  `HubsCmd::RefetchSourceQuiet` and the fork's `MetadataCmd::WarmDetail` fell through to
+  `unsupported Home store command` and every flow refused on its first frames. They are encoded now
+  (`hold`, `refetch_source_quiet`, `warm_detail`), matching upstream's own arms.
+- **`PmsMovie::audience_rating` broke replay's payload grading.** It is an `f32`, and it was written
+  as a JSON float: `9.600000381469728` reads back as `…727`, one ulp off, so replay re-encoded the
+  recorded hubs result differently and reported `result diverge f=2 reason=changed` on all three
+  anchors. It travels as bits now, exactly as `blur` already did (`record::f32_bits`, and
+  `the_complete_projection_round_trips_without_float_or_integer_loss` uses `Some(0.1)` — a value the
+  old codec could not carry). `record::SHAPE` gained the fields the census had never listed:
+  `guid`/`show_guid` and the "Under posters" caption facts, which is part of what moved the shape.
+- **The focus prefetch did a real fetch during replay.** A warm read answers nothing in the store,
+  so it has no recorded reply; replay's clients have their data transport denied, and the run died
+  with `unrecorded client IO attempted`. A controlled boot — recording AND replay — now drops
+  `WarmDetail` at the store door (`MetadataStore::deny_warm_reads`, called beside
+  `arm_detail_tracker` in `Bridge::controlled_home`). The effect is still recorded and graded; only
+  the fetch is not made, which also keeps the recording free of a host-dependent cache read.
+
+Pacing matters on this host, and the budget is what makes it visible: the simulator's software frame
+budget (`WslgFrameBudget`) engages only when `WSL_DISTRO_NAME` is set *and* `SDL_VIDEODRIVER=x11`.
+An agent shell often has neither, and at ~180 fps the wall-clock-driven flows record three times the
+committed ledger — Flow 1 reached 18.5 k lines and the loader refused it as `record JSON/budget`
+(104.9 MiB against the 64 MiB decoded budget; the writer caps bytes, the reader budgets decoded
+allocations). With the pacer on, the three anchors are 576 / 1288 / 891 frames and 6389 / 10251 /
+6657 lines, the same scale as the committed ledger.
+
+All three were recorded with `WSL_DISTRO_NAME=… tests/focusfp.sh --rec --only 1,6,12`, each passed
+`tools/plxnative-rec check`, and `tools/plxnative-rec rerecord` installed it as
+`(3, 14134545847820828830)` -> `(3, 18086715510016527203)` with `anchor: true` kept. Targets and
+Resolve each replayed twice: `verdict=SAME`, every difference counter zero, on all three. The closed
+alphabet did not move — `check` accepted every recording as recorded.

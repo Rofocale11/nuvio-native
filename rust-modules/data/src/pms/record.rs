@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use super::{Landing, LandingClient, SourceBuild};
 
-pub const SHAPE: &str = "HubsResultV1{gen:u32,seq:u32,sid:u16,client:Option<u32>,token_gen:u32,build:Option<{cw:[{last_viewed_at:i64,m:PmsMovie}],shelves:[{title:str,hub_id:str,key:str,items:[PmsMovie],positions:[u64],total:u64,offset:u64,end:u64,more:bool}]}>};PmsMovie{sid:u16,sec:i64,title:str,year:i32,rating:str,dur_ns:i64,part:str,thumb:str,still:str,art:str,summary:str,rk:str,vcodec:str,acodec:str,blur:[[f32bits;3];4],has_blur:bool,kind:i32,resume_ms:i64,show_rk:str,season_index:i32,show_title:str,ep_index:i32,unwatched:bool,watched:bool,aired:str,child_count:i64}";
+pub const SHAPE: &str = "HubsResultV1{gen:u32,seq:u32,sid:u16,client:Option<u32>,token_gen:u32,build:Option<{cw:[{last_viewed_at:i64,m:PmsMovie}],shelves:[{title:str,hub_id:str,key:str,items:[PmsMovie],positions:[u64],total:u64,offset:u64,end:u64,more:bool}]}>};PmsMovie{sid:u16,sec:i64,title:str,year:i32,rating:str,dur_ns:i64,part:str,thumb:str,still:str,art:str,summary:str,rk:str,vcodec:str,acodec:str,blur:[[f32bits;3];4],has_blur:bool,kind:i32,resume_ms:i64,show_rk:str,guid:Option<[u8;12]>,show_guid:Option<[u8;12]>,season_index:i32,show_title:str,ep_index:i32,unwatched:bool,watched:bool,aired:str,child_count:i64,subtype:Option<str>,smart:bool,genre:Option<str>,video_resolution:Option<str>,hdr:bool,audience_rating:Option<f32bits>,leaf_count:Option<u32>,viewed_leaf_count:Option<u32>,added_at:Option<i64>}";
 
 pub fn encode(landing: &Landing) -> Value {
     let Landing { gen, seq, sid, client, token_gen, build } = landing;
@@ -94,6 +94,19 @@ pub(super) mod blur_bits {
     }
 }
 
+/// The one DECIMAL the projection carries — `audienceRating`. Kept as bits for the same reason as
+/// the blur colours: replay grades the payload byte for byte, and an `f32` printed as a JSON float
+/// does not survive text → `f32` → text (9.6 printed `9.600000381469728`, read back as `…727`).
+pub(super) mod f32_bits {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(v: &Option<f32>, s: S) -> Result<S::Ok, S::Error> {
+        v.map(f32::to_bits).serialize(s)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+        Ok(Option::<u32>::deserialize(d)?.map(f32::from_bits))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,7 +127,10 @@ mod tests {
             aired: "2026-09-08".into(), child_count: i64::MAX,
             guid: Some([1; 12]), show_guid: Some([2; 12]),
             subtype: Some("movie".into()), smart: true, genre: Some("Drama".into()),
-            video_resolution: Some("4k".into()), hdr: true, audience_rating: Some(7.5),
+            video_resolution: Some("4k".into()), hdr: true,
+            // Not exactly printable as decimal text on purpose: this is the value that made the
+            // float payload fail its own round trip.
+            audience_rating: Some(0.1),
             leaf_count: Some(10), viewed_leaf_count: Some(4), added_at: Some(i64::MAX),
         };
         Landing { gen: 7, seq: 19, sid: m.sid, client: None, token_gen: 5,

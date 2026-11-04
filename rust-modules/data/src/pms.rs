@@ -156,8 +156,9 @@ pub struct PmsMovie {
     /// The first video stream is HDR (HDR10 / HLG / Dolby Vision).
     #[serde(default, skip_serializing_if = "is_false")]
     pub hdr: bool,
-    /// `audienceRating` (0..10), or `None` when the server sent none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `audienceRating` (0..10), or `None` when the server sent none. Recorded as bits, like the
+    /// blur colours: its decimal text does not survive a round trip through `f32`.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "record::f32_bits")]
     pub audience_rating: Option<f32>,
     /// `leafCount` — a show/season's episode count.
     #[serde(default, skip_serializing_if = "Option::is_none")]

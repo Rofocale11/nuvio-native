@@ -62,6 +62,17 @@ impl Drop for Pms {
     }
 }
 
+/// A loopback port with nothing listening, so a connect is REFUSED at once. A hard-coded low
+/// port is not portable: on this WSL host a connect to `:1` is silently dropped and waits out
+/// the whole fetch deadline instead of resetting, which turned the "refused" fixture into a
+/// 5 s hang that never settled.
+fn refused_port() -> i32 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port() as i32;
+    drop(listener);
+    port
+}
+
 struct Rig {
     ps: plx_media::route::PlaybackSession,
     pa: plx_media::player::adapter::PlayerAdapter,
@@ -220,7 +231,7 @@ fn leaving_the_show_during_the_season_wait_cancels_it() {
 /// the wrong season's name.)
 #[test]
 fn a_failed_season_fetch_opens_the_page_instead_of_playing() {
-    let mut rig = Rig::new(1); // refused port: the worker's GET fails
+    let mut rig = Rig::new(refused_port()); // refused port: the worker's GET fails
     rig.tick(0);
     assert!(rig.wait.is_some());
     rig.pump_until_settled();
@@ -251,7 +262,7 @@ fn the_ceiling_ends_a_season_wait_that_never_lands() {
 /// the page (season 1 is `cur_season` 0 in the rig).
 #[test]
 fn an_already_listed_season_plays_without_a_fetch() {
-    let mut rig = Rig::new(1);
+    let mut rig = Rig::new(refused_port());
     rig.wait = Some(MenuPlayAwait::new(rig.sid, SHOW.into(), Some(1), 1000, 0));
     rig.tick(0);
     assert!(rig.wait.is_none());

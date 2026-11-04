@@ -2368,7 +2368,14 @@ mod tests {
         // **A collection shelf's total moves it to this value.** A Home shelf and a hub row carry
         // the hub's `totalSize` (the linked heading's "· N"), in both the hubs record and the
         // hubs initial state.
-        assert_eq!(plx_ui::rec::state_fp(APP_SHAPES), 0x68eb_d05d_f046_ba72);
+        //
+        // **The hubs record's row shape moves it to 0x966a_5d45_a0a9_48f6** (predecessor
+        // 0x68eb_d05d_f046_ba72, above). `record::SHAPE` now names the facts `PmsMovie` actually
+        // carries — `guid`/`show_guid` and the caption facts the "Under posters" redesign added —
+        // and `audience_rating` travels as `f32bits` rather than as a JSON float, which is what
+        // let a recorded hubs landing round-trip byte-for-byte instead of diverging on replay at
+        // the second frame. (The fork's `record` census had never listed those fields at all.)
+        assert_eq!(plx_ui::rec::state_fp(APP_SHAPES), 0x966a_5d45_a0a9_48f6);
     }
 
     /// The gate at the REAL hubs landing site, through the recording the driver loads: a result

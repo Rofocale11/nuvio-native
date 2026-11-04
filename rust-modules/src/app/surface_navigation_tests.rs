@@ -26,8 +26,19 @@ fn content_instances_compare_item_identity_and_keep_distinct_entries() {
 
 #[test]
 fn a_page_arg_wears_the_chrome_its_own_table_says() {
+    // The REVIEWED list of pages that wear the strip, beside `AppArg::chrome`'s own arms: the test
+    // exists so a page gaining or losing the bar is a decision, not a side effect. The Library's
+    // two sub-pages wear it as the Library they are pushed over, and the Watchlist wears it because
+    // the chip strip is its chrome too (`page_regions_tests` grades that every wearer owns the
+    // pointer, which is the half a table like this cannot say).
     for r in every_route() {
-        let want = if matches!(r, AppArg::Home | AppArg::Library | AppArg::Search) {
+        let want = if matches!(r, AppArg::Home
+            | AppArg::Library
+            | AppArg::LibraryCollections { .. }
+            | AppArg::LibraryRecommended { .. }
+            | AppArg::Search
+            | AppArg::Watchlist)
+        {
             Chrome::TabBar
         } else {
             Chrome::None

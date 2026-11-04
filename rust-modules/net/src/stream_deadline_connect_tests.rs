@@ -101,11 +101,22 @@ fn connect_to_a_black_hole_gives_up_on_the_deadline() {
     );
 }
 
-/// A refused connection must be reported immediately, not waited out: port 1 on loopback
-/// has no listener, so the kernel answers RST within the first poll.
+/// A loopback port with nothing listening, so a connect is REFUSED by the kernel at once. A
+/// hard-coded low port is not portable: this WSL host silently drops connects to `:1` instead
+/// of resetting them, so the "refused" fixture sat out the full connect deadline and this
+/// suite's slowest run (33 dials) took minutes rather than milliseconds.
+fn refused_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    port
+}
+
+/// A refused connection must be reported immediately, not waited out: a loopback port with no
+/// listener answers RST within the first poll.
 #[test]
 fn a_refused_connection_fails_fast_and_is_not_reported_as_success() {
-    let sa = sockaddr([127, 0, 0, 1], 1);
+    let sa = sockaddr([127, 0, 0, 1], refused_port());
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
     assert!(fd >= 0);
     let t0 = Instant::now();
@@ -127,7 +138,8 @@ fn a_refused_connection_fails_fast_and_is_not_reported_as_success() {
 /// hold end-to-end, and it is the invariant a future interruptible-open design has to keep.
 #[test]
 fn every_failed_open_retires_its_fd_and_leaks_nothing() {
-    let ip_refused = std::ffi::CString::new("127.0.0.1").unwrap(); // nothing listens on :1
+    let ip_refused = std::ffi::CString::new("127.0.0.1").unwrap();
+    let closed = refused_port() as c_int;
     let path = std::ffi::CString::new("/x").unwrap();
 
     // The first case used to be the dotted quad `999.1.2.3`, rejected by the hand parse after
@@ -140,7 +152,7 @@ fn every_failed_open_retires_its_fd_and_leaks_nothing() {
     // and it cannot leave the machine.
     for (label, ip, port) in [
         ("port out of range", &ip_refused, 70_000),
-        ("refused connection", &ip_refused, 1),
+        ("refused connection", &ip_refused, closed),
     ] {
         let mut hs = http_stream_boxed();
         let rv = http_open(
@@ -174,7 +186,7 @@ fn every_failed_open_retires_its_fd_and_leaks_nothing() {
         let _ = http_open(
             &mut *hs,
             ip_refused.as_ptr(),
-            1,
+            closed,
             path.as_ptr(),
             std::ptr::null(),
             "GET",

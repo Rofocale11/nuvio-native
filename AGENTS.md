@@ -49,7 +49,7 @@ before changing that area. Upstream PlxNative docs in
   is `docs/ui-restructure-spec-v4.md`, which `rust-modules/ui/src/lib.rs` cites by section
   number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) is in **both** the trunk and
   `forward-port/v0.9-hq` (ported on `tier-c/ui`, merged then deleted). The working line is
-  <!-- docs-fresh:ahead -->33<!-- /docs-fresh:ahead --> commits ahead of the trunk; run
+  <!-- docs-fresh:ahead -->34<!-- /docs-fresh:ahead --> commits ahead of the trunk; run
   `git log --oneline nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens
   are the ported ones.
 - Before account/watch-progress work, read `docs/nuvio/WATCH-PROGRESS.md`.
@@ -130,7 +130,7 @@ fails the build on a forbidden edge.
 - **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line
   (2026-11-02).** `nuvio-native` is the trunk, the product, and the repository's default branch.
   Short-lived branches and worktrees are cut from the working line, `forward-port/v0.9-hq` (the
-  stable `.ipk` line, currently <!-- docs-fresh:ahead -->33<!-- /docs-fresh:ahead --> commits
+  stable `.ipk` line, currently <!-- docs-fresh:ahead -->34<!-- /docs-fresh:ahead --> commits
   ahead of the trunk), and land back on it; the trunk is fast-forwarded only when the owner asks.
   Merge commits and squash commits are both acceptable. `main` is NOT the trunk: it holds
   upstream-side history and
@@ -208,9 +208,9 @@ fails the build on a forbidden edge.
   `--require-match`: a filter that matches no test fails the run instead of reporting
   "0 tests" as success. Do not hand-write a cargo invocation with a target dir outside the
   checkout.
-- Known pre-existing reds are recorded in `docs/nuvio/UPSTREAM.md` (the `plx_data`
-  concurrency tests, `play_automatically_publishes_direct_play_auto_once`). Reproduce a red
-  on the pre-change tree before attributing it to your diff.
+- There are no known pre-existing reds on the working line as of 2026-11-04 (`docs/nuvio/UPSTREAM.md`
+  records what each of the last ones was). Reproduce a red on the pre-change tree before attributing
+  it to your diff.
 - `make sim-macos` / `make` fail with `make: cargo: No such file` from a non-login shell:
   prefix `PATH="$HOME/.cargo/bin:$PATH"`. Test builds deny warnings, so a new `App` field
   must be read (`dead-code`) and initialised at BOTH construction sites (`app/boot.rs` and

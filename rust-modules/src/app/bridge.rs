@@ -494,6 +494,11 @@ impl Bridge {
         // adapter (`plx_data::metadata::record::arm`'s own doc has the history). Must run before this
         // `Bridge` can admit any detail request.
         stores.metadata.arm_detail_tracker(initial.content.is_some());
+        // A controlled boot never warms the shim's caches for a focused card. The read answers
+        // nothing in the recording, moves no store state, and replay's clients have their data
+        // transport denied — so it is dropped at the store door on BOTH sides, which keeps the
+        // recorded effect stream complete while making it host-independent.
+        stores.metadata.deny_warm_reads();
         let mut bridge = Self::with_publications_and_stores(&TTF, now_us, initial.session.clone(),
             super::adapters::session::SessionAdapter::controlled_home(mt, replay),
             initial.consent.clone(), super::adapters::consent::ConsentAdapter::live(),

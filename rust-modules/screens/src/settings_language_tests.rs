@@ -172,7 +172,13 @@ fn language_page_row_keys_are_distinct_and_pinned_languages_keep_theirs() {
     assert_eq!(unique.len(), keys.len(), "two Language rows share a key: {keys:?}");
     assert_eq!(LangId::Choice(Preference::System).key().0, 0);
     assert_eq!(LangId::Contribute.key().0, 1000);
-    for (p, key) in [(Preference::En, 1), (Preference::Es, 2), (Preference::Be, 3), (Preference::Fr, 5)] {
-        assert_eq!(LangId::Choice(p).key().0, key, "{p:?}: a shipped language's row identity moved");
+    // A REVIEWED LEDGER of the row each roster entry keeps, in `SHIPPED` order — not a language
+    // list: a row identity is what focus memory and a saved selection address, 4 is a retired
+    // language's gap, and renumbering any of them is a decision a reviewer has to sign for. A new
+    // language fails the length, so it cannot arrive with a silent row.
+    const ROWS: [u32; 8] = [1, 2, 3, 5, 6, 7, 8, 9];
+    assert_eq!(ROWS.len(), Preference::SHIPPED.len(), "the roster changed: name each new row here");
+    for (preference, row) in Preference::SHIPPED.iter().zip(ROWS) {
+        assert_eq!(LangId::Choice(*preference).key().0, row, "{preference:?}: a shipped language's row identity moved");
     }
 }

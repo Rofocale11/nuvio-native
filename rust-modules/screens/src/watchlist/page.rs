@@ -1473,6 +1473,17 @@ impl<H: ContentLike> Machine<H> for WatchlistScreen {
             Some(StackEvent::Card(_, card)) => Some(card),
             _ => None,
         };
+        // The engine's no-cursor OK fallback seats the first non-empty group — the bar — and a page
+        // whose first read is still on its way has nothing to seat (`PageRegions::unseat`). That
+        // press has no answer here, so swallow it rather than let the fallback park the reader on a
+        // pill the loading page does not own.
+        if cx.focus.current.is_none()
+            && self.with_regions(|regions| regions.first_seat()).is_none()
+            && matches!(ev, ScreenEvent::Input(InputEvent {
+                kind: InputKind::Key { key: Key::Ok, .. }, .. }))
+        {
+            return Handled::Yes;
+        }
         // The reader acting at the seat makes it theirs. It must be claimed HERE, on the event: an
         // OK-down arms a press the dispatcher commits only if focus is still on its key, and this
         // page's next Tick may run before that commit.

@@ -260,6 +260,12 @@ pub struct MetadataStore {
     adapter: Arc<crate::metadata::MetadataAdapter>,
     notice_gen: AtomicU32,
     notice_dirty: AtomicBool,
+    /// A controlled boot (recording AND replay) drops every [`MetadataCmd::WarmDetail`] at this door
+    /// instead of fetching it: the answer has no row in a recording, nothing in the store moves for
+    /// it, and replay's clients have their data transport denied — so running it made the recording
+    /// host-dependent and the replay refuse. It lives here rather than on the adapter because
+    /// `Reset` rotates the adapter and this decision outlives that rotation.
+    warm_denied: bool,
 }
 
 impl Default for MetadataStore {
@@ -269,6 +275,7 @@ impl Default for MetadataStore {
             adapter: Arc::new(Default::default()),
             notice_gen: AtomicU32::new(0),
             notice_dirty: AtomicBool::new(false),
+            warm_denied: false,
         }
     }
 }
@@ -319,11 +326,20 @@ impl MetadataStore {
         crate::metadata::record::arm(&self.adapter, enabled);
     }
 
+    /// Stops this owner issuing focus-prefetch warm reads at all — see the `warm_denied` field. The
+    /// one caller is `Bridge::controlled_home`, beside `arm_detail_tracker`.
+    pub fn deny_warm_reads(&mut self) {
+        self.warm_denied = true;
+    }
+
     /// Synchronous command path over this owner's own state/adapter. D3: no adapter rotation for
     /// `Clear` — see the struct doc. `Reset` (the server/profile switch) DOES rotate, before the
     /// state clears, so a worker spawned before the reset can only land into the retired `Arc` —
     /// mirrors `PersonStore::run`/`SearchStore::run_with_directory`'s `Reset` arm.
     pub fn run(&mut self, cmd: MetadataCmd) -> bool {
+        if self.warm_denied && matches!(&cmd, MetadataCmd::WarmDetail { .. }) {
+            return false;
+        }
         if matches!(&cmd, MetadataCmd::Reset) {
             self.adapter = Arc::new(Default::default());
         }

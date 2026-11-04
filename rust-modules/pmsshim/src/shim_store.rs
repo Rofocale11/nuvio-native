@@ -738,10 +738,9 @@ mod tests {
     }
 
     fn meta_scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pmsshim-meta-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        // The shared scratch door, not a hand-made `$TMPDIR` path: the runner fails a binary that
+        // leaves scratch behind, and `process_dir` registers the tree for removal at exit.
+        plx_base::testscratch::process_dir(&format!("pmsshim-meta-{tag}"))
     }
 
     #[test]

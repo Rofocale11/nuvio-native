@@ -222,13 +222,19 @@ fn store(command: &plx_data::stores::StoreCmd) -> Result<Value, &'static str> {
             json!({"hubs":{"page":[sid.raw(),id,key,before]}}),
         StoreCmd::Hubs(HubsCmd::CancelPage { sid, id, key }) =>
             json!({"hubs":{"cancel_page":[sid.raw(),id,key]}}),
+        // The band of rows the screen holds, and a quiet source read: both are fork/port vocabulary
+        // the pre-port encoder never saw. `seen` and staged state stay in the frame's own view.
+        StoreCmd::Hubs(HubsCmd::Hold { lo, hi }) => json!({"hubs":{"hold":[lo,hi]}}),
         StoreCmd::Hubs(HubsCmd::Retry) => json!({"hubs":"retry"}),
+        StoreCmd::Hubs(HubsCmd::RefetchSourceQuiet { sid }) =>
+            json!({"hubs":{"refetch_source_quiet":sid.raw()}}),
         StoreCmd::Browse(BrowseCmd::Reset) => json!({"browse":"reset"}),
         StoreCmd::Browse(BrowseCmd::Discovery(result)) => plx_data::browse::record::encode(result),
         StoreCmd::Metadata(cmd) => {
             use plx_data::stores::metadata::MetadataCmd;
             json!({"metadata":match cmd {
                 MetadataCmd::RequestDetail { sid, rk } => json!({"request_detail":[sid.raw(),rk]}),
+                MetadataCmd::WarmDetail { sid, rk } => json!({"warm_detail":[sid.raw(),rk]}),
                 MetadataCmd::Clear => json!("clear"),
                 MetadataCmd::ClearItem { sid, rk } => json!({"clear_item":[sid.raw(),rk]}),
                 MetadataCmd::Withdraw { sid, rk } => json!({"withdraw":[sid.raw(),rk]}),

@@ -262,10 +262,10 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
         (returned_b.sid, returned_b.rk.as_str()),
         (b_item.sid, b_item.rk.as_str())
     );
-    // Choosing another library is a header action: UP walks the grid back to the
-    // Type/Sort/Filter row (the grid-only page's head) before the section switch. With focus
-    // still on a poster the engine reconciles that poster's row to the incoming section's grid
-    // before the saved cursor can be seeded; from the header the bookmark is the page's seat.
+    // Choosing another library is a header action: UP walks the grid back to the header row (the
+    // grid-only page's head) before the section switch. With focus still on a poster the engine
+    // reconciles that poster's row to the incoming section's grid before the saved cursor can be
+    // seeded; from the header the bookmark is seeded into the grid's remembered seat.
     let region = |d: &Dispatcher<AppHost>| {
         let page = d.top_screen().unwrap().as_any().unwrap()
             .downcast_ref::<plx_screens::library::LibraryScreen>().unwrap();
@@ -287,9 +287,20 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
     assert_eq!(rig.directory.view().current(), Some(0));
+    // A library chosen with OK keeps the header on screen (`seed_cursor`), so the header still
+    // holds focus; A's saved card is the grid's remembered seat and DOWN returns to it.
+    assert_eq!(
+        region(&d),
+        "toolbar",
+        "premise: the header keeps focus after a header switch"
+    );
+    frame(&mut d, &mut rig, AppArg::Library, tick(380), script_key(Key::Down, tick(380)));
+    for i in 381..460 {
+        frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
+    }
     let (returned, opener) = rig
         .library_selection(&d, entry, d.focus())
-        .expect("new entry restores the saved card");
+        .expect("DOWN from the header lands on A's remembered card");
     assert_eq!(
         (returned.sid, returned.rk.as_str()),
         (item.sid, item.rk.as_str())

@@ -85,7 +85,10 @@ fn push_trace(case: Case) -> Vec<Row> {
     }
     let mut rows = Vec::new();
     nav_tab(&mut d, &mut rig, tab, None, None);
-    for _ in 0..22 {
+    // The captured image is held until the page is quiescent, bounded by
+    // `PAGE_QUIESCENCE_HOLD_MAX_MS` (600 ms, ~38 frames), so trace well past that to reach the
+    // settled replacement capture.
+    for _ in 0..60 {
         step(&mut d, &mut rig, Some(&mut rows));
     }
     assert!(d.top_arg() == Some(&AppArg::Library), "premise: the push committed");

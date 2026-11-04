@@ -2435,8 +2435,16 @@ impl HomeScreen {
             self.prefetch.sent = false;
         }
         let Some((sid, rk)) = self.prefetch.key.clone() else { return };
-        self.prefetch.dwell += dt;
-        if self.prefetch.sent || self.prefetch.dwell < PREFETCH_DWELL_S {
+        // A timer that only adds `dt` never fires on an idle page: the idle gate parks the loop
+        // unless the screen reports `Motion`. Report only while the dwell is still running, so a
+        // card that has already warmed lets the page park again.
+        if self.prefetch.sent {
+            return;
+        }
+        plx_ui::dwell::accumulate(&mut self.prefetch.dwell, dt, &mut |event| {
+            fx.note(event);
+        });
+        if self.prefetch.dwell < PREFETCH_DWELL_S {
             return;
         }
         self.prefetch.sent = true;

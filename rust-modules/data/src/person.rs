@@ -2421,6 +2421,17 @@ mod tests {
         assert!(!owner.current().unwrap().credited);
     }
 
+    /// A loopback port with nothing listening, so a forged server's dial is REFUSED at once. A
+    /// hard-coded low port is not portable: this WSL host silently drops connects to `:1` instead
+    /// of resetting them, and the fan-out test's four workers then stalled against the connect
+    /// deadline and never reached the rest of the roster.
+    fn refused_port() -> i32 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port() as i32;
+        drop(listener);
+        port
+    }
+
     /// **A person page over forty servers asks all forty and never has more than four out at once.**
     /// The per-server fetches (resolve, media, roles) share one gate ([`crate::stores::fanout`]);
     /// the two plex.tv fetches are not per server and are not counted. A claim stays raised until
@@ -2431,8 +2442,9 @@ mod tests {
         let _g = plx_base::testlock::serial();
         plx_plex::plex::reset_servers_for_test();
         owner.reset();
+        let port = refused_port();
         let ids: Vec<ServerId> = (0..40)
-            .map(|n| plx_plex::plex::register_for_test(&format!("person-fan-{n}"), "127.0.0.1", 1, "t", "cid"))
+            .map(|n| plx_plex::plex::register_for_test(&format!("person-fan-{n}"), "127.0.0.1", port, "t", "cid"))
             .collect();
         owner.open(ids[0], "7", "plex://person/7", "Actor", "");
         let mut asked = std::collections::BTreeSet::new();
