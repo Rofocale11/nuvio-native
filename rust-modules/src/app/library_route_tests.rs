@@ -452,7 +452,7 @@ fn the_sort_filter_pill_is_painted_after_the_panel_in_the_dispatchers_own_draw()
     use plx_ui::frame::backdrop::Z;
     let mut w = World::movies_library("route-sort-lift-order", false);
     w.climb_into_header();
-    for (key, at) in [(Key::Right, "header:recommended"), (Key::Right, "header:sort"), (Key::Ok, "menu:type:0")] {
+    for (key, at) in [(Key::Right, "header:recommended"), (Key::Right, "header:sort"), (Key::Ok, "menu:unwatched")] {
         w.press(key);
         w.frames(30);
         assert_eq!(here(&w), at, "premise: {key:?} lands on {at}");
@@ -468,7 +468,8 @@ fn the_sort_filter_pill_is_painted_after_the_panel_in_the_dispatchers_own_draw()
     let words: Vec<&str> = words.iter().map(|(s, _)| s.as_str()).collect();
     let at = |word: &str| words.iter().position(|w| *w == word);
     let pills: Vec<usize> = (0..words.len()).filter(|i| words[*i] == "Sort & Filter").collect();
-    let (panel_first, panel_last) = (at("SORT").expect("the panel drew its Sort section"), at("Genre").expect("…and its last Filter row"));
+    // These fixtures seed no sorts, so the panel is the Filter section alone.
+    let (panel_first, panel_last) = (at("FILTER").expect("the panel drew its Filter section"), at("Genre").expect("…and its last Filter row"));
     assert_eq!(pills.len(), 1, "the pill is drawn once, by the lift (the page pass left it out): {words:?}");
     assert!(pills[0] > panel_last && panel_first < panel_last,
         "the pill's run ({}) comes after the panel's rows ({panel_first}..={panel_last}): {words:?}", pills[0]);
@@ -484,16 +485,12 @@ fn to_sort_filter() -> Vec<Step> {
     ]
 }
 
-/// OK on the Sort & Filter control, then down to the Filter section's Unwatched row. The panel
-/// opens on the Show section's first row (the library's own type, checked), and the two rows above
-/// Unwatched are that type and the Collections page.
+/// OK on the Sort & Filter control lands on the panel's opening row. The panel is Sort then Filter
+/// (no Show section since the Collections page's only entry point went), and these fixtures seed no
+/// sorts, so Unwatched IS the opening row.
 fn to_unwatched() -> Vec<Step> {
     let mut steps = to_sort_filter();
-    steps.extend([
-        press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:type:0"),
-        press(Key::Down, "", "library", "menu:collections"),
-        press(Key::Down, "", "library", "menu:unwatched"),
-    ]);
+    steps.push(press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"));
     steps
 }
 
@@ -522,9 +519,7 @@ fn a_filter_shows_n_of_m_beside_the_control_and_clears_when_reset() {
             // The server answered: 37 of the library's 120.
             after(films_answered::<37>, press(Key::Right, "", "library", "header:sort [37 of 120 films]")),
             // Reset it, from the same control (which seats its Show section again).
-            press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:type:0"),
-            press(Key::Down, "", "library", "menu:collections"),
-            press(Key::Down, "", "library", "menu:unwatched"),
+            press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"),
             press(Key::Ok, "", "library", "menu:unwatched"),
             press(Key::Back, "", "library", "header:sort*"),
             after(films_answered::<120>, press(Key::Right, "", "library", "header:sort")),

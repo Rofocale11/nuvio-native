@@ -1,15 +1,16 @@
 //! The library page header (redesign spec, "Header"): the library names, the "+N" overflow and the
-//! page's three controls (on the Collections page, the crumb and its Sort) on the ui
-//! [`PageHeader`], one focus row at y 148.
+//! page's controls on the ui [`PageHeader`], one focus row at y 148. Catalogs (naming the catalog in
+//! force) and Recommended stand at the left edge, over the first poster; the "312 of 1,284" read-out
+//! and Sort & Filter are the right cluster. On the Collections page the left side is the crumb.
 //!
 //! This file DECLARES the row: which names, which controls, which element each focusable item is.
 //! The row is built here, once per sync, as a ui [`HeaderRow`]; its layout, paint, motion and focus
 //! group are the ui's (`plx_ui::page_header`), the same ones the Collections, Recommended and
 //! Watchlist pages wear. The names are packed against the room the right cluster leaves
-//! (`PageHeader::layout`'s `left_budget`, sized from the cluster's widest case), so the names never
-//! shift when a value changes, the filter read-out included, and the Catalogs control (which draws
-//! no value, only its label) comes and goes with the section's answer. The controls inside the
-//! cluster stand by what they draw, one gap apart. The row's MOTION (`header_capsules`,
+//! (`PageHeader::layout`'s `left_budget`, sized from the cluster's widest case, less the room the
+//! left controls need), so the names never shift when a value changes, the filter read-out and the
+//! catalog title included, and the Catalogs control comes and goes with the section's answer. The
+//! controls stand by what they draw, one gap apart. The row's MOTION (`header_capsules`,
 //! `header_pop`) lives on the screen, not in the row: a library switch replaces the whole row, and
 //! the pill must travel across it.
 use super::*;
@@ -115,9 +116,48 @@ impl LibraryScreen {
         Some(plx_platform::i18n::msg::library_header_filtered_of(&locale.number(listing.total()), &of_total))
     }
 
+    /// The catalog the grid is listing — the one the menu checks — or the server's first, which is
+    /// what the grid lists until a pick lands. `None` when the section advertised none.
+    pub(super) fn current_catalog<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> Option<String> {
+        let listing = H::listing(cx);
+        let catalogs = listing.catalogs();
+        let active = listing.catalog()
+            .and_then(|key| catalogs.iter().find(|c| c.key == key))
+            .or_else(|| catalogs.iter().find(|c| c.active))
+            .or_else(|| catalogs.first())?;
+        Some(active.title.clone())
+    }
+
+    /// The controls that stand on the LEFT of the row: the Catalogs selector, drawing the catalog
+    /// in force, then Recommended. Returned as (live, widest): the widest catalogue title fixes the
+    /// room they need so the library names beside them are packed against a stable budget.
+    pub(super) fn header_left<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> (Vec<HeaderItem>, Vec<HeaderItem>) {
+        use plx_platform::i18n::msg;
+        let mut live = Vec::new();
+        let mut widest = Vec::new();
+        if self.listing == Listing::Collections { return (live, widest); }
+        if self.catalogs {
+            let current = self.current_catalog(cx).unwrap_or_default();
+            let longest = H::listing(cx).catalogs().iter().map(|catalog| catalog.title.as_str())
+                .max_by(|a, b| page_header::cluster_width(&[item(*a)], cx.measure)
+                    .total_cmp(&page_header::cluster_width(&[item(*b)], cx.measure)))
+                .unwrap_or_default().to_owned();
+            live.push(HeaderItem { value: (!current.is_empty()).then_some(current), fold_glyph: true,
+                ..item(msg::library_header_catalogs()) });
+            widest.push(HeaderItem { value: (!longest.is_empty()).then_some(longest), fold_glyph: true,
+                ..item(msg::library_header_catalogs()) });
+        }
+        let recommended = HeaderItem { selected_plate: self.listing == Listing::Recommended,
+            ..item(msg::library_header_recommended()) };
+        live.push(recommended.clone());
+        widest.push(recommended);
+        (live, widest)
+    }
+
     /// The right cluster as it is now, and in its widest case (every value at its longest), which
-    /// fixes the cluster's BUDGET so the room the library names may use does not change when a
-    /// value does.
+    /// fixes the cluster's BUDGET so the room the left side may use does not change when a value
+    /// does. Only Sort & Filter stands at the right edge now; Catalogs and Recommended moved to
+    /// [`Self::header_left`], over the first poster.
     pub(super) fn header_right<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> (Vec<HeaderItem>, Vec<HeaderItem>) {
         use plx_platform::i18n::msg;
         let mut right = Vec::new();
@@ -127,19 +167,6 @@ impl LibraryScreen {
             widest.push(item.clone());
             right.push(item);
         }
-        // The Catalogs control: the menu of the addon catalogs this section can list (films on
-        // Movies, shows on TV, as the server splits them). It draws NO value, unlike Sort & Filter:
-        // a catalog's title is a phrase ("Netflix Movies", "Prime Video Series") and the cluster's
-        // budget must leave the library names 40% of the row in every shipped language, which a
-        // title this long eats. The menu is where the catalog in force is read, from its check.
-        // The control is on the row only for a section that advertised any ([`Self::catalogs`]).
-        if self.catalogs {
-            right.push(item(msg::library_header_catalogs()));
-            widest.push(item(msg::library_header_catalogs()));
-        }
-        right.push(HeaderItem { selected_plate: self.listing == Listing::Recommended,
-            ..item(msg::library_header_recommended()) });
-        widest.push(item(msg::library_header_recommended()));
         let sort = self.sort_value(cx);
         let longest = H::listing(cx).sorts().iter().map(|sort| sort.label()).chain([sort.as_str()])
             .max_by(|a, b| page_header::cluster_width(&[item(*a)], cx.measure)
@@ -170,6 +197,10 @@ impl LibraryScreen {
             listing.unwatched(), listing.genre().map(|genre| genre.id.as_str()), listing.total(),
             listing.fetch() == SecFetch::Ready, listing.sorts().len(), self.unfiltered.as_ref().map(|(_, total)| *total)).hash(&mut h);
         listing.catalogs().len().hash(&mut h);
+        for catalog in listing.catalogs() {
+            (catalog.key.as_str(), catalog.title.as_str(), catalog.active).hash(&mut h);
+        }
+        listing.catalog().hash(&mut h);
         match self.pending.grid().filter(|(target, _)| target.matches(listing)).map(|(_, action)| action) {
             Some(GridAction::Sort { key, desc }) => (1u8, key.as_str(), *desc).hash(&mut h),
             Some(GridAction::Unwatched { desired }) => (2u8, *desired).hash(&mut h),
@@ -218,13 +249,18 @@ impl LibraryScreen {
     /// The row of the Library page itself: the library names that fit, then the controls.
     fn names_header<H: LibraryLike>(&mut self, cx: &Cx<'_, H>) -> HeaderRow {
         let (right, widest) = self.header_right(cx);
+        let (left_controls, left_widest) = self.header_left(cx);
         let measure = cx.measure;
-        let budget = PageHeader::new(PageHeaderSpec { right: right.clone(), ..Default::default() }, &widest, measure)
-            .layout(SCR_W, measure).left_budget;
+        // The right cluster fixes this page's left budget; the controls standing at the left edge
+        // take their (widest) room out of it first, so the names packed below never run under them.
+        let probe = PageHeader::new(PageHeaderSpec { right: right.clone(), ..Default::default() }, &widest, measure)
+            .layout(SCR_W, measure);
+        let reserve = if left_widest.is_empty() { 0.0 }
+            else { page_header::cluster_width(&left_widest, measure) + page_header::GAP };
+        let budget = (probe.left_budget - reserve).max(0.0);
 
         self.libraries.clear();
         self.folded.clear();
-        let mut overflow = 0;
         let current = self.view_section(cx);
         let mut left = Vec::new();
         if let Some(current) = current {
@@ -247,22 +283,28 @@ impl LibraryScreen {
                 let selected = all.iter().position(|(_, index)| *index == current).unwrap_or(0);
                 let more_w = page_header::cluster_width(&[item(format!("+{}", all.len() - 1))], measure);
                 let picks = pack_names(&widths, selected, budget, more_w, layout::MAX_LIBRARY_PILLS);
-                overflow = all.len() - picks.len();
+                let overflow = all.len() - picks.len();
                 self.folded = all.iter().enumerate().filter(|(i, _)| !picks.contains(i))
                     .filter_map(|(_, (_, section))| u32::try_from(*section).ok()).collect();
                 for &pick in &picks {
                     left.push(HeaderItem { selected_plate: all[pick].1 == current, ..item(labels[pick].as_str()) });
                     self.libraries.push(all[pick]);
                 }
-                if overflow > 0 { self.libraries.push((MORE, usize::MAX)); }
+                if overflow > 0 {
+                    left.push(item(format!("+{overflow}")));
+                    self.libraries.push((MORE, usize::MAX));
+                }
             }
         }
+        // The controls stand after any names and the "+N", so on the usual one-library page they
+        // sit at the left text edge, above the first poster.
+        left.extend(left_controls);
 
-        let page = PageHeader::new(PageHeaderSpec { left, overflow, right, ..Default::default() }, &widest, measure);
+        let page = PageHeader::new(PageHeaderSpec { left, right, ..Default::default() }, &widest, measure);
         let mut layout = page.layout(SCR_W, measure);
         if self.libraries.is_empty() {
-            // One library: no names, and the three controls sit centred between the nav and the
-            // grid (the board's row top is y 158, ten under the multi-library row's 148).
+            // No names: the controls sit a little lower than the multi-library row's 148 (the
+            // board's row top is y 158).
             for it in &mut layout.items {
                 it.text.y += layout::SINGLE_LIBRARY_DY;
                 it.plate.y += layout::SINGLE_LIBRARY_DY;
@@ -271,18 +313,23 @@ impl LibraryScreen {
         self.header_row(page, layout)
     }
 
-    /// The built row: which element each focusable item of `layout` is. The names and "+N" are
-    /// `self.libraries`, the controls are [`Self::toolbar_elems`] (the first focusable right item is
-    /// the first control, a read-out before it is no stop), the crumb's root is [`CRUMB_ROOT`] and
-    /// its page name, the title, is none.
+    /// The built row: which element each focusable item of `layout` is. The left side is the
+    /// library names, the "+N" that folds the rest, then [`Self::left_controls`]; the right cluster
+    /// is [`Self::right_controls`] (a read-out before them is no stop). On the Collections page the
+    /// left side is the crumb: its root is [`CRUMB_ROOT`], its page name is no stop.
     fn header_row(&self, page: PageHeader, layout: page_header::HeaderLayout) -> HeaderRow {
-        let controls = self.toolbar_elems();
+        let left_controls = self.left_controls();
+        let right_controls = self.right_controls();
+        let names = self.libraries.iter().take_while(|(elem, _)| *elem != MORE).count();
+        let more = usize::from(self.libraries.len() > names);
         let first_control = page.spec().right.iter().position(|it| it.focusable).unwrap_or(0);
         let stops = layout.items.iter().enumerate().filter(|(_, rect)| rect.focusable).filter_map(|(index, rect)| {
             let elem = match rect.slot {
-                Slot::Left(i) => self.libraries.get(i).map(|(elem, _)| *elem),
+                Slot::Left(i) if i < names => self.libraries.get(i).map(|(elem, _)| *elem),
+                Slot::Left(i) if i == names && more == 1 => Some(MORE),
+                Slot::Left(i) => left_controls.get(i - names - more).copied(),
                 Slot::Overflow => Some(MORE),
-                Slot::Right(i) => i.checked_sub(first_control).and_then(|i| controls.get(i).copied()),
+                Slot::Right(i) => i.checked_sub(first_control).and_then(|i| right_controls.get(i).copied()),
                 Slot::CrumbRoot => Some(CRUMB_ROOT),
                 Slot::CrumbPage => None,
             };

@@ -4407,13 +4407,23 @@ impl Shim {
                 let (start, size) = page_params(req);
                 let genre = req.q("genre").filter(|g| !g.is_empty());
                 let sort = parse_catalog_sort(req.q("sort"));
-                // Cinemeta does not honour `?sort=`; instead it exposes dedicated catalogs for
-                // each ordering ("top" = Popular, "imdbRating" = Top Rated). Map the Sort dropdown
-                // to those catalogs so the addon's own ranking is used, and never forward `sort`
-                // to the addon URL (catalog_page does not send it). "Release Date" has no clean
-                // catalog mapping without a concrete year, so it keeps the "top" catalog and is
-                // sorted in memory by the panic-free comparator above.
-                let (cat, sort) = if let Some((kind, _)) = sort {
+                // A request that NAMED a catalog gets that catalog: the choice IS the order, and
+                // the Sort menu only reorders within it (Popularity is the catalog's own order).
+                // Rewriting the catalog from the sort here is what made every page past the first
+                // one revert to Popular Movies: the client sends `?catalog=<key>&sort=popularity`
+                // on the pages it fetches after the landing taught it the menu.
+                //
+                // Without a named catalog (a listing the selector never reached), Cinemeta does
+                // not honour `?sort=`; instead it exposes dedicated catalogs for each ordering
+                // ("top" = Popular, "imdbRating" = Top Rated). Map the Sort dropdown to those
+                // catalogs so the addon's own ranking is used, and never forward `sort` to the
+                // addon URL (catalog_page does not send it). "Release Date" has no clean catalog
+                // mapping without a concrete year, so it keeps the "top" catalog and is sorted in
+                // memory by the panic-free comparator above.
+                let named_catalog = req.q("catalog").filter(|key| !key.is_empty());
+                let (cat, sort) = if named_catalog.is_some() {
+                    (self.section_catalog(req, k), sort)
+                } else if let Some((kind, _)) = sort {
                     let target_id = match kind {
                         CatalogSort::Popularity => Some("top"),
                         CatalogSort::Rating => Some("imdbRating"),
@@ -5721,6 +5731,63 @@ mod catalog_selector_tests {
             headers: HashMap::new(),
             body: Vec::new(),
         }
+    }
+
+    /// Two movie catalogs, one of them Cinemeta's `top`, so a request that names a catalog can be
+    /// told apart from the sort menu's old "popularity means top" rewrite.
+    struct TwoCatalogBackend;
+
+    impl Backend for TwoCatalogBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            vec![
+                CatalogInfo { key: "addon/movie/top".into(), title: "Popular Movies".into(),
+                    type_: "movie".into(), genres: Vec::new() },
+                CatalogInfo { key: "addon/movie/nfx".into(), title: "Netflix Movies".into(),
+                    type_: "movie".into(), genres: Vec::new() },
+            ]
+        }
+        fn catalog_page(&self, key: &str, skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+            if skip > 0 { return Ok(Vec::new()); }
+            match key {
+                "addon/movie/top" => Ok(vec![meta("Popular One", Some("8.0"), Some("2020-01-02"), &[])]),
+                "addon/movie/nfx" => Ok(vec![meta("Netflix One", Some("7.0"), Some("2021-01-02"), &[])]),
+                _ => Err(()),
+            }
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> { Vec::new() }
+        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> { None }
+        fn streams(&self, _type_: &str, _id: &str, _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream> { Vec::new() }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> { Vec::new() }
+    }
+
+    fn first_title(response: &Response) -> String {
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        body["MediaContainer"]["Metadata"][0]["title"].as_str().unwrap_or_default().to_owned()
+    }
+
+    /// The app fetches the first page without a sort, then sends `sort=popularity` on every page
+    /// after it learned the menu. That sort must reorder *within* the chosen catalog, never rewrite
+    /// the catalog: doing so made every page past the first revert to Popular Movies.
+    #[test]
+    fn a_named_catalog_survives_the_sort_the_client_sends_on_later_pages() {
+        let shim = Arc::new(Shim::new(Arc::new(TwoCatalogBackend), Config::default()));
+        let first = shim.handle(&get("/library/sections/1/all", &[("catalog", "addon/movie/nfx")]));
+        assert_eq!(first_title(&first), "Netflix One");
+        for sort in ["popularity:desc", "popularity:asc", "rating:desc", "titleSort"] {
+            let later = shim.handle(&get("/library/sections/1/all",
+                &[("catalog", "addon/movie/nfx"), ("sort", sort)]));
+            assert_eq!(first_title(&later), "Netflix One", "sort {sort:?} replaced the chosen catalog");
+        }
+    }
+
+    /// A listing that names no catalog keeps the old behavior: Cinemeta exposes orders as catalogs,
+    /// so "Popularity" means its `top` one.
+    #[test]
+    fn without_a_named_catalog_a_popularity_sort_still_means_the_top_catalog() {
+        let shim = Arc::new(Shim::new(Arc::new(TwoCatalogBackend), Config::default()));
+        let response = shim.handle(&get("/library/sections/1/all", &[("sort", "popularity:desc")]));
+        assert_eq!(first_title(&response), "Popular One");
     }
 
     #[test]

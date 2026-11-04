@@ -67,7 +67,10 @@ see "The P2P streaming server" below.
   Selecting a row sends `?catalog=<key>` on `/library/sections/{k}/all`; the shim resolves the key
   against `plx_stremio`'s browse catalogs, fetches only that catalog, applies `?genre=` (defensively
   in memory when the addon does not declare genre support) and sorts in memory by `popularity`
-  (the catalog's own order), `rating`, `releaseDate`, or `titleSort`. `/library/sections/{k}/genre`
+  (the catalog's own order), `rating`, `releaseDate`, or `titleSort`. **A request that names a
+  catalog keeps it whatever `?sort=` says**: the sort only reorders inside the chosen catalog, so
+  the page the client fetches after the landing teaches it the menu cannot revert to the section's
+  first catalog. `/library/sections/{k}/genre`
   merges the catalog's declared genres with TMDB's standard list (movie or TV by section), so the
   Filter menu is populated even when the addon declares no `genre` extra; a TMDB genre the addon
   does not declare is matched against the rows' `Genre[]` in memory, alias-aware so `Sci-Fi` and

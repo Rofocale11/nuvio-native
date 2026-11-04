@@ -23,11 +23,16 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   own order. Real PMS servers and failed addon loads omit `catalogKey`, so the client keeps its
   original hardcoded Type menu as the fallback.
 - **The Library header's Catalogs control opens that menu.** The header slot that used to hold a
-  "Collections · N" button now holds a *Catalogs* control (label only — a catalog title in the
-  value blew the header's width budget, so the menu's own check is the read-out). It opens
-  `LibraryMenuKind::Type`, so it is tab-dependent for free: Movies offers the section's movie
-  catalogs, TV Shows its show catalogs. The Collections button was deleted rather than fixed: its
-  count was fabricated (cached rows plus a page-size hint) and it spun forever.
+  "Collections · N" button now holds a *Catalogs* control that names the catalog in force
+  ("Catalogs · Netflix Movies") and stands at the left edge over the first poster, beside
+  *Recommended*; *Sort & Filter* stays at the right edge. It opens `LibraryMenuKind::Type`, so it is
+  tab-dependent for free: Movies offers the section's movie catalogs, TV Shows its show catalogs.
+  The Collections button was deleted rather than fixed: its count was fabricated (cached rows plus a
+  page-size hint) and it spun forever. The Collections page is no longer offered from Sort & Filter
+  either, so the menu is now Sort and Filter only.
+- **A named catalog is never rewritten by the sort.** The Sort menu reorders *within* the catalog
+  the reader picked (Popularity is the catalog's own order); only a listing that names no catalog
+  still maps Popularity/Rating onto Cinemeta's `top`/`imdbRating` catalogs.
 - **The Library tab is grid-only.** It does not fetch or draw the section's horizontal hub rows;
   Movies/TV Shows open with Type/Sort/Filter directly above the grid. Home shelves are unaffected.
 - **TMDB baseline for the Filter and Sort menus.** The genre list merges the catalog's declared

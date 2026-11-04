@@ -10,8 +10,21 @@ pub(super) const SORTFILTER: u32 = 10;
 pub(super) const CRUMB_ROOT: u32 = 11;
 
 impl LibraryScreen {
-    /// The controls on the row, left to right. The Catalogs control is on it only when the section
-    /// advertised catalogs (`LibraryScreen::catalogs`): a library with none has nothing to pick.
+    /// The controls on the LEFT of the row, left to right: the Catalogs selector (which draws the
+    /// catalog in force) and Recommended. They stand over the first poster rather than beside the
+    /// Sort & Filter at the right edge.
+    pub(super) fn left_controls(&self) -> &'static [u32] {
+        if self.listing == Listing::Collections { return &[]; }
+        if self.catalogs { &[CATALOGS, RECOMMENDED] } else { &[RECOMMENDED] }
+    }
+
+    /// The controls on the RIGHT of the row, left to right (the Sort & Filter menu).
+    pub(super) fn right_controls(&self) -> &'static [u32] {
+        if self.listing == Listing::Collections { return self.toolbar_elems(); }
+        &[SORTFILTER]
+    }
+
+    /// Every focusable control on the row, in reading order.
     pub(super) fn toolbar_elems(&self) -> &'static [u32] {
         // The Collections page's row: the crumb (its own element, `CRUMB_ROOT`) and, only when the
         // server declares two sorts, the one Sort control. No Catalogs, Recommended or menu.

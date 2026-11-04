@@ -233,7 +233,7 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
             _ => None,
         })
         .unwrap_or_else(|| panic!("the real toolbar activation must request its menu: {evidence}"));
-    assert_eq!(kind, plx_screens::registry::LibraryMenuKind::Filter);
+    assert_eq!(kind, plx_screens::registry::LibraryMenuKind::SortFilter);
     d.nav.next_style = plx_ui::containers::modal::Style::Compact;
     d.request(
         MachineId::Nav,

@@ -41,13 +41,14 @@ fn every_library_kind_offers_the_header_controls_and_sort_filter_opens_its_menu(
     let fixture = tv_fixture(LibraryType::Primary, 36);
     let mut page = tv_page(&fixture);
     assert_eq!(page.toolbar_elems(), [CATALOGS, RECOMMENDED, SORTFILTER]);
-    let mut right = MARGIN_X;
+    let mut right = 0.0;
     for &elem in page.toolbar_elems() {
         let rect = <LibraryScreen as Focusable<HostFixture>>::place(&page, &elem, &fixture.cx(None), At::Drawn).unwrap().rect;
         assert!(rect.x >= right);
         right = rect.x + rect.w;
     }
-    assert!(right < layout::GRID_RIGHT + plx_ui::page_header::OVERHANG);
+    assert!((right - (plx_ui::page_header::TEXT_X1 + plx_ui::page_header::OVERHANG)).abs() < 1.0,
+        "the right cluster ends at the right text edge: {right}");
     let mut output = Vec::new();
     let mut present = plx_machine::present::Present::new();
     page.activate(SORTFILTER, false, &fixture.cx(Some(page.key(SORTFILTER))),

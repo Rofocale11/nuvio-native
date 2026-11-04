@@ -1491,7 +1491,9 @@ pub(crate) fn key_back(
     pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
 ) {
     if super::bridge::nav_cancel(pages) {
+        // Handled: the page transition was still inside its 70 ms window, so it was withdrawn.
     } else if super::bridge::player(pages).is_some() {
+        // Handled: the player owns BACK while it is up.
     } else if matches!(pages.top_arg(), Some(AppArg::Content(_))) {
         // The two stacking screens, through the page transition. All three
         // halves of the pop — the outgoing page's teardown, the trail move and

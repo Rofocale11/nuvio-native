@@ -53,17 +53,17 @@ fn the_header_row_stands_at_148_and_the_grid_starts_at_244() {
 }
 
 /// **The Catalogs control is on the row only for a section the server advertised catalogs for**,
-/// and it draws no value: the row carries the way into the menu, the menu shows which catalog is in
-/// force. A library with none has nothing to pick, so it has no control — and no room reserved.
+/// and it stands at the left edge, over the first poster, naming the catalog in force. A library
+/// with none has nothing to pick, so it has no control — and no room reserved.
 #[test]
 fn the_catalogs_control_is_on_the_row_only_when_the_section_advertises_catalogs() {
     let _guard = plx_base::testlock::serial();
     let (mut fixture, mut page, engine) = grid_page(1);
     let label = plx_platform::i18n::msg::library_header_catalogs();
-    let built = |page: &LibraryScreen| page.header.row().unwrap().page.spec().right.iter()
+    let built = |page: &LibraryScreen| page.header.row().unwrap().page.spec().left.iter()
         .find(|item| item.label == label).map(|item| item.value.clone());
     assert_eq!(page.toolbar_elems(), [CATALOGS, RECOMMENDED, SORTFILTER]);
-    assert_eq!(built(&page), Some(None), "the control is on the row, wearing its label alone");
+    assert_eq!(built(&page), Some(Some(TEST_CATALOGS[0].1.to_owned())), "the control names the catalog in force");
     assert!(<LibraryScreen as Focusable<TestHost>>::place(&page, &CATALOGS, &fixture.cx(&engine), At::Drawn).is_some());
     // The section advertised none on arrival (an addon set with no catalog for it): nothing to
     // pick, so no control — and no room reserved.
@@ -72,38 +72,42 @@ fn the_catalogs_control_is_on_the_row_only_when_the_section_advertises_catalogs(
     let bare = bare.screen();
     assert_eq!(bare.toolbar_elems(), [RECOMMENDED, SORTFILTER], "nothing to pick: no control");
     assert_eq!(built(&bare), None, "and it is not laid out");
-    // Another catalog picked: the stop and the row are what they were (the pick is the menu's).
+    // Another catalog picked: the control says so.
     fixture.listing = fixture.listing.clone().with_catalogs(test_catalogs(), Some(TEST_CATALOGS[2].0));
     page.sync(&fixture.cx(&engine));
     assert_eq!(page.toolbar_elems(), [CATALOGS, RECOMMENDED, SORTFILTER]);
-    assert_eq!(built(&page), Some(None));
+    assert_eq!(built(&page), Some(Some(TEST_CATALOGS[2].1.to_owned())));
 }
 
-/// **One rule spaces the right cluster** (the owner's photo: `Collections · 4` and `Recommended`
-/// stood a wide gap apart and `Recommended` and `Sort & Filter` a narrow one). Every adjacent pair
-/// of the cluster's items stands exactly one `GAP` apart on the drawn text, whatever the control's
-/// value is, or whether the control is there at all.
+/// **One rule spaces the row** (the owner's photo: `Collections · 4` and `Recommended` stood a wide
+/// gap apart and `Recommended` and `Sort & Filter` a narrow one). Every adjacent pair of the left
+/// group (names then Catalogs then Recommended) stands exactly one `GAP` apart on the drawn text,
+/// whatever the control's value is; the right cluster ends at the right text edge.
 #[test]
-fn every_gap_of_the_right_cluster_is_one_gap_whatever_the_catalog_is() {
+fn every_gap_of_the_row_is_one_gap_whatever_the_catalog_is() {
     use plx_ui::page_header::{Slot, GAP};
     let _guard = plx_base::testlock::serial();
-    // (what, the section's catalogs, the one shown, the controls on the row)
-    for (what, list, current, controls) in [
-        ("none advertised", Vec::new(), None, 2usize),
-        ("the first", test_catalogs(), Some(TEST_CATALOGS[0].0), 3),
-        ("the widest title", test_catalogs(), Some(TEST_CATALOGS[2].0), 3),
+    for (what, list, current) in [
+        ("none advertised", Vec::new(), None),
+        ("the first", test_catalogs(), Some(TEST_CATALOGS[0].0)),
+        ("the widest title", test_catalogs(), Some(TEST_CATALOGS[2].0)),
     ] {
         let (fixture, mut page, engine) = grid_page_with_catalogs(2, list, current);
         page.sync(&fixture.cx(&engine));
         let row = page.header.row().unwrap();
-        let cluster: Vec<_> = row.layout.items.iter()
-            .filter_map(|rect| match rect.slot { Slot::Right(i) => Some((rect, &row.page.spec().right[i])), _ => None }).collect();
-        assert_eq!(cluster.len(), controls, "{what}: the controls on the row");
-        for pair in cluster.windows(2) {
+        let left: Vec<_> = row.layout.items.iter()
+            .filter_map(|rect| match rect.slot { Slot::Left(i) => Some((rect, &row.page.spec().left[i])), _ => None }).collect();
+        for pair in left.windows(2) {
             let gap = pair[1].0.text.x - (pair[0].0.text.x + pair[0].0.text.w);
             assert!((gap - GAP).abs() < 0.01, "{what}: {} -> {} is {gap} apart, not {GAP}", pair[0].1.label, pair[1].1.label);
         }
-        let last = cluster.last().unwrap().0.text;
+        let right: Vec<_> = row.layout.items.iter()
+            .filter_map(|rect| match rect.slot { Slot::Right(i) => Some((rect, &row.page.spec().right[i])), _ => None }).collect();
+        for pair in right.windows(2) {
+            let gap = pair[1].0.text.x - (pair[0].0.text.x + pair[0].0.text.w);
+            assert!((gap - GAP).abs() < 0.01, "{what}: {} -> {} is {gap} apart, not {GAP}", pair[0].1.label, pair[1].1.label);
+        }
+        let last = right.last().unwrap().0.text;
         assert!((last.x + last.w - plx_ui::page_header::TEXT_X1).abs() < 0.01, "{what}: the cluster ends at the right text edge");
     }
 }
@@ -231,20 +235,24 @@ fn the_header_cluster_leaves_the_names_room_in_every_shipped_language() {
     assert!(out.is_empty(), "{}", out.join("\n"));
 }
 
-/// **Picking a catalog moves nothing in the header.** The control draws no value, so the pick
-/// changes the menu's check and the grid, never the row's width, the names' packing or the budget
-/// they were packed into.
+/// **Picking a catalog changes only what the Catalogs control says.** The names stay folded the
+/// way they were and the budget they were packed into does not move; the control names the picked
+/// catalog, which is the confirmation the grid gave none before.
 #[test]
-fn a_catalog_pick_leaves_the_row_exactly_as_it_was() {
+fn a_catalog_pick_changes_only_the_catalogs_value() {
     let _guard = plx_base::testlock::serial();
     let (mut fixture, mut page, engine) = grid_page(12);
     assert!(page.libraries.iter().any(|(elem, _)| *elem == MORE), "premise: twelve libraries fold into +N");
-    let row = |page: &LibraryScreen| (page.header.row().unwrap().layout.left_budget, page.libraries.clone(), page.folded.clone());
-    let before = row(&page);
-    for (key, _) in TEST_CATALOGS {
+    let packing = |page: &LibraryScreen| (page.header.row().unwrap().layout.left_budget, page.libraries.clone(), page.folded.clone());
+    let value = |page: &LibraryScreen| page.header.row().unwrap().page.spec().left.iter()
+        .find(|item| item.label == plx_platform::i18n::msg::library_header_catalogs())
+        .and_then(|item| item.value.clone());
+    let before = packing(&page);
+    for (key, title) in TEST_CATALOGS {
         fixture.listing = fixture.listing.clone().with_catalogs(test_catalogs(), Some(key));
         page.sync(&fixture.cx(&engine));
-        assert_eq!(row(&page), before, "{key}: picking a catalog moved the row");
+        assert_eq!(packing(&page), before, "{key}: picking a catalog moved the names");
+        assert_eq!(value(&page).as_deref(), Some(title), "{key}: the control names the catalog in force");
     }
 }
 
