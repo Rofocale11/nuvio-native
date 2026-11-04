@@ -352,6 +352,16 @@ pub struct Shim {
     meta_flight: plx_base::flight::Flight,
     catalogs: Mutex<HashMap<(String, Option<String>), Arc<Mutex<CatalogCache>>>>,
     catalog_list: Mutex<Option<(Instant, Vec<CatalogInfo>)>>,
+    /// The full browse list, same cache shape. **Every `/hubs/nuvio/{i}` index is an index into
+    /// this list**, so Home and Recommended must both build their rows from it — a row's key has to
+    /// page the catalog the row previewed.
+    browse_list: Mutex<Option<(Instant, Vec<CatalogInfo>)>>,
+    /// The last card the shim built for a rating key, by `ratingKey`. A LISTING read
+    /// (`/library/metadata/{rk1},{rk2},…`) is a row of cards the shim itself just handed out, so
+    /// answering it from here costs nothing; resolving it through the addon's `meta` + TMDB costs
+    /// ~0.7 s a card, which is what made a Recommended page fill in one row a minute. A detail
+    /// read (one key) never uses this.
+    cards: Mutex<HashMap<i64, Value>>,
     streams: Mutex<HashMap<i64, Arc<StreamSlot>>>,
     sub_urls: Mutex<HashMap<i64, String>>,
     poster_fallbacks: Mutex<HashMap<String, String>>,
@@ -1550,6 +1560,9 @@ mod tmdb_metadata_tests {
         fn catalogs(&self) -> Vec<CatalogInfo> {
             Vec::new()
         }
+        fn all_catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
         fn catalog_page(
             &self,
             _key: &str,
@@ -1561,7 +1574,7 @@ mod tmdb_metadata_tests {
         fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
             Vec::new()
         }
-        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> {
+        fn meta(&self, _type_: &str, _id_: &str) -> Option<Meta> {
             None
         }
         fn streams(
@@ -1584,6 +1597,220 @@ mod tmdb_metadata_tests {
                 .push((type_.into(), id.into()));
             Vec::new()
         }
+    }
+
+    /// Regression: Movies / TV Shows Recommended must show the full browse list (all_catalogs),
+    /// not just home_catalogs(). A backend returning 1 home + 1 hidden catalog makes /hubs
+    /// contain 1 hub but /hubs/sections/1 contain 2.
+    #[derive(Default)]
+    struct TwoCatalogBackend {
+        // 1 movie home catalog, 1 movie hidden catalog
+        m_home: Mutex<Vec<CatalogInfo>>,
+        m_hidden: Mutex<Vec<CatalogInfo>>,
+        /// How many times the addon's `meta` was asked: a card the shim already built must not
+        /// cost one.
+        meta_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TwoCatalogBackend {
+        fn meta_reads(&self) -> usize {
+            self.meta_reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl TwoCatalogBackend {
+        fn new() -> Self {
+            Self {
+                meta_reads: std::sync::atomic::AtomicUsize::new(0),
+                m_home: std::sync::Mutex::new(vec![CatalogInfo {
+                    key: "a/movie/top".into(),
+                    title: "Top Movies".into(),
+                    type_: "movie".into(),
+                    genres: vec![],
+                }]),
+                m_hidden: std::sync::Mutex::new(vec![CatalogInfo {
+                    key: "b/movie/hidden".into(),
+                    title: "Hidden Movies".into(),
+                    type_: "movie".into(),
+                    genres: vec![],
+                }]),
+            }
+        }
+    }
+
+    impl Backend for TwoCatalogBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            self.m_home.lock().unwrap().clone()
+        }
+        fn all_catalogs(&self) -> Vec<CatalogInfo> {
+            let home = self.m_home.lock().unwrap().clone();
+            let hidden = self.m_hidden.lock().unwrap().clone();
+            home.into_iter().chain(hidden).collect()
+        }
+        fn catalog_page(
+            &self,
+            key: &str,
+            skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
+            if skip == 0 {
+                Ok(vec![MetaPreview {
+                    id: format!("tt{key}"),
+                    type_: "movie".into(),
+                    name: format!("Movie for {key}"),
+                    poster: None,
+                    background: None,
+                    logo: None,
+                    description: None,
+                    release_info: None,
+                    imdb_rating: None,
+                    ratings: serde_json::Value::Null,
+                    mdb_list_ratings: serde_json::Value::Null,
+                    rotten_tomatoes_rating: None,
+                    genres: vec![],
+                }])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> {
+            self.meta_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn recommended_rows_show_the_full_browse_list_not_only_home_catalogs() {
+        let shim = Arc::new(Shim::new(Arc::new(TwoCatalogBackend::new()), Config::default()));
+        // /hubs (Home) must stay gated on showInHome: only 1 movie hub (plus Continue Watching).
+        let home = serde_json::from_slice::<Value>(&shim.handle(&Request {
+            method: "GET".into(),
+            path: "/hubs".into(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        }).body).unwrap();
+        let home_hubs = home["MediaContainer"]["Hub"].as_array().unwrap();
+        let home_movie_hubs = home_hubs.iter().filter(|h| h["type"] == "movie").count();
+        assert_eq!(home_movie_hubs, 1, "Home stays gated on showInHome: {home_hubs:?}");
+
+        // /hubs/sections/1 (Movies Recommended) must show BOTH catalogs, including the hidden one.
+        let rec = serde_json::from_slice::<Value>(&shim.handle(&Request {
+            method: "GET".into(),
+            path: "/hubs/sections/1".into(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        }).body).unwrap();
+        let rec_hubs = rec["MediaContainer"]["Hub"].as_array().unwrap();
+        let rec_movie_hubs = rec_hubs.iter().filter(|h| h["type"] == "movie").count();
+        assert_eq!(rec_movie_hubs, 2, "Recommended must show all browseable movie catalogs: {rec_hubs:?}");
+        let titles: Vec<&str> = rec_hubs.iter()
+            .filter(|h| h["type"] == "movie")
+            .filter_map(|h| h["title"].as_str())
+            .collect();
+        assert!(titles.contains(&"Top Movies"), "home catalog present");
+        assert!(titles.contains(&"Hidden Movies"), "hidden catalog must appear in Recommended");
+
+        // A row's `key` is read back for its cards. It must page the SAME catalog the row previewed,
+        // whatever list the section was built from (Home's list is shorter than the browse list).
+        for hub in rec_hubs.iter().filter(|h| h["type"] == "movie") {
+            let key = hub["key"].as_str().unwrap();
+            let body = serde_json::from_slice::<Value>(&shim.handle(&Request {
+                method: "GET".into(),
+                path: key.into(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: Vec::new(),
+            }).body).unwrap();
+            let rows = body["MediaContainer"]["Metadata"].as_array().unwrap();
+            assert_eq!(rows.len(), 1, "{key} must page its catalog: {body:?}");
+            assert_eq!(
+                rows[0]["title"], hub["Metadata"][0]["title"],
+                "{key} paged a different catalog than the row previewed"
+            );
+        }
+    }
+
+    /// The hub list pages BY HUB: a window must fetch only that window and report the whole list's
+    /// size. A shim that ignored the window re-ran every catalog on every window the client read,
+    /// which is what made a Recommended page take a minute to fill in.
+    #[test]
+    fn a_hub_window_fetches_only_its_rows_and_reports_the_total() {
+        let backend = Arc::new(TwoCatalogBackend::new());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let get = |path: &str, query: HashMap<String, String>| -> Value {
+            serde_json::from_slice(&shim.handle(&Request {
+                method: "GET".into(),
+                path: path.into(),
+                query,
+                headers: HashMap::new(),
+                body: Vec::new(),
+            }).body).unwrap()
+        };
+        let page = |start: usize, size: usize| HashMap::from([
+            ("X-Plex-Container-Start".to_string(), start.to_string()),
+            ("X-Plex-Container-Size".to_string(), size.to_string()),
+        ]);
+        // Row 0 is Continue Watching; the two movie catalogs follow it.
+        let first = get("/hubs/sections/1", page(0, 2));
+        let hubs = first["MediaContainer"]["Hub"].as_array().unwrap();
+        assert_eq!(hubs.len(), 2, "{first:?}");
+        assert_eq!(first["MediaContainer"]["offset"], 0);
+        assert_eq!(first["MediaContainer"]["totalSize"], 3, "1 CW + 2 catalogs");
+
+        let second = get("/hubs/sections/1", page(2, 2));
+        let hubs = second["MediaContainer"]["Hub"].as_array().unwrap();
+        assert_eq!(hubs.len(), 1, "the window is the tail of the list: {second:?}");
+        assert_eq!(hubs[0]["title"], "Hidden Movies");
+        assert_eq!(hubs[0]["key"], "/hubs/nuvio/1", "the index is the row's place in the list");
+        assert_eq!(second["MediaContainer"]["offset"], 2);
+        assert_eq!(second["MediaContainer"]["totalSize"], 3);
+    }
+
+    /// A LISTING read (`/library/metadata/{rk1},{rk2},…`) must be answered from the cards the shim
+    /// already built, not by resolving each one through the addon's `meta` again. Measured on the
+    /// sim, a 12-card listing cost 9.2 s that way (addon meta + TMDB per title, serially) and the
+    /// page reads its rows one at a time — a Recommended page filled in a row a minute.
+    #[test]
+    fn a_listing_read_answers_from_cards_already_built() {
+        let backend = Arc::new(TwoCatalogBackend::new());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let get = |path: &str| -> Value {
+            serde_json::from_slice(&shim.handle(&Request {
+                method: "GET".into(),
+                path: path.into(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: Vec::new(),
+            }).body).unwrap()
+        };
+        // Build the row, which is what remembers its cards.
+        let hub = get("/hubs/sections/1");
+        let rows = hub["MediaContainer"]["Hub"][1]["Metadata"].as_array().unwrap().clone();
+        let key = rows[0]["ratingKey"].as_str().unwrap().to_string();
+        assert_eq!(backend.meta_reads(), 0, "a preview row must not need the addon");
+
+        let csv = get(&format!("/library/metadata/{key},{key}"));
+        let listed = csv["MediaContainer"]["Metadata"].as_array().unwrap();
+        assert_eq!(listed.len(), 2, "{csv:?}");
+        assert_eq!(listed[0]["title"], rows[0]["title"]);
+        assert_eq!(backend.meta_reads(), 0, "a listing must not resolve the addon again: {csv:?}");
     }
 
     #[test]
@@ -1671,6 +1898,8 @@ impl Shim {
             meta_flight: plx_base::flight::Flight::default(),
             catalogs: Mutex::new(HashMap::new()),
             catalog_list: Mutex::new(None),
+            browse_list: Mutex::new(None),
+            cards: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
             sub_urls: Mutex::new(HashMap::new()),
             poster_fallbacks: Mutex::new(HashMap::new()),
@@ -1880,6 +2109,7 @@ impl Shim {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         *self.catalog_list.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.browse_list.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.streams
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1915,8 +2145,7 @@ impl Shim {
 
     /// Every browseable catalog belonging to this section's content type, in addon order.
     fn section_catalogs(&self, section: i64) -> Vec<CatalogInfo> {
-        self.backend
-            .all_catalogs()
+        self.all_catalogs()
             .into_iter()
             .filter(|c| {
                 if section == SECTION_SHOWS {
@@ -1926,6 +2155,20 @@ impl Shim {
                 }
             })
             .collect()
+    }
+
+    /// The full browse list, cached like [`Self::catalog_list`]. `/hubs/nuvio/{i}` indexes THIS
+    /// list, so every row builder (Home and Recommended) must hand it to [`Self::catalog_hubs`].
+    fn all_catalogs(&self) -> Vec<CatalogInfo> {
+        let mut g = self.browse_list.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = g.as_ref() {
+            if at.elapsed() < CATALOG_TTL {
+                return v.clone();
+            }
+        }
+        let v = self.backend.all_catalogs();
+        *g = Some((Instant::now(), v.clone()));
+        v
     }
 
     /// The catalog the request asked for, or the section's first catalog.
@@ -1972,6 +2215,7 @@ impl Shim {
         // Popularity IS the catalog's own order, so it needs no full read; the other keys do.
         let sorted = sort.is_some_and(|(kind, _)| kind != CatalogSort::Popularity);
         let mut guard = 0;
+        let mut failed = false;
         // A sorted listing needs the WHOLE catalog before it can answer a page correctly; an
         // unsorted one stops as soon as the requested window is covered.
         while !c.exhausted
@@ -1996,8 +2240,19 @@ impl Shim {
                         c.exhausted = true;
                     }
                 }
-                Err(()) => break,
+                Err(()) => {
+                    failed = true;
+                    break;
+                }
             }
+        }
+        // A failure is NOT an empty catalog. The cache entry was created before this fetch, so
+        // leaving it fresh would answer zero rows for `CATALOG_TTL` (15 min) — an addon that
+        // blipped once (the Streaming Catalogs host answers 403 intermittently) left its shelf a
+        // bare heading for a quarter of an hour. Expire the entry instead: the next read retries,
+        // and a partial read keeps what it already holds.
+        if failed && c.rows.is_empty() {
+            c.at = Instant::now() - CATALOG_TTL;
         }
         let mut ordered: Vec<&MetaPreview> = c.rows.iter().collect();
         if let Some((sort, desc)) = sort.filter(|(kind, _)| *kind != CatalogSort::Popularity) {
@@ -2367,7 +2622,19 @@ impl Shim {
         if !series {
             self.watch_fields(&mut row, rk);
         }
+        self.remember_card(rk, &row);
         row
+    }
+
+    /// Keep the card a listing read will ask for again, so that read costs no addon `meta` and no
+    /// TMDB. Bounded: a huge library clears rather than grows without limit, and a cleared card is
+    /// simply re-resolved the old way.
+    fn remember_card(&self, rk: i64, row: &Value) {
+        let mut cards = self.cards.lock().unwrap_or_else(|e| e.into_inner());
+        if cards.len() > 8192 {
+            cards.clear();
+        }
+        cards.insert(rk, row.clone());
     }
 
     fn meta_row(&self, rk: i64, m: &Meta) -> Value {
@@ -3880,20 +4147,35 @@ impl Shim {
     }
 
     /// Catalog hubs in catalog order, fetched with bounded parallelism. Whatever has not answered
-    /// within `budget` is left out of THIS answer and keeps fetching into the cache.
+    /// within `budget` is left out of THIS answer and keeps fetching into the cache; a hub that
+    /// answered with zero rows is dropped, so a shelf that failed to load shows no heading rather
+    /// than a bare one (its failure is not cached, so the row returns on the next read).
+    ///
+    /// `window` is the hub window the client asked for, over the FILTERED list (the list pages by
+    /// HUB, `docs/pms-api.md`): only that slice is fetched, and `i` stays the row's position in the
+    /// whole filtered list, because that index is what `/hubs/nuvio/{i}` resolves. Ignoring the
+    /// window is what made a Recommended page take a minute: the client reads it a window at a
+    /// time, and every window used to re-fetch every catalog.
     fn catalog_hubs(
         self: &Arc<Self>,
+        list: &[CatalogInfo],
         filter: impl Fn(&CatalogInfo) -> bool,
         count: usize,
         pageable: bool,
         budget: Duration,
-    ) -> Vec<Value> {
-        let cats: Vec<(usize, CatalogInfo)> = self
-            .catalog_list()
-            .into_iter()
+        window: Option<(usize, usize)>,
+    ) -> (Vec<Value>, usize) {
+        let all: Vec<(usize, CatalogInfo)> = list
+            .iter()
+            .cloned()
             .enumerate()
             .filter(|(_, c)| filter(c))
             .collect();
+        let total = all.len();
+        let cats: Vec<(usize, CatalogInfo)> = match window {
+            Some((start, size)) => all.into_iter().skip(start).take(size).collect(),
+            None => all,
+        };
         let (tx, rx) = std::sync::mpsc::channel::<(usize, Value)>();
         for (pos, (i, c)) in cats.iter().cloned().enumerate() {
             let (me, tx) = (self.clone(), tx.clone());
@@ -3920,10 +4202,13 @@ impl Shim {
                 Err(_) => break,
             }
         }
-        got.into_iter()
+        // A hub with no rows is a heading over nothing: drop it rather than draw the heading. The
+        // failure that produced it is not cached (see `catalog_range`), so the row returns on the
+        // next window read instead of blanking a shelf for the catalog's whole TTL.
+        (got.into_iter()
             .flatten()
-            .filter(|h| h["size"].as_u64() != Some(0))
-            .collect()
+            .filter(|h| h["size"].as_u64().unwrap_or(0) > 0)
+            .collect(), total)
     }
 
     /// Fill the catalog list and every catalog's first page in the background (boot, or after the
@@ -3934,7 +4219,8 @@ impl Shim {
             .name("pmsshim-warm".into())
             .spawn(move || {
                 let _ = me.account.saved_library(false);
-                let _ = me.catalog_hubs(|_| true, 12, true, Duration::from_secs(60));
+                let list = me.catalog_list();
+                let _ = me.catalog_hubs(&list, |_| true, 12, true, Duration::from_secs(60), None);
                 // `/hubs` gives each catalog 4 s and leaves the late ones out of that answer.
                 // A client that already asked may be holding one of those partial answers, so a
                 // finished warm is itself a content change worth re-reading.
@@ -4055,15 +4341,27 @@ impl Shim {
                 }
                 let rows_at = Instant::now();
                 let mut streams_wait = Duration::ZERO;
+                // A CSV is a LISTING: the cards the shim handed out for a row the page released.
+                // Answer it from the cards already built; only a key the shim has never shown falls
+                // back to the addon. Resolving all 12 through addon `meta` + TMDB took ~9 s per row,
+                // and the page reads rows one at a time.
+                let listing = rk.contains(',');
                 let mut rows: Vec<Value> = rk
                     .split(',')
-                    .filter_map(|x| x.parse().ok())
-                    .filter_map(|k| match self.person_row(k) {
-                        Some(row) => Some(row),
-                        None => self.item_probed(k, None).map(|(row, _, wait)| {
-                            streams_wait += wait;
-                            row
-                        }),
+                    .filter_map(|x| x.parse::<i64>().ok())
+                    .filter_map(|k| {
+                        if listing {
+                            if let Some(card) = self.cards.lock().unwrap_or_else(|e| e.into_inner()).get(&k).cloned() {
+                                return Some(card);
+                            }
+                        }
+                        match self.person_row(k) {
+                            Some(row) => Some(row),
+                            None => self.item_probed(k, None).map(|(row, _, wait)| {
+                                streams_wait += wait;
+                                row
+                            }),
+                        }
                     })
                     .collect();
                 if rows.is_empty() {
@@ -4071,12 +4369,16 @@ impl Shim {
                 }
                 let meta_elapsed = rows_at.elapsed();
                 let enrich_at = Instant::now();
-                for row in &mut rows {
-                    if let Some(key) = row["ratingKey"]
-                        .as_str()
-                        .and_then(|value| value.parse().ok())
-                    {
-                        self.enrich_row(key, row);
+                // A listing's cards are drawn as they are; the TMDB enrichment is for a DETAIL page,
+                // and paying it per card is the other half of the same minute.
+                if !listing {
+                    for row in &mut rows {
+                        if let Some(key) = row["ratingKey"]
+                            .as_str()
+                            .and_then(|value| value.parse().ok())
+                        {
+                            self.enrich_row(key, row);
+                        }
                     }
                 }
                 let tmdb_elapsed = enrich_at.elapsed();
@@ -4159,14 +4461,32 @@ impl Shim {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(12usize)
                     .clamp(1, 50);
-                let mut hubs = vec![self.continue_hub(count, None)];
-                if req.q("excludeContinueWatching") == Some("1") {
-                    hubs.clear();
+                // The list pages BY HUB, so the window has to be honoured here too (see
+                // `catalog_hubs`); Continue Watching is the list's first hub, as on a real PMS.
+                let (start, size) = page_params(req);
+                let size = size.unwrap_or(usize::MAX).max(1);
+                let skip_cw = req.q("excludeContinueWatching") == Some("1");
+                let mut hubs = Vec::new();
+                if start == 0 && !skip_cw {
+                    hubs.push(self.continue_hub(count, None));
                 }
-                // My List is surfaced through the Watchlist tab, not a home hub row.
-                let _ = (count, &mut hubs);
-                hubs.extend(self.catalog_hubs(|_| true, count, true, HUBS_BUDGET));
-                Response::json(&container(json!({"Hub": hubs})))
+                // Home rows come from the same numbered list `/hubs/nuvio/{i}` pages, filtered to
+                // the Home-eligible catalogs: a row's index must name the catalog it previewed.
+                let home = self.catalog_list();
+                let browse = self.all_catalogs();
+                let lead = usize::from(!skip_cw);
+                let (rows, total) = self.catalog_hubs(
+                    &browse,
+                    |c| home.iter().any(|h| h.key == c.key),
+                    count,
+                    true,
+                    HUBS_BUDGET,
+                    Some((start.saturating_sub(lead), size.saturating_sub(hubs.len()))),
+                );
+                hubs.extend(rows);
+                Response::json(&container(json!({
+                    "Hub": hubs, "offset": start, "totalSize": total + lead,
+                })))
             }
             (_, ["hubs", "continueWatching"]) => {
                 let count = req
@@ -4195,14 +4515,29 @@ impl Shim {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(12usize)
                     .clamp(1, 50);
-                let mut hubs = vec![self.continue_hub(count, Some(section))];
-                hubs.extend(self.catalog_hubs(
+                // Pages BY HUB (docs/pms-api.md): a window here is a window of rows, and ignoring
+                // it made every window re-fetch every catalog — a minute on a Recommended page.
+                let (start, size) = page_params(req);
+                let size = size.unwrap_or(usize::MAX).max(1);
+                let mut hubs = Vec::new();
+                if start == 0 {
+                    hubs.push(self.continue_hub(count, Some(section)));
+                }
+                // Recommended rows use the full browse list (the Library selector already shows
+                // them under catalogKey) — not home_catalogs(), which hides showInHome:false.
+                let browse_list = self.all_catalogs();
+                let (rows, total) = self.catalog_hubs(
+                    &browse_list,
                     |c| (section == SECTION_SHOWS) == is_series(&c.type_),
                     count,
                     false,
                     HUBS_BUDGET,
-                ));
-                Response::json(&container(json!({"Hub": hubs})))
+                    Some((start.saturating_sub(1), size.saturating_sub(hubs.len()))),
+                );
+                hubs.extend(rows);
+                Response::json(&container(json!({
+                    "Hub": hubs, "offset": start, "totalSize": total + 1,
+                })))
             }
             (_, ["hubs", "nuvio", "list"]) => {
                 let (start, size) = page_params(req);
@@ -4230,7 +4565,7 @@ impl Shim {
                 let cat = i
                     .parse::<usize>()
                     .ok()
-                    .and_then(|i| self.catalog_list().into_iter().nth(i));
+                    .and_then(|i| self.all_catalogs().into_iter().nth(i));
                 self.catalog_listing(cat, None, None, start, size.unwrap_or(50))
             }
             (_, ["hubs", "search"]) => self.search(
