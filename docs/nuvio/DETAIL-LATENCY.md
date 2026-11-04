@@ -217,10 +217,16 @@ Implemented as "warm the caches, not the UI state":
   rotates it with the rest of the adapter. A refused worker spawn releases the key, so a transient
   `RLIMIT_NPROC` does not hide the card for the TTL.
 - Home triggers at `HomeScreen::tick_prefetch` (`rust-modules/screens/src/home/mod.rs:2428`): the
-  focused card's `(sid, rk)` with a **250 ms** dwell (`PREFETCH_DWELL_S`), reset on every focus
+  focused card's `(sid, rk)` with a **750 ms** dwell (`PREFETCH_DWELL_S`), reset on every focus
   move, one command per rest. It pushes the existing store effect — no `screens → pmsshim` edge.
   The dwell is a `Tick` timer (`PrefetchDwell`), not hashed logical state. Scoped to Home; the
   Library grid is the same helper in a follow-up.
+  **Why 750 and not 250 (2026-11-04):** 250 ms sat inside the remote's own scroll rhythm. The
+  device log showed a `detail: warm … — focus prefetch` line per card on every pass through six
+  or seven Home rows — each one a shim GET that enriches the row (addon meta + TMDB, `tmdb_ms`
+  1244–2589 in the same log) for one to three seconds while the next frames were drawn. A scroll
+  tap rests on a card for ~300–500 ms, so the dwell must outlast a scroll step; a viewer who
+  reads before pressing OK rests well past 750 ms and still gets the warm.
 - A warm command raises no store notice (the `run` arm treats it like an optimistic view edit
   that changed nothing), so it cannot relayout a mounted Detail page.
 - **Why warm the shim rather than `fetch_full` into a data cache:** no new landing/refresh state,
@@ -228,7 +234,7 @@ Implemented as "warm the caches, not the UI state":
   re-runs `fetch_full` on OK, but every hop is local.
 
 **Cost:** one Cinemeta meta (a series can be ~65 KB), one TMDB details, one stream fan-out per
-focused card the viewer rests on. Bound it: one card, 250 ms dwell, one ask per key per 60 s.
+focused card the viewer rests on. Bound it: one card, 750 ms dwell, one ask per key per 60 s.
 **Test:** `warm_detail_admits_one_get_and_lands_nothing` (data) pins the dedup, no `current()` and
 no loading movement; `the_warm_book_admits_one_fetch_per_key_per_ttl` pins the TTL and per-key
 independence; `a_focused_card_warms_its_detail_once_it_rests` (Home) pins one command per rest,
@@ -426,8 +432,11 @@ focus (cold).
    fallback must stay, and 2C matters more.
 3. Is `moviedb_id` ever a string in any addon's JSON? `opt_u64` should handle the normal cases;
    check a sample of the installed addons.
-4. Is a 250 ms dwell the right prefetch threshold on the TV, and does the remote's repeat rate
-   make focus jitter expensive?
+4. **Settled 2026-11-04: 250 ms was the wrong threshold on the TV.** The remote's repeat rate
+   makes a scroll step rest ~300–500 ms on each card, so every step admitted a warm and the
+   enrichment (TMDB 1–3 s) ran continuously under a Home scroll (see Stage 1's dwell note). The
+   dwell is now 750 ms and `a_scroll_through_cards_does_not_warm_each_one` pins it: at 250 ms
+   that test admits exactly one warm per card (`rk` 1…5).
 5. On the target firmware, is libcurl/OpenSSL thread-safe (does `threaded_tls_ready()` hold)? This
    decides whether 3A is a `CURLSH` change or also needs the serial fallback kept.
 6. Does the TV's network really pay one handshake per call, or does the OS/the addons use HTTP/2?

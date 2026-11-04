@@ -809,11 +809,15 @@ impl Grid {
         let cards = pool::let_go_cards(&self.pop, src);
         // What each card is painted with, decided once: the captions and the tiles are two passes
         // over the same decisions.
-        let paints: Vec<_> = plan.into_iter().map(|(role, i)| {
+        // `gplan`: every card's paint decision before any ink — the slot, the pop/press scale and
+        // `card_paint` (which also places the focused card's label). The captions and tiles then
+        // iterate this list; if `gplan` is the gap under `page`, the walk's cost is here, not in
+        // the draws.
+        let paints: Vec<_> = plx_base::diag::spans::span("gplan", || plan.into_iter().map(|(role, i)| {
             let s = super::press_scale(self.pop_in(cards, src, i, focus), i, pressed, f.cx);
             let focused = role == DrawRole::Focus;
             (i, s, focused, self.card_paint(f, p, src, cards, i, s, focused, &bands))
-        }).collect();
+        }).collect());
         // The focused card paints last, over its neighbours, but it is the card the reader is
         // looking at: it asks the source for its poster FIRST, so it is the first one served
         // (`card_row::lead_focused`). It still resolves once; the draw below reuses the answer.
@@ -1011,6 +1015,9 @@ impl Grid {
         led: Option<crate::widgets::ArtImage>,
     ) {
         let CardPaint { rect, p, .. } = paint;
+        // `grid`: one grid card end to end — the tile (`tile`/`ccom`), the source's overlay.
+        // The caption and its placement are the caller's (`gplan`/`gcap`), as in `draw`.
+        let _span = plx_base::diag::spans::Timer::new("grid");
         if focused {
             #[cfg(feature = "devtriggers")]
             crate::card_probe::begin_art();

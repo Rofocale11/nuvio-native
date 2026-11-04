@@ -864,6 +864,9 @@ pub fn draw_tile(
     sty: &RowStyle,
     resume: Option<f32>,
 ) {
+    // `tile`: one unfocused card cell end to end (radius, pop factor, the composite, the resume
+    // bar), the per-card work the three page walks each repeat. Nested in `shelf`/`grid`.
+    let _span = plx_base::diag::spans::Timer::new("tile");
     let rad = sty.tile_radius(rect, s);
     // every tile carries a resting shadow + 1px perimeter stroke, both FOLDED into card()'s single
     // composite pass; a near-neighbour mid-pop (s slightly >1) lifts smoothly toward the focused

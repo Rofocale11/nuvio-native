@@ -1340,6 +1340,9 @@ pub fn draw_art_scrim(
     let Some([qx, qy, qw, qh]) = art_scrim_quad(x, y, w, h, band) else {
         return true;
     };
+    // `scrim`: the per-card bottom gradient (`Class::Grad`), the one draw class never masked
+    // alone in the 2026-11-04 legs.
+    let _span = plx_base::diag::spans::Timer::new("scrim");
     unsafe {
         if AS_PROG == 0 {
             return false;
@@ -1375,6 +1378,10 @@ pub fn draw_rect(
     if culled(x, y, w, h) || gate(Class::Rect, x, y, w, h) {
         return;
     }
+    // `rect`: the issue cost of one plain rect quad (program switch, nine uniforms, one
+    // `glDrawArrays`) — the primitives had no span, so their share of a walk read as "GL command
+    // issue" only by inference. Drop-guard: it must time this body's early `return`s too.
+    let _span = plx_base::diag::spans::Timer::new("rect");
     unsafe {
         // `pad` is not in the condition: `fs_src.frag`'s own flat path never reads it either, so
         // the two programs draw the same quad for a square, unfocused rect whatever it was given.
@@ -2970,6 +2977,8 @@ fn draw_tex_impl(
 const NO_RIM: [f32; 4] = [0.0, 0.0, 0.0, 0.0]; // rim/shadow disabled: alpha 0 ⇒ shader skips it
 
 pub fn draw_tex(tex: c_uint, x: f32, y: f32, w: f32, h: f32, radius: f32, tint: *const f32) {
+    // `tex`: the plain textured quad (the card path is `draw_tex_carded`, which has `card`).
+    let _span = plx_base::diag::spans::Timer::new("tex");
     draw_tex_uv(tex, UV_FULL, x, y, w, h, radius, tint);
 }
 
@@ -3372,6 +3381,7 @@ pub fn draw_tex_carded(
     f: f32,
     dy: f32,
 ) {
+    let _span = plx_base::diag::spans::Timer::new("card");
     note_card(x, y, w, h, pad, dy);
     draw_tex_impl(tex, crop, x, y, w, h, radius, tint, rimw, rimcol, pad, shblur, shcol, f, dy, None);
 }

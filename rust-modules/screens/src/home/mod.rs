@@ -3507,7 +3507,15 @@ fn disc_hex(item: &PmsMovie) -> Option<[u8; 12]> {
 
 /// How long the focus must rest on one card before its detail page is worth warming. A move
 /// restarts the dwell; the data layer drops repeat asks for the same key.
-const PREFETCH_DWELL_S: f32 = 0.250;
+///
+/// 0.75 s, not 0.25: the 0.25 s this started at sat inside the remote's own scroll rhythm. Tapping
+/// through six or seven rows rests on a card for ~300-500 ms, so every step admitted a warm — and
+/// a warm is a shim GET that enriches the row (addon meta + TMDB, 1-3 s of worker time) while the
+/// next frame is being drawn. The dwell has to outlast a scroll step and still fire on a genuine
+/// pause: a viewer who reads a card before opening it rests far longer than this, and the two
+/// tests below pin both halves (`a_focused_card_warms_its_detail_once_it_rests`,
+/// `a_scroll_through_cards_does_not_warm_each_one`).
+const PREFETCH_DWELL_S: f32 = 0.750;
 
 /// The card the focus rests on and how long it has been there. Fed by `Tick`; not logical state.
 #[derive(Default)]

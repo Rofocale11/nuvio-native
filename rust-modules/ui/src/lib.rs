@@ -1349,7 +1349,10 @@ impl Painter {
     /// every art tile gets its resting-and-rising shadow without a separate soft-shadow pass.
     /// `uv` is the window of the texture the card shows ([`tex_uv`](Self::tex_uv)).
     pub fn tex_carded(self, tex: u32, uv: [f32; 4], r: Rect, rad: f32, tint: [f32; 4], f: f32) {
-        if self.declare({ let (b,o,_,_)=card_shadow_params(r.h,f,theme::CARD_SHADOW[3]); Rect::new(r.x-b,r.y+o-b,r.w+2.0*b,r.h+2.0*b) }, 14, |data| {
+        // `cdec`: the change declaration — the shadow rect, seven recorded values and the compare
+        // that lets the second and third page walks skip an unchanged card's GL. It runs per card
+        // on EVERY walk whether or not the draw is skipped.
+        if plx_base::diag::spans::span("cdec", || self.declare({ let (b,o,_,_)=card_shadow_params(r.h,f,theme::CARD_SHADOW[3]); Rect::new(r.x-b,r.y+o-b,r.w+2.0*b,r.h+2.0*b) }, 14, |data| {
             use frame::backdrop::Value;
             tex.record(data);
             plx_gfx::gfx::tex_ledger::revision(tex).record(data);
@@ -1357,7 +1360,7 @@ impl Painter {
             rad.record(data);
             tint.record(data);
             f.record(data);
-        }) { return; }
+        })) { return; }
         if self.records() { return; }
         let t = self.c(tint);
         let (blur, _off, sa, off_l) = card_shadow_params(r.h, f, theme::CARD_SHADOW[3]);

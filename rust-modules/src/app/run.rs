@@ -474,11 +474,18 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
         // popover's open frame does not pay for it (`ModalUnderlay::preload`; an upload, hence here).
 
         let mut ph = plx_machine::machine::PresentHandle::of(&mut app.present);
-        super::adapters::poster::prepare(
-            &mut app.pages.budget,
-            &mut ph,
-            plx_base::diag::heartbeat::now_us,
-        );
+        // `upl` is the whole upload window and it had NO span of its own until now, which is how a
+        // fold frame's 60-90 ms could be blamed entirely on the page walks that the other spans
+        // cover: this window runs in the legacy loop, outside every span in the report. Its two
+        // halves are `glup` (the `glTexImage2D` itself, the driver's deferred copy) and `wrm`
+        // (`gfx::warm_tex`'s offscreen draw, which is where the back-buffer wait would land).
+        plx_base::diag::spans::span("upl", || {
+            super::adapters::poster::prepare(
+                &mut app.pages.budget,
+                &mut ph,
+                plx_base::diag::heartbeat::now_us,
+            )
+        });
     }
     // EXPERIMENT (`/tmp/plxnative-opaque`): one `static` read and a return when the trigger
     // is absent. Edge-triggered — see `system.rs`.
@@ -2545,6 +2552,22 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         };
                         {
                             let _declarations = plx_ui::frame::backdrop::discover(sources.clone());
+                            // **The walk must keep walking, even though it rasterises nothing.**
+                            // `culled` refuses every primitive under `discovering()`, so this pass
+                            // issues no GL: its cost is the per-card CPU, and making it a
+                            // `record_walk` (no GL at all) is the obvious-looking saving — the
+                            // pixels were never the point — and it was measured on the set
+                            // 2026-11-04: the recorded pass leaves the bands with no capture rect,
+                            // `jobs()` comes back empty, and every band falls back to INLINE
+                            // framebuffer capture inside the visible walk. That costs 22.3 ms of
+                            // `chrome` in a hitch frame against 8.6 ms of `src`, and hitches went
+                            // from 1.4/s to 3.7/s. One discarded page render is far cheaper than
+                            // one inline capture: do not reintroduce that.
+                            //
+                            // It still draws, and the pixels are still binned — the thing to
+                            // try next is rendering THIS pass at the blur divisor (1/16 the
+                            // fragments, same recorded `Paint`s, same band schedule), not
+                            // suppressing it.
                             plx_base::diag::spans::span("disc", || page(Z::ALL));
                         }
                         sources.borrow_mut().resolve();
@@ -2556,14 +2579,21 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                             let reg = plx_gfx::gfx::blur_region(rect.x, rect.y, rect.w, rect.h);
                             // `src`: one blur source job, its replay of the page prefix included.
                             plx_base::diag::spans::span("src", || {
-                                if plx_gfx::gfx::blur_snapshot_direct(reg, &mut || page(ceiling)) {
+                                // `srcpg` is the page replay inside the source pass, `src` minus it is
+                                // the blur chain itself (setup, glClear, the six taps).
+                                if plx_gfx::gfx::blur_snapshot_direct(reg, &mut || {
+                                    plx_base::diag::spans::span("srcpg", || page(ceiling));
+                                }) {
                                     plx_gfx::gfx::retain_backdrop(ceiling);
                                 }
                             });
                         }
                         // An opaque route ground replaces the page entirely.
                         if plan != super::bridge::PagePlan::SurfacesOnly {
-                            plx_ui::profile::phase("main.ui", || page(Z::ALL));
+                            // `vis`: the whole visible page walk (every layer), the third of the three.
+                            plx_base::diag::spans::span("vis", || {
+                                plx_ui::profile::phase("main.ui", || page(Z::ALL));
+                            });
                         }
                         // The diagnostics read-out, off the player. It drew ONLY inside the branch
                         // above until 2026-08-29, which is why its module doc had to warn that a

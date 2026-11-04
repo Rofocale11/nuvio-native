@@ -798,10 +798,15 @@ pub fn card_named_led(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>,
     // Text prewarming visits an offscreen page. This leaf has no text: starting
     // image work here would bypass on-screen admission, and pollute its history.
     if p.is_recording() { return; }
+    // `ccom`: one card composite — art resolve (the poster key path), the draw itself (`card`),
+    // the skeleton swap, the state mark. The per-card body outside the raw texture quad.
+    let _span = plx_base::diag::spans::Timer::new("ccom");
     let r = if focused { frame.scaled(scale) } else { frame };
     // All card variants resolve inside their final placement scope. Neither the
     // screen nor its springs can forget to report a new positional expression.
-    let image = led.unwrap_or_else(|| resolve_card_art(p, r, &art));
+    // `cart`: the art resolve alone (the poster key path). Cached by the motion scope, but the
+    // scope is per WALK, and a frame walks the page three times.
+    let image = led.unwrap_or_else(|| plx_base::diag::spans::span("cart", || resolve_card_art(p, r, &art)));
     // Art that landed late dissolves in over the skeleton the card wore until now: the texture is
     // drawn at `shown` and the placeholder underneath it (uncounted: the art is here).
     let shown = image.shown;

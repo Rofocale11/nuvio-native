@@ -2278,6 +2278,9 @@ pub fn draw_text(
     bold: c_int,
     zoom: crate::gfx::Zoom,
 ) -> f32 {
+    // `glyph`: one text run — the atlas/cache lookup (`place_text`) plus the quad. Masking
+    // `text` never moved a hitch, but that mask is the draw class; this also prices the lookup.
+    let _span = plx_base::diag::spans::Timer::new("glyph");
     unsafe {
         let p = match place_text(s, x, y, sz, align, bold, zoom) {
             Ok(p) => p,

@@ -66,6 +66,28 @@ pub fn note(name: &'static str, ms: f64) {
     });
 }
 
+/// [`span`] for a scope that already owns its braces: `let _t = Timer::new("card");` times the
+/// rest of the block and adds it to this frame's `name` when the guard drops, including on an
+/// unwind. Costs one `armed()` load when the instrument is off, so it can sit in a primitive that
+/// runs hundreds of times a frame — which is the case this exists for: the three page walks are
+/// 92% unattributed because the primitives inside them are not `span`-shaped functions.
+pub struct Timer(&'static str, Option<std::time::Instant>);
+
+impl Timer {
+    #[inline]
+    pub fn new(name: &'static str) -> Self {
+        Timer(name, armed().then(std::time::Instant::now))
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        if let Some(t0) = self.1 {
+            note(self.0, t0.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+}
+
 /// This frame's spans as the `FRAMEDROP` field (`""` when none ran), and a reset for the next
 /// frame. Called once per PRESENTED frame, whether or not it crossed the threshold, so a span
 /// never carries into a later frame's line — the same rule `FrameCounters` learned in phase 11.

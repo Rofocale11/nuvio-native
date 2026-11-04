@@ -1636,7 +1636,12 @@ pub(crate) struct GfxUploader;
 
 impl Uploader for GfxUploader {
     fn upload(&mut self, d: &Decoded) -> Tex {
-        let id = img::img_upload_rgba(d.rgba.as_ptr(), d.w as c_int, d.h as c_int);
+        // `glup`: the `glTexImage2D` alone. On this driver the call returns after the copy and
+        // defers the rest (`gfx::upload_rgba`'s note), which is why a 0.9 Mpx upload costs 8-32 ms
+        // of render thread and no other span ever saw it.
+        let id = plx_base::diag::spans::span("glup", || {
+            img::img_upload_rgba(d.rgba.as_ptr(), d.w as c_int, d.h as c_int)
+        });
         UP_CT.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "devtriggers")]
         plx_ui::card_motion_metrics::upload();
@@ -1649,7 +1654,9 @@ impl Uploader for GfxUploader {
     }
     fn warm(&mut self, t: Tex) {
         if t.id != 0 {
-            plx_gfx::gfx::warm_tex(t.id);
+            // `wrm`: the offscreen draw that makes a texture resident now — the half of the upload
+            // window that is a DRAW, and so the half that can take the back-buffer wait.
+            plx_base::diag::spans::span("wrm", || plx_gfx::gfx::warm_tex(t.id));
         }
     }
     fn free(&mut self, t: Tex) {

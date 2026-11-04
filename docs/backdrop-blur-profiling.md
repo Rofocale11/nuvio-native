@@ -2022,3 +2022,279 @@ rules a grid re-layout out either.
 The `prepare`-window work above stands on its own account: on this scene, 16–28 frames per minute
 still stall 8–32 ms in a texture upload, all of them a 1280×720 (0.92 Mpx) hero art, and no frame
 has 9.6 ms of slack for one.
+
+## 2026-11-04 (ship pass): the upload window got a span, and the walks are still the wall
+
+The sections above kept saying "the three page walks" without ever being able to prove the credit
+line, because the upload window (`app/run.rs`, step 9's `poster::prepare`) runs in the legacy loop
+**outside every span the report prints**. So the FRAMEDROP line could not separate "the walks ate
+this frame" from "an upload ate this frame", and `upl` was added for exactly that:
+
+- `upl` — the whole upload window (`poster::prepare`: the budget, the drain, `warm`).
+- `glup` — the `glTexImage2D` inside `GfxUploader::upload`, the driver's deferred copy.
+- `wrm` — `gfx::warm_tex`, the offscreen draw that makes a texture resident now.
+
+All three are ordinary `plx_base::diag::spans::span` calls: unarmed (`plxnative-framedrop` absent)
+each is one relaxed atomic load, and they print in `spans=` beside `disc`/`src`/`chrome`.
+
+### 52 of 74 hitches are the walks, and the walks are not draw calls
+
+One `homeosc` run, ARM release, debug flavour, panel off, `plxnative-framedrop=16`, 3135 logged
+frames / 52 s. p50 16.5 ms (the vsync boundary), p99 37.0, max 1229.7 (a boot-frame host snapshot,
+`swap=1010`). Frames >30 ms: **74, i.e. 1.4/s — the owner's "smooth, then a jump every second"**.
+
+| where the frame's excess went | hitches (>30 ms) |
+|---|---|
+| the three page walks (`disc`+`src`+visible) | **52** |
+| `swap` | 9 |
+| the dispatcher (`dpre`+`dframe`+`dstep`) | 7 |
+| `upl` | 3 |
+| `chrome` / `clear` | 2 / 1 |
+
+In those 58 walk-owned frames (walks alone > 10 ms) the walks cost **29.2 ms** inside a 16.6 ms
+budget: `page` 14.0, `src` 10.7, `disc` 4.5 — and **92% of it is unnamed**, i.e. GL command issue,
+not the `page.image` / `text` / `chrome` spans nested in them (2.3 ms together).
+
+`upl` is not that: 790.8 ms over the whole run = 3.6% of draw time; in the walk-owned hitches it
+averages 2.3 ms. The upload window has its own 49 frames per 52 s where it exceeds 5 ms (mean frame
+27.3 ms) — real, but half the size of the walk problem and a different fix.
+
+### Masking the draws does not move it (so it is not the draw calls)
+
+Same binary, same motion, one draw class masked per boot — the point of `drawmask` is that a class
+can be removed without touching layout or the springs:
+
+| leg | frames | >30 ms | walk p50 | draw p50 |
+|---|---|---|---|---|
+| baseline | 3135 | 74 | 4.8 | 5.0 |
+| `drawmask=text` | 1824 | 67 | 4.8 | 5.0 |
+| `drawmask=shadow` | 1748 | 73 | 5.2 | 5.5 |
+| `drawmask=card` | 1874 | 69 | 3.9 | 4.3 |
+| `drawmask=all` | 808 | 28 | — | 2.1 |
+
+Removing every text draw, every shadow, or every card art draw changes nothing; removing
+**everything** only halves it. So the cost is the per-card widget work being executed three times
+per frame, not the rasterisation of any one class. (Leg-to-leg tail rates are NOT comparable here —
+`homeosc` crosses the fold a different number of times per second depending on where it is in its
+sweep — so read the structural columns, not the `>30 ms` count, unless two legs ran for the same
+length from the same start.)
+
+### The obvious saving that is a trap: record the discovery walk
+
+`disc` rasterises a whole page that is then thrown away, and `ui::record_walk` already exists (every
+primitive records its `Paint` and returns before GL — the mode a held surface walks in). Wrapping the
+discovery walk in it looked free and measured **much worse**:
+
+- the recorded pass leaves the bands with **no capture rect**, so `jobs()` comes back empty;
+- every band then falls back to **inline framebuffer capture inside the visible walk**;
+- `chrome` (which owns that capture) goes **3.1 → 22.3 ms** in a hitch frame against `src` 8.6 ms,
+  and the run's hitch rate went 1.4/s → 3.7/s.
+
+**One discarded full-page render is cheaper than one inline capture on this GPU.** That is the same
+lesson as the 2026-10-19 section from the other direction, and it closes the "just capture the
+framebuffer inline" idea for Home: the direct job is the cheap path, and `src`'s cost is the price of
+not paying the inline one.
+
+### So: can the budget fix it? No.
+
+`Class::Poster` (2500 µs, quota 3) and `Class::Residency` (6000 µs, quota 1) admit *uploads*. The
+walks are not budgeted at all — they run every frame. The budget gates 3.6% of the measured problem,
+and it is already **optimistic by 3–13×** (an upload it prices at ≤2.5 ms measures 8–32 ms), so
+raising it admits *more* work per frame and deepens the overrun. Raising these numbers is a way to
+make the lurch worse, not better; if they move at all it is upward, which is downward in effect.
+
+### What is actually left to do
+
+Two independent items, both already described above and neither a tuning change:
+
+1. **The walks, three per frame** (`disc` + one `src` per band + the visible pass). The per-walk cost
+   is GL-command issue, so the lever is the *count*: one page render instead of three
+   (recorded-primitive replay, or a schedule that gives the bands their prefix from the visible pass
+   without an inline capture). Both are design changes with a look risk; the sim + the overdraw
+   ledger is where they start.
+2. **The upload window**, 49 frames/52 s over 5 ms, one monolithic `glTexImage2D` of up to 0.92 Mpx.
+   The fix is to stop asking the driver for 3.7 MB in one call — band the upload across frames and
+   draw the texture only once its last band lands (it is not resident until then, so nothing samples
+   a half-filled texture). Invisible when it works: the tile appears a frame or two later.
+
+### The arithmetic that decides the shape of the fix
+
+A hitch frame is `total` 59.5 ms with `draw` 33.8 of it, the walks 29.2 of that draw, and the rest
+is `swap` (10) plus loop and prepare. So:
+
+- removing **two of the three walks** (-19 ms) leaves a 40 ms frame — still two frames late;
+- removing **the upload window entirely** (-2.3 ms mean) does not touch these frames at all;
+- the *steady state* is the real problem: `draw` p50 is 5.0 ms against a 16.6 ms interval, and
+  `total` p50 is 16.5, i.e. the loop is parked exactly on the vsync boundary with **no headroom**.
+  Any frame that needs a few extra ms anywhere drops one.
+
+That is why every single-class mask changed nothing: there is no one hot spot to remove. A frame is
+smooth when its *whole* work fits, so the fix has to come off the frame as a shape (one page render
+instead of three; fewer composite passes), not off one function. The single-walk redesign is worth
+about -12 ms of draw per frame, which is the difference between "every arrival drops a frame" and
+"most arrivals fit", but it is a design change and it will not make the deepest fold frames 16 ms on
+its own.
+
+Estimate honestly before promising a number: with the walks at one instead of three, a 59.5 ms hitch
+lands near 40 ms and a normal frame's draw near 3 ms. That is a much better app and it is not "no
+lurch"; the rest has to come from the composite (shadows and AA are the biggest per-card quads) or
+from drawing the page at a lower internal scale while it scrolls — the last of which is a visible
+change and the owner's call, not a lane's.
+
+## 2026-11-04 (attribution, second pass): the discovery walk rasterises nothing, and no one call dominates
+
+One `homeosc` leg, 35 s, 3323 frames, ARM release in the debug install, `framedrop=16`. The spans
+added for this: `rect` (`draw_rect`'s issue), `tex` (`draw_tex`), `tile` (`card_row::draw_tile`),
+`ccom` (the card composite), `cart` (its art resolve), `cdec` (the card's change declaration),
+`slot`/`flab` (the shelf's placement and focused label), `glyph` (a text run),
+`scrim` (`draw_art_scrim`), `srcpg` (the page replay inside a source pass) and `vis` (the whole
+visible walk).
+
+Steady state: `total` p50 16.4, p99 37.7. 53 frames exceed 30 ms; 38 of them are walk-owned
+(`total` mean 44.1, `draw` 34.7, walks 32.4). Over those 38:
+
+| span | mean ms | p50 ms | | span | mean ms | p50 ms |
+|---|---|---|---|---|---|---|
+| `disc` | 6.23 | 3.75 | | `shelf` | 10.58 | 9.85 |
+| `src` | 13.51 | 11.75 | | `ccom` | 7.23 | 6.90 |
+| `srcpg` | 6.28 | 3.50 | | `cart` | 3.64 | 2.85 |
+| `vis` | 12.68 | 10.35 | | `card` | 1.12 | 0.25 |
+| `glyph` | 4.82 | 0.90 | | `rect` | 1.03 | 0.10 |
+| `chrome` | 3.14 | 0.65 | | `cdec`/`slot`/`flab`/`scrim` | 0.02/0.21/0.28/0.00 | |
+
+Three corrections to the section above.
+
+### 1. The discovery walk rasterises NOTHING, so rendering it at the divisor is dead
+
+`gfx::culled` returns true whenever `backdrop::suppressed()`, and `suppressed()` is true for the
+whole of `discovery` (it is `w.stopped || w.discovery`). Every primitive tests it — text's quad
+included (`text.rs`, the `drawn_tex` emitter). So `disc` issues no GL at all: its 6.2 ms is a pure
+**CPU declaration walk** (resolve, declare, placement, the hero and the shelves). There are no
+fragments to save by rendering it at 1/16, and the sentence "one discarded full-page render" above
+is wrong — it is one discarded CPU walk, which is also why `record_walk` was a trap for a different
+reason than it looked: the pixels were never the cost.
+
+### 2. No draw class dominates the walks; the cost is the per-card CPU
+
+`card` (the textured card quad) is 1.1 ms of the 32.4; `rect` 1.0; `tex` 0; `scrim` 0. That is
+why every single-class `drawmask` leg read flat. Inside the 10.6 ms of `shelf` (3 walks x ~18
+cards): `cart` 3.64 (the poster key path — resolve runs in ALL THREE walks, 1.2 ms each),
+`card` 1.12, and ~5.8 of geometry/declare/mark/overlay. `cdec` itself is 0.02, so the declaration
+compare is not the cost; the resolve and the per-card body are.
+
+`glyph` is bursty: p50 0.9 ms, mean 4.8 (one boot-adjacent frame 45 ms). Text is issued twice
+(`src` + `vis`; `disc` culls it), not three times.
+
+### 3. The source pass is a page replay plus a GPU bubble
+
+`src` 13.5 ms = `srcpg` 6.3 (the same ~18-card CPU walk, at 1/4) + 7.2 of the tap/up draws. Three
+small quads cannot cost 7.2 ms: the first tap samples the FBO the replay has just rendered, so that
+is the tiler flush, not the tap math. It is the price of "render, then read", and it is why the
+source resolution (already 1/4) is not the lever either.
+
+Budget per hitch frame: `disc` 6.2 + `src` 13.5 + `vis` 12.7 = 32.4, against a 16.6 ms interval.
+The same per-card CPU is paid three times; no contained fix removes two of those payments.
+
+### What that means for the fix
+
+- A **contained** win exists: memoise the art resolve across the frame's walks (saves ~2.4 ms of the
+  3.6), skip the declaration walk when the page is unchanged, and stop issuing text in `disc` (it
+  is already culled, so nothing to stop). None of these is enough: the hitch is 32 ms over a 16.6 ms
+  interval, and the biggest of them is 2.4.
+- The **one-pass shape** is the real one, and it is a day: merge the declaration walk into the source
+  walk (render the page at 1/4 while declaring, blur from that texture — one walk fewer, about
+  -6 ms of CPU), and stand the visible frame on the same render (-6 more and the bubble). A 44 ms
+  hitch lands near 20–24 ms: much better, still one late frame at the deepest folds. It touches the
+  glass engine and the look is the owner's call, so it is not something to start as a "contained
+  fix".
+- The steady p50 is still 16.4 against 16.6, i.e. zero headroom. Even a one-pass frame that fits
+  most of the time will drop the frame that does not; the rest has to come off the baseline
+  (composite, text, the declaration walk), not off the hitch alone.
+
+
+## 2026-11-04 (the shelf cull gate and the prefetch storm): two contained fixes, not the one-pass shape
+
+The attribution pass left two things unsaid about the addon-backed Home that the live device log
+then made concrete. Both are contained fixes; neither replaces the one-pass redesign.
+
+### The shelf never consulted the source pass's cull
+
+`Grid::card_paint` has always rejected a card *before* its artwork is resolved
+(`card_row::paint_visible`: an off-screen or off-band card contributes no fragment, so its resolve,
+its declaration and its overlay text are pure CPU). `Shelf::draw_card` did not — it culled only
+horizontally (`on_axis`) and then ran the whole per-card body, including `src.art(i)` and the
+focused label, for every card in every drawn row. `gfx::culled` refused the *primitives*, which is
+exactly too late: by then the resolve and the declaration have been paid.
+
+The source pass is where that bites. Its `CULL_RECT` is the blur band — on Home that is a strip at
+the top of the screen, not the card area — so during `srcpg` almost every card is outside the band
+and its entire body was executed to emit quads that `culled` then dropped. The gate now mirrors
+Grid's, at the same point in the card (after the slot rect, before the landing fade, the label and
+the art):
+
+```rust
+if !card_row::paint_visible(pr, rect, s, focused) {
+    return;
+}
+```
+
+What it can remove: the source walk's share of `shelf`/`cart`/`ccom` (the 6.3 ms `srcpg` is ~18
+cards of mostly-out-of-band work). What it cannot: the 7.2 ms tiler bubble that follows the replay,
+and the visible walk, where the cards are on screen and must be drawn. Expected shape: `src` from
+~13.5 ms toward the bubble plus the band's own cards; `disc` and `vis` unchanged. **Not yet
+measured on the device** — the tree that carries it is the one to run `homeosc` on.
+
+### The 250 ms prefetch dwell was shorter than a scroll step
+
+The live log from the same session showed `detail: warm rk=… — focus prefetch` on essentially
+every card, interleaved with key presses, and `detail: shim … tmdb_ms=1244–2589
+total_ms=1649–3047` on almost every move. That is the shim enriching each row (addon meta + TMDB)
+while the next frames are drawn — work a local Plex library never does, and the one difference
+between this Home and upstream's that is not in the draw path at all.
+
+The cause is arithmetic: `PREFETCH_DWELL_S` was 0.250 s and a scroll tap rests on a card for
+~300–500 ms, so **every** step crossed the gate. The dwell is now 0.750 s (`home/mod.rs`), and
+`a_scroll_through_cards_does_not_warm_each_one` pins the regression: at 0.250 s it admits exactly
+one warm per card (rk 1…5); at 0.750 s it admits none, while a card rested for a second still
+warms once. This bounds worker/network contention during a scroll; it does not change the draw
+walks, and the steady p50 is still parked on the vsync boundary.
+
+### What is left
+
+Unchanged from the attribution pass: the default dwell only reduces how often the background work
+starts; the frame still pays three page walks. The one-pass shape (declare, render at 1/4, and
+stand the visible frame on the same render) remains the real fix and the owner's call. The next
+contained item after this one is the frame-scoped memo of the art resolve, which is now worth less
+in `src` (those cards are skipped) and priced mostly in `disc` + `vis`.
+
+### Measured after both fixes (ARM release, debug flavour, 2026-11-04)
+
+One `homeosc` + `framedrop=16` run, 64 one-second heartbeats / 3652 frames after the two fixes:
+
+| | before (attribution pass) | after |
+|---|---|---|
+| frames over 33 ms | 54 (this run; the earlier pass graded >30 ms: 74 / 52 s) | 54 / 64 s = **0.84/s** |
+| of those, first 10 s | — | **42 of 54** |
+| steady sweep (last 10 s) | — | **2 in 10 s** |
+| `shelf` in hitch frames | 10.58 mean | 7.23 mean |
+| `ccom` in hitch frames | 7.23 | 4.80 |
+| `cart` in hitch frames | 3.64 | 2.25 |
+| `srcpg` in hitch frames | 6.28 | 5.22 |
+| prefetch warms in the run | one per card stepped over | **1** |
+
+Two conclusions the numbers force:
+
+1. **The card body is no longer the cost.** In the worst frame (242 ms, `srcpg` 70.1 ms) the
+   21 shelf bodies totalled **0.8 ms** and `cart` 0.4. The 70 ms is `text`/`glyph` (79.1/69.7 ms
+   across 8/16 runs), not cards. The gate did its job — the source pass no longer pays for the
+   cards outside the band — but it cannot remove a page whose replay is dominated by text and
+   GPU work.
+2. **The hitch is front-loaded, not steady.** 42 of 54 >33 ms frames land in the first ten
+   seconds (boot, 13 catalog landings, image/text first use); the last ten seconds of a
+   continuous sweep carry 2. Per second, the steady sweep is ~0.2 hitches/s, dominated by the
+   `src`/`vis` walks (`src` >=10 ms in 33 of 67 graded hitches, `vis` in 27). That residual is
+   the render-then-read blur cost the one-pass shape exists to remove; no per-card cull reaches
+   it.
+
+The dwell is confirmed on the set: a 39 s sweep that steps focus every 350 ms produced **one**
+warm (it produced one *per card* at 250 ms, pinned by the new Home test).

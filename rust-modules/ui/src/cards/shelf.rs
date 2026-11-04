@@ -869,15 +869,29 @@ impl Shelf {
         if super::lifted_out(f, self.entry, src, i) {
             return;
         }
-        let unscrolled = self.slot(i, src.len(), SectionFrame { y: at.y - pr.dy(), ..at }, 0.0);
+        // `shelf`: one shelf card end to end — the focused label is placed in here, the tile
+        // (`tile`/`ccom`) and the source's overlay.
+        let _span = plx_base::diag::spans::Timer::new("shelf");
+        let unscrolled = plx_base::diag::spans::span("slot", || {
+            self.slot(i, src.len(), SectionFrame { y: at.y - pr.dy(), ..at }, 0.0)
+        });
         let rect = unscrolled.scaled(s);
+        // Reject the card before its artwork is resolved or its overlay text is fitted. The blur
+        // source is a crop of the page, so during that pass a card outside the band contributes
+        // no fragment — without this gate it still pays the resolve and the declaration, which
+        // is per-card CPU the primitive-level cull in `culled` is far too late to avoid. `grid`
+        // already gates here (`card_paint`); a shelf is the other page walk that draws seven rows
+        // of them.
+        if !card_row::paint_visible(pr, rect, s, focused) {
+            return;
+        }
         // an arriving card fades in
         let pr = match self.landing.alpha(src.len(), i) {
             a if a < 1.0 => pr.alpha(a),
             _ => pr,
         };
         if focused {
-            let label = self.focused_label(src, i, at);
+            let label = plx_base::diag::spans::span("flab", || self.focused_label(src, i, at));
             #[cfg(feature = "devtriggers")]
             crate::card_probe::begin_card();
             card_row::draw_focused(pr, src.art(i), rect, s, self.style, src.progress(i), &label, f.measure);

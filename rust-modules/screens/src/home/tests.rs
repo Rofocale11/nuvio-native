@@ -5891,17 +5891,60 @@ fn a_focused_card_warms_its_detail_once_it_rests() {
     step(&mut s, view, Some(first), &ScreenEvent::FocusMoved { from: None, to: first, by: By::Dir });
     assert!(frame(&mut s, first, 16).is_empty(), "no prefetch before the dwell");
     let mut sent = Vec::new();
-    for n in 1..=20u32 {
+    for n in 1..=50u32 {
         sent.extend(frame(&mut s, first, 16 + n * 16));
     }
     assert_eq!(sent, vec![first_key], "one command once the card rests");
-    assert!(frame(&mut s, first, 600).is_empty(), "resting longer asks again never");
+    assert!(frame(&mut s, first, 900).is_empty(), "resting longer asks again never");
 
     step(&mut s, view, Some(second), &ScreenEvent::FocusMoved { from: Some(first), to: second, by: By::Dir });
-    assert!(frame(&mut s, second, 700).is_empty(), "a move restarts the dwell");
+    assert!(frame(&mut s, second, 1000).is_empty(), "a move restarts the dwell");
     let mut sent = Vec::new();
-    for n in 1..=20u32 {
-        sent.extend(frame(&mut s, second, 700 + n * 16));
+    for n in 1..=50u32 {
+        sent.extend(frame(&mut s, second, 1000 + n * 16));
     }
     assert_eq!(sent, vec![second_key], "the new card warms once it rests");
+}
+
+/// The scroll regression: a remote tap that steps the focus every ~500 ms never dwells on a card,
+/// so it must never admit a warm. The 0.25 s the dwell started at was shorter than a scroll step,
+/// and each admitted warm is a shim GET that enriches the row (addon meta + TMDB) for one to
+/// three seconds — work that upstream's local Plex library never has to do, and that ran
+/// continuously underneath the Home draw while the viewer scrolled.
+#[test]
+fn a_scroll_through_cards_does_not_warm_each_one() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 6, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let view = snapshot.view();
+    let mut s = screen(view);
+    let warm = |out: &[Stamped<TestHost>]| -> Vec<(plx_plex::plex::ServerId, String)> {
+        out.iter()
+            .filter_map(|stamped| match &stamped.fx {
+                Fx::App(AppFx::Store(
+                    StoreId::Metadata,
+                    StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmDetail { sid, rk }),
+                )) => Some((*sid, rk.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut sent = Vec::new();
+    let mut from = None;
+    let mut ms = 0u32;
+    for i in 0..5 {
+        let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[i] };
+        step(&mut s, view, Some(key), &ScreenEvent::FocusMoved { from, to: key, by: By::Dir });
+        // ~500 ms of frames on the card: a scroll tap settles and the next one arrives before the
+        // dwell could fire.
+        for _ in 0..30 {
+            ms += 16;
+            let (_, out, _) = step(&mut s, view, Some(key), &ScreenEvent::Tick(Tick { ms, dt_us: 16_667 }));
+            sent.extend(warm(&out));
+        }
+        from = Some(key);
+    }
+    assert!(sent.is_empty(), "scrolling past a card must not warm it: {sent:?}");
 }
