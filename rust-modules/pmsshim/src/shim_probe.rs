@@ -80,6 +80,36 @@ pub type Prober = Arc<dyn Fn(&str, Duration) -> Result<ProbeInfo, String> + Send
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(45);
 const PROBE_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// Cache key for a URL: scheme + host + path, without query or fragment.
+///
+/// Debrid re-resolves a file to a fresh signed URL on each play
+/// (`?Signature=...&Expires=...&token=...`), so the same host+path is the
+/// same file and must share one probe entry \u2014 otherwise a second play pays a
+/// cold probe. The query is never part of path/file identity for these signed
+/// URLs, so it is dropped here. Path bytes (including any credential embedded
+/// in the path) are kept byte-identical, as is any userinfo; only scheme/host
+/// casing is normalized. The stored `ProbeInfo` and the URL handed to the
+/// prober stay byte-identical to the caller's \u2014 only this key is normalized.
+fn cache_key(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    let base = &url[..end];
+    let Some(sep) = base.find("://") else {
+        return base.to_string();
+    };
+    let scheme = base[..sep].to_ascii_lowercase();
+    let rest = &base[sep + 3..];
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    // Preserve userinfo (credentials) byte-identical; lowercase only the host.
+    let authority = match authority.rfind('@') {
+        Some(at) => format!("{}@{}", &authority[..at], authority[at + 1..].to_ascii_lowercase()),
+        None => authority.to_ascii_lowercase(),
+    };
+    format!("{scheme}://{authority}{path}")
+}
+
 #[derive(Default)]
 pub struct ProbeCache {
     prober: Mutex<Option<Prober>>,
@@ -99,18 +129,25 @@ impl ProbeCache {
 
     /// A cached answer, without probing.
     pub fn cached(&self, url: &str) -> Option<Result<ProbeInfo, String>> {
+        let key = cache_key(url);
         let g = self.done.lock().unwrap_or_else(|e| e.into_inner());
-        g.get(url).filter(|(at, _)| at.elapsed() < PROBE_TTL).map(|(_, r)| r.clone())
+        g.get(&key).filter(|(at, _)| at.elapsed() < PROBE_TTL).map(|(_, r)| r.clone())
     }
 
     /// Probe (or wait for the probe already running). `None` when no prober is installed (host
     /// runs of the bin, tests): the caller keeps the label guesses.
+    ///
+    /// The `cached`/`done`/`inflight` maps are keyed by [`cache_key`] (host+path,
+    /// no query), but the prober is invoked with the caller's original `url`
+    /// byte-identical \u2014 the first URL to ask determines the probe URL, and
+    /// later re-signed URLs for the same file reuse its result.
     pub fn probe(&self, url: &str) -> Option<Result<ProbeInfo, String>> {
+        let key = cache_key(url);
         if let Some(r) = self.cached(url) {
             return Some(r);
         }
         let prober = self.prober.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
-        let gate = self.inflight.lock().unwrap_or_else(|e| e.into_inner()).entry(url.to_string()).or_default().clone();
+        let gate = self.inflight.lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone();
         let _held = gate.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = self.cached(url) {
             return Some(r);
@@ -120,8 +157,8 @@ impl ProbeCache {
         if g.len() > 300 {
             g.retain(|_, (at, _)| at.elapsed() < PROBE_TTL);
         }
-        g.insert(url.to_string(), (Instant::now(), r.clone()));
-        self.inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(url);
+        g.insert(key.clone(), (Instant::now(), r.clone()));
+        self.inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         Some(r)
     }
 }
@@ -281,6 +318,60 @@ pub fn apply(media: &mut Value, p: &ProbeInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Two re-signed debrid URLs for the same host+path but different query
+    /// strings (`Signature`/`Expires`/`token`) must share one cache entry:
+    /// the prober is called once, with the first URL byte-identical, and the
+    /// second `probe`/`cached` returns that same `ProbeInfo`. Different
+    /// paths, however, stay distinct entries; path bytes (including any
+    /// credential embedded in the path) are never stripped.
+    #[test]
+    fn cache_key_normalizes_query_but_keeps_path() {
+        let base = "https://cdn.debrid.example/videos/movie.mkv";
+        let a = format!("{base}?Signature=AAA&Expires=111&token=one#frag");
+        let b = format!("{base}?Signature=BBB&Expires=222&token=two");
+        assert_eq!(cache_key(&a), cache_key(&b));
+        assert_eq!(cache_key(&a), base);
+        assert_ne!(cache_key(&a), cache_key("https://cdn.debrid.example/videos/other.mkv?Signature=AAA"));
+        assert_ne!(
+            cache_key("https://cdn.debrid.example/cred/secret-token-1/movie.mkv?x=1"),
+            cache_key("https://cdn.debrid.example/cred/secret-token-2/movie.mkv?x=1"),
+        );
+        // Host casing folds; scheme casing folds; path casing does not.
+        assert_eq!(cache_key("HTTPS://CDN.DEBRID.example/videos/m.mkv?x=1"), "https://cdn.debrid.example/videos/m.mkv");
+        assert_ne!(cache_key("https://h.example/Videos/m.mkv?x=1"), cache_key("https://h.example/videos/m.mkv?x=1"));
+    }
+
+    #[test]
+    fn res_signed_urls_for_same_file_probe_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let probe_calls = calls.clone();
+        let probe_seen = seen.clone();
+        let cache = ProbeCache::default();
+        cache.set_prober(Arc::new(move |url: &str, _deadline| {
+            probe_calls.fetch_add(1, Ordering::SeqCst);
+            probe_seen.lock().unwrap().push(url.to_string());
+            Ok(ProbeInfo { container: "mkv".into(), ..Default::default() })
+        }));
+        let first = "https://cdn.debrid.example/videos/movie.mkv?Signature=AAA&Expires=111";
+        let second = "https://cdn.debrid.example/videos/movie.mkv?Signature=BBB&Expires=222&token=two";
+
+        let r1 = cache.probe(first).expect("prober installed");
+        let r2 = cache.probe(second).expect("prober installed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "same host+path must probe once");
+        assert_eq!(seen.lock().unwrap().as_slice(), [first.to_string()], "prober gets the first URL byte-identical");
+        assert_eq!(r1.expect("ok").container, "mkv");
+        assert_eq!(r2.expect("ok").container, "mkv");
+
+        // `cached()` (the read-only path) also hits under the normalized key,
+        // and a different path does not.
+        assert!(cache.cached(second).is_some());
+        assert!(cache.cached("https://cdn.debrid.example/videos/other.mkv?Signature=BBB").is_none());
+        let _ = cache.probe("https://cdn.debrid.example/videos/other.mkv?Signature=BBB");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a different path probes separately");
+    }
 
     #[test]
     fn english_audio_beats_a_decodable_foreign_default() {
