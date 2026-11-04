@@ -1560,6 +1560,8 @@ impl HomeScreen {
         let dormant = self.snap.pos <= 0.5;
         let mut shelves = std::mem::take(&mut self.grid.shelves);
         let mut on_screen: Option<(usize, usize)> = focused.map(|(row, _)| (row, row));
+        // The page's own spring velocity: the rest signal the off-screen skip below reads.
+        let scroll_vel = self.grid.scroll_y.vel;
         for (row, shelf) in shelves.iter_mut().enumerate() {
             shelf.dormant(dormant);
             let top = heading_y(shelf.base_y(), shelf.heading_lift());
@@ -1567,6 +1569,17 @@ impl HomeScreen {
             let visible = !dormant && on_axis(top, bottom - top, SCR_H, 0.0);
             if visible {
                 on_screen = Some(on_screen.map_or((row, row), |(lo, hi)| (lo.min(row), hi.max(row))));
+            }
+            // An off-screen shelf that has settled costs a full `Tick` per frame and can change
+            // nothing anybody sees, so it is skipped. Two rows must still be ticked: the focused
+            // one, and one that is still moving — a row that just lost focus has to reach exact
+            // rest (`walking_focus_down_leaves_every_released_row_at_exact_rest` walks focus down
+            // and asserts every released row parks). `at_rest()` is cfg(test)-only in prod, so rest
+            // is read as "no landing pending and the page's own spring has stopped".
+            let is_focused_row = focused.is_some_and(|(r, _)| r == row);
+            let grid_quiet = scroll_vel.abs() < 0.001;
+            if !visible && !is_focused_row && grid_quiet && !shelf.landing_pending() {
+                continue;
             }
             let mut src = self.cards(view, row);
             src.paging = visible && focused.is_some_and(|(r, col)|
