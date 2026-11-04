@@ -3,7 +3,8 @@
 //! mirror `plx_media::ff_probe::MediaProbe` one for one; the app's adapter is a copy plus the two
 //! `*_decodable` verdicts it takes from the TV's codec table (`devcaps`).
 //!
-//! `docs/nuvio/PLAYBACK.md` is the contract: probe at decision time, cache per URL, emit the real
+//! `docs/nuvio/PLAYBACK.md` is the contract: probe at decision time, cache per host+path
+//! (signed query params such as debrid expiry are stripped from the key), emit the real
 //! fields, and refuse (never "transcode") a stream the TV cannot decode.
 
 use serde_json::{json, Value};
