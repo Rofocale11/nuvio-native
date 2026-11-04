@@ -175,6 +175,9 @@ struct Pslot {
     // tile; if the shape ever routinely needs more room, key this the klen way instead of raising
     // the number.
     key: [u8; PT_KEYLEN],
+    /// [`art_hash`] of `key` as stored — the scan's first test, written only by [`set_key`] so it
+    /// cannot drift from the bytes it describes.
+    art: u64,
     /// Which server this art was asked of — the OTHER half of the slot's identity, and what the
     /// worker dials. Two servers can hand out the same `/photo/:/transcode?url=/library/metadata/
     /// 42/thumb/…` path (their rating keys are both server-local integers from 1), so a key alone
@@ -234,6 +237,7 @@ struct Pslot {
 impl Pslot {
     const ZERO: Pslot = Pslot {
         key: [0; PT_KEYLEN],
+        art: 0,
         srv: ServerId::UNSET,
         pw: 0,
         ph: 0,
@@ -432,13 +436,35 @@ fn is_transient(outcome: &plx_plex::plex::ArtFetch) -> bool {
 /// resident slot answers a draw whose key differs only in `X-Plex-Token`, and [`lookup`] re-keys
 /// it; whether the IDENTITY behind that token still matches is [`Pslot::grant_epoch`]'s question.
 fn same_art(s: &Pslot, srv: ServerId, key: &[u8]) -> bool {
+    same_art_h(s, srv, key, art_hash(key))
+}
+
+/// [`same_art`] with the probe's hash already known — what [`lookup`]'s slot scan calls, so the
+/// scan is integers rather than 96 key comparisons.
+fn same_art_h(s: &Pslot, srv: ServerId, key: &[u8], hash: u64) -> bool {
     if s.state == P_EMPTY || s.srv != srv {
         return false;
     }
-    // One memcmp settles the common case (an unchanged credential); only a key that differs pays
-    // for the two token scans.
-    let held = key_bytes(s);
-    held == key || sans_token(held) == sans_token(key)
+    // The hash settles the common case; only a key that collides pays for the two token scans,
+    // and the `memcmp` after them keeps a collision a comparison rather than a wrong answer.
+    s.art == hash && sans_token(key_bytes(s)) == sans_token(key)
+}
+
+/// A slot's identity as one word: FNV-1a over the key with its credential set aside, i.e. exactly
+/// what [`same_art`] compares. Stored per slot by [`set_key`] so [`lookup`] does not have to.
+///
+/// This exists because the scan is not free: `resolve_card_art` probes every visible tile on every
+/// page walk — ~40 tiles, three walks (discovery, blur replay, visible) — so 96 `memcmp`s and two
+/// `sans_token` scans per tile per walk put [`same_art`] at 28% of the render thread's samples
+/// while the home grid folded (measured, `plxnative-sample`, 2026-11-04). One `Vec`-free pass per
+/// probe replaces it. Not cryptographic, and it does not need to be.
+fn art_hash(key: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in sans_token(key) {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// `key` without its trailing credential. [`plx_plex::plex::Client::with_token`] appends
@@ -509,6 +535,8 @@ fn key_bytes(s: &Pslot) -> &[u8] {
 }
 fn set_key(s: &mut Pslot, key: &str) {
     plx_base::cbuf::set_bytes(&mut s.key, key);
+    // From the STORED bytes, not `key`: the slot must answer for what it can actually match.
+    s.art = art_hash(key_bytes(s));
 }
 
 // (server, path, w, h, png) → built transcode path, memoised. resolve_tex_wh_on re-derives the key for
@@ -1067,8 +1095,12 @@ fn lookup(srv: ServerId, key_s: &str, touch: Touch) -> (Hit, Warm) {
     // a stored server under plex.tv's current grant for the same user moves `token_gen` (and the
     // key's `X-Plex-Token`) but not the art — the owner's "every poster blinks when the server is
     // reached" (imgtrace `cause=key_changed`, 2026-09-30).
+    //
+    // The probe's hash is computed ONCE for the scan, not once per slot ([`art_hash`]): this loop
+    // runs for every visible tile of every page walk.
+    let probe = art_hash(key_s.as_bytes());
     for i in 0..PT_CAP {
-        if g.slots[i].cache_gen == cache_gen && g.slots[i].grant_epoch == grant_epoch && same_art(&g.slots[i], srv, key_s.as_bytes()) {
+        if g.slots[i].cache_gen == cache_gen && g.slots[i].grant_epoch == grant_epoch && same_art_h(&g.slots[i], srv, key_s.as_bytes(), probe) {
             // Same identity, refreshed credential: carry the fresh request so any later fetch of
             // this slot (a re-arm after eviction, a retry) dials with the grant now in force.
             let key_changed = key_bytes(&g.slots[i]) != key_s.as_bytes();
@@ -1252,7 +1284,8 @@ fn lookup(srv: ServerId, key_s: &str, touch: Touch) -> (Hit, Warm) {
         Some(i) => i,
         None => { trace::outcome("store_full"); return (None, Warm::Full) } // all visible: skip
     };
-    let (was_ready, old_px) = (g.slots[idx].state == P_READY, g.slots[idx].px);
+    let (was_ready, was_decoded) = (g.slots[idx].state == P_READY, g.slots[idx].state == P_DECODED);
+    let (old_px, old_w, old_h) = (g.slots[idx].px, g.slots[idx].pw, g.slots[idx].ph);
     if trace::armed() {
         if g.slots[idx].state != P_EMPTY {
             trace::lost(idx, g.slots[idx].gen, "recycled");
@@ -1309,9 +1342,7 @@ fn lookup(srv: ServerId, key_s: &str, touch: Touch) -> (Hit, Warm) {
     if was_ready {
         tex::free(PosterKey(idx as u32), &mut GfxUploader);
     }
-    if old_px != 0 {
-        img::img_free(old_px as *mut c_uchar);
-    }
+    free_pixels(old_px, was_decoded, old_w, old_h);
     #[cfg(feature = "devtriggers")]
     plx_ui::card_motion_metrics::request();
     CV.notify_one();
@@ -1501,11 +1532,59 @@ pub(crate) fn begin_frame() {
     log_residency_settled(settled);
 }
 
+/// Take ownership of the pixels a worker decoded — **on the worker** — as a Rust-owned buffer the
+/// render cache can take over as-is. Returns the address to store in `Pslot::px`; the decoder's C
+/// allocation is released right here.
+///
+/// [`drain_decoded`] carries the measurement that put this on the worker: the same bytes cost the
+/// render thread 8-82 ms per image as page faults on a fresh allocation, and nothing at all to a
+/// worker that has no frame to miss.
+fn owned_px(px: *mut c_uchar, w: c_int, h: c_int) -> usize {
+    let n = (w as usize) * (h as usize) * 4;
+    // SAFETY: `px` is a non-null w*h*4-byte allocation this worker owns (img_decode_rgba's /
+    // img_malloc_copy's contract) and it is freed immediately after the copy.
+    let owned: Box<[u8]> = unsafe { std::slice::from_raw_parts(px as *const u8, n) }.into();
+    img::img_free(px);
+    Box::into_raw(owned) as *mut u8 as usize
+}
+
+/// The inverse of [`owned_px`]: the owned buffer behind `px` back as the `Box` its slice metadata
+/// was built with.
+///
+/// # Safety
+/// `px` must be an [`owned_px`] address, and the app must not hold it anywhere else any more.
+unsafe fn take_owned_px(px: usize, w: c_int, h: c_int) -> Box<[u8]> {
+    let n = (w as usize) * (h as usize) * 4;
+    unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(px as *mut u8, n)) }
+}
+
+/// Release pixels a slot is holding. `owned` says which kind they are: a slot in P_DECODED holds
+/// an [`owned_px`] buffer, and every other holder is a decoder allocation that goes back through
+/// `img_free` — which is not interchangeable, because the C side may be the guard-page allocator
+/// (`src/gpdebug.c`) rather than the system one.
+fn free_pixels(px: usize, owned: bool, w: c_int, h: c_int) {
+    if px == 0 {
+        return;
+    }
+    if owned {
+        // SAFETY: the caller passes `owned` exactly for a P_DECODED slot's `px`.
+        unsafe { drop(take_owned_px(px, w, h)) };
+    } else {
+        img::img_free(px as *mut c_uchar);
+    }
+}
+
 /// MAIN thread, once per frame (§3.3 step 3, the adapter's results): every slot a worker has
 /// DECODED hands its pixels to the render cache as one `PosterReady` and becomes READY. No GL
-/// here — the cache uploads in PREPARE ([`prepare`]). The pixels are copied once out of the
-/// decoder's C allocation into the owned `Decoded` (a 250x375 poster is ~375 KB, tens of
-/// microseconds) so the library owns what it uploads.
+/// here — the cache uploads in PREPARE ([`prepare`]). The pixels are the WORKER's own buffer,
+/// handed over as-is ([`owned_px`]).
+///
+/// **The copy out of the decoder's C allocation happens on the worker, and this is why.** It used
+/// to be here, and a fresh `Box<[u8]>` per image costs not memcpy but PAGE FAULTS: measured on
+/// the television (2026-11-04, release-profile `homeosc`, timed sub-spans of this loop) this loop
+/// held 8-82 ms of a 16.7 ms frame, with the store lock and `tex::accept` both at 0.0 — a held
+/// scroll lurched about once a second, and this was half of it. A worker has the same copy to do
+/// and no deadline, so it does it there; the render thread only moves an owned pointer.
 pub(crate) fn drain_decoded() {
     loop {
         let (idx, px, w, h, current) = {
@@ -1524,26 +1603,23 @@ pub(crate) fn drain_decoded() {
             (i, px, w, h, current)
         };
         if !current {
-            if px != 0 { img::img_free(px as *mut c_uchar); }
+            free_pixels(px, true, w, h);
             continue;
         }
         let key = PosterKey(idx as u32);
         let result = if px != 0 && w > 0 && h > 0 && w <= u16::MAX as c_int && h <= u16::MAX as c_int {
-            let n = (w as usize) * (h as usize) * 4;
-            // SAFETY: the worker decoded exactly w*h RGBA bytes at `px` (img::img_decode_rgba's
-            // contract) and handed the pointer over under the lock; it is freed right below.
-            let rgba: Box<[u8]> = unsafe { std::slice::from_raw_parts(px as *const u8, n) }.into();
+            // SAFETY: a slot in P_DECODED holds exactly what `owned_px` stored — a `Box<[u8]>` of
+            // w*h*4 bytes — and this is the only place that takes ownership back out.
+            let rgba: Box<[u8]> = unsafe { take_owned_px(px, w, h) };
             Ok(Decoded {
                 w: w as u16,
                 h: h as u16,
                 rgba,
             })
         } else {
+            free_pixels(px, true, w, h);
             Err(PosterError::Decode)
         };
-        if px != 0 {
-            img::img_free(px as *mut c_uchar);
-        }
         tex::accept(PosterReady { key, result });
         let mut g = store();
         // Rejection may synchronously notify unresident during accept. Preserve that verdict.
@@ -1904,12 +1980,12 @@ fn request_box(key: &str) -> Option<(c_int, c_int)> {
     (w > 0 && h > 0).then_some((w, h))
 }
 
-/// A card-sized box no larger than the biggest one the cap is meant for. Backdrops and detail art
-/// are deliberately `Residency` takes; resizing them to a poster box would only degrade them.
+/// The biggest box that is a CARD's. Above it the box is the size the screen DRAWS the art at (the
+/// Home hero's 1280×720, the detail hero's 1920×1080 — `plx_gfx::img`'s decode table), so the box
+/// alone bounds the decode and the art keeps its `Residency` take either way.
 const CAP_BOX_MAX_PX: i64 = 500 * 750;
 
-/// The size to decode a card's art at, when the source is too big for the upload budget to treat
-/// as a poster.
+/// The size to decode an image at, when the source is bigger than the box the screen draws it in.
 ///
 /// **Why cap at all.** `plx_ui::tex` classifies an upload over [`plx_ui::tex::RESIDENCY_BYTES`]
 /// (1 MiB) as a solo `Residency` take that owns its frame. Some addon CDNs serve a 500×750 WebP
@@ -1919,13 +1995,19 @@ const CAP_BOX_MAX_PX: i64 = 500 * 750;
 /// take; art already inside the threshold (TMDB's `w342`, 702 KB) is untouched, so the card keeps
 /// its headroom for the focus pop.
 ///
+/// **The box is not only a card's.** The Home hero asks for 1280×720 and draws it at 1920×1080;
+/// a CDN that answers a 16:9 background with the 1920×1080 original therefore had 8.3 MB uploaded
+/// for a 1.5× magnified 3.5 MB box — `prepare` 27–64 ms on the render thread, one dropped frame
+/// per hero flip (television, 2026-11-04). Capping to the box costs nothing the screen asked for
+/// and cuts the upload by 2.25×; a 4K source is cut the same way.
+///
 /// **COVER, not fit.** The card crops its texture to the tile (`art_uv`), so a non-matching
 /// source keeps only the middle band. Fitting a landscape still inside a 2:3 card would shrink the
-/// band that survives the crop; covering the box keeps that band at the tile's resolution. A byte
-/// cap then bounds the result to just under the class threshold.
+/// band that survives the crop; covering the box keeps that band at the tile's resolution. On a
+/// card box a byte cap then bounds the result to just under the class threshold; a bigger box is
+/// drawn whole, so the box is its only honest bound.
 ///
-/// `None` when the image is not over the threshold, the box is not a card's, or the image already
-/// fits.
+/// `None` when the image is not over the threshold or already fits its box.
 fn cap_dims(w: c_int, h: c_int, box_w: c_int, box_h: c_int) -> Option<(c_int, c_int)> {
     if w <= 0 || h <= 0 || box_w <= 0 || box_h <= 0 {
         return None;
@@ -1936,23 +2018,25 @@ fn cap_dims(w: c_int, h: c_int, box_w: c_int, box_h: c_int) -> Option<(c_int, c_
     if plx_base::surface::render_scale() > 1 {
         return None;
     }
-    if i64::from(box_w) * i64::from(box_h) > CAP_BOX_MAX_PX {
-        return None;
-    }
     let bytes = (w as usize) * (h as usize) * 4;
     if bytes <= plx_ui::tex::RESIDENCY_BYTES {
         return None;
     }
     let cover = (box_w as f32 / w as f32).max(box_h as f32 / h as f32);
-    // …and no more than the threshold allows. `×0.999` keeps the floor under it.
-    let area = (plx_ui::tex::RESIDENCY_BYTES as f32 / bytes as f32).sqrt() * 0.999;
-    let scale = cover.min(area);
+    // A card box: also no more than the threshold allows (`×0.999` keeps the floor under it). A
+    // bigger box is drawn whole, so shrinking it under its own size would only soften it.
+    let scale = if i64::from(box_w) * i64::from(box_h) <= CAP_BOX_MAX_PX {
+        let area = (plx_ui::tex::RESIDENCY_BYTES as f32 / bytes as f32).sqrt() * 0.999;
+        cover.min(area)
+    } else {
+        cover
+    };
     if scale >= 1.0 {
         return None;
     }
     let (dw, dh) = (
-        ((w as f32 * scale).floor() as c_int).max(1),
-        ((h as f32 * scale).floor() as c_int).max(1),
+        ((w as f32 * scale).round() as c_int).max(1),
+        ((h as f32 * scale).round() as c_int).max(1),
     );
     (dw != w || dh != h).then_some((dw, dh))
 }
@@ -2042,7 +2126,13 @@ fn poster_worker() {
             let s = &mut g.slots[idx];
             if s.gen == gen && s.state == P_LOADING {
                 if cache_gen == plx_platform::imgcache::generation() && !px.is_null() {
-                    s.px = px as usize;
+                    // Ours now, and ours to copy: see `owned_px`. A zero dimension publishes no
+                    // pixels at all, which `drain_decoded` answers as a decode failure exactly as
+                    // it did when the raw pointer was handed over.
+                    s.px = if w > 0 && h > 0 { owned_px(px, w, h) } else { 0 };
+                    if s.px == 0 {
+                        img::img_free(px);
+                    }
                     s.pw = w;
                     s.ph = h;
                     s.state = P_DECODED;
@@ -2104,14 +2194,13 @@ pub(crate) fn shutdown() {
     {
         let mut g = store();
         for i in 0..PT_CAP {
-            to_free.push(g.slots[i].px);
+            let s = &g.slots[i];
+            to_free.push((s.px, s.state == P_DECODED, s.pw, s.ph));
             g.slots[i] = Pslot::ZERO;
         }
     }
-    for px in to_free {
-        if px != 0 {
-            img::img_free(px as *mut c_uchar);
-        }
+    for (px, owned, w, h) in to_free {
+        free_pixels(px, owned, w, h);
     }
     tex::shutdown(&mut GfxUploader);
 }
@@ -2139,19 +2228,26 @@ mod tests {
         assert_eq!(request_box("/plx/fan/123/456"), None, "a fan bake has no box");
     }
 
-    /// The cap is for card art the CDN served too large: it covers the box only when the source is
-    /// over `RESIDENCY_BYTES` and the box is card-sized. Backdrops stay solo takes, and art already
-    /// under the threshold keeps its pixels.
+    /// The cap is for art the CDN served bigger than the box the screen draws it in: it covers the
+    /// box; on a card box the byte threshold is the tighter bound, on a backdrop the box is.
     #[test]
-    fn oversized_card_art_is_capped_to_its_box() {
+    fn oversized_art_is_capped_to_the_box_it_is_drawn_at() {
         // btttr.cc's 500×750 poster for a 250×375 card: 1.5 MB of RGBA, a solo take without this.
         assert_eq!(cap_dims(500, 750, 250, 375), Some((250, 375)));
         // MetaHub `large` (780×1170) at the same box.
         assert_eq!(cap_dims(780, 1170, 250, 375), Some((250, 375)));
         // TMDB w342 is 702 KB: under the threshold, and its 1.37× headroom is wanted.
         assert_eq!(cap_dims(342, 513, 250, 375), None);
-        // A backdrop's box is not a card box: a 1280×720 decode is a Residency take by design.
-        assert_eq!(cap_dims(2460, 1384, 1920, 1080), None);
+        // The Home hero's 1920×1080 original for the 1280×720 box it is drawn in: 8.3 MB of RGBA
+        // on the render thread becomes 3.5 MB, still a Residency take by design.
+        assert_eq!(cap_dims(1920, 1080, 1280, 720), Some((1280, 720)));
+        // A 4K background at the same box: 33 MB would be the whole frame, 3.5 MB is one band.
+        assert_eq!(cap_dims(3840, 2160, 1280, 720), Some((1280, 720)));
+        // A source already at its backdrop box is left alone — the box is not a byte cap.
+        assert_eq!(cap_dims(1280, 720, 1280, 720), None);
+        // The detail hero draws at 1920×1080, so that is where its cap sits.
+        assert_eq!(cap_dims(2460, 1384, 1920, 1080), Some((1920, 1080)));
+        assert_eq!(cap_dims(1920, 1080, 1920, 1080), None);
         // COVER, so the band the 2:3 tile crops keeps its resolution: a 500×750 poster into a
         // 300×300 headshot box becomes 300×450, not 200×300.
         assert_eq!(cap_dims(500, 750, 300, 300), Some((300, 450)));
@@ -2633,10 +2729,12 @@ mod tests {
     fn a_ready_source_hit_recovers_after_its_texture_is_evicted() {
         struct StubUp {
             next: u32,
+            uploaded: Vec<usize>,
         }
         impl Uploader for StubUp {
             fn upload(&mut self, d: &Decoded) -> Tex {
                 self.next += 1;
+                self.uploaded.push(d.rgba.as_ptr() as usize);
                 Tex {
                     id: self.next,
                     w: d.w,
@@ -2679,7 +2777,7 @@ mod tests {
         budget.begin_frame(0);
         let mut present = plx_machine::present::Present::new();
         let mut present_handle = plx_machine::machine::PresentHandle::of(&mut present);
-        let mut uploader = StubUp { next: 0 };
+        let mut uploader = StubUp { next: 0, uploaded: Vec::new() };
         assert_eq!(
             tex::prepare(&mut budget, &mut uploader, &mut present_handle, || 0),
             1
@@ -2711,6 +2809,7 @@ mod tests {
         assert_eq!(store().slots[0].state, P_EVICTED);
 
         let (armed_tx, armed_rx) = std::sync::mpsc::channel();
+        let (published_tx, published_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let g = store();
             armed_tx.send(()).unwrap();
@@ -2722,15 +2821,11 @@ mod tests {
             slot.state = P_LOADING;
             drop(g);
 
-            unsafe extern "C" {
-                fn malloc(size: usize) -> *mut std::ffi::c_void;
-            }
-            let px = unsafe { malloc(BYTES) as *mut c_uchar };
-            assert!(!px.is_null());
-            unsafe { std::ptr::write_bytes(px, 0, BYTES) };
+            let owned = vec![0u8; BYTES].into_boxed_slice();
+            published_tx.send(owned.as_ptr() as usize).unwrap();
             let mut g = store();
             let slot = &mut g.slots[0];
-            slot.px = px as usize;
+            slot.px = Box::into_raw(owned) as *mut u8 as usize;
             slot.pw = 2;
             slot.ph = 2;
             slot.state = P_DECODED;
@@ -2742,6 +2837,7 @@ mod tests {
             "the re-armed slot has no texture yet - a draw re-arms the dormant source slot"
         );
         worker.join().unwrap();
+        let published = published_rx.recv().unwrap();
         assert_eq!(store().slots[0].state, P_DECODED, "the woken worker published pixels");
 
         drain_decoded();
@@ -2755,6 +2851,15 @@ mod tests {
             tex::resolve_on(srv.raw(), SRC, 2, 2, false),
             0,
             "the same source key becomes resident again"
+        );
+        // **The drain does not copy**, which is the whole point of the worker-side handoff: the
+        // bytes the worker filled are the bytes the uploader reads. A `Box` built in
+        // `drain_decoded` would be a different address — and, on the television, 8-82 ms of a
+        // 16.7 ms frame.
+        assert_eq!(
+            uploader.uploaded.last().copied(),
+            Some(published),
+            "the cache must take over the WORKER's buffer, not a render-thread copy of it"
         );
 
         tex::shutdown(&mut uploader);
@@ -3977,6 +4082,30 @@ mod tests {
         assert!(!same_art(&s, b, format!("{KEY}&X-Plex-Token=fresh-grant").as_bytes()));
         assert!(!same_art(&s, a,
             b"/photo/:/transcode?width=250&height=375&minSize=1&url=%2Fother&X-Plex-Token=old-grant"));
+    }
+
+    /// The scan's prefilter is a hash of the token-less key, so `set_key` is the only thing keeping
+    /// it true and the `memcmp` behind it is what keeps it safe. Both halves are asserted here:
+    /// a slot answers its own identity and a refreshed credential, and a hash the slot does not
+    /// hold is refused WITHOUT the bytes being consulted (a stale hash can only cost a miss, never
+    /// a wrong picture — that is the shape `same_art_h` has to keep).
+    #[test]
+    fn a_slot_answers_by_its_stored_hash_and_the_bytes_still_decide() {
+        const KEY: &str = "/photo/:/transcode?width=250&height=375&minSize=1&url=%2Fh";
+        let a = ServerId::from_raw(7);
+        let mut s = Pslot { state: P_READY, srv: a, ..Pslot::ZERO };
+        set_key(&mut s, KEY);
+        assert_eq!(
+            s.art,
+            art_hash(KEY.as_bytes()),
+            "set_key stamps the hash of what it stored"
+        );
+        assert!(same_art_h(&s, a, KEY.as_bytes(), s.art));
+        // The same picture under a refreshed grant is one hash — the credential is set aside.
+        assert!(same_art_h(&s, a, format!("{KEY}&X-Plex-Token=fresh").as_bytes(),
+            art_hash(format!("{KEY}&X-Plex-Token=fresh").as_bytes())));
+        assert!(!same_art_h(&s, a, KEY.as_bytes(), s.art ^ 1),
+            "a hash the slot does not hold is refused by the scan, before any key is compared");
     }
 
     /// The memo's twin of the rule above, plus the generation half. Both are about serving a path

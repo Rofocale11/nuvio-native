@@ -1815,3 +1815,210 @@ whose FRAMEDROP line carries `inl` in its `spans=` took the inline path (it coun
 that line is logged for, not on every frame). Two caveats: the
 per-pass split of the inline increment (copy, render-pass split, chain) is not measured, and the
 ~6050 class is not unique to inline captures (frames with no glass job at all land there too).
+
+## 2026-11-04: a scrolling page holds its glass sources — and the frame was never short of time
+
+The owner's report was Home scrolling feeling bad enough to hold a release. The instrument was the
+exact scene for it: `/tmp/plxnative-homeosc` ("perpetually sweep the home grid focus DOWN to the
+bottom then UP to the top … so a headless run reproduces the top↔bottom vertical-scroll judder"),
+armed with `/tmp/plxnative-framedrop=16` and `/tmp/plxnative-cpuprof`. Debug tvdev build, one
+lease, 50 s of steady sweep at `snap=1`.
+
+### What the scroll actually carried
+
+`src` was replayed on **2716 of the 2895** frames over 16 ms — essentially all of them — at a mean
+3.5 ms (p50 2.6, p95 7.2) of a 16.5 ms frame. That was expected and by design: the chrome band's
+source is compared against the draws beneath it, and a scrolling page changes all of them. A held
+ROW only settles a heading under the lens (`screens::home`'s own test); a held COLUMN translates the
+whole page.
+
+### The fix, and the path it first leaked through
+
+`backdrop::Sources::hold` keeps a band's retained image while the page is moving
+(`plx_machine::idle::page_moving`, the engine's verdict on the page's own motion, decorative
+animation excluded). The first cut gated only `jobs()` — the direct replay — and the refresh moved
+straight into the **inline capture** instead: the same work, taken from the framebuffer the visible
+walk had just drawn, which the new `inl` span measured at 1.9 ms a frame. `Decision::refresh` is read
+by both, so the band is now marked up to date in `request()` itself and neither runs. A band with no
+image, or one whose image no longer covers its rect, keeps its refresh — a glass sampling outside its
+texture is a visible edge, not a lag.
+
+### What it bought, measured A/B on the set
+
+| per frame | before | after |
+|---|---|---|
+| `src` frames | 2716 / 2895 | **93 / 2991** (the window's own refreshes) |
+| `draw` | p50 7.3, mean 9.1 | **p50 5.8, mean 7.8** |
+| `swap` | p50 8.5, mean 7.8 | **p50 9.6, mean 8.6** |
+| `total` | p50 16.5, mean 18.3 | p50 16.5, mean 18.0 |
+
+**The frame time did not move, because it was never the draw's to move.** The saving went into the
+wait for the back buffer: `swap` absorbed it to within 0.1 ms of the total. `fps=` stayed 60, `gt33`
+0–1, p95 18 ms on both legs. So on this scene the app was already presenting every vsync, and the
+`frame_gt16` counts the sweep produces (26–34 of 60) are the 16.0–16.7 ms band straddling the
+threshold, not overruns. The hold is still right — it removes 1.5 ms of work per frame from the most
+common frame shape and it is what makes a scroll's draw fit under a slower present — but it is not
+what a "feels terrible" report was about, and this entry exists so nobody reads it as one.
+
+### What is left in the frame, and the shape of the complaint it fits
+
+Two stalls live beside the draw and both were already there:
+
+- **`prepare`** (the upload window): 51 of 2991 frames over 8 ms, p99 10.2, max **45.2 ms**, on
+  `cards=` bursts and residencies alike; the budget's `solo:residency` frames show in the same
+  heartbeats. One 45 ms frame is three vsyncs of frozen picture.
+- **`gndread`** (the ground probe's `glReadPixels`, already cadenced and fenced): 120 frames of
+  2991 at a mean 3.1 ms, max 16.
+
+That is about three lurches a second on a picture that is otherwise moving at 60 fps — which is what
+"janky" means once the frame rate is ruled out. Neither is addressed here.
+
+## 2026-11-04 (later): the prepare stalls were two different things, and `cards=` was not the decoder
+
+The section above left two suspects: the `prepare` window and `gndread`. This is `prepare`, on a
+release-profile build (`make ARM_PROFILE=release`, fat LTO, `homeosc`, `framedrop=16`), because the
+owner judged a stable build and the stable flavour is always `RELEASE=1`.
+
+The first thing the ten minutes of measurement bought was a correction. `dprep`/`prep` are
+**dispatcher** spans: the legacy loop in `app/run.rs` never runs `prepare_pass`, so those two read
+0.0 on every stall frame and the earlier note ("the time is in the loop's own prepare window
+somewhere") had nothing behind it. The second correction: `cards=` is the number of card composites
+DRAWN in the frame (`gfx::take_card_stats`), not a decode burst — on a 21-card Home grid it sits at
+21 for the whole sweep and means nothing about `prepare`.
+
+Temporary sub-spans inside `prepare_window` split the window into its parts. On 2794 frames, 53
+exceeded 8 ms and they fell into exactly two populations:
+
+| population | span | measured |
+|---|---|---|
+| pixel copy in `drain_decoded` | 8–82 ms, `plock`/`pacc` at 0.0 | 27 frames |
+| texture upload in `poster::prepare` | 8–178 ms | 26 frames |
+
+**The copy was pure waste, and its cost was page faults.** `drain_decoded` copied every decoded
+image out of the decoder's C allocation into a fresh `Box<[u8]>` on the render thread — 3.5 MB for a
+1280x720 backdrop, accounted at "tens of microseconds" in its own comment and measured at 8-82 ms,
+because a fresh multi-megabyte allocation faults its pages in. The pixels are already owned (the
+worker `img_malloc_copy`s them), so the conversion now happens **on the worker** (`owned_px`) and
+the render thread only moves the pointer (`take_owned_px`). A/B on the same scene and profile:
+
+| | before | after |
+|---|---|---|
+| `prepare` p99 / max | 12.9 / 178 | **8.0 / 54.6** |
+| frames with `prepare` > 8 ms | 53 / 2794 | **26 / 2657** |
+| `drain_decoded` span | up to 82.3 | **0.0 on every frame** |
+
+**The half that is left is the upload, and it is the driver.** On the 26 surviving stalls
+`pprep` splits into `glTexImage2D` (1.1–44.7 ms) and `warm_tex` (1.0–15.6, a draw, so it can be the
+one that takes the implicit wait): a 375 KB card is 1.6–15.5 ms and a 3.5 MB 1280x720 hero art
+8–44.7 ms, against a frame with about 9.6 ms of slack (16.67 − `total` p50's own work). Both halves
+are the same order as the whole-stall budget, so **no single frame has room for a 3.5 MB upload** —
+only a banded `glTexSubImage2D` across frames, or not uploading it, removes the hitch.
+
+Where they come from: 14 of the 18 large uploads land on frames whose `snap=1.000`, i.e. the hero
+billboard is folded out and the picture being uploaded is not on screen; the claims that produced
+them were made while it was (an `imgtrace` run shows claims taking seconds to come back:
+`decode=+4000ms`). So the useful rule is "do not upload what no draw resolved", which is a `TexCache`
+policy change and not made here.
+
+**And the draw is bigger than any of it.** Bucketing the sweep by second (`loop=` fps against the
+frames of that second), the seconds that dip below 60 are draw-dominated — summed over their late
+frames, `draw` is 100–650 ms a second against `prepare`'s 0–76 — and the draw's own spikes
+(`draw` > 15 ms, 161 of 2257 steady frames) are `page` 48%, `disc` 34%, `chrome` 7%. `disc` is the
+glass **discovery walk**: a second full page draw per frame whose only product is the band
+declarations `jobs()` turns into source replays. (While the glass hold of the section above was in
+the tree, `jobs()` took none of them and this pass was pure waste; with the hold reverted it is
+load-bearing again, so the question about it is how to make it cheaper, not whether to skip it.)
+
+### The hold was not kept: the glass must follow the page
+
+`Sources::hold` was reverted the same day. It is correct as an optimisation — a moving page
+translates under the lens, so the blurred picture differs by position alone — but it is *visible*:
+the glass under the chrome stops following the page for up to a second, and the owner rejected that
+outright, preferring the work back. So the glass re-takes its source on every frame of a scroll, as
+it did before, and the cost has to come out of something invisible instead. The `prepare`-window
+work below (the decoded-pixel copy) is exactly that, and the draw's own spikes are the next target.
+
+## 2026-11-04 (later still): the lurch is the fold, not the glass — and it was a `memcmp` scan
+
+Three corrections, one fix, and a scene the owner actually scrolls. Everything below is one ARM
+`release`-profile build of the debug flavour (`make ARM_PROFILE=release`, fat LTO), `homeosc` +
+`framedrop=16`, on the set.
+
+**First, `screen off` contaminates this row of measurements.** The panel was being turned off to keep
+the set's screensaver out of a long run, and with no panel to scan out the compositor stops
+consuming: `swap` grew waits of 31–555 ms, `draw` read 10.6 ms against 7.3, and 67 of 2685 frames
+passed 40 ms against 51 of 3031 with the panel on. Nothing in the app changed. Quote the panel-ON
+leg for what a viewer sees; the earlier sections above were all taken with the panel off and are
+pessimistic in the same direction.
+
+**Second, the glass is not the cause, which is why masking its whole chain barely moved the feel.**
+Same binary, same scene, one added trigger (`drawmask=glass` removes the composite and every
+capture/replay pass):
+
+| panel off | glass live | glass masked |
+|---|---|---|
+| `draw` p50 / mean | 8.1 / 10.6 | 5.5 / 7.0 |
+| `draw` > 15 ms | 460 | 151 |
+| frames > 40 ms | 67 | 40 |
+| `total` p99 | 59.2 | 44.3 |
+| seconds under 60 fps | 25 / 66 | 21 / 66 |
+| `swap` p50 | 7.6 | **10.0** |
+
+So the glass walks cost 3.5 ms a frame and 60% of the draw spikes — and removing them buys no
+frame: the freed time lands in `swap`, because the frame was never short of CPU overall. The lurch
+survives with no glass in the picture, so following it into the glass pipeline was the wrong road.
+
+**Third, the scene has exactly one bad place, and it is the fold.** Per-second, panel on, 66 s:
+
+```text
+t=2..9   t=3 78 ms   t=4 68   t=5 83   t=6 86   t=7 86   t=8 35   worst per frame
+t=10..65 16.4..17.2 ms every second, not one frame over 40 ms
+```
+
+That is the hero billboard folding into the grid (`snap` 0 → 1) and the focus travelling the rows:
+five seconds at ~20 fps, then 57 seconds of a clean 60. The owner scrolls up and down across exactly
+that boundary, so "smooth, then a jump" is this episode, repeated per gesture — not a periodic
+timer. Aggregate over the episode's frames, the walks are 76%: `page` 32%, `src` 27%, `disc` 17%;
+`dpre`/`dframe`/`dstep` 13%, `text` 3%, uploads the rest.
+
+### The one thing the sampler found: 96 `memcmp`s per tile per walk
+
+`tools/plxnative-sample profile` over the fold, 350 stacks at 25 Hz: **102 of 350 samples (29%) were
+inside `poster::same_art`**, reached `resolve_card_art` → `PosterSource::probe` → `lookup`, with the
+leaf in `__memcmpeq` and `__aeabi_memcpy`. `lookup` scans all 96 slots and, for each, compared the
+probe key with `sans_token(key_bytes(slot)) == sans_token(key)` — two `windows(13)` scans plus a
+`memcmp` over a ~250-byte key, per slot, per visible tile, on every one of the frame's three page
+walks. ~40 tiles × 3 walks × up to 96 slots is the fold's whole frame budget spent comparing
+strings about pictures that had not moved.
+
+The key has a single other writer (`set_key`), so a slot can carry its identity as one word:
+`art_hash` (FNV-1a over `sans_token(key)`) stamped by `set_key` from the bytes it actually stored,
+and `lookup` computing the probe's hash once per probe instead of once per slot. A hash hit still
+`memcmp`s, so a collision costs a comparison and never a wrong picture, and a stale hash can only
+cost a miss. A/B, same scene, panel on, 66 s each:
+
+| | before | after |
+|---|---|---|
+| samples in `same_art` | 102 / 350 | **5 / 350** (and `__libc_do_syscall`/`poll` rose 109 → 219) |
+| frames > 40 ms | 51 | **32** |
+| `total` p99 | 52.3 ms | **40.9 ms** |
+| fold `page` time | 1611 ms | 1285 ms |
+
+### What is still there
+
+The fold still costs 66–89 ms on its worst frame second by second (`t=2..9`), i.e. ~12–17 fps
+across it, and 72% of that is still the three page walks (`page` 27%, `src`
+27%, `disc` 18%). No micro-fix reaches that: `disc` is a full page walk whose only product is glass
+band declarations, `src` re-walks the prefix per stale band, and `page` is the frame itself. Making
+the walks cheap means giving the glass its prefix from something other than a re-walk — the
+recorded-primitive path this file has twice deferred — and that is a design change with a look risk,
+so it starts on the simulator with the ledger, not here.
+
+One more thing is unexplained and worth re-measuring before it is blamed on a change: the
+post-fix run carried a single 500 ms frame at `t=4`, the pre-fix one a single 86 ms max, and the
+panel-off runs a 425 ms `swap` stall. One frame per run is not a distribution, but nothing here
+rules a grid re-layout out either.
+
+The `prepare`-window work above stands on its own account: on this scene, 16–28 frames per minute
+still stall 8–32 ms in a texture upload, all of them a 1280×720 (0.92 Mpx) hero art, and no frame
+has 9.6 ms of slack for one.

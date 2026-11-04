@@ -979,14 +979,18 @@ owns its frame — measured as `budget …/solo:residency` and fps 44–54 durin
 on the television (2026-11-02). TMDB keeps its own `w185/w342/w500/w780/…` ladder.
 
 **…and the poster worker caps what the CDN ignores.** Some addon CDNs have no usable size hint at
-all (`btttr.cc` serves 500×750 WebP for every variant, measured 2026-11-02). Any card art whose
-decode is over `RESIDENCY_BYTES` is therefore cover-scaled to the request box on the worker —
-before the main thread uploads it, and bounded just under the threshold — so it stays an ordinary
-`Poster` take. Cover rather than fit matters: the card crops its texture (`art_uv`), so fitting a
+all (`btttr.cc` serves 500×750 WebP for every variant, measured 2026-11-02). Any art whose decode
+is over `RESIDENCY_BYTES` is therefore cover-scaled to the request box on the worker, before the
+main thread uploads it — a **card** box is additionally bounded just under the threshold, so the
+card stays an ordinary `Poster` take; a **backdrop** box (Home's 1280×720, Detail's 1920×1080) is
+the size the screen draws, so the box alone bounds it and the art keeps its `Residency` take.
+Cover rather than fit matters: the card crops its texture (`art_uv`), so fitting a
 landscape still inside a 2:3 card would shrink the band that survives the crop. Art already under
 1 MiB (TMDB's `w342`, 702 KB) is untouched, keeping its headroom for the focus pop. In the
 simulator the same fast scroll now uploads 250×375 (93,750 px) per poster instead of
-500×750 (375,000 px), and no poster frame is a solo take.
+500×750 (375,000 px), and no poster frame is a solo take; on the television a 1920×1080 original
+for Home's hero box is now a 1280×720 upload (8.3 MB → 3.5 MB, `prepare` 27–64 ms → 17–24 ms,
+2026-11-04).
 
 ---
 
