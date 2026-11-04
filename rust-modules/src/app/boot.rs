@@ -632,9 +632,15 @@ static P2P_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 
 /// Start the headless P2P server as a DIRECT CHILD of this process: `node server.js` from
 /// `paths::app_dir()/js-service`. Its settings, cache and certificate live under
-/// `/tmp/nuvio-serverp2p` (or `$APP_PATH`), and its stdout/stderr append to `/tmp/nuvio-p2p.log`.
+/// `<runtime_dir>/serverp2p`, and its stdout/stderr append to `<runtime_dir>/serverp2p.log`.
 /// This firmware's Node has no `palmbus`/`pmloglib`, so there is no LS2 service and no
 /// `luna-send` here.
+///
+/// The runtime root is PER INSTALL (`/tmp` for the app users get, `/tmp/<app id>` for a
+/// developer install beside it), and that is load-bearing here rather than cosmetic: the debug
+/// and stable packages run under different uids and cannot write each other's directories. A
+/// literal `/tmp/nuvio-serverp2p` shared by both made whichever install booted second refuse to
+/// start P2P with an ownership error.
 ///
 /// Television-only: the host and test builds must not spawn a server. A controlled or replay boot
 /// never reaches this call either (see `construct`).
@@ -682,17 +688,20 @@ fn start_p2p_service_inner() {
             return;
         }
 
-        // `/tmp` is writable on read-only production installs, and with `cacheSize: 0` nothing
-        // here needs to survive a reboot. The app directory is not used for state.
-        let p2p_dir = std::path::Path::new("/tmp/nuvio-serverp2p");
-        if let Err(e) = std::fs::create_dir_all(p2p_dir) {
+        // `/tmp` (or the per-install root) is writable on read-only production installs, and with
+        // `cacheSize: 0` nothing here needs to survive a reboot. The app directory is not used for
+        // state.
+        let runtime_dir = plx_base::paths::runtime_dir();
+        let p2p_dir = runtime_dir.join("serverp2p");
+        let p2p_log = runtime_dir.join("serverp2p.log");
+        if let Err(e) = std::fs::create_dir_all(&p2p_dir) {
             plx_base::eventlog::log(&format!(
                 "nuvio: could not create {}: {e}",
                 p2p_dir.display()
             ));
             return;
         }
-        match std::fs::metadata(p2p_dir) {
+        match std::fs::metadata(&p2p_dir) {
             Ok(meta) => {
                 let euid = unsafe { libc::geteuid() };
                 if meta.uid() != euid {
@@ -773,6 +782,9 @@ fn start_p2p_service_inner() {
         };
         let mut command = std::process::Command::new(node);
         command.arg(&server).current_dir(&js_dir);
+        // server.js resolves its settings, cache and certificate through `APP_PATH`, falling back
+        // to a desktop-oriented literal. Hand it THIS install's directory so both halves agree.
+        command.env("APP_PATH", &p2p_dir);
         // Strip a broken LD_PRELOAD (webOS quirk) so node's dynamic linker
         // doesn't choke on a literal "$LD_PRELOAD" entry.
         command.env_remove("LD_PRELOAD");
@@ -811,12 +823,13 @@ fn start_p2p_service_inner() {
         let log_ok = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/tmp/nuvio-p2p.log")
+            .open(&p2p_log)
             .is_ok();
         if !log_ok {
-            plx_base::eventlog::log(
-                "nuvio: could not open /tmp/nuvio-p2p.log; node output discarded",
-            );
+            plx_base::eventlog::log(&format!(
+                "nuvio: could not open {}; node output discarded",
+                p2p_log.display()
+            ));
         }
 
         match command.spawn() {
@@ -829,7 +842,7 @@ fn start_p2p_service_inner() {
                     let lf = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open("/tmp/nuvio-p2p.log");
+                        .open(&p2p_log);
                     if let Ok(mut f) = lf {
                         std::thread::spawn(move || {
                             use std::io::{BufRead, Write};

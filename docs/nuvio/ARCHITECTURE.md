@@ -215,14 +215,19 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   `<app_dir>/js-service/` on the television, and `make install` re-installs the whole package.
   `server.js` is the only JS payload: the old `js-service/server-settings.json` is gone, and both
   `make deploy` and `verify-deploy` copy/check only `server.js`.
-- **Data directory.** `appPath` is `/tmp/nuvio-serverp2p` unless `APP_PATH` overrides it, and
-  `cacheRoot` follows `appPath`. The generated settings and state are therefore
-  `/tmp/nuvio-serverp2p/server-settings.json`,
-  `/tmp/nuvio-serverp2p/stremio-cache/` (only while caching is on), and
-  `/tmp/nuvio-serverp2p/httpsCert.json`. `/tmp` is
+- **Data directory.** `appPath` is `<runtime_dir>/serverp2p` (the Rust half passes it as
+  `APP_PATH`; `server.js`'s desktop default is never used on the television), and `cacheRoot`
+  follows `appPath`. The runtime root is per install — `/tmp` for the stable app, `/tmp/<app id>`
+  for a developer install beside it (`paths::resolve_runtime_dir`) — which is required here, not
+  cosmetic: the two installs run under different uids and the stable one could not write the
+  debug one's directory, so a shared path made whichever booted second refuse to start P2P. The
+  generated settings and state are therefore
+  `<runtime_dir>/serverp2p/server-settings.json`,
+  `<runtime_dir>/serverp2p/stremio-cache/` (only while caching is on), and
+  `<runtime_dir>/serverp2p/httpsCert.json`. The root is
   writable on read-only production installs, and with `cacheSize: 0` nothing there needs to survive
   a reboot. `boot.rs` creates the directory and refuses to spawn when it is owned by a different
-  uid, logging `rm -rf /tmp/nuvio-serverp2p` rather than trying to chown it. Startup also removes
+  uid, logging `rm -rf <path>` rather than trying to chown it. Startup also removes
   a legacy `<app_dir>/.stremio-server/` and the earlier `<app_dir>/nuvio-serverp2p/`, logging each
   removal; both are non-fatal and idempotent.
 - **Generated defaults.** `cacheSize` and `transcodeMaxWidth` are `0`; `transcodeMaxBitRate` is
@@ -243,10 +248,11 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   whole file. The player's own cold-start budget is the `MEDIA_FIRST_BYTE_TIMEOUT_MS` grace
   described in `PLAYBACK.md`.
 - **Start.** On a live boot — `app::boot::construct`, never a controlled/replay boot, a host run or
-  a test — `app::boot::start_p2p_service` creates `/tmp/nuvio-serverp2p` and spawns
+  a test — `app::boot::start_p2p_service` creates `<runtime_dir>/serverp2p` and spawns
   `/usr/bin/node server.js` with its working directory set to `<app_dir>/js-service`. If
   `/usr/bin/node` is absent, it falls back to `node` on `PATH`. The child's stdout and stderr
-  append to `/tmp/nuvio-p2p.log` (both are discarded if the file cannot be opened). The child
+  append to `<runtime_dir>/serverp2p.log` (both are discarded if the file cannot be opened); the
+  root is per install, so the stable and debug installs never share it. The child
   handle lives in a process-global slot; the event log records the interpreter and pid
   (`nuvio: P2P server started with …`) or the exact spawn error. The spawn does not block the
   first frame.
