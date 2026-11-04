@@ -73,6 +73,11 @@ fi
 
 AHEAD="$(git rev-list --count "$TRUNK..$WORK")"
 BEHIND="$(git rev-list --count "$WORK..$TRUNK")"
+# The commit that carries these numbers is itself on the working line, so a `check` on the
+# COMMITTED tree counts it and a number written from HEAD alone is always one short (that is how
+# 788b7bb7 landed saying 41 against a real 42). `update` therefore writes the count the tree will
+# have after that commit; `check` keeps grading HEAD, which is what a committed tree is.
+if [ "$MODE" = update ]; then AHEAD=$((AHEAD + 1)); fi
 HAVE_REF=0
 BASE="" OURS="" REF_AHEAD="" FILES_OURS="" FILES_REF="" CONTESTED="" CONTESTED_SM=""
 EDITED="" ADDED="" BASE_SHA="" BASE_DATE="" BASE_SUBJECT="" REF_SHA="" REF_DATE=""
@@ -84,6 +89,8 @@ if [ -n "$REF" ]; then
     # trunk itself, and that silently reports only the working line's own commits as the seam.
     BASE="$(git merge-base "$TRUNK" "$REF")"
     OURS="$(git rev-list --count "$BASE..$WORK")"
+    # Same off-by-one as AHEAD: the docs commit is on our side of the seam too.
+    if [ "$MODE" = update ]; then OURS=$((OURS + 1)); fi
     REF_AHEAD="$(git rev-list --count "$BASE..$REF")"
     FILES_OURS="$(git diff --name-only "$BASE" "$WORK" | wc -l | tr -d ' ')"
     FILES_REF="$(git diff --name-only "$BASE" "$REF" | wc -l | tr -d ' ')"
