@@ -34,5 +34,11 @@ png = "0.18"
 # compiled for the UI (`gfx::img`) at every other feature the tree uses.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[dev-dependencies]
+# `shim_store.rs` tests use `plx_base::testscratch`; `test-support` is the feature that exposes it
+# (plx_base/Cargo.toml:24-27 — enabled from a crate's dev-deps, never shipped). Needed so a bare
+# `cargo nextest run -p plx_pmsshim` passes without `--features plx_base/test-support` on the CLI.
+plx_base = { path = "../base", features = ["test-support"] }
+
 [lints]
 workspace = true
