@@ -77,8 +77,12 @@ rules an agent must not break:
   `account::local_preferences()`.
 - **My List and watch progress are Nuvio RPCs**: one title and the active profile per write,
   never whole-list replacement. See `docs/nuvio/WATCH-PROGRESS.md`.
-- **The P2P streaming server is an external `node` child process** from `js-service/`, never an
-  embedded JS engine; a missing interpreter is logged and leaves the app usable.
+- **The P2P streaming server is either the staged C engine (`libsbengine.so`, dlopen'd, never
+  linked) or the external `node` child from `js-service/`** — never an embedded JS engine. The
+  C engine is preferred when it loads (graded OK on every webOS release; it links libstdc++ and
+  OpenSSL statically); when it starts, the Node child is not spawned at all, and when it cannot
+  load the Node child is the path. Both a missing `.so` and a missing interpreter are logged and
+  leave the app usable. See `docs/nuvio/ARCHITECTURE.md`.
 
 ## Documentation
 

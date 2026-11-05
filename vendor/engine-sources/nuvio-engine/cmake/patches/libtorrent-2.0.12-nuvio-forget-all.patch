@@ -1,0 +1,89 @@
+--- a/include/libtorrent/torrent.hpp
++++ b/include/libtorrent/torrent.hpp
+@@ -647,6 +647,7 @@
+ 		void reset_piece_deadline(piece_index_t piece);
+ 		void set_piece_first_block(piece_index_t piece, int block);
+ 		void nuvio_drop_piece(piece_index_t piece);
++		void nuvio_forget_all();
+ 		void clear_time_critical();
+ #endif // TORRENT_DISABLE_STREAMING
+ 
+--- a/include/libtorrent/torrent_handle.hpp
++++ b/include/libtorrent/torrent_handle.hpp
+@@ -432,6 +432,12 @@
+ 		// that understand lt_donthave are told so, and the piece is downloaded
+ 		// again only if its priority asks for it.
+ 		void nuvio_drop_piece(piece_index_t index) const;
++
++		// nuvio: the payload's storage went away (a removable drive pulled out)
++		// and the save path was reset to an empty folder elsewhere: every piece,
++		// whole or partial, is missing again, and a disk error that paused the
++		// torrent meanwhile is cleared so it downloads into the new folder.
++		void nuvio_forget_all() const;
+ 		void clear_piece_deadlines() const;
+ 
+ #if TORRENT_ABI_VERSION == 1
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -5450,6 +5450,47 @@
+ 		update_want_tick();
+ 	}
+ 
++	// nuvio: the storage moved to an empty folder (the old one vanished with
++	// its drive). Whole pieces become "not have", partial ones start over (their
++	// first blocks went with the old folder), and a disk error that paused the
++	// torrent while the drive was going is cleared.
++	void torrent::nuvio_forget_all()
++	{
++		if (m_error)
++		{
++			clear_error();
++			if (is_paused()) resume();
++		}
++		if (m_upload_mode) set_upload_mode(false);
++		if (!valid_metadata()) return;
++		if (!has_picker() && !m_have_all) return;
++		need_picker();
++		m_have_all = false;
++		for (auto const& dp : m_picker->get_download_queue())
++			m_picker->restore_piece(dp.index);
++		for (piece_index_t i(0); i < m_torrent_file->end_piece(); ++i)
++		{
++			if (!m_picker->have_piece(i)) continue;
++			m_picker->we_dont_have(i);
++			inc_stats_counter(counters::num_have_pieces, -1);
++			for (auto c : m_connections)
++			{
++				TORRENT_INCREMENT(m_iterating_connections);
++				if (c->is_disconnecting()) continue;
++				c->write_dont_have(i);
++			}
++		}
++		if (!m_file_progress.empty())
++		{
++			m_file_progress.clear();
++			m_file_progress.init(*m_picker, m_torrent_file->files());
++		}
++		update_gauge();
++		set_need_save_resume(torrent_handle::if_download_progress);
++		state_updated();
++		update_want_tick();
++	}
++
+ 	void torrent::set_piece_first_block(piece_index_t const piece, int const block)
+ 	{
+ 		if (!valid_metadata() || piece < piece_index_t(0)
+--- a/src/torrent_handle.cpp
++++ b/src/torrent_handle.cpp
+@@ -956,6 +956,11 @@
+ 		async_call(&torrent::nuvio_drop_piece, index);
+ 	}
+ 
++	void torrent_handle::nuvio_forget_all() const
++	{
++		async_call(&torrent::nuvio_forget_all);
++	}
++
+ 	void torrent_handle::clear_piece_deadlines() const
+ 	{
+ #ifndef TORRENT_DISABLE_STREAMING
