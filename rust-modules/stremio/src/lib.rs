@@ -31,6 +31,8 @@ pub mod addons_tmdb;
 pub mod torrent;
 pub use torrent::playable_url;
 
+pub mod sbengine;
+
 pub mod import;
 
 mod lenient;

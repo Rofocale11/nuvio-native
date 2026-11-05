@@ -41,6 +41,10 @@ const DEFAULT_EPISODE_MS: i64 = 45 * 60_000;
 const DEFAULT_MOVIE_MS: i64 = 110 * 60_000;
 const SECTION_MOVIES: i64 = 1;
 const SECTION_SHOWS: i64 = 2;
+/// Where the in-process Node P2P fallback listens, and the last-resort "torrents are available"
+/// marker when no URL is configured: with the C engine loaded the URL is never dialled, but the
+/// stream list and the resolve gate both ask `torrent_server()` whether torrents may be offered.
+const DEFAULT_P2P_SERVER: &str = "http://127.0.0.1:11470";
 const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
 /// Above the movie base so the two decoders cannot alias, a billion apart because TMDB movie ids
 /// already pass 100,000.
@@ -53,6 +57,17 @@ const TMDB_PERSON_KEY_BASE: i64 = 3_000_000_000;
 const TMDB_COLLECTION_KEY_BASE: i64 = 4_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
+/// Whether a cached resolve for `marker` is still usable while the engine's active torrent is
+/// `active`. A marker names its torrent (`torrent:<info hash>`), and the engine serves only the
+/// torrent it last resolved: any other hash means the cached URL belongs to a torrent `remember`
+/// deleted, whose `/stream/<id>` answers 404 for the rest of the session.
+fn engine_url_is_current(marker: &str, active: Option<&str>) -> bool {
+    let Some(hash) = marker.strip_prefix(shim_media::TORRENT_SCHEME) else {
+        return true;
+    };
+    active.is_some_and(|a| a.eq_ignore_ascii_case(hash))
+}
+
 fn synthetic_tmdb_id(rk: i64) -> Option<u64> {
     (TMDB_FALLBACK_KEY_BASE..TMDB_SHOW_KEY_BASE)
         .contains(&rk)
@@ -1071,6 +1086,17 @@ mod tmdb_metadata_tests {
         assert_eq!(shim.torrent_server(), None, "the switch outranks a configured URL");
     }
 
+    /// The P2P switch must run BEFORE the C-engine branch in `open_url`: a torrent marker with the
+    /// switch off resolves to nothing even when `libsbengine.so` loaded (regression guard — the
+    /// engine path used to be tried first and would have played with P2P disabled).
+    #[test]
+    fn p2p_off_does_not_resolve_a_torrent_through_the_engine() {
+        let shim = Shim::new(Arc::new(TmdbMetaBackend), Config { torrent_server: Some("http://127.0.0.1:2710".into()), ..Config::default() });
+        let stream = Stream { info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()), ..Default::default() };
+        let marker = format!("{}{}", shim_media::TORRENT_SCHEME, "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(shim.open_url(1, &stream, &marker), None, "P2P off must drop every torrent");
+    }
+
     #[test]
     fn tmdb_related_rating_key_resolves_to_full_metadata() {
         let shim = Arc::new(Shim::new(Arc::new(TmdbMetaBackend), Config::default()));
@@ -2037,14 +2063,29 @@ impl Shim {
     /// The Stremio-compatible streaming server torrents play through, if any. `None` whenever P2P
     /// is off, which is what makes [`shim_media::rank`] and `playable_url` drop every torrent and
     /// magnet stream: an unplayable pick is not offered.
+    ///
+    /// With the in-process C engine loaded, the address is not dialled at all — the engine serves
+    /// its own loopback URL — but it is still the marker that torrents are available, so an empty
+    /// Settings field falls back to the default address instead of hiding every torrent.
     pub fn torrent_server(&self) -> Option<String> {
         if !self.p2p_enabled() {
             return None;
         }
-        self.torrent_server
+        let configured = self
+            .torrent_server
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .clone();
+        if configured.is_some() {
+            return configured;
+        }
+        // The URL field is optional now: the engine needs no server, and an absent URL must not
+        // silently remove torrents from every list. This is also where a Node fallback would
+        // listen if the engine later fails.
+        if plx_stremio::sbengine::available() {
+            return Some(DEFAULT_P2P_SERVER.to_string());
+        }
+        None
     }
 
     /// Is peer-to-peer streaming on (Settings > Playback > P2P Streaming)?
@@ -3504,23 +3545,16 @@ impl Shim {
         cached.or_else(|| self.tmdb_synthetic_row(rk))
     }
 
-    /// The URL to open for a ranked stream: itself, or — for a torrent marker — what the streaming
-    /// server answers `/create` with (season/episode let it pick the file in a season pack).
+    /// The URL to open for a ranked stream: itself, or — for a torrent marker — a URL the streaming
+    /// engine serves (season/episode let it pick the file in a season pack). The in-process C engine
+    /// is tried first when it loaded; the Node server answers `/create` otherwise.
     fn open_url(&self, rk: i64, stream: &Stream, url: &str) -> Option<String> {
         if !url.starts_with(shim_media::TORRENT_SCHEME) {
             return Some(url.to_string());
         }
-        let key = (rk, url.to_string());
-        if let Some(u) = self
-            .resolved
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-        {
-            return Some(u.clone());
+        if let Some(u) = self.cached_open_url(rk, url) {
+            return Some(u);
         }
-        let server = self.torrent_server()?;
-        let server = server.as_str();
         let (season, episode) = match self.keys.ident(rk) {
             Some(Ident::Episode { video, .. }) => {
                 let mut it = video.rsplit(':').filter_map(|x| x.parse::<u32>().ok());
@@ -3529,12 +3563,116 @@ impl Shim {
             }
             _ => (None, None),
         };
+        let key = (rk, url.to_string());
+        // P2P off drops every torrent before any resolve: `torrent_server()` is `None` then, and
+        // that gate must run BEFORE the C-engine branch or a disabled switch would still play.
+        let server = self.torrent_server()?;
+        let server = server.as_str();
+        // C engine first (when it loaded); the engine serves its own 127.0.0.1 Range URLs so no
+        // server prefix is required. Node is the fallback on firmwares that cannot load
+        // `libsbengine.so` (missing from the package, or a firmware fwcompat has not graded).
+        if let Some(u) = self.resolve_with_sbengine(stream, season, episode) {
+            self.resolved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, u.clone());
+            return Some(u);
+        }
         let u = plx_stremio::torrent::resolve(server, stream, season, episode).ok()?;
         self.resolved
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, u.clone());
         Some(u)
+    }
+
+    /// The cached resolve for a torrent marker, if it is still usable. An engine URL names one of
+    /// the engine's streams; switching sources calls `sbengine::remember`, which deletes the
+    /// previous torrent and with it that stream, and the engine then answers `/stream/<id>` with
+    /// 404 for the rest of the session (the player retried it forever: `ff: http_open FAILED
+    /// status=404`, `playback retry: resolving item again`, never recovering). Reuse a cached URL
+    /// only while its torrent is still the engine's active one; a stale entry is dropped so the
+    /// caller resolves again. Node URLs never move, so nothing is checked without the engine.
+    fn cached_open_url(&self, rk: i64, marker: &str) -> Option<String> {
+        let key = (rk, marker.to_string());
+        let cached = self
+            .resolved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()?;
+        if plx_stremio::sbengine::available()
+            && !engine_url_is_current(marker, plx_stremio::sbengine::active_hash().as_deref())
+        {
+            self.resolved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+            return None;
+        }
+        Some(cached)
+    }
+
+    /// Try the in-process C engine (`libsbengine.so`) first and fall back to the
+    /// Node EngineFS HTTP path on failure. `libsbengine.so` links OpenSSL statically
+    /// (graded OK on every webOS release in fwcompat's inventory); where `available()`
+    /// is false the Node server at `torrent_server()` remains the only path, so this is
+    /// a preferred-engine, never engine-only.
+    fn resolve_with_sbengine(&self, stream: &Stream, season: Option<u32>, episode: Option<u32>) -> Option<String> {
+        use plx_stremio::torrent;
+        if !plx_stremio::sbengine::available() {
+            return None;
+        }
+        let hash = torrent::info_hash(stream)?;
+        // The engine takes a magnet URI. Prefer the stream's own magnet; when the
+        // stream only carries `infoHash`, synthesize one from peer_sources
+        // trackers (tracker:/dht: prefixes stripped to bare `tr=` params).
+        let magnet = stream
+            .url
+            .as_deref()
+            .filter(|u| u.trim().to_ascii_lowercase().starts_with("magnet:"))
+            .map(str::to_owned)
+            .or_else(|| {
+                let sources = torrent::peer_sources(stream, &hash);
+                if sources.is_empty() {
+                    // No tracker info: a hash alone still lets the engine try
+                    // DHT. Fall back to a bare hash-magnet.
+                    return Some(format!("magnet:?xt=urn:btih:{hash}"));
+                }
+                let mut m = format!("magnet:?xt=urn:btih:{hash}");
+                for s in &sources {
+                    let bare = s.strip_prefix("tracker:").or_else(|| s.strip_prefix("dht:")).unwrap_or(s);
+                    // dht: entries are not trackers; skip them as `tr=` params.
+                    if s.starts_with("dht:") {
+                        continue;
+                    }
+                    m.push_str(&format!("&tr={}", plx_stremio::addon_http::encode_component(bare)));
+                }
+                Some(m)
+            })?;
+        // `torrent::info_hash` gives us the engine's lowercased hash; `open`
+        // keys on it, so pass it verbatim.
+        let preferred = stream.file_idx;
+        // season/episode currently only feed the Node-side file guesser; the
+        // engine picks the largest file when `preferred_idx` is None, which
+        // matches that heuristic for season packs.
+        let _ = (season, episode);
+        match plx_stremio::sbengine::resolve_stream(&magnet, &hash, preferred, 30_000) {
+            Ok(u) => {
+                // One line per opened stream: the log then says which engine served it, which is
+                // the only evidence on a TV that the C engine (rather than Node) is in play.
+                plx_base::eventlog::log(&format!(
+                    "sbengine: serving {} via engine (file {})",
+                    &hash[..hash.len().min(12)],
+                    preferred.map_or("largest".to_string(), |i| i.to_string())
+                ));
+                Some(u)
+            }
+            Err(e) => {
+                plx_base::eventlog::log(&format!("sbengine: resolve failed, Node fallback ({e})"));
+                None
+            }
+        }
     }
 
     fn season_row(&self, show_rk: i64, m: &Meta, n: u32) -> Value {
@@ -3695,11 +3833,7 @@ impl Shim {
             if probe_index.is_none() && done && self.probes.has_prober() {
                 if let Some((_, c)) = ranked.first() {
                     let url = self
-                        .resolved
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get(&(rk, c.url.clone()))
-                        .cloned()
+                        .cached_open_url(rk, &c.url)
                         .unwrap_or_else(|| c.url.clone());
                     if !url.starts_with(shim_media::TORRENT_SCHEME)
                         && self.probes.cached(&url).is_none()
@@ -3726,11 +3860,7 @@ impl Shim {
                     verdict = r.clone();
                     r
                 } else {
-                    self.resolved
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get(&(rk, c.url.clone()))
-                        .cloned()
+                    self.cached_open_url(rk, &c.url)
                         .or_else(|| Some(c.url.clone()))
                         .and_then(|u| self.probes.cached(&u))
                 };
@@ -6432,5 +6562,30 @@ mod image_sizing_tests {
         assert_eq!(sized_image_url(url, 250), "https://image.tmdb.org/t/p/w342/abc.jpg");
         assert_eq!(sized_image_url(url, 500), "https://image.tmdb.org/t/p/w500/abc.jpg");
         assert_eq!(sized_image_url(url, 780), "https://image.tmdb.org/t/p/w780/abc.jpg");
+    }
+}
+
+#[cfg(test)]
+mod resolved_url_cache_tests {
+    use super::{engine_url_is_current, shim_media};
+
+    /// Switching sources and then switching back returned the first source's cached engine URL
+    /// after `sbengine::remember` had deleted its torrent: the engine answered `/stream/<id>` with
+    /// 404 for the rest of the session and the player retried it forever (`ff: http_open FAILED
+    /// status=404`, `playback retry: resolving item again`). A cached engine URL is only usable
+    /// while its marker names the torrent the engine is serving now.
+    #[test]
+    fn a_cached_engine_url_is_only_reused_for_the_active_torrent() {
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        let marker = format!("{}{hash}", shim_media::TORRENT_SCHEME);
+        assert!(engine_url_is_current(&marker, Some(hash)));
+        assert!(engine_url_is_current(&marker, Some(&hash.to_uppercase())));
+        assert!(
+            !engine_url_is_current(&marker, Some("ffffffffffffffffffffffffffffffffffffffff")),
+            "a released torrent's URL is dead, not reusable"
+        );
+        assert!(!engine_url_is_current(&marker, None));
+        // Nothing that is not a marker has an engine stream behind it.
+        assert!(engine_url_is_current("https://example.invalid/a.mkv", None));
     }
 }

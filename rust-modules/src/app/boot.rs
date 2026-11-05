@@ -629,6 +629,86 @@ pub(crate) unsafe fn boot(
 static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
 static P2P_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+static SBENGINE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Start the in-process C torrent engine (`libsbengine.so`) when its library loads. Falls back
+/// to the Node server below when `sbengine::available()` is false — the normal case when the
+/// package was built without the engine, or on a firmware fwcompat has not graded.
+pub(crate) fn start_sbengine() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        if !plx_stremio::sbengine::available() {
+            plx_base::eventlog::log("sbengine: libsbengine.so not available; Node server is the fallback");
+            return;
+        }
+        let p2p_root = plx_base::paths::runtime_dir().join("serverp2p");
+        let state = p2p_root.join("state");
+        let cache = p2p_root.join("cache");
+        for dir in [&state, &cache] {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                plx_base::eventlog::log(&format!(
+                    "sbengine: could not create {}: {e}",
+                    dir.display()
+                ));
+                return;
+            }
+        }
+        let state_s = state.to_string_lossy().into_owned();
+        let cache_s = cache.to_string_lossy().into_owned();
+        // ponytail: start blocks on the C++ shim's internal mutex; ceiling is a synchronous
+        // boot-time call, upgrade path is a dedicated engine thread if it ever stalls.
+        if plx_stremio::sbengine::start_engine(&state_s, &cache_s) {
+            SBENGINE_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            plx_base::eventlog::log(&format!(
+                "sbengine: engine started ({})",
+                plx_stremio::sbengine::version()
+            ));
+            // Throughput visibility: without a rate in the log, a slow torrent and a player-side
+            // problem look the same on the television. One line per 10 s, only while something is
+            // moving, so an idle engine adds nothing.
+            std::thread::spawn(|| {
+                use std::sync::atomic::Ordering;
+                let mut last = 0u64;
+                while SBENGINE_STARTED.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    if !SBENGINE_STARTED.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some(s) = plx_stremio::sbengine::stats() else { continue };
+                    if s.peers == 0 && s.down_bps == 0 && s.downloaded == last {
+                        continue;
+                    }
+                    last = s.downloaded;
+                    plx_base::eventlog::log(&format!(
+                        "sbengine: peers={} seeds={} down={}KB/s up={}KB/s got={}MB window={}MB mem={}MB refetch={}",
+                        s.peers,
+                        s.seeds,
+                        s.down_bps / 1024,
+                        s.up_bps / 1024,
+                        s.downloaded >> 20,
+                        s.window >> 20,
+                        s.mem_cache_used >> 20,
+                        s.refetched,
+                    ));
+                }
+            });
+        } else {
+            plx_base::eventlog::log("sbengine: start_engine failed; Node server is the fallback");
+        }
+    }
+}
+
+/// Stop the C torrent engine. Idempotent; safe to call twice.
+pub(crate) fn stop_sbengine() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        if SBENGINE_STARTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            plx_stremio::sbengine::stop_engine();
+            plx_base::eventlog::log("sbengine: engine stopped");
+        }
+    }
+}
 
 /// Start the headless P2P server as a DIRECT CHILD of this process: `node server.js` from
 /// `paths::app_dir()/js-service`. Its settings, cache and certificate live under
@@ -651,6 +731,7 @@ pub(crate) fn start_p2p_service() {
         // is tied to the *creating thread*, so if the spawning thread exits the
         // kernel sends SIGTERM to node. This thread stays parked until shutdown.
         std::thread::spawn(|| {
+            start_sbengine();
             start_p2p_service_inner();
             // Keep this thread alive so node's parent doesn't die prematurely.
             loop {
@@ -772,6 +853,16 @@ fn start_p2p_service_inner() {
                 }
             }
         }
+        // The C engine owns torrents once it starts: it serves its own loopback Range URLs and
+        // the shim tries it before any Node call, so spawning `node` here would only add an idle
+        // child to the TV's RAM (the thing this engine exists to remove). Node stays the whole
+        // path on firmware where the engine cannot load — that is the `available()` false case,
+        // where `SBENGINE_STARTED` was never set.
+        if SBENGINE_STARTED.load(std::sync::atomic::Ordering::Relaxed) {
+            plx_base::eventlog::log("nuvio: C engine owns P2P; Node server not spawned");
+            return;
+        }
+
         // The absolute path first: the jail's PATH is not root's PATH, and `node` may be absent
         // from it even though /usr/bin/node exists and is world-executable. A firmware that keeps
         // the interpreter elsewhere still gets the PATH lookup as the fallback.
@@ -906,6 +997,7 @@ fn start_p2p_service_inner() {
 pub(crate) fn stop_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
+        stop_sbengine();
         P2P_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut slot = P2P_CHILD.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut child) = slot.take() {
