@@ -11,8 +11,9 @@
 # are now generated; the prose around them is not.
 #
 # USAGE
-#   tools/ai-docs-refresh.sh          # update: rewrite every marked number in place
-#   tools/ai-docs-refresh.sh check    # read-only: exit 1 if any marked number is stale
+#   tools/ai-docs-refresh.sh                        # update: rewrite every marked number in place
+#   tools/ai-docs-refresh.sh update --trunk-follows # ...for a commit the trunk will be ff'd to as well
+#   tools/ai-docs-refresh.sh check                  # read-only: exit 1 if any marked number is stale
 #
 # `check` is wired into ci/check-python-steps.txt, so `make check` and CI's host-python job (when
 # that job runs) execute it. A docs-only push starts no CI by design. Run the update form after
@@ -30,10 +31,22 @@
 set -euo pipefail
 
 MODE="${1:-update}"
+TRUNK_FOLLOWS=0
 case "$MODE" in
     update|check) ;;
-    *) echo "usage: $0 [update|check]" >&2; exit 2 ;;
+    *) echo "usage: $0 [update|check] [--trunk-follows]" >&2; exit 2 ;;
 esac
+shift || true
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --trunk-follows) TRUNK_FOLLOWS=1; shift ;;
+        *) echo "usage: $0 [update|check] [--trunk-follows]" >&2; exit 2 ;;
+    esac
+done
+if [ "$MODE" = check ] && [ "$TRUNK_FOLLOWS" = 1 ]; then
+    echo "ai-docs-refresh: --trunk-follows describes the commit about to be made, not a check" >&2
+    exit 2
+fi
 
 export PATH="$HOME/.cargo/bin:$PATH"
 # Prefer the enclosing work tree; fall back to this script's own checkout so an agent can call it
@@ -85,6 +98,12 @@ if [ "$MODE" = update ] && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = 
     DOCS_ON_WORK=1
     AHEAD=$((AHEAD + 1))
 fi
+# `--trunk-follows`: the commit is made on the working line and the trunk is fast-forwarded to it
+# immediately afterwards. Both branches then point at the same commit, so the ahead count of the
+# committed tree is 0 even though our side of the seam gains the commit.
+if [ "$TRUNK_FOLLOWS" = 1 ]; then
+    AHEAD=0
+fi
 HAVE_REF=0
 BASE="" OURS="" REF_AHEAD="" FILES_OURS="" FILES_REF="" CONTESTED="" CONTESTED_SM=""
 EDITED="" ADDED="" BASE_SHA="" BASE_DATE="" BASE_SUBJECT="" REF_SHA="" REF_DATE=""
@@ -96,9 +115,9 @@ if [ -n "$REF" ]; then
     # trunk itself, and that silently reports only the working line's own commits as the seam.
     BASE="$(git merge-base "$TRUNK" "$REF")"
     OURS="$(git rev-list --count "$BASE..$WORK")"
-    # Same off-by-one as AHEAD, and the same caveat: only a commit made on the working line is
-    # on our side of the seam.
-    if [ "$DOCS_ON_WORK" = 1 ]; then OURS=$((OURS + 1)); fi
+    # Same off-by-one as AHEAD, and the same caveat: a commit made on the working line is on our
+    # side of the seam, and so is one the trunk will be fast-forwarded to.
+    if [ "$DOCS_ON_WORK" = 1 ] || [ "$TRUNK_FOLLOWS" = 1 ]; then OURS=$((OURS + 1)); fi
     REF_AHEAD="$(git rev-list --count "$BASE..$REF")"
     FILES_OURS="$(git diff --name-only "$BASE" "$WORK" | wc -l | tr -d ' ')"
     FILES_REF="$(git diff --name-only "$BASE" "$REF" | wc -l | tr -d ' ')"

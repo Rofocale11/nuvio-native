@@ -3,6 +3,12 @@
 This is the long-form architecture, build, portability, and verification reference shared by all
 coding agents. The concise, always-loaded project contract is `AGENTS.md`; Claude imports both.
 
+> **Status:** current for build, deploy, portability and verification. Some sections were written
+> before the shim replaced the Plex data layer and describe plex.tv/PMS flows that no longer run;
+> they explain why the code is shaped this way, not what it does now. The current contract is
+> [`nuvio/ARCHITECTURE.md`](nuvio/ARCHITECTURE.md) and [`../AGENTS.md`](../AGENTS.md); upstream
+> PlxNative documents are marked in [`README.md`](README.md).
+
 > **FORK STATE (2026-11-03).** The upstream release/site/simulator workflows were removed:
 > `release.yml`, `rc.yml`, `nightly.yml`, `build-package.yml`, `site-video.yml`, `pages.yml`,
 > `build-bench.yml`, `ci-metrics.yml`, `simulators.yml`. The fork's only release path is

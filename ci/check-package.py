@@ -224,8 +224,9 @@ RELEASE_LEGITIMATE_TRIGGER_NAMES = {
     # picker the way an actual trigger file would).
     "plxnative-remote",
     # `ui/rec.rs:65`'s erasure list — a STABLE/nightly install deletes these leftovers from a
-    # devtriggers install that shared the same system `/tmp` (AGENTS.md: `/tmp` is shared across
-    # installs in both jail profiles). Deleting a name is not carrying its trigger surface.
+    # devtriggers install that shared the same system `/tmp` (the runtime dir is machine-wide, so
+    # a debug and a stable install in either jail profile share it). Deleting a name is not
+    # carrying its trigger surface.
     "plxnative-rec", "plxnative-recplay", "plxnative-app-init", "plxnative-recordings",
     # `app/input.rs`'s `delete_all_local_data` erasure list — the SAME rationale as rec.rs's, for
     # the diagnostic sinks a coexisting devtriggers install could have left in the shared `/tmp`:

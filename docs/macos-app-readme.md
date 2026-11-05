@@ -1,5 +1,9 @@
 # PlxNative for macOS
 
+> **Upstream reference — not this product.** The macOS build of upstream PlxNative, kept for
+> attribution. It describes signing in at plex.tv; Nuvio Native has no Plex account. See
+> [`upstream-readme.md`](upstream-readme.md) and [`nuvio/ARCHITECTURE.md`](nuvio/ARCHITECTURE.md).
+
 A native Plex client, built for LG webOS televisions, running here as a real Mac app. Everything it
 needs is inside the bundle — there is nothing to install.
 

@@ -1135,11 +1135,11 @@ skip_live() {
 # `--worktrees` — REMOVE A LANE OUTRIGHT, not just its build tree. Everything above this line
 # reclaims what a worktree LEFT BEHIND; this is the mode for a worktree nobody needs anymore, and
 # it exists because `git worktree list` at 128 entries (measured 2026-09-18) is not a report
-# anyone reads by hand, and `git branch --merged` cannot see the answer at all — every lane here
-# lands on `main` as a SQUASH (`AGENTS.md`, Working rules), so a lane branch's commits are never
-# reachable from `main` by ancestry even when every byte they added is sitting on trunk. Instead,
-# merge the lane tip into `main` with `git merge-tree --write-tree`; if the result equals
-# `main^{tree}`, the lane adds nothing. The known limit: a lane whose lines `main` has since
+# anyone reads by hand, and `git branch --merged` cannot see the answer at all — a lane may land
+# on the trunk as a squash (AGENTS.md accepts merge or squash), so a lane branch's commits are
+# never reachable by ancestry even when every byte they added is sitting on the trunk. Instead,
+# merge the lane tip into the base ref with `git merge-tree --write-tree`; if the result equals
+# the base's tree, the lane adds nothing. The known limit: a lane whose lines the base has since
 # changed again conflicts and reads `unmerged` — the check errs toward keeping. (Measured
 # 2026-09-18: 5 of 128 removable, 74 unmerged.)
 #
@@ -1171,6 +1171,9 @@ worktree_records() {
 # `tools/disk-budget.py` makes the same choice (`base_ref`), so the report and this mode agree. It
 # is resolved ONCE, at top level, because this function runs inside `worktree_records | while`, a
 # subshell whose assignments would not survive. Empty when there is neither: nothing reads merged.
+# NOTE: this fork's trunk is `nuvio-native`, which the resolver below does not name yet, so in this
+# repository `--worktrees` reports a landed lane as `unmerged` and keeps it. Teaching it the fork's
+# trunk needs the fixture update in `ci/test_build_gc.py`.
 resolve_base_ref() {
   for _r in refs/remotes/origin/main refs/heads/main; do
     if git -C "$MAIN" rev-parse --verify --quiet "$_r^{commit}" >/dev/null 2>&1; then

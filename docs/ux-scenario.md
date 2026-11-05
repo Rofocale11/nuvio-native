@@ -1,5 +1,10 @@
 # UX Scenario — PlxNative
 
+> **Upstream reference — not this product.** Written for upstream PlxNative
+> (`com.beb.plxnative`, version 0.4.1) on 2026-08-23. It describes the Plex client. Nuvio Native
+> has no plex.tv credential and no PMS; see [`nuvio/FEATURE.md`](nuvio/FEATURE.md) and
+> [`nuvio/ARCHITECTURE.md`](nuvio/ARCHITECTURE.md).
+
 **App:** PlxNative · **id** `com.beb.plxnative` · **version** 0.4.1 · `"type": "native"`
 **Platform:** LG webOS TV, 1920×1080 UI, Magic Remote and standard IR remote
 **Document status:** written 2026-08-23 against the tree at that date. Every behaviour below is

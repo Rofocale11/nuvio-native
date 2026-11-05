@@ -1,11 +1,15 @@
 # NuvioNative architecture
 
+> **Status:** current — the system shape, constraints and crate map for this product.
+> `docs/README.md` marks the upstream PlxNative documents that are kept for reference only.
+
 NuvioNative is a fork of RichiL10/plx-native's `feature/v0.8-hq` branch, itself based on PlxNative
 (`GLinnik21/plx-native`, GPL-3.0-or-later); `UPSTREAM.md` records the computed base. It browses and
 plays content from Stremio addons — the same addons a user configured in Nuvio — with PlxNative's
 GPU-rendered UI and native Starfish/ACB video pipeline.
 
-Companion documents: `ID-MANAGEMENT.md` (numeric keys, the key table, synthetic keys),
+Companion documents: `FEATURE.md` (the running catalogue of what the fork adds),
+`ID-MANAGEMENT.md` (numeric keys, the key table, synthetic keys),
 `TMDB.md` (detail enrichment, person pages, collections), `PLAYBACK.md` (the stream → decoder
 path), `WATCH-PROGRESS.md` (local watch state and the account mirror), `DETAIL-LATENCY.md`
 (why a detail open is several round trips, and the plan to prefetch and cache them).
@@ -274,16 +278,17 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
 
 ## Constraints that shape the code
 
-- **Pure Rust only — no C libraries or JS engines in the TV build.** The app compiles for an ancient
-  LG toolchain (`arm-webos-linux-gnueabi`). Crates such as `innertube-rs`, `rusty_ytdl`,
-  `rquickjs` or `boa_engine` pull C code or need `libclang`/`bindgen`, and the ARM build fails on
-  them. The bundled FFmpeg is built `--disable-everything` plus the demuxers/decoders the player
-  actually uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump. The
-  one place audio is decoded and re-encoded in-app is the fork's AC3 encode lane
-  (`media/src/ff_enc.rs`: `dca`/`truehd`/`mlp`/`flac` decoders, the integer `ac3_fixed` encoder),
-  which is why those components are in the list — see `PLAYBACK.md`. The P2P server is an external
-  `node` child process (see above), not an embedded JS engine: nothing here links a JS runtime into
-  the app.
+- **No new C libraries or JS engines in the TV build.** The fixed exceptions are the bundled
+  FFmpeg and the C shims: `src/main.c` (boot/crash), `src/starfish.c` (the Starfish/ACB seam) and
+  `src/svg.c` (the SVG rasteriser). Everything else is Rust. The app compiles for an ancient LG
+  toolchain (`arm-webos-linux-gnueabi`); crates such as `innertube-rs`, `rusty_ytdl`, `rquickjs`
+  or `boa_engine` pull C code or need `libclang`/`bindgen`, and the ARM build fails on them. The
+  bundled FFmpeg is built `--disable-everything` plus the demuxers/decoders the player actually
+  uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump. The one place
+  audio is decoded and re-encoded in-app is the fork's AC3 encode lane (`media/src/ff_enc.rs`:
+  `dca`/`truehd`/`mlp`/`flac` decoders, the integer `ac3_fixed` encoder), which is why those
+  components are in the list — see `PLAYBACK.md`. The P2P server is an external `node` child
+  process (see above), not an embedded JS engine: nothing here links a JS runtime into the app.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string like `"tmdb:603"`
   blanks the screen. `ID-MANAGEMENT.md` is how the shim keeps that promise.
 - **No native YouTube trailers.** In-app trailer playback was abandoned: extracting YouTube MP4s on
@@ -293,25 +298,51 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   playing. Do not re-add extraction.
 - **The shim is a loopback PMS.** One in-process HTTP server (`plx_pmsshim`, default
   `127.0.0.1:32420`) speaking the Plex dialect, in the same process as the UI.
+- **Account preferences live in one file, with one writer.** `defaultAudioLanguage`,
+  `defaultSubtitleLanguage`, `autoSelectSubtitle` and `defaultSubtitleForced` sit under
+  `preferences` in `nuvio-session.json`; `Account::write_prefs` is the only writer, and playback
+  reads through `account::local_preferences()`.
+- **My List and watch progress are Nuvio RPCs.** A write names one title and the active profile,
+  never a whole-list replacement; watch progress is pushed throttled and pulled/merged on boot or
+  a profile switch. `WATCH-PROGRESS.md` is the contract.
 
 ## Crates
 
+`ci/module-layers.ini` is the authority for allowed references; `ci/check-module-layers.py` fails
+the build on a forbidden edge.
+
 | crate | owner | depends on |
 |---|---|---|
-| `rust-modules/stremio` (`plx_stremio`) | backend | `plx_base`, `plx_net`, serde |
-| `rust-modules/pmsshim` (`plx_pmsshim`) | shim | `plx_stremio`, `plx_base` |
-| app wiring (boot, appinfo, settings) | lead/integration | all |
+| `rust-modules/base` (`plx_base`) | leaf utilities | — |
+| `rust-modules/machine` (`plx_machine`) | state-machine runtime | `plx_base` |
+| `rust-modules/platform` (`plx_platform`) | webOS identity, storage, codecs, artwork, i18n | `plx_base`, `plx_machine` |
+| `rust-modules/gfx` (`plx_gfx`) | GL/EGL, text, images, icons | `plx_base`, `plx_machine`, `plx_platform` |
+| `rust-modules/net` (`plx_net`) | libcurl HTTPS + plaintext stream | `plx_base`, `plx_platform` |
+| `rust-modules/plex` (`plx_plex`) | typed Plex API, session store | `plx_base`, `plx_machine`, `plx_platform`, `plx_net` |
+| `rust-modules/stremio` (`plx_stremio`) | Stremio addon protocol, Nuvio account/import, classify, torrents | `plx_base`, `plx_net` |
+| `rust-modules/pmsshim` (`plx_pmsshim`) | loopback PMS dialect over `plx_stremio` | `plx_base`, `plx_net`, `plx_platform`, `plx_stremio` |
+| `rust-modules/telemetry` (`plx_telemetry`) | consent, crash/usage channels | `plx_base`, `plx_machine`, `plx_platform`, `plx_net`, `plx_plex` |
+| `rust-modules/data` (`plx_data`) | data layer / stores | see `ci/module-layers.ini` |
+| `rust-modules/session` (`plx_session`) | session layer | see `ci/module-layers.ini` |
+| `rust-modules/media` (`plx_media`) | media pipeline / player | see `ci/module-layers.ini` |
+| `rust-modules/appkit` (`plx_appkit`) | shared widgets (player HUD, track/source menus) | see `ci/module-layers.ini` |
+| `rust-modules/screens` (`plx_screens`) | owned screens | `ui` and data crates; never `app` |
+| `rust-modules/storage` (`plxnative-storage`) | private storage helper | isolated package |
+| `rust-modules/ui` (`plx_ui`) | shared UI system / design tokens | see `ci/module-layers.ini` |
 
 ## Build and release
 
 - **Host simulator:** `make -j10 sim-linux` (needs the Linux `libav*`/libass host libraries staged
   in `pkg/`); `make sim-macos` on macOS.
-- **TV build (.ipk):** `make ipk`. A release is cut by pushing a tag
-  (`git tag -a v0.8.1 -m "…" && git push origin v0.8.1`); the GitHub Actions runner builds the
-  `.ipk` and attaches it to the Release. Do not add `libclang` or ARM cross-compiler steps to the
-  workflow unless C code is genuinely being compiled — which it should not be.
+- **TV build (.ipk):** `make ipk` where the webOS NDK is installed. The release artifact is built
+  by CI — `.github/workflows/build-ipk.yml`, on a `v*` tag or by `workflow_dispatch` on a pushed
+  branch.
+- **Release:** `tools/cut-release.sh` (see the `cut-release` skill) bumps the version files,
+  commits and tags. A stable install, package or deploy names `FLAVOR=stable`, and every release
+  build carries `RELEASE=1`. Do not add `libclang` or ARM cross-compiler steps to the workflow
+  unless C code is genuinely being compiled — which it should not be.
 
 ## App identity
 
-- appid `com.nuvionative.app`, title "Nuvio Native". Installs beside `space.nuvio.webos`; never
-  touches it.
+- appids `com.nuvionative.app` and `com.nuvionative.app.debug` (they can sit beside each other),
+  title "Nuvio Native". Installs beside `space.nuvio.webos`; never touches it.
