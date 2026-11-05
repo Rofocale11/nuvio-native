@@ -49,9 +49,9 @@ before changing that area. Upstream PlxNative docs in
   is `docs/ui-restructure-spec-v4.md`, which `rust-modules/ui/src/lib.rs` cites by section
   number. Tier C (upstream's `screens`/`ui`/`data`/`appkit`/`gfx`) is in **both** the trunk and
   `forward-port/v0.9-hq` (ported on `tier-c/ui`, merged then deleted). The working line is
-  <!-- docs-fresh:ahead -->47<!-- /docs-fresh:ahead --> commits ahead of the trunk; run
-  `git log --oneline nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens
-  are the ported ones.
+  <!-- docs-fresh:ahead -->0<!-- /docs-fresh:ahead --> commits ahead of the trunk (it was
+  fast-forwarded into it on 2026-11-05); run `git log --oneline
+  nuvio-native..forward-port/v0.9-hq` before assuming a checkout's screens are the ported ones.
 - Before account/watch-progress work, read `docs/nuvio/WATCH-PROGRESS.md`.
 - Before taking any upstream PlxNative work — cherry-picking a fix, absorbing a Richi branch, or
   reasoning about how far this fork has drifted — read `docs/nuvio/UPSTREAM.md` and run
@@ -130,8 +130,9 @@ fails the build on a forbidden edge.
 - **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line
   (2026-11-02).** `nuvio-native` is the trunk, the product, and the repository's default branch.
   Short-lived branches and worktrees are cut from the working line, `forward-port/v0.9-hq` (the
-  stable `.ipk` line, currently <!-- docs-fresh:ahead -->47<!-- /docs-fresh:ahead --> commits
-  ahead of the trunk), and land back on it; the trunk is fast-forwarded only when the owner asks.
+  stable `.ipk` line, currently <!-- docs-fresh:ahead -->0<!-- /docs-fresh:ahead --> commits
+  ahead of the trunk, fast-forwarded into it on 2026-11-05), and land back on it; the trunk is
+  fast-forwarded only when the owner asks.
   Merge commits and squash commits are both acceptable. `main` is NOT the trunk: it holds
   upstream-side history and
   none of the fork's commits — never cut work from it, never build or ship it. The upstream

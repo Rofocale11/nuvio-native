@@ -73,11 +73,18 @@ fi
 
 AHEAD="$(git rev-list --count "$TRUNK..$WORK")"
 BEHIND="$(git rev-list --count "$WORK..$TRUNK")"
-# The commit that carries these numbers is itself on the working line, so a `check` on the
-# COMMITTED tree counts it and a number written from HEAD alone is always one short (that is how
-# 788b7bb7 landed saying 41 against a real 42). `update` therefore writes the count the tree will
-# have after that commit; `check` keeps grading HEAD, which is what a committed tree is.
-if [ "$MODE" = update ]; then AHEAD=$((AHEAD + 1)); fi
+# The commit that carries these numbers lands on whichever branch is checked out. Made on the
+# working line it is a commit the trunk does not have yet, so a `check` on the COMMITTED tree
+# counts it and a number written from HEAD alone is always one short (that is how 788b7bb7 landed
+# saying 41 against a real 42). Made on the trunk — the state after the trunk was fast-forwarded
+# to the working line — it never reaches the working line and neither count moves, so adding one
+# would make `update` and `check` disagree forever. `update` therefore writes the count the tree
+# will have after that commit; `check` keeps grading HEAD, which is what a committed tree is.
+DOCS_ON_WORK=0
+if [ "$MODE" = update ] && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$WORK" ]; then
+    DOCS_ON_WORK=1
+    AHEAD=$((AHEAD + 1))
+fi
 HAVE_REF=0
 BASE="" OURS="" REF_AHEAD="" FILES_OURS="" FILES_REF="" CONTESTED="" CONTESTED_SM=""
 EDITED="" ADDED="" BASE_SHA="" BASE_DATE="" BASE_SUBJECT="" REF_SHA="" REF_DATE=""
@@ -89,8 +96,9 @@ if [ -n "$REF" ]; then
     # trunk itself, and that silently reports only the working line's own commits as the seam.
     BASE="$(git merge-base "$TRUNK" "$REF")"
     OURS="$(git rev-list --count "$BASE..$WORK")"
-    # Same off-by-one as AHEAD: the docs commit is on our side of the seam too.
-    if [ "$MODE" = update ]; then OURS=$((OURS + 1)); fi
+    # Same off-by-one as AHEAD, and the same caveat: only a commit made on the working line is
+    # on our side of the seam.
+    if [ "$DOCS_ON_WORK" = 1 ]; then OURS=$((OURS + 1)); fi
     REF_AHEAD="$(git rev-list --count "$BASE..$REF")"
     FILES_OURS="$(git diff --name-only "$BASE" "$WORK" | wc -l | tr -d ' ')"
     FILES_REF="$(git diff --name-only "$BASE" "$REF" | wc -l | tr -d ' ')"

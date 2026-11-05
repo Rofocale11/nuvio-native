@@ -533,12 +533,12 @@ already has as `1bcf30b2`. Taking it would replace working code with its twin.
 
 | branch | what it is |
 |---|---|
-| `nuvio-native` | **the trunk, the product, and the GitHub default branch.** Feature branches merge into it. It carries tier C and the `forward-port/v0.9-hq` line through `541a5ad9` (the 2026-11-02 fast-forward). The working line is <!-- docs-fresh:ahead -->47<!-- /docs-fresh:ahead --> commits ahead of it; run `git log --oneline nuvio-native..forward-port/v0.9-hq` for the list. |
+| `nuvio-native` | **the trunk, the product, and the GitHub default branch.** Feature branches merge into it. It carries tier C and the `forward-port/v0.9-hq` line through `63825383` (the 2026-11-05 fast-forward; the 2026-11-02 merge landed at `541a5ad9`). The working line is <!-- docs-fresh:ahead -->0<!-- /docs-fresh:ahead --> commits ahead of it; run `git log --oneline nuvio-native..forward-port/v0.9-hq` for the list. |
 | `origin/nuvio-native` | the pushed trunk. |
 | `feature/*`, `agent/*`, `docs/*` | scratch lanes cut from the working line (`forward-port/v0.9-hq`, or the trunk) so an experiment cannot break it. May lag. |
 | `main` | **not this project.** It holds upstream-side history and none of the fork's commits. Never cut work from it; never build or ship it. |
 | `upstream/feature/v0.9-hq` | Richi's HQ line — the reference for upstream work. Read-only. |
-| `forward-port/v0.9-hq` | **the working line since 2026-11-02** (the owner directed new work here): the A+B merge (`656e0cb2`), tier C on top (`5297c0aa`), the port fixes, the actor page (`1f692378`), the two follow-ups (`1443fc03`), the branch-topology docs (`66375ded`) and the poster cap (`7e79e57e`). Fast-forwarded into `nuvio-native` at `541a5ad9`; now <!-- docs-fresh:ahead -->47<!-- /docs-fresh:ahead --> commits ahead of the trunk. Still the line the stable `.ipk` is built from. |
+| `forward-port/v0.9-hq` | **the working line since 2026-11-02** (the owner directed new work here): the A+B merge (`656e0cb2`), tier C on top (`5297c0aa`), the port fixes, the actor page (`1f692378`), the two follow-ups (`1443fc03`), the branch-topology docs (`66375ded`) and the poster cap (`7e79e57e`). Fast-forwarded into `nuvio-native` at `541a5ad9` (2026-11-02) and again at `63825383` (2026-11-05); now <!-- docs-fresh:ahead -->0<!-- /docs-fresh:ahead --> commits ahead of the trunk. Still the line the stable `.ipk` is built from. |
 | ~~`tier-c/ui`~~ | tier C ported on top of the A+B merge (`741def78`), plus the port fixes through `f41d84a5`. Merged into `forward-port/v0.9-hq` and verified on the television on 2026-11-02, then **deleted** (local and `origin`) on 2026-11-02. `f41d84a5` stays in `forward-port/v0.9-hq`'s history. |
 
 The p11 merge attempts are gone too: `nuvio-native-p11-merge` (a failed merge attempt, deleted
@@ -882,6 +882,28 @@ changing Home, whose row reads the preview (`docs/pms-api.md`).
 **Landed on `forward-port/v0.9-hq` (`1443fc03`) and pushed.** The owner directed that new work
 continue on `forward-port/v0.9-hq`, so `nuvio-native` was left at `541a5ad9` rather than
 fast-forwarded.
+
+### 2026-11-05 — the working line merged into the trunk again
+
+`forward-port/v0.9-hq` (`63825383`) was fast-forwarded into `nuvio-native`, which had not moved
+since the 2026-11-02 merge: 47 commits ahead, 0 behind, so **no file changed** — the trunk simply
+became that tip. The host gates had already run on exactly this tree (`plx_base`, `plx_pmsshim`,
+`plxnative-modules`, `plx_screens`: 2830/2830; the `--no-default-features` shipping check;
+`upstream-seam.sh check` against `d12e8659`), and a stable `.ipk` built from either branch is the
+same artifact. The two newest functional commits (`7e6d81bd`: the bar stepper follows
+`bridge::wears_tab_bar`, and the sign-in screen names `nuvio.tv/link`) remain simulator-verified;
+the last television pass was 2026-11-02.
+
+The docs commit recording this lands on the trunk, which exposed an assumption in
+`tools/ai-docs-refresh.sh`: `update` added one to the ahead/ours counts because the commit it was
+about to make sits on the working line. Once the trunk is level with the working line the commit
+is on the trunk instead, the working line cannot see it, and `update` and `check` could never
+agree. `update` now adds the commit only when the checked-out branch **is** the working line, so
+the marked counts describe the committed tree again. `forward-port/v0.9-hq` is unchanged at
+`63825383` — the docs commit is trunk-only — and remains the line the stable `.ipk` is built from.
+
+The upstream catch-up is the next project, not a prerequisite for this merge: it is still the
+166-commit / 249-contested-file span in the table above, and it is cut from the trunk.
 
 ## Recomputing
 
