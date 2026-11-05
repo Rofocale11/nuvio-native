@@ -11,14 +11,21 @@
 # are now generated; the prose around them is not.
 #
 # USAGE
-#   tools/ai-docs-refresh.sh                        # update: rewrite every marked number in place
-#   tools/ai-docs-refresh.sh update --trunk-follows # ...for a commit the trunk will be ff'd to as well
-#   tools/ai-docs-refresh.sh check                  # read-only: exit 1 if any marked number is stale
+#   tools/ai-docs-refresh.sh                         # update: rewrite every marked number in place
+#   tools/ai-docs-refresh.sh update --trunk-follows  # ...for a commit the trunk will be ff'd to as well
+#   tools/ai-docs-refresh.sh update --amend          # ...for `git commit --amend` (replaces HEAD, adds none)
+#   tools/ai-docs-refresh.sh check                   # read-only: exit 1 if any marked number is stale
+#
+# **A commit does not need you to run this.** `.githooks/prepare-commit-msg` runs the update form
+# and stages the two files with every commit, so ONE commit carries both the change and the numbers
+# it implies. It works because `update` writes the count the tree will have AFTER the commit while
+# `check` grades HEAD — which is why running the update form by hand before a commit used to need a
+# second commit, and why a forgotten one left `make check` red and the prose a commit stale.
+# Install it once per clone with `make hooks`.
 #
 # `check` is wired into ci/check-python-steps.txt, so `make check` and CI's host-python job (when
-# that job runs) execute it. A docs-only push starts no CI by design. Run the update form after
-# any commit that moves the working line, the trunk, or the reference branch. Never hand-edit a
-# value between markers.
+# that job runs) execute it. A docs-only push starts no CI by design. Never hand-edit a value
+# between markers.
 #
 # MARKERS
 #   <!-- docs-fresh:NAME -->value<!-- /docs-fresh:NAME -->          (inline)
@@ -32,19 +39,22 @@ set -euo pipefail
 
 MODE="${1:-update}"
 TRUNK_FOLLOWS=0
+AMEND=0
+USAGE="usage: $0 [update|check] [--trunk-follows] [--amend]"
 case "$MODE" in
     update|check) ;;
-    *) echo "usage: $0 [update|check] [--trunk-follows]" >&2; exit 2 ;;
+    *) echo "$USAGE" >&2; exit 2 ;;
 esac
 shift || true
 while [ $# -gt 0 ]; do
     case "$1" in
         --trunk-follows) TRUNK_FOLLOWS=1; shift ;;
-        *) echo "usage: $0 [update|check] [--trunk-follows]" >&2; exit 2 ;;
+        --amend) AMEND=1; shift ;;
+        *) echo "$USAGE" >&2; exit 2 ;;
     esac
 done
-if [ "$MODE" = check ] && [ "$TRUNK_FOLLOWS" = 1 ]; then
-    echo "ai-docs-refresh: --trunk-follows describes the commit about to be made, not a check" >&2
+if [ "$MODE" = check ] && [ $((TRUNK_FOLLOWS + AMEND)) -gt 0 ]; then
+    echo "ai-docs-refresh: --trunk-follows/--amend describe the commit about to be made, not a check" >&2
     exit 2
 fi
 
@@ -86,23 +96,30 @@ fi
 
 AHEAD="$(git rev-list --count "$TRUNK..$WORK")"
 BEHIND="$(git rev-list --count "$WORK..$TRUNK")"
-# The commit that carries these numbers lands on whichever branch is checked out. Made on the
-# working line it is a commit the trunk does not have yet, so a `check` on the COMMITTED tree
-# counts it and a number written from HEAD alone is always one short (that is how 788b7bb7 landed
-# saying 41 against a real 42). Made on the trunk — the state after the trunk was fast-forwarded
-# to the working line — it never reaches the working line and neither count moves, so adding one
-# would make `update` and `check` disagree forever. `update` therefore writes the count the tree
-# will have after that commit; `check` keeps grading HEAD, which is what a committed tree is.
-DOCS_ON_WORK=0
-if [ "$MODE" = update ] && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$WORK" ]; then
-    DOCS_ON_WORK=1
-    AHEAD=$((AHEAD + 1))
-fi
-# `--trunk-follows`: the commit is made on the working line and the trunk is fast-forwarded to it
-# immediately afterwards. Both branches then point at the same commit, so the ahead count of the
-# committed tree is 0 even though our side of the seam gains the commit.
+# **Two readings of the same numbers, and both have to be legal.**
+#
+# `HEAD` is the committed state: what CI grades, and what a clean checkout must match exactly.
+# `PENDING` is the state after the commit being prepared, which `update` writes and the hook
+# stages. Both differ from HEAD by exactly one commit, on whichever branch that commit extends:
+# the working line adds to `ahead`, the trunk adds to `behind`. Getting this wrong in ONE
+# direction is how 788b7bb7 landed saying 41 against a real 42.
+#
+# `--amend` replaces HEAD instead of extending it, so it bumps neither; `--trunk-follows` describes
+# a commit the trunk is then fast-forwarded to, which leaves both branches on the same commit, so
+# `ahead` is 0 afterwards.
+HEAD_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+AHEAD_HEAD=$AHEAD
+BEHIND_HEAD=$BEHIND
+AHEAD_PENDING=$AHEAD
+BEHIND_PENDING=$BEHIND
 if [ "$TRUNK_FOLLOWS" = 1 ]; then
-    AHEAD=0
+    AHEAD_PENDING=0
+elif [ "$AMEND" = 0 ]; then
+    if [ "$HEAD_BRANCH" = "$WORK" ]; then
+        AHEAD_PENDING=$((AHEAD + 1))
+    elif [ "$HEAD_BRANCH" = "$TRUNK" ]; then
+        BEHIND_PENDING=$((BEHIND + 1))
+    fi
 fi
 HAVE_REF=0
 BASE="" OURS="" REF_AHEAD="" FILES_OURS="" FILES_REF="" CONTESTED="" CONTESTED_SM=""
@@ -115,19 +132,44 @@ if [ -n "$REF" ]; then
     # trunk itself, and that silently reports only the working line's own commits as the seam.
     BASE="$(git merge-base "$TRUNK" "$REF")"
     OURS="$(git rev-list --count "$BASE..$WORK")"
-    # Same off-by-one as AHEAD, and the same caveat: a commit made on the working line is on our
-    # side of the seam, and so is one the trunk will be fast-forwarded to.
-    if [ "$DOCS_ON_WORK" = 1 ] || [ "$TRUNK_FOLLOWS" = 1 ]; then OURS=$((OURS + 1)); fi
+    # Same off-by-one as AHEAD, and the same two readings: a commit being prepared on the working
+    # line is on our side of the seam, and so is one the trunk will be fast-forwarded to.
+    OURS_HEAD=$OURS
+    OURS_PENDING=$OURS
+    if [ "$AHEAD_PENDING" -gt "$AHEAD_HEAD" ] || [ "$TRUNK_FOLLOWS" = 1 ]; then OURS_PENDING=$((OURS + 1)); fi
     REF_AHEAD="$(git rev-list --count "$BASE..$REF")"
-    FILES_OURS="$(git diff --name-only "$BASE" "$WORK" | wc -l | tr -d ' ')"
-    FILES_REF="$(git diff --name-only "$BASE" "$REF" | wc -l | tr -d ' ')"
-    CONTESTED_LIST="$(comm -12 \
-        <(git diff --name-only "$BASE" "$WORK" | LC_ALL=C sort) \
-        <(git diff --name-only "$BASE" "$REF" | LC_ALL=C sort))"
-    CONTESTED="$(printf '%s\n' "$CONTESTED_LIST" | grep -c . || true)"
-    CONTESTED_SM="$(printf '%s\n' "$CONTESTED_LIST" | grep -Ec '^rust-modules/(screens|media)/' || true)"
-    EDITED="$(git diff --name-only --diff-filter=M "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot | wc -l | tr -d ' ')"
-    ADDED="$(git diff --name-only --diff-filter=A "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot | wc -l | tr -d ' ')"
+
+    # **A table generated BEFORE a commit cannot see the paths that commit adds**, so a commit
+    # carrying a new file shipped a file count one short (measured: 3c4c1f62 wrote 491 against a
+    # real 492). The index can see them — the hook runs after `git add` — so every count has a HEAD
+    # reading and a PENDING one, and `check` accepts whichever the tree state allows.
+    REF_FILES="$(git diff --name-only "$BASE" "$REF" | LC_ALL=C sort)"
+    WORK_FILES_HEAD="$(git diff --name-only "$BASE" "$WORK" | LC_ALL=C sort)"
+    WORK_FILES_PENDING="$({ printf '%s\n' "$WORK_FILES_HEAD"; \
+        git diff --cached --name-only --diff-filter=ACMR; } | LC_ALL=C sort -u | sed '/^$/d')"
+    count_lines() { printf '%s\n' "$1" | grep -c . || true; }
+    contested_with_ref() { comm -12 <(printf '%s\n' "$1") <(printf '%s\n' "$REF_FILES") || true; }
+
+    FILES_REF="$(count_lines "$REF_FILES")"
+    FILES_OURS_HEAD="$(count_lines "$WORK_FILES_HEAD")"
+    FILES_OURS_PENDING="$(count_lines "$WORK_FILES_PENDING")"
+    CONTESTED_HEAD="$(count_lines "$(contested_with_ref "$WORK_FILES_HEAD")")"
+    CONTESTED_PENDING="$(count_lines "$(contested_with_ref "$WORK_FILES_PENDING")")"
+    CONTESTED_SM_HEAD="$(contested_with_ref "$WORK_FILES_HEAD" | grep -Ec '^rust-modules/(screens|media)/' || true)"
+    CONTESTED_SM_PENDING="$(contested_with_ref "$WORK_FILES_PENDING" | grep -Ec '^rust-modules/(screens|media)/' || true)"
+
+    # `edited`/`added` count statuses, so they cannot be unioned by name alone: the staged side is
+    # asked with the same filter and the two lists are merged.
+    ours_paths() {
+        git diff --name-only --diff-filter="$1" "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
+        if [ "$2" = pending ]; then
+            git diff --cached --name-only --diff-filter="$1" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
+        fi
+    }
+    EDITED_HEAD="$(count_lines "$(ours_paths M head)")"
+    EDITED_PENDING="$(count_lines "$(ours_paths M pending)")"
+    ADDED_HEAD="$(count_lines "$(ours_paths A head)")"
+    ADDED_PENDING="$(count_lines "$(ours_paths A pending)")"
     BASE_SHA="$(git rev-parse --short "$BASE")"
     BASE_DATE="$(git log -1 --date=short --format=%ad "$BASE")"
     BASE_SUBJECT="$(git log -1 --format=%s "$BASE" | sed 's/|/\\|/g')"
@@ -138,9 +180,21 @@ else
     echo "                 (run: git fetch upstream)" >&2
 fi
 
-export MODE AHEAD BEHIND HAVE_REF
-export BASE OURS REF_AHEAD FILES_OURS FILES_REF CONTESTED CONTESTED_SM
-export EDITED ADDED BASE_SHA BASE_DATE BASE_SUBJECT REF_SHA REF_DATE
+# A `check` on a DIRTY tree has a commit to account for; a check on a clean tree is grading a
+# committed state and must match HEAD exactly. Without this the window between `git commit` and
+# `make check` was red by construction, which is how an agent learns to ignore it.
+# `git diff HEAD` covers staged and unstaged alike — the hook stages, it does not commit.
+PENDING_ALLOWED=0
+if ! git diff --quiet HEAD -- AGENTS.md docs/nuvio/UPSTREAM.md 2>/dev/null; then
+    PENDING_ALLOWED=1
+fi
+
+export MODE HAVE_REF PENDING_ALLOWED HEAD_BRANCH
+export AHEAD_HEAD BEHIND_HEAD AHEAD_PENDING BEHIND_PENDING
+export OURS_HEAD OURS_PENDING REF_AHEAD FILES_REF
+export FILES_OURS_HEAD FILES_OURS_PENDING CONTESTED_HEAD CONTESTED_PENDING
+export CONTESTED_SM_HEAD CONTESTED_SM_PENDING EDITED_HEAD EDITED_PENDING ADDED_HEAD ADDED_PENDING
+export BASE BASE_SHA BASE_DATE BASE_SUBJECT REF_SHA REF_DATE
 
 python3 - <<'PY'
 import os
@@ -149,35 +203,56 @@ import sys
 
 mode = os.environ["MODE"]
 have_ref = os.environ["HAVE_REF"] == "1"
-
-values = {"ahead": os.environ["AHEAD"], "behind": os.environ["BEHIND"]}
+# The two readings described in the shell half: the committed state and the state after the commit
+# being prepared. `update` writes the second; `check` accepts either, but only when the docs are
+# dirty (so a clean tree still has to match HEAD exactly, which is the case a stale number hides in).
+vals_head = {
+    "ahead": os.environ["AHEAD_HEAD"],
+    "behind": os.environ["BEHIND_HEAD"],
+}
+vals_pending = {
+    "ahead": os.environ["AHEAD_PENDING"],
+    "behind": os.environ["BEHIND_PENDING"],
+}
+pending_allowed = os.environ["PENDING_ALLOWED"] == "1"
 if have_ref:
-    values["contested"] = os.environ["CONTESTED"]
-    values["contested-screens"] = os.environ["CONTESTED_SM"]
-    values["edited"] = os.environ["EDITED"]
+    # Every seam number has a committed and a pending reading for the same reason (see the shell
+    # half): a commit adds paths the pre-commit tree cannot show.
+    for vals, suffix in ((vals_head, "HEAD"), (vals_pending, "PENDING")):
+        vals.update(
+            {
+                "ours": os.environ["OURS_" + suffix],
+                "files_ours": os.environ["FILES_OURS_" + suffix],
+                "files_ref": os.environ["FILES_REF"],
+                "contested": os.environ["CONTESTED_" + suffix],
+                "contested-screens": os.environ["CONTESTED_SM_" + suffix],
+                "edited": os.environ["EDITED_" + suffix],
+                "added": os.environ["ADDED_" + suffix],
+            }
+        )
 
-def base_table():
+def base_table(v):
     return (
         "| | |\n"
         "|---|---|\n"
         f"| reference | `upstream/feature/v0.9-hq` (`{os.environ['REF_SHA']}`, {os.environ['REF_DATE']}) |\n"
         f"| merge-base with `nuvio-native` and `forward-port/v0.9-hq` | `{os.environ['BASE_SHA']}` — {os.environ['BASE_SUBJECT']}, {os.environ['BASE_DATE']} |\n"
-        f"| commits on our side since the base | {os.environ['OURS']} |\n"
+        f"| commits on our side since the base | {v['ours']} |\n"
         f"| commits on the reference side since the base | {os.environ['REF_AHEAD']} |\n"
         "\n"
         "(Generated by `tools/ai-docs-refresh.sh`; `drift` is the authority when this drifts.)\n"
     )
 
-def cost_table():
+def cost_table(v):
     return (
         "| | |\n"
         "|---|---|\n"
-        f"| files this fork changed | {os.environ['FILES_OURS']} |\n"
-        f"| files the reference branch changed | {os.environ['FILES_REF']} |\n"
-        f"| **contested** — changed on **both** sides | {os.environ['CONTESTED']} |\n"
-        f"| of those, under `rust-modules/screens` or `rust-modules/media` | {os.environ['CONTESTED_SM']} |\n"
-        f"| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | {os.environ['EDITED']} |\n"
-        f"| upstream-owned source **added** (the fork's own crates) | {os.environ['ADDED']} |\n"
+        f"| files this fork changed | {v['files_ours']} |\n"
+        f"| files the reference branch changed | {v['files_ref']} |\n"
+        f"| **contested** — changed on **both** sides | {v['contested']} |\n"
+        f"| of those, under `rust-modules/screens` or `rust-modules/media` | {v['contested-screens']} |\n"
+        f"| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | {v['edited']} |\n"
+        f"| upstream-owned source **added** (the fork's own crates) | {v['added']} |\n"
     )
 
 blocks = {}
@@ -187,17 +262,20 @@ if have_ref:
 INLINE = re.compile(r"(<!-- docs-fresh:([a-z-]+) -->)(.*?)(<!-- /docs-fresh:\2 -->)", re.S)
 BLOCK = re.compile(r"(<!-- BEGIN docs-fresh:([a-z-]+) -->\n)(.*?)(<!-- END docs-fresh:\2 -->)", re.S)
 
-def fill_block(match):
-    name = match.group(2)
-    if name not in blocks:
-        return match.group(0)
-    return match.group(1) + blocks[name]() + match.group(4)
+def render(text, values):
+    def fill_block(match):
+        name = match.group(2)
+        if name not in blocks:
+            return match.group(0)
+        return match.group(1) + blocks[name](values) + match.group(4)
 
-def fill_inline(match):
-    name = match.group(2)
-    if name not in values:
-        return match.group(0)
-    return match.group(1) + values[name] + match.group(4)
+    def fill_inline(match):
+        name = match.group(2)
+        if name not in values:
+            return match.group(0)
+        return match.group(1) + values[name] + match.group(4)
+
+    return INLINE.sub(fill_inline, BLOCK.sub(fill_block, text))
 
 paths = ("AGENTS.md", "docs/nuvio/UPSTREAM.md")
 texts = {}
@@ -219,25 +297,37 @@ if have_ref:
 
 stale = []
 updated = []
+pending_only = []
 for path in paths:
     before = texts[path]
-    after = BLOCK.sub(fill_block, before)
-    after = INLINE.sub(fill_inline, after)
-    if after == before:
-        continue
+    after = render(before, vals_pending)
     if mode == "update":
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(after)
-        updated.append(path)
-    else:
-        stale.append(path)
+        if after != before:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(after)
+            updated.append(path)
+        continue
+    # Committed already? Then HEAD's reading is the one that must match.
+    if render(before, vals_head) == before:
+        continue
+    # A dirty tree has a commit in flight; its numbers are the pending ones.
+    if pending_allowed and after == before:
+        pending_only.append(path)
+        continue
+    stale.append(path)
 
 if mode == "check":
     if stale:
         print("ai-docs-refresh: stale derived numbers in " + ", ".join(stale))
         print("  run: ./tools/ai-docs-refresh.sh update")
         sys.exit(1)
-    print("ai-docs-refresh: derived numbers are current")
+    if pending_only:
+        print(
+            "ai-docs-refresh: numbers are current for the commit in flight in "
+            + ", ".join(pending_only)
+        )
+    else:
+        print("ai-docs-refresh: derived numbers are current")
 else:
     if updated:
         print("ai-docs-refresh: updated " + ", ".join(updated))

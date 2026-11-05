@@ -31,14 +31,25 @@ the desktop simulator are valuable but cannot prove every device behaviour.
 - **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line.**
   `nuvio-native` is the trunk, the product and the repository's default branch. Short-lived
   branches and worktrees are cut from the working line (the stable `.ipk` line, currently
-  <!-- docs-fresh:ahead -->3<!-- /docs-fresh:ahead --> commits ahead of the trunk) and land back
+  <!-- docs-fresh:ahead -->5<!-- /docs-fresh:ahead --> commits ahead of the trunk) and land back
   on it; the trunk is fast-forwarded only when the owner asks. Merge and squash commits are both
   acceptable. `main` is **not** this project: it holds upstream-side history and none of the
   fork's commits — never cut work from it, never build or ship it.
 - **Derived numbers are generated, not hand-written.** `./tools/ai-docs-refresh.sh` rewrites the
   branch/commit/file counts in this file and `docs/nuvio/UPSTREAM.md`; its `check` form runs in
-  `make check` and CI. Run the update form after any commit that moves the working line, the
-  trunk or the reference branch, and never hand-edit a marked number.
+  `make check` and CI. **A commit does not require you to run it.** `.githooks/pre-commit`
+  runs the update form and stages both files with every commit, so one commit carries the change
+  *and* the numbers it implies. Enable it once per repository:
+  `git config core.hooksPath .githooks` (worktrees share that setting). Do not run the update form
+  by hand before a commit, do not add a second docs-only commit for it, never pass `--no-verify`,
+  and never hand-edit a marked number. The hook deliberately **aborts** if you have unstaged edits
+  in those two files (staging the whole file would sweep your prose into the commit): `git add`
+  them and run the commit again. It skips during a rebase. Git does not tell a pre-commit hook that
+  a commit is an `--amend` (which replaces HEAD rather than adding one), so an amended commit keeps
+  the number it had — one too many, which `check` then reports. The fix is
+  `./tools/ai-docs-refresh.sh update --amend`, `git add AGENTS.md docs/nuvio/UPSTREAM.md`, then
+  `PLX_DOCS_REFRESH=0 git commit --amend --no-edit`. `PLX_DOCS_REFRESH=0` is the general escape
+  hatch.
 - **A bug fix starts with a failing test or reproducible artifact.** Observe the failure,
   implement the fix, then observe it pass.
 - **Preserve unrelated changes and generated artifacts.** Never clean or reset a dirty tree to

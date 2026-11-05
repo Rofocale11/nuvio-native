@@ -1,0 +1,85 @@
+#!/bin/sh
+#
+# pre-commit — carry the generated docs numbers in the SAME commit as the change.
+#
+# WHY THIS EXISTS
+# ---------------
+# `AGENTS.md` and `docs/nuvio/UPSTREAM.md` quote counts about the branch topology (how far the
+# working line is ahead of the trunk, the seam tables). They are generated, never hand-written:
+# `tools/ai-docs-refresh.sh update` rewrites them, `… check` (run by `make check` and CI) fails if
+# they are stale.
+#
+# `update` writes the count the tree will have AFTER the commit, while `check` grades HEAD. That is
+# correct for a committed tree and impossible to satisfy before one — so the update form had to be
+# run and committed SEPARATELY, one commit behind the change it described. Every agent that finished
+# a task faced the same two-step: commit the work, then be told `check` is red and ask for a second,
+# docs-only commit. Forgetting it left the prose one commit stale and the gate red, which is the
+# exact failure the generator was written to prevent.
+#
+# This hook closes that hole: on every commit it runs the update form (which computes exactly the
+# number the tree will have once this commit exists) and stages the two generated files. One commit,
+# numbers right, nothing to remember.
+#
+# WHY pre-commit AND NOT prepare-commit-msg: git builds the tree to commit from the INDEX *after*
+# prepare-commit-msg has run, so a `git add` there is silently lost — measured, twice: an amended
+# commit kept the numbers of the tree it replaced. pre-commit runs before that snapshot, and its
+# staging lands.
+#
+# AMEND: git does not tell a pre-commit hook that this is `--amend` (no flag, no environment
+# variable — measured), and an amend replaces HEAD instead of adding a commit, so the count must not
+# move. An amended commit therefore gets the same number it already had, one too many, and `check`
+# says so afterwards. The rare fix, in full:
+#
+#   ./tools/ai-docs-refresh.sh update --amend && git add AGENTS.md docs/nuvio/UPSTREAM.md
+#   PLX_DOCS_REFRESH=0 git commit --amend --no-edit
+#
+# INSTALL (once per repository — worktrees share the config; `git config core.hooksPath` is what
+# makes git look here instead of .git/hooks):
+#   git config core.hooksPath .githooks
+#
+# EMERGENCIES: `PLX_DOCS_REFRESH=0 git commit …` skips the hook. `--no-verify` skips every hook —
+# do not use it, and expect `make check` to catch a stale number if you do.
+#
+set -eu
+
+[ "${PLX_DOCS_REFRESH:-1}" = 0 ] && exit 0
+
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root"
+
+paths="AGENTS.md docs/nuvio/UPSTREAM.md"
+
+# A rebase replays commits one at a time from a detached HEAD, where "commits ahead of the trunk"
+# describes an intermediate state that will not exist when it finishes — and rewriting the same two
+# files on every replayed commit turns a clean rebase into a conflict cascade. Skip, and say so
+# once: the hook runs again on the first ordinary commit afterwards.
+if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+    printf '%s\n' "ai-docs-refresh: skipping — a rebase is in progress (numbers refresh on the next commit)"
+    exit 0
+fi
+
+# No generator, nothing to do: a docs-only checkout may not carry tools/ (e.g. an exported tree).
+[ -x tools/ai-docs-refresh.sh ] || exit 0
+
+# Refuse to guess when the author has UNSTAGED prose edits in one of these files: `git add` below
+# would sweep that edit into this commit silently, and leaving the file alone would ship the old
+# number. One retry fixes it, so fail closed with the instruction rather than pick.
+dirty=$(git diff --name-only -- $paths || true)
+if [ -n "$dirty" ]; then
+    printf '%s\n' "ai-docs-refresh: refusing to stage the generated numbers — unstaged edits in:" >&2
+    printf '  %s\n' $dirty >&2
+    printf '%s\n' "  Stage them (git add), then run the commit again; the numbers ride along." >&2
+    printf '%s\n' "  (Or PLX_DOCS_REFRESH=0 to commit without regenerating them.)" >&2
+    exit 1
+fi
+
+out=$(./tools/ai-docs-refresh.sh update) || { printf '%s\n' "$out" >&2; exit 1; }
+# Quiet on the common path (the numbers already said this): one line only when they moved.
+case "$out" in
+    *updated*) printf '%s\n' "$out" ;;
+esac
+
+# Stage only these two. They are wholly generated between the markers, so there is no partial-file
+# case to preserve here; a hand edit to them is exactly what the dirty check above caught.
+git add -- $paths
+exit 0

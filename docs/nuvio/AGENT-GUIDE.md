@@ -50,7 +50,7 @@ it. Raw `ssh` and `tools/nv-tv.py` are forbidden.
 | `./tools/ai-tv-log.sh` | read-only device logs: `200`, `p2p`, `perf`, `panic`, `mem`, `grep`, `raw` |
 | `./tools/ai-perf-summary.sh` | one-paragraph TV perf summary from the logs |
 | `./tools/ai-layers.sh` | module-layer check (`ci/check-module-layers.py`) |
-| `./tools/ai-docs-refresh.sh` | regenerates the derived counts; `check` is the gate form, `update --trunk-follows` when the commit will also be fast-forwarded into the trunk |
+| `./tools/ai-docs-refresh.sh` | the derived counts; `check` is the gate form. **You do not run `update` by hand** — `.githooks/pre-commit` does it and stages both files with each commit (`git config core.hooksPath .githooks`, once per repository) |
 | `./tools/upstream-seam.sh` | drift / diff / contested / check against the reference branch |
 | `python3 tools/probe-addon.py …` | query Stremio addons and TMDB (`manifest`, `meta`, `streams`, `tmdb`) |
 
@@ -63,7 +63,9 @@ it. Raw `ssh` and `tools/nv-tv.py` are forbidden.
 4. Update the owning document in the same commit. If the change makes a sentence elsewhere
    false, fix that sentence too.
 5. Pick the verification tier with `which-tier`. A host-only green result is not a device result.
-6. Run `./tools/ai-docs-refresh.sh` if the change moved a branch or the upstream reference.
+6. Commit. The pre-commit hook regenerates the derived counts and stages them with the change, so
+   there is nothing to run by hand and no second docs-only commit. If it aborts, you have unstaged
+   edits in `AGENTS.md`/`docs/nuvio/UPSTREAM.md`: `git add` them and commit again.
 7. Report the `test result:` line itself, not a summary, and say which tier you actually ran.
 
 ## Orchestration
