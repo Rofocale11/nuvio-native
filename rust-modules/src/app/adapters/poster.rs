@@ -2065,6 +2065,10 @@ fn downscale_rgba(px: *mut c_uchar, w: c_int, h: c_int, dw: c_int, dh: c_int) ->
 /// BACKGROUND worker: claim a request, read disk or fetch and decode off-lock, publish pixels.
 /// RAM/GPU residency stays bounded independently of the number of persistent images.
 fn poster_worker() {
+    // Speculative work: a poster has no deadline, the frame that waits on it does. Let the frame
+    // thread win the cores whenever they contend (`task::yield_to_frame_thread`'s doc carries the
+    // device reading this answers — `loop=6` on a cold Library load with nothing being uploaded).
+    plx_base::task::yield_to_frame_thread();
     loop {
         let (idx, key_s, srv, gen, cache_gen, token_gen) = {
             let mut g = store();

@@ -273,6 +273,24 @@ pub fn spawn_small(what: &str, f: impl FnOnce() + Send + 'static) -> bool {
     spawn_with(what, Some(SMALL_STACK), f).is_some()
 }
 
+/// Put the CALLING worker below the frame thread in the scheduler's eyes.
+///
+/// The frame thread has 16.6 ms per frame and every worker here shares the same few cores with it.
+/// Measured on the television 2026-11-04: a cold Library load read `loop=6, 8, 7, 8` with
+/// `budget=0/0` — nothing was even being uploaded, the LOOP itself was starved — and climbed back
+/// to 60 only as the fetch/decode work drained. `nice` reorders only under contention, so a settled
+/// screen pays nothing for it, and a worker blocked on the network is not affected at all.
+///
+/// **Deliberately not called from [`spawn`] itself.** The demux and AC3-encode threads come through
+/// that same seam, and they must not lose to the frame thread — an audio underrun is worse than the
+/// jank this fixes. Call it from the workers whose work is *speculative*: artwork and the shim's
+/// request handling, neither of which has a deadline.
+pub fn yield_to_frame_thread() {
+    // SAFETY: `who == 0` is the calling thread under NPTL, so this re-priorities only this worker.
+    // A refusal (EPERM in a sandbox) returns -1 and leaves the priority where it was.
+    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+}
+
 /// [`spawn_small`] for work that must run off the frame thread and read the proof:
 /// `f` receives the [`OffFrame`] token, minted inside the new thread. `false` = the OS refused the
 /// thread and the work does not exist (undo whatever was armed for it), exactly as
