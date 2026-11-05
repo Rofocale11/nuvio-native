@@ -516,6 +516,25 @@ host, a request to that host starts there instead of repeating the handshake the
 redirect is a request of its own, verified against the television's own store, and is offered this
 file only if its target is itself a `*.plex.direct` name that fails the same way.
 
+### 2.8 The P2P torrent engine (`libsbengine.so`)
+
+The C torrent engine ships beside the binary and is loaded only when present; without it the app
+uses its Node P2P server instead. It is built by `ci/build-sbengine.sh` from the components below,
+which are compiled into it — one file, no separate runtime copy.
+
+| Component | Version | Licence | Licence text |
+|---|---|---|---|
+| **Nuvio Engine** | 0.1.5 (`99a1860`, plus `engine.patch`) | **GPL-3.0-or-later** | `LICENSE` (package root) |
+| **libtorrent** (Rasterbar) | 2.0.12 | **BSD-3-Clause** | `licenses/BSD-3-Clause-libtorrent.txt` |
+| **Boost** (headers) | 1.86 | **BSL-1.0** | `licenses/BSL-1.0.txt` |
+| **OpenSSL** | 1.1.1w | **OpenSSL / SSLeay dual** | `licenses/OpenSSL.txt` |
+
+Nuvio Engine is GPL-3.0-or-later, the same licence as this application; its corresponding source
+is the pinned `vendor/engine-sources/nuvio-engine` tree and `vendor/engine-sources/engine.patch`.
+OpenSSL is linked **statically** into the engine (built by `ci/build-openssl.sh` with `no-zlib`,
+`no-engine`, `no-async`) so the library does not require the television's `libssl` of any
+particular version. libtorrent and Boost are used unmodified.
+
 ---
 
 ## 3. Dynamically linked, not redistributed
@@ -594,6 +613,9 @@ runtime notices listed below:
 | `licenses/FreeType.txt` | FreeType's elected FTL and contributed module notices (§1.2) |
 | `licenses/HarfBuzz-Old-MIT.txt` | HarfBuzz and its copyright holders (§1.2) |
 | `licenses/libunibreak-Zlib.txt` | libunibreak, complete upstream licence with its copyright holders (§1.2) |
+| `licenses/BSD-3-Clause-libtorrent.txt` | libtorrent, compiled into `libsbengine.so` (§2.8) |
+| `licenses/BSL-1.0.txt` | Boost headers, compiled into `libsbengine.so` (§2.8) |
+| `licenses/OpenSSL.txt` | OpenSSL 1.1.1, statically linked into `libsbengine.so` (§2.8) |
 
 `OFL.txt` (SIL Open Font License 1.1, for **Inter, Noto Sans CJK KR and the Noto Sans script faces** — §2.3) already ships at
 the root of this package. Keep it there; do not add a second copy under `licenses/`, and do not
@@ -602,7 +624,9 @@ script faces' differs by one URL line), and
 what differs between them (the copyright statement and the Reserved Font Name) is reproduced in
 §2.3 and carried inside each font's own name table.
 
-No BSD-3-Clause text is required because Apache-2.0 is elected for `moxcms` and `pxfm`. The full GPLv3 text is supplied at the package root as `LICENSE`; `LICENSING.md` states
+No BSD-3-Clause text is required for the Rust packages because Apache-2.0 is elected for `moxcms`
+and `pxfm`; the separate `licenses/BSD-3-Clause-libtorrent.txt` is for the engine's libtorrent
+(§2.8). The full GPLv3 text is supplied at the package root as `LICENSE`; `LICENSING.md` states
 the GPL-3.0-or-later election. Also retain `licenses/GCC-exception-3.1.txt` and
 `licenses/PlxNative-historical-MIT.txt`.
 

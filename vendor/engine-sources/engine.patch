@@ -1,0 +1,2896 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fd78423..2a494ad 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -56,6 +56,7 @@ if(NUVIO_ENGINE_ENABLE_LIBTORRENT)
+         PRIVATE
+             src/torrent/libtorrent_backend.cpp
+             src/torrent/libtorrent_stream_bridge.cpp
++            src/storage/streaming_window.cpp
+     )
+     target_link_libraries(nuvio_engine PRIVATE $<BUILD_INTERFACE:torrent-rasterbar>)
+     target_compile_definitions(nuvio_engine PRIVATE NUVIO_ENGINE_HAS_LIBTORRENT=1)
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index 8a04890..2c0d5b9 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -73,6 +73,8 @@ function(nuvio_engine_add_libtorrent)
+         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-top-priority-first.patch"
+         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-metadata-pipeline.patch"
+         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-urgent-hedge.patch"
++        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-drop-piece.patch"
++        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-forget-all.patch"
+     )
+     set(
+         nuvio_libtorrent_patch_files
+@@ -88,6 +90,8 @@ function(nuvio_engine_add_libtorrent)
+         "src/piece_picker.cpp"
+         "src/ut_metadata.cpp"
+         "src/torrent.cpp"
++        "src/torrent_handle.cpp"
++        "src/torrent_handle.cpp"
+     )
+     set(
+         nuvio_libtorrent_patch_sentinels
+@@ -103,6 +107,8 @@ function(nuvio_engine_add_libtorrent)
+         "nuvio_top"
+         "nuvio_metadata_pipeline"
+         "nuvio_hedge_blocks"
++        "nuvio_drop_piece"
++        "nuvio_forget_all"
+     )
+     list(LENGTH nuvio_libtorrent_patches nuvio_libtorrent_patch_count)
+     math(EXPR nuvio_libtorrent_last_patch "${nuvio_libtorrent_patch_count} - 1")
+diff --git a/cmake/patches/libtorrent-2.0.12-nuvio-drop-piece.patch b/cmake/patches/libtorrent-2.0.12-nuvio-drop-piece.patch
+new file mode 100644
+index 0000000..1647f4d
+--- /dev/null
++++ b/cmake/patches/libtorrent-2.0.12-nuvio-drop-piece.patch
+@@ -0,0 +1,89 @@
++diff --git a/include/libtorrent/torrent.hpp b/include/libtorrent/torrent.hpp
++index 99f41f297..9655c43fd 100644
++--- a/include/libtorrent/torrent.hpp
+++++ b/include/libtorrent/torrent.hpp
++@@ -646,6 +646,7 @@ namespace libtorrent {
++ 		void set_piece_deadline(piece_index_t piece, int t, deadline_flags_t flags);
++ 		void reset_piece_deadline(piece_index_t piece);
++ 		void set_piece_first_block(piece_index_t piece, int block);
+++		void nuvio_drop_piece(piece_index_t piece);
++ 		void clear_time_critical();
++ #endif // TORRENT_DISABLE_STREAMING
++ 
++diff --git a/include/libtorrent/torrent_handle.hpp b/include/libtorrent/torrent_handle.hpp
++index 24b6363fe..a2433979d 100644
++--- a/include/libtorrent/torrent_handle.hpp
+++++ b/include/libtorrent/torrent_handle.hpp
++@@ -426,6 +426,12 @@ namespace aux {
++ 		void set_piece_deadline(piece_index_t index, int deadline, deadline_flags_t flags = {}) const;
++ 		void reset_piece_deadline(piece_index_t index) const;
++ 		void set_piece_first_block(piece_index_t index, int block) const;
+++
+++		// nuvio (#334): forget a piece we have. The caller has already freed
+++		// its bytes on disk; the piece becomes "not have" in the picker, peers
+++		// that understand lt_donthave are told so, and the piece is downloaded
+++		// again only if its priority asks for it.
+++		void nuvio_drop_piece(piece_index_t index) const;
++ 		void clear_piece_deadlines() const;
++ 
++ #if TORRENT_ABI_VERSION == 1
++diff --git a/src/torrent.cpp b/src/torrent.cpp
++index bc72b4ed8..fe5b25b33 100644
++--- a/src/torrent.cpp
+++++ b/src/torrent.cpp
++@@ -5417,6 +5417,39 @@ namespace {
++ 		if (has_picker()) m_picker->set_block_start(piece, 0);
++ 	}
++ 
+++	// nuvio (#334): streaming window. The disk back-end already punched the
+++	// piece out of the file, so it must stop being "have": otherwise reads
+++	// would serve a hole to the player or to peers.
+++	void torrent::nuvio_drop_piece(piece_index_t const piece)
+++	{
+++		if (!valid_metadata() || piece < piece_index_t(0)
+++			|| piece >= m_torrent_file->end_piece())
+++			return;
+++		if (!has_picker() && !m_have_all) return;
+++		need_picker();
+++		m_have_all = false;
+++		if (!m_picker->have_piece(piece)) return;
+++		m_picker->we_dont_have(piece);
+++		inc_stats_counter(counters::num_have_pieces, -1);
+++		// file_progress has no "lost a piece": rebuild it from the picker
+++		if (!m_file_progress.empty())
+++		{
+++			m_file_progress.clear();
+++			m_file_progress.init(*m_picker, m_torrent_file->files());
+++		}
+++		for (auto c : m_connections)
+++		{
+++			TORRENT_INCREMENT(m_iterating_connections);
+++			if (c->is_disconnecting()) continue;
+++			c->reject_piece(piece);
+++			c->write_dont_have(piece);
+++		}
+++		update_gauge();
+++		set_need_save_resume(torrent_handle::if_download_progress);
+++		state_updated();
+++		update_want_tick();
+++	}
+++
++ 	void torrent::set_piece_first_block(piece_index_t const piece, int const block)
++ 	{
++ 		if (!valid_metadata() || piece < piece_index_t(0)
++diff --git a/src/torrent_handle.cpp b/src/torrent_handle.cpp
++index 3bfb27d0b..eb390566f 100644
++--- a/src/torrent_handle.cpp
+++++ b/src/torrent_handle.cpp
++@@ -951,6 +951,11 @@ namespace libtorrent {
++ 		async_call(&torrent::set_piece_first_block, index, block);
++ 	}
++ 
+++	void torrent_handle::nuvio_drop_piece(piece_index_t index) const
+++	{
+++		async_call(&torrent::nuvio_drop_piece, index);
+++	}
+++
++ 	void torrent_handle::clear_piece_deadlines() const
++ 	{
++ #ifndef TORRENT_DISABLE_STREAMING
+diff --git a/cmake/patches/libtorrent-2.0.12-nuvio-forget-all.patch b/cmake/patches/libtorrent-2.0.12-nuvio-forget-all.patch
+new file mode 100644
+index 0000000..adf816a
+--- /dev/null
++++ b/cmake/patches/libtorrent-2.0.12-nuvio-forget-all.patch
+@@ -0,0 +1,89 @@
++--- a/include/libtorrent/torrent.hpp
+++++ b/include/libtorrent/torrent.hpp
++@@ -647,6 +647,7 @@
++ 		void reset_piece_deadline(piece_index_t piece);
++ 		void set_piece_first_block(piece_index_t piece, int block);
++ 		void nuvio_drop_piece(piece_index_t piece);
+++		void nuvio_forget_all();
++ 		void clear_time_critical();
++ #endif // TORRENT_DISABLE_STREAMING
++ 
++--- a/include/libtorrent/torrent_handle.hpp
+++++ b/include/libtorrent/torrent_handle.hpp
++@@ -432,6 +432,12 @@
++ 		// that understand lt_donthave are told so, and the piece is downloaded
++ 		// again only if its priority asks for it.
++ 		void nuvio_drop_piece(piece_index_t index) const;
+++
+++		// nuvio: the payload's storage went away (a removable drive pulled out)
+++		// and the save path was reset to an empty folder elsewhere: every piece,
+++		// whole or partial, is missing again, and a disk error that paused the
+++		// torrent meanwhile is cleared so it downloads into the new folder.
+++		void nuvio_forget_all() const;
++ 		void clear_piece_deadlines() const;
++ 
++ #if TORRENT_ABI_VERSION == 1
++--- a/src/torrent.cpp
+++++ b/src/torrent.cpp
++@@ -5450,6 +5450,47 @@
++ 		update_want_tick();
++ 	}
++ 
+++	// nuvio: the storage moved to an empty folder (the old one vanished with
+++	// its drive). Whole pieces become "not have", partial ones start over (their
+++	// first blocks went with the old folder), and a disk error that paused the
+++	// torrent while the drive was going is cleared.
+++	void torrent::nuvio_forget_all()
+++	{
+++		if (m_error)
+++		{
+++			clear_error();
+++			if (is_paused()) resume();
+++		}
+++		if (m_upload_mode) set_upload_mode(false);
+++		if (!valid_metadata()) return;
+++		if (!has_picker() && !m_have_all) return;
+++		need_picker();
+++		m_have_all = false;
+++		for (auto const& dp : m_picker->get_download_queue())
+++			m_picker->restore_piece(dp.index);
+++		for (piece_index_t i(0); i < m_torrent_file->end_piece(); ++i)
+++		{
+++			if (!m_picker->have_piece(i)) continue;
+++			m_picker->we_dont_have(i);
+++			inc_stats_counter(counters::num_have_pieces, -1);
+++			for (auto c : m_connections)
+++			{
+++				TORRENT_INCREMENT(m_iterating_connections);
+++				if (c->is_disconnecting()) continue;
+++				c->write_dont_have(i);
+++			}
+++		}
+++		if (!m_file_progress.empty())
+++		{
+++			m_file_progress.clear();
+++			m_file_progress.init(*m_picker, m_torrent_file->files());
+++		}
+++		update_gauge();
+++		set_need_save_resume(torrent_handle::if_download_progress);
+++		state_updated();
+++		update_want_tick();
+++	}
+++
++ 	void torrent::set_piece_first_block(piece_index_t const piece, int const block)
++ 	{
++ 		if (!valid_metadata() || piece < piece_index_t(0)
++--- a/src/torrent_handle.cpp
+++++ b/src/torrent_handle.cpp
++@@ -956,6 +956,11 @@
++ 		async_call(&torrent::nuvio_drop_piece, index);
++ 	}
++ 
+++	void torrent_handle::nuvio_forget_all() const
+++	{
+++		async_call(&torrent::nuvio_forget_all);
+++	}
+++
++ 	void torrent_handle::clear_piece_deadlines() const
++ 	{
++ #ifndef TORRENT_DISABLE_STREAMING
+diff --git a/include/nuvio_engine/nuvio_engine.h b/include/nuvio_engine/nuvio_engine.h
+index 10e59e7..404fd83 100644
+--- a/include/nuvio_engine/nuvio_engine.h
++++ b/include/nuvio_engine/nuvio_engine.h
+@@ -10,7 +10,11 @@
+ extern "C" {
+ #endif
+ 
+-#define NUVIO_ENGINE_API_VERSION 3U
++#define NUVIO_ENGINE_API_VERSION 4U
++/* smallest streaming window the engine runs with; smaller values are raised.
++ * Stremio Origin: the head, tail, look-behind and read-ahead scale with the
++ * window, so it works down to a few dozen MB (TVs with little storage). */
++#define NUVIO_ENGINE_MINIMUM_STREAMING_WINDOW_BYTES (24ULL * 1024ULL * 1024ULL)
+ 
+ typedef struct nuvio_engine nuvio_engine;
+ 
+@@ -60,6 +64,22 @@ typedef struct nuvio_engine_config {
+     const char* tls_ca_bundle_path;
+     nuvio_engine_torrent_profile torrent_profile;
+     uint32_t reserved_3;
++    /* API 4: streaming window. 0 = keep the whole file (previous behavior).
++     * > 0 = while a file LARGER than the window plays (smaller files are kept
++     * whole, as before), pieces far behind (and far ahead of) the
++     * playhead are freed from disk so the stream's payload stays near this
++     * many bytes; freed pieces are downloaded again if read again. Reading a
++     * freed piece never returns zeros. Values below
++     * NUVIO_ENGINE_MINIMUM_STREAMING_WINDOW_BYTES are raised to it. Payload on
++     * disk can exceed the window by a few MB between trims (every 100 ms).
++     * Not available on Windows. */
++    uint64_t streaming_window_bytes;
++    /* Stremio Origin: > 0 = with a streaming window, torrents are kept as segment
++     * files of about this many bytes (whole pieces), deleted as the window
++     * moves: for storage that cannot free bytes inside a file and caps files
++     * at 4 GB (FAT32). 0 = each torrent in its own files, freed by punching
++     * holes. */
++    uint64_t streaming_segment_bytes;
+ } nuvio_engine_config;
+ 
+ typedef uint32_t nuvio_engine_event_type;
+@@ -178,6 +198,14 @@ typedef struct nuvio_engine_stats {
+     uint64_t peer_disconnect_turnover;
+     uint64_t peer_disconnect_other;
+     uint64_t torrent_finished_events;
++    /* API 4: streaming window */
++    uint64_t window_capacity_bytes;
++    uint64_t window_resident_bytes;
++    uint64_t window_freed_bytes;
++    uint64_t window_freed_pieces;
++    uint64_t window_refetched_pieces;
++    uint8_t window_unsupported;
++    uint8_t reserved_3[7];
+ } nuvio_engine_stats;
+ 
+ typedef struct nuvio_engine_stream_stats {
+@@ -276,6 +304,39 @@ NUVIO_ENGINE_API nuvio_engine_status nuvio_engine_get_stats(
+     nuvio_engine* engine,
+     nuvio_engine_stats* stats
+ );
++/* Stremio Origin: live session-wide transfer limits in bytes per second; 0 = unlimited. */
++NUVIO_ENGINE_API nuvio_engine_status nuvio_engine_set_rate_limits(
++    nuvio_engine* engine,
++    uint64_t download_bytes_per_second,
++    uint64_t upload_bytes_per_second
++);
++/* Stremio Origin: change the streaming window while running (0 is ignored; values
++ * below the minimum are raised). Applied on the engine thread within ~100 ms;
++ * pieces outside the new window are freed at once. Only has an effect when the
++ * engine was created with a window. */
++NUVIO_ENGINE_API nuvio_engine_status nuvio_engine_set_streaming_window(
++    nuvio_engine* engine,
++    uint64_t streaming_window_bytes
++);
++/* Stremio Origin: one libtorrent setting by its settings_pack name (integer or
++ * boolean settings; booleans take 0/1), e.g. "connections_limit". Returns
++ * NUVIO_ENGINE_STATUS_INVALID_ARGUMENT for an unknown or string setting. */
++/* Stremio Origin: the payload moves to another cache directory (the old one
++ * vanished, e.g. a removable drive pulled out, or a better place appeared).
++ * Nothing is copied: every torrent forgets the pieces it had and downloads
++ * again into the new place, streams keep their addresses and wait for the
++ * pieces. segment_bytes as in the config, for torrents added from now on.
++ * Applied on the engine thread. */
++NUVIO_ENGINE_API nuvio_engine_status nuvio_engine_relocate(
++    nuvio_engine* engine,
++    const char* cache_directory,
++    uint64_t segment_bytes
++);
++NUVIO_ENGINE_API nuvio_engine_status nuvio_engine_apply_setting(
++    nuvio_engine* engine,
++    const char* name,
++    int value
++);
+ NUVIO_ENGINE_API nuvio_engine_status nuvio_engine_get_stream_stats(
+     nuvio_engine* engine,
+     const char* stream_id,
+diff --git a/src/cache/disk_cache_manager.cpp b/src/cache/disk_cache_manager.cpp
+index 0270d34..6100545 100644
+--- a/src/cache/disk_cache_manager.cpp
++++ b/src/cache/disk_cache_manager.cpp
+@@ -146,6 +146,7 @@ std::uint64_t directory_size(
+         if (++inspected_entries > maximum_payload_entries) {
+             throw std::runtime_error("torrent payload scan entry limit exceeded");
+         }
++#if defined(_WIN32)
+         const auto status = entry.symlink_status(error);
+         if (error) {
+             throw std::system_error(error, "inspect torrent payload entry");
+@@ -153,6 +154,20 @@ std::uint64_t directory_size(
+         if (status.type() != std::filesystem::file_type::regular) {
+             continue;
+         }
++#else
++        // Stremio Origin: the entry's kind from lstat itself, with 64-bit sizes: on a
++        // 32-bit TV the C++ library's own call overflowed on files past 2 GB
++        struct stat entry_stat {};
++        if (::lstat(entry.path().c_str(), &entry_stat) != 0) {
++            if (errno == ENOENT) {
++                continue;
++            }
++            throw std::system_error(errno, std::generic_category(), "inspect torrent payload entry");
++        }
++        if (!S_ISREG(entry_stat.st_mode)) {
++            continue;
++        }
++#endif
+         saturating_add(size, stored_file_size(entry.path()));
+     }
+     return size;
+diff --git a/src/core/engine.cpp b/src/core/engine.cpp
+index a87c866..4b4273e 100644
+--- a/src/core/engine.cpp
++++ b/src/core/engine.cpp
+@@ -26,6 +26,7 @@ struct nuvio_engine {
+     std::uint32_t stream_inactivity_timeout_milliseconds;
+     std::uint32_t warm_torrent_timeout_milliseconds;
+     nuvio_engine_torrent_profile torrent_profile;
++    std::uint64_t streaming_window_bytes;
+     std::unique_ptr<nuvio::core::EngineRuntime> runtime;
+ };
+ 
+@@ -47,6 +48,10 @@ constexpr std::size_t config_v4_size =
+     offsetof(nuvio_engine_config, tls_ca_bundle_path) + sizeof(const char*);
+ constexpr std::size_t config_v5_size =
+     offsetof(nuvio_engine_config, reserved_3) + sizeof(std::uint32_t);
++constexpr std::size_t config_v6_size =
++    offsetof(nuvio_engine_config, streaming_window_bytes) + sizeof(std::uint64_t);
++constexpr std::size_t config_v7_size =
++    offsetof(nuvio_engine_config, streaming_segment_bytes) + sizeof(std::uint64_t);
+ constexpr std::size_t torrent_request_v1_size =
+     offsetof(nuvio_engine_torrent_request, magnet_uri) + sizeof(const char*);
+ constexpr std::size_t torrent_request_v2_size =
+@@ -300,6 +305,17 @@ nuvio_engine_status nuvio_engine_create(
+         return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
+     }
+ 
++    const auto streaming_window_bytes = config->struct_size >= config_v6_size &&
++            config->streaming_window_bytes > 0
++        ? std::max<std::uint64_t>(
++              config->streaming_window_bytes,
++              NUVIO_ENGINE_MINIMUM_STREAMING_WINDOW_BYTES
++          )
++        : std::uint64_t{0};
++    const auto streaming_segment_bytes = config->struct_size >= config_v7_size && streaming_window_bytes > 0
++        ? config->streaming_segment_bytes
++        : std::uint64_t{0};
++
+     try {
+         const auto stream_inactivity_timeout = config->struct_size >= config_v2_size
+             ? config->stream_inactivity_timeout_milliseconds
+@@ -330,6 +346,7 @@ nuvio_engine_status nuvio_engine_create(
+             stream_inactivity_timeout,
+             warm_torrent_timeout,
+             torrent_profile,
++            streaming_window_bytes,
+             std::make_unique<nuvio::core::EngineRuntime>(
+                 nuvio::torrent::create_protocol_backend({
+                     config->upload_mode,
+@@ -343,6 +360,8 @@ nuvio_engine_status nuvio_engine_create(
+                     warm_torrent_timeout,
+                     torrent_profile,
+                     std::move(tls_ca_bundle_path),
++                    streaming_window_bytes,
++                    streaming_segment_bytes,
+                 }),
+                 config->cache_directory
+             ),
+@@ -602,6 +621,75 @@ nuvio_engine_status nuvio_engine_get_stats(
+     }
+ }
+ 
++nuvio_engine_status nuvio_engine_set_rate_limits(
++    nuvio_engine* const engine,
++    const std::uint64_t download_bytes_per_second,
++    const std::uint64_t upload_bytes_per_second
++) {
++    if (engine == nullptr) {
++        return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
++    }
++    try {
++        engine->runtime->set_rate_limits(download_bytes_per_second, upload_bytes_per_second);
++        return NUVIO_ENGINE_STATUS_OK;
++    } catch (...) {
++        return NUVIO_ENGINE_STATUS_INITIALIZATION_FAILED;
++    }
++}
++
++nuvio_engine_status nuvio_engine_set_streaming_window(
++    nuvio_engine* const engine,
++    const std::uint64_t streaming_window_bytes
++) {
++    if (engine == nullptr) {
++        return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
++    }
++    if (engine->streaming_window_bytes == 0 || streaming_window_bytes == 0) {
++        return NUVIO_ENGINE_STATUS_OK;
++    }
++    try {
++        engine->runtime->set_streaming_window(std::max<std::uint64_t>(
++            streaming_window_bytes,
++            NUVIO_ENGINE_MINIMUM_STREAMING_WINDOW_BYTES
++        ));
++        return NUVIO_ENGINE_STATUS_OK;
++    } catch (...) {
++        return NUVIO_ENGINE_STATUS_INITIALIZATION_FAILED;
++    }
++}
++
++nuvio_engine_status nuvio_engine_relocate(
++    nuvio_engine* const engine,
++    const char* const cache_directory,
++    const std::uint64_t segment_bytes
++) {
++    if (engine == nullptr || cache_directory == nullptr || cache_directory[0] == '\0') {
++        return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
++    }
++    try {
++        return engine->runtime->relocate(cache_directory, segment_bytes);
++    } catch (...) {
++        return NUVIO_ENGINE_STATUS_INITIALIZATION_FAILED;
++    }
++}
++
++nuvio_engine_status nuvio_engine_apply_setting(
++    nuvio_engine* const engine,
++    const char* const name,
++    const int value
++) {
++    if (engine == nullptr || name == nullptr) {
++        return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
++    }
++    try {
++        return engine->runtime->apply_setting(name, value)
++            ? NUVIO_ENGINE_STATUS_OK
++            : NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
++    } catch (...) {
++        return NUVIO_ENGINE_STATUS_INITIALIZATION_FAILED;
++    }
++}
++
+ nuvio_engine_status nuvio_engine_get_stream_stats(
+     nuvio_engine* const engine,
+     const char* const stream_id,
+diff --git a/src/core/engine_runtime.cpp b/src/core/engine_runtime.cpp
+index 2a8c4ca..29a04dd 100644
+--- a/src/core/engine_runtime.cpp
++++ b/src/core/engine_runtime.cpp
+@@ -287,6 +287,11 @@ void EngineRuntime::process_command(Command command) {
+         case CommandType::remove_torrent:
+             backend_->remove_torrent(command.request_id, command.torrent_id);
+             break;
++        case CommandType::relocate:
++            // the torrent id field carries the new directory
++            save_path_ = command.torrent_id;
++            backend_->relocate(command.torrent_id, command.target_bytes);
++            break;
+         }
+     } catch (const std::exception& error) {
+         push_event({
+@@ -370,6 +375,12 @@ void EngineRuntime::refresh_stats() {
+     stats.disk_cache_evictions = backend_stats.disk_cache_evictions;
+     stats.disk_cache_reclaimed_bytes = backend_stats.disk_cache_reclaimed_bytes;
+     stats.disk_cache_over_budget = backend_stats.disk_cache_over_budget ? 1 : 0;
++    stats.window_capacity_bytes = backend_stats.window_capacity_bytes;
++    stats.window_resident_bytes = backend_stats.window_resident_bytes;
++    stats.window_freed_bytes = backend_stats.window_freed_bytes;
++    stats.window_freed_pieces = backend_stats.window_freed_pieces;
++    stats.window_refetched_pieces = backend_stats.window_refetched_pieces;
++    stats.window_unsupported = backend_stats.window_unsupported ? 1 : 0;
+     stats.tracker_peers_returned = backend_stats.tracker_peers_returned;
+     stats.dht_peers_returned = backend_stats.dht_peers_returned;
+     stats.peer_connect_events = backend_stats.peer_connect_events;
+@@ -459,3 +470,23 @@ void EngineRuntime::push_event(torrent::BackendEvent backend_event) {
+ }
+ 
+ }
++
++namespace nuvio::core {
++void EngineRuntime::set_rate_limits(const std::uint64_t download_bps, const std::uint64_t upload_bps) {
++    backend_->set_rate_limits(download_bps, upload_bps);
++}
++void EngineRuntime::set_streaming_window(const std::uint64_t bytes) {
++    backend_->set_streaming_window(bytes);
++}
++bool EngineRuntime::apply_setting(const char* const name, const int value) {
++    return backend_->apply_setting(name, value);
++}
++nuvio_engine_status EngineRuntime::relocate(std::string cache_directory, const std::uint64_t segment_bytes) {
++    Command command{};
++    command.type = CommandType::relocate;
++    command.torrent_id = std::move(cache_directory);
++    command.target_bytes = segment_bytes;
++    std::uint64_t request_id = 0;
++    return enqueue(std::move(command), request_id);
++}
++}
+diff --git a/src/core/engine_runtime.hpp b/src/core/engine_runtime.hpp
+index d6eb057..b4e4ae9 100644
+--- a/src/core/engine_runtime.hpp
++++ b/src/core/engine_runtime.hpp
+@@ -60,6 +60,13 @@ public:
+         std::uint64_t& request_id
+     );
+     [[nodiscard]] nuvio_engine_stats get_stats();
++    // Stremio Origin: live transfer limits (0 = unlimited); libtorrent applies them on its own thread
++    void set_rate_limits(std::uint64_t download_bps, std::uint64_t upload_bps);
++    // Stremio Origin: live streaming window; one libtorrent setting by name
++    void set_streaming_window(std::uint64_t bytes);
++    [[nodiscard]] bool apply_setting(const char* name, int value);
++    // Stremio Origin: the payload moves to another cache directory (engine thread)
++    [[nodiscard]] nuvio_engine_status relocate(std::string cache_directory, std::uint64_t segment_bytes);
+     [[nodiscard]] nuvio_engine_status get_stream_stats(
+         const std::string& stream_id,
+         nuvio_engine_stream_stats& stats
+@@ -76,6 +83,7 @@ private:
+         stop_stream,
+         reclaim_disk_cache,
+         remove_torrent,
++        relocate,
+     };
+ 
+     struct Command {
+diff --git a/src/storage/payload_reader.cpp b/src/storage/payload_reader.cpp
+index ee2d318..61290ff 100644
+--- a/src/storage/payload_reader.cpp
++++ b/src/storage/payload_reader.cpp
+@@ -17,7 +17,8 @@
+ 
+ namespace nuvio::storage {
+ 
+-PayloadReader::PayloadReader(const std::filesystem::path& path) {
++PayloadReader::PayloadReader(const std::filesystem::path& path, const std::uint64_t tag)
++    : path_(path), tag_(tag) {
+ #if defined(_WIN32)
+     const auto handle = CreateFileW(
+         path.c_str(),
+@@ -53,6 +54,8 @@ PayloadReader::PayloadReader(PayloadReader&& other) noexcept {
+ PayloadReader& PayloadReader::operator=(PayloadReader&& other) noexcept {
+     if (this != &other) {
+         close();
++        path_ = std::move(other.path_);
++        tag_ = other.tag_;
+ #if defined(_WIN32)
+         handle_ = std::exchange(other.handle_, nullptr);
+ #else
+diff --git a/src/storage/payload_reader.hpp b/src/storage/payload_reader.hpp
+index 006aa65..8c65aca 100644
+--- a/src/storage/payload_reader.hpp
++++ b/src/storage/payload_reader.hpp
+@@ -10,7 +10,7 @@ namespace nuvio::storage {
+ class PayloadReader {
+ public:
+     PayloadReader() = default;
+-    explicit PayloadReader(const std::filesystem::path& path);
++    explicit PayloadReader(const std::filesystem::path& path, std::uint64_t tag = 0);
+     ~PayloadReader();
+ 
+     PayloadReader(const PayloadReader&) = delete;
+@@ -20,10 +20,16 @@ public:
+ 
+     [[nodiscard]] bool is_open() const;
+     [[nodiscard]] bool read_exact(std::uint64_t offset, std::span<char> destination) const;
++    // Stremio Origin: what it was opened for (the payload can move while a stream reads it)
++    [[nodiscard]] const std::filesystem::path& path() const { return path_; }
++    [[nodiscard]] std::uint64_t tag() const { return tag_; }
+ 
+ private:
+     void close();
+ 
++    std::filesystem::path path_;
++    std::uint64_t tag_ = 0;
++
+ #if defined(_WIN32)
+     void* handle_ = nullptr;
+ #else
+diff --git a/src/storage/streaming_window.cpp b/src/storage/streaming_window.cpp
+new file mode 100644
+index 0000000..78ea0a4
+--- /dev/null
++++ b/src/storage/streaming_window.cpp
+@@ -0,0 +1,627 @@
++#include "storage/streaming_window.hpp"
++
++#include <algorithm>
++#include <cerrno>
++#include <cstring>
++#include <functional>
++#include <map>
++#include <unordered_set>
++#include <utility>
++
++#include <boost/asio/error.hpp>
++#include <boost/asio/post.hpp>
++
++#include <libtorrent/disk_interface.hpp>
++#include <libtorrent/file_storage.hpp>
++#include <libtorrent/hex.hpp>
++#include <libtorrent/peer_request.hpp>
++#include <libtorrent/posix_disk_io.hpp>
++#include <libtorrent/storage_defs.hpp>
++#include <libtorrent/torrent_status.hpp>
++
++#if !defined(_WIN32)
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
++
++namespace nuvio::storage {
++
++std::string StreamingWindowStore::key_for(const std::string& torrent_id) {
++    return torrent_id.substr(0, std::min<std::size_t>(torrent_id.size(), 40));
++}
++
++void StreamingWindowStore::set_segment_bytes(const std::uint64_t bytes) {
++    std::lock_guard lock(mutex_);
++    segment_bytes_ = bytes;
++}
++
++std::uint64_t StreamingWindowStore::segment_bytes() const {
++    std::lock_guard lock(mutex_);
++    return segment_bytes_;
++}
++
++void StreamingWindowStore::attach(
++    const int storage,
++    const std::string& torrent_id,
++    std::shared_ptr<const lt::file_storage> segments,
++    std::string save_path,
++    const std::uint32_t segment_pieces
++) {
++    std::lock_guard lock(mutex_);
++    const auto key = key_for(torrent_id);
++    storages_.insert_or_assign(storage, key);
++    if (segments) {
++        auto& torrent = torrents_[key];
++        torrent.segments = std::move(segments);
++        torrent.save_path = std::move(save_path);
++        torrent.segment_pieces = std::max<std::uint32_t>(segment_pieces, 1);
++    }
++}
++
++void StreamingWindowStore::detach(const int storage) {
++    std::lock_guard lock(mutex_);
++    const auto found = storages_.find(storage);
++    if (found == storages_.end()) {
++        return;
++    }
++    const auto key = found->second;
++    storages_.erase(found);
++    const auto still_used = std::ranges::any_of(storages_, [&](const auto& entry) {
++        return entry.second == key;
++    });
++    if (!still_used) {
++        torrents_.erase(key);
++    }
++}
++
++bool StreamingWindowStore::is_freed(const int storage, const std::uint32_t piece) const {
++    std::lock_guard lock(mutex_);
++    const auto found = storages_.find(storage);
++    if (found == storages_.end()) {
++        return false;
++    }
++    const auto torrent = torrents_.find(found->second);
++    return torrent != torrents_.end() && torrent->second.freed.contains(piece);
++}
++
++void StreamingWindowStore::note_write(const int storage, const std::uint32_t piece) {
++    std::lock_guard lock(mutex_);
++    const auto found = storages_.find(storage);
++    if (found == storages_.end()) {
++        return;
++    }
++    auto& torrent = torrents_[found->second];
++    // the piece is being downloaded again: its bytes are real from now on
++    torrent.freed.erase(piece);
++    torrent.resident.insert(piece);
++}
++
++std::vector<std::uint32_t> StreamingWindowStore::resident_pieces(
++    const std::string& torrent_id
++) const {
++    std::lock_guard lock(mutex_);
++    const auto torrent = torrents_.find(key_for(torrent_id));
++    if (torrent == torrents_.end()) {
++        return {};
++    }
++    return {torrent->second.resident.begin(), torrent->second.resident.end()};
++}
++
++bool StreamingWindowStore::mark_freed(const std::string& torrent_id, const std::uint32_t piece) {
++    std::lock_guard lock(mutex_);
++    const auto torrent = torrents_.find(key_for(torrent_id));
++    if (torrent == torrents_.end() || torrent->second.resident.erase(piece) == 0) {
++        return false;
++    }
++    torrent->second.freed.insert(piece);
++    return true;
++}
++
++void StreamingWindowStore::unmark_freed(const std::string& torrent_id, const std::uint32_t piece) {
++    std::lock_guard lock(mutex_);
++    const auto torrent = torrents_.find(key_for(torrent_id));
++    if (torrent == torrents_.end() || torrent->second.freed.erase(piece) == 0) {
++        return;
++    }
++    torrent->second.resident.insert(piece);
++}
++
++bool StreamingWindowStore::is_freed(const std::string& torrent_id, const std::uint32_t piece) const {
++    std::lock_guard lock(mutex_);
++    const auto torrent = torrents_.find(key_for(torrent_id));
++    return torrent != torrents_.end() && torrent->second.freed.contains(piece);
++}
++
++std::optional<StreamingWindowStore::Location> StreamingWindowStore::segment_location(
++    const std::string& torrent_id,
++    const std::uint64_t absolute
++) const {
++    std::lock_guard lock(mutex_);
++    const auto torrent = torrents_.find(key_for(torrent_id));
++    if (torrent == torrents_.end() || !torrent->second.segments) {
++        return std::nullopt;
++    }
++    const auto& files = *torrent->second.segments;
++    if (absolute >= static_cast<std::uint64_t>(files.total_size())) {
++        return std::nullopt;
++    }
++    const auto index = files.file_index_at_offset(static_cast<std::int64_t>(absolute));
++    const auto start = static_cast<std::uint64_t>(files.file_offset(index));
++    const auto size = static_cast<std::uint64_t>(files.file_size(index));
++    return Location{
++        files.file_path(index, torrent->second.save_path),
++        absolute - start,
++        start + size - absolute,
++    };
++}
++
++bool StreamingWindowStore::release_segment(const std::string& torrent_id, const std::uint32_t piece) {
++    // under the lock: a write to this segment marks its piece resident (also
++    // under the lock) before it starts, so a file is never deleted under a
++    // write, and a write after the delete simply creates the file again
++    std::lock_guard lock(mutex_);
++    const auto found = torrents_.find(key_for(torrent_id));
++    if (found == torrents_.end() || !found->second.segments) {
++        return false;
++    }
++    const auto& torrent = found->second;
++    const auto& files = *torrent.segments;
++    const auto per = torrent.segment_pieces;
++    const auto first = piece / per * per;
++    const auto last = std::min<std::uint64_t>(
++        static_cast<std::uint64_t>(first) + per,
++        static_cast<std::uint64_t>(std::max(files.num_pieces(), 0))
++    );
++    for (auto other = static_cast<std::uint64_t>(first); other < last; ++other) {
++        if (torrent.resident.contains(static_cast<std::uint32_t>(other))) {
++            return true;
++        }
++    }
++    const auto piece_length = static_cast<std::uint64_t>(files.piece_length());
++    const auto begin = static_cast<std::uint64_t>(first) * piece_length;
++    const auto end = std::min<std::uint64_t>(last * piece_length, static_cast<std::uint64_t>(files.total_size()));
++    if (begin >= end) {
++        return true;
++    }
++    for (auto index = files.file_index_at_offset(static_cast<std::int64_t>(begin));
++         index < files.end_file() && static_cast<std::uint64_t>(files.file_offset(index)) < end;
++         ++index) {
++        if (files.pad_file_at(index)) {
++            continue;
++        }
++        std::error_code ignored;
++        std::filesystem::remove(files.file_path(index, torrent.save_path), ignored);
++    }
++    return true;
++}
++
++void StreamingWindowStore::relocate(const std::string& torrent_id, const std::string& save_path) {
++    std::lock_guard lock(mutex_);
++    const auto found = torrents_.find(key_for(torrent_id));
++    if (found == torrents_.end()) {
++        return;
++    }
++    found->second.resident.clear();
++    found->second.freed.clear();
++    found->second.save_path = save_path;
++}
++
++namespace {
++
++class WindowDiskIo final : public lt::disk_interface {
++public:
++    WindowDiskIo(
++        lt::io_context& io,
++        const lt::settings_interface& settings,
++        lt::counters& counters,
++        std::shared_ptr<StreamingWindowStore> store
++    )
++        : io_(io),
++          inner_(lt::posix_disk_io_constructor(io, settings, counters)),
++          store_(std::move(store)) {
++    }
++
++    ~WindowDiskIo() override {
++        // the inner holders call back into inner_, which must still exist
++        holders_.clear();
++    }
++
++    lt::storage_holder new_torrent(
++        const lt::storage_params& params,
++        const std::shared_ptr<void>& torrent
++    ) override {
++        const auto segment_bytes = store_->segment_bytes();
++        const auto& files = params.files;
++        if (segment_bytes == 0 || params.mapped_files || files.num_pieces() <= 0 ||
++            files.piece_length() <= 0 || files.total_size() <= 0) {
++            auto inner = inner_->new_torrent(params, torrent);
++            const lt::storage_index_t index = inner;
++            store_->attach(static_cast<int>(index), lt::aux::to_hex(params.info_hash));
++            holders_.insert_or_assign(index, std::move(inner));
++            return lt::storage_holder(index, *this);
++        }
++        // segments of whole pieces, split where the torrent's own files meet
++        // (a segment is then one or a few files, all deleted together); pad
++        // files stay pad files, never written
++        const auto piece_length = static_cast<std::int64_t>(files.piece_length());
++        const auto per = std::max<std::int64_t>(1, static_cast<std::int64_t>(segment_bytes) / piece_length);
++        const auto segment = per * piece_length;
++        auto segments = std::make_shared<lt::file_storage>();
++        auto origin = std::make_shared<std::vector<lt::file_index_t>>(); // segment file -> the torrent's file
++        segments->set_piece_length(files.piece_length());
++        segments->set_name("seg");
++        for (const auto file : files.file_range()) {
++            auto offset = files.file_offset(file);
++            auto left = files.file_size(file);
++            if (left <= 0) {
++                continue;
++            }
++            if (files.pad_file_at(file)) {
++                segments->add_file("seg/pad" + std::to_string(static_cast<int>(file)), left, lt::file_storage::flag_pad_file);
++                origin->push_back(file);
++                continue;
++            }
++            while (left > 0) {
++                const auto number = offset / segment;
++                const auto bytes = std::min(left, (number + 1) * segment - offset);
++                segments->add_file(
++                    "seg/" + std::to_string(number) + "-" + std::to_string(static_cast<int>(file)),
++                    bytes
++                );
++                origin->push_back(file);
++                offset += bytes;
++                left -= bytes;
++            }
++        }
++        segments->set_num_pieces(files.num_pieces());
++        // priorities are per file of the torrent, not per segment: every
++        // written byte goes to a segment (no part file)
++        const lt::aux::vector<lt::download_priority_t, lt::file_index_t> none;
++        const lt::storage_params mapped(files, segments.get(), params.path, params.mode, none, params.info_hash);
++        auto inner = inner_->new_torrent(mapped, torrent);
++        const lt::storage_index_t index = inner;
++        store_->attach(
++            static_cast<int>(index),
++            lt::aux::to_hex(params.info_hash),
++            segments,
++            params.path,
++            static_cast<std::uint32_t>(per)
++        );
++        segmented_.insert(index);
++        origin_.insert_or_assign(index, std::move(origin));
++        holders_.insert_or_assign(index, std::move(inner));
++        return lt::storage_holder(index, *this);
++    }
++
++    void remove_torrent(const lt::storage_index_t index) override {
++        store_->detach(static_cast<int>(index));
++        segmented_.erase(index);
++        origin_.erase(index);
++        holders_.erase(index);
++    }
++
++    void async_read(
++        const lt::storage_index_t storage,
++        const lt::peer_request& request,
++        std::function<void(lt::disk_buffer_holder, const lt::storage_error&)> handler,
++        const lt::disk_job_flags_t flags
++    ) override {
++        if (store_->is_freed(static_cast<int>(storage), piece_of(request))) {
++            // Never hand out the hole. operation_aborted makes libtorrent
++            // reject the peer request (and send dont_have) without pausing
++            // the torrent; read_piece reports the error to the bridge.
++            boost::asio::post(io_, [handler = std::move(handler)] {
++                handler(
++                    lt::disk_buffer_holder{},
++                    lt::storage_error(
++                        lt::error_code(boost::asio::error::operation_aborted),
++                        lt::operation_t::file_read
++                    )
++                );
++            });
++            return;
++        }
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](lt::disk_buffer_holder buffer, const lt::storage_error& error) mutable {
++                handler(std::move(buffer), to_torrent(error, *origin));
++            };
++        }
++        inner_->async_read(storage, request, std::move(handler), flags);
++    }
++
++    bool async_write(
++        const lt::storage_index_t storage,
++        const lt::peer_request& request,
++        const char* buffer,
++        std::shared_ptr<lt::disk_observer> observer,
++        std::function<void(const lt::storage_error&)> handler,
++        const lt::disk_job_flags_t flags
++    ) override {
++        store_->note_write(static_cast<int>(storage), piece_of(request));
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](const lt::storage_error& error) { handler(to_torrent(error, *origin)); };
++        }
++        return inner_->async_write(
++            storage,
++            request,
++            buffer,
++            std::move(observer),
++            std::move(handler),
++            flags
++        );
++    }
++
++    void async_hash(
++        const lt::storage_index_t storage,
++        const lt::piece_index_t piece,
++        const lt::span<lt::sha256_hash> v2,
++        const lt::disk_job_flags_t flags,
++        std::function<void(lt::piece_index_t, const lt::sha1_hash&, const lt::storage_error&)> handler
++    ) override {
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](lt::piece_index_t p, const lt::sha1_hash& h, const lt::storage_error& error) {
++                handler(p, h, to_torrent(error, *origin));
++            };
++        }
++        inner_->async_hash(storage, piece, v2, flags, std::move(handler));
++    }
++
++    void async_hash2(
++        const lt::storage_index_t storage,
++        const lt::piece_index_t piece,
++        const int offset,
++        const lt::disk_job_flags_t flags,
++        std::function<void(lt::piece_index_t, const lt::sha256_hash&, const lt::storage_error&)> handler
++    ) override {
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](lt::piece_index_t p, const lt::sha256_hash& h, const lt::storage_error& error) {
++                handler(p, h, to_torrent(error, *origin));
++            };
++        }
++        inner_->async_hash2(storage, piece, offset, flags, std::move(handler));
++    }
++
++    void async_move_storage(
++        const lt::storage_index_t storage,
++        std::string path,
++        const lt::move_flags_t flags,
++        std::function<void(lt::status_t, const std::string&, const lt::storage_error&)> handler
++    ) override {
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](lt::status_t st, const std::string& p, const lt::storage_error& error) {
++                handler(st, p, to_torrent(error, *origin));
++            };
++        }
++        inner_->async_move_storage(storage, std::move(path), flags, std::move(handler));
++    }
++
++    void async_release_files(
++        const lt::storage_index_t storage,
++        std::function<void()> handler
++    ) override {
++        inner_->async_release_files(storage, std::move(handler));
++    }
++
++    void async_check_files(
++        const lt::storage_index_t storage,
++        const lt::add_torrent_params* resume_data,
++        lt::aux::vector<std::string, lt::file_index_t> links,
++        std::function<void(lt::status_t, const lt::storage_error&)> handler
++    ) override {
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](lt::status_t st, const lt::storage_error& error) {
++                handler(st, to_torrent(error, *origin));
++            };
++        }
++        inner_->async_check_files(storage, resume_data, std::move(links), std::move(handler));
++    }
++
++    void async_stop_torrent(
++        const lt::storage_index_t storage,
++        std::function<void()> handler
++    ) override {
++        inner_->async_stop_torrent(storage, std::move(handler));
++    }
++
++    void async_rename_file(
++        const lt::storage_index_t storage,
++        const lt::file_index_t index,
++        std::string name,
++        std::function<void(const std::string&, lt::file_index_t, const lt::storage_error&)> handler
++    ) override {
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](const std::string& n, lt::file_index_t f, const lt::storage_error& error) {
++                handler(n, f, to_torrent(error, *origin));
++            };
++        }
++        inner_->async_rename_file(storage, index, std::move(name), std::move(handler));
++    }
++
++    void async_delete_files(
++        const lt::storage_index_t storage,
++        const lt::remove_flags_t options,
++        std::function<void(const lt::storage_error&)> handler
++    ) override {
++        if (const auto origin = origin_of(storage)) {
++            handler = [handler = std::move(handler), origin](const lt::storage_error& error) { handler(to_torrent(error, *origin)); };
++        }
++        inner_->async_delete_files(storage, options, std::move(handler));
++    }
++
++    void async_set_file_priority(
++        const lt::storage_index_t storage,
++        lt::aux::vector<lt::download_priority_t, lt::file_index_t> priorities,
++        std::function<void(const lt::storage_error&, lt::aux::vector<lt::download_priority_t, lt::file_index_t>)> handler
++    ) override {
++        if (segmented_.contains(storage)) {
++            // segments have no per-file part files: taken as they are
++            boost::asio::post(io_, [handler = std::move(handler), priorities = std::move(priorities)]() mutable {
++                handler(lt::storage_error{}, std::move(priorities));
++            });
++            return;
++        }
++        inner_->async_set_file_priority(storage, std::move(priorities), std::move(handler));
++    }
++
++    void async_clear_piece(
++        const lt::storage_index_t storage,
++        const lt::piece_index_t index,
++        std::function<void(lt::piece_index_t)> handler
++    ) override {
++        inner_->async_clear_piece(storage, index, std::move(handler));
++    }
++
++    void update_stats_counters(lt::counters& counters) const override {
++        inner_->update_stats_counters(counters);
++    }
++
++    std::vector<lt::open_file_state> get_status(const lt::storage_index_t storage) const override {
++        return inner_->get_status(storage);
++    }
++
++    void abort(const bool wait) override {
++        inner_->abort(wait);
++    }
++
++    void submit_jobs() override {
++        inner_->submit_jobs();
++    }
++
++    void settings_updated() override {
++        inner_->settings_updated();
++    }
++
++private:
++    using Origin = std::shared_ptr<const std::vector<lt::file_index_t>>;
++    Origin origin_of(const lt::storage_index_t storage) const {
++        const auto found = origin_.find(storage);
++        return found == origin_.end() ? Origin{} : found->second;
++    }
++    // Stremio Origin: libtorrent reads an error's file index against the
++    // torrent's own files; in segments it is a segment's index (one past the
++    // torrent's files read out of bounds when a drive vanished)
++    static lt::storage_error to_torrent(const lt::storage_error& error, const std::vector<lt::file_index_t>& origin) {
++        auto mapped = error;
++        const auto file = static_cast<int>(error.file());
++        if (file >= 0) {
++            mapped.file(file < static_cast<int>(origin.size()) ? origin[static_cast<std::size_t>(file)] : lt::torrent_status::error_file_none);
++        }
++        return mapped;
++    }
++
++    static std::uint32_t piece_of(const lt::peer_request& request) {
++        return static_cast<std::uint32_t>(static_cast<int>(request.piece));
++    }
++
++    lt::io_context& io_;
++    std::unique_ptr<lt::disk_interface> inner_;
++    std::shared_ptr<StreamingWindowStore> store_;
++    std::map<lt::storage_index_t, lt::storage_holder> holders_;
++    std::set<lt::storage_index_t> segmented_;
++    std::map<lt::storage_index_t, Origin> origin_;
++};
++
++}
++
++std::unique_ptr<lt::disk_interface> make_window_disk_io(
++    lt::io_context& io,
++    const lt::settings_interface& settings,
++    lt::counters& counters,
++    std::shared_ptr<StreamingWindowStore> store
++) {
++    return std::make_unique<WindowDiskIo>(io, settings, counters, std::move(store));
++}
++
++#if defined(__linux__)
++#ifndef FALLOC_FL_KEEP_SIZE
++#define FALLOC_FL_KEEP_SIZE 0x01
++#endif
++#ifndef FALLOC_FL_PUNCH_HOLE
++#define FALLOC_FL_PUNCH_HOLE 0x02
++#endif
++#endif
++
++bool punch_hole(
++    const std::filesystem::path& path,
++    const std::uint64_t offset,
++    const std::uint64_t length,
++    std::string* const error
++) {
++#if defined(_WIN32)
++    static_cast<void>(path);
++    static_cast<void>(offset);
++    static_cast<void>(length);
++    if (error) {
++        *error = "punch hole is not implemented on Windows";
++    }
++    return false;
++#else
++    const auto fail = [&](const char* step) {
++        if (error) {
++            *error = std::string(step) + ": " + std::strerror(errno);
++        }
++        return false;
++    };
++#if defined(__linux__)
++    // open64/fstat64/fallocate64: off_t is 32-bit on armv7 without
++    // _FILE_OFFSET_BITS=64, and the file is larger than 2 GB (#202).
++    const int descriptor = ::open64(path.c_str(), O_WRONLY | O_CLOEXEC);
++    if (descriptor < 0) {
++        return fail("open");
++    }
++    struct stat64 information {};
++    if (::fstat64(descriptor, &information) != 0) {
++        const auto result = fail("fstat");
++        ::close(descriptor);
++        return result;
++    }
++#else
++    const int descriptor = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
++    if (descriptor < 0) {
++        return fail("open");
++    }
++    struct stat information {};
++    if (::fstat(descriptor, &information) != 0) {
++        const auto result = fail("fstat");
++        ::close(descriptor);
++        return result;
++    }
++#endif
++    const auto block = static_cast<std::uint64_t>(
++        information.st_blksize > 0 ? information.st_blksize : 4096
++    );
++    const auto begin = (offset + block - 1) / block * block;
++    const auto end = (offset + length) / block * block;
++    if (end <= begin) {
++        ::close(descriptor);
++        return true;
++    }
++#if defined(__linux__)
++    const int result = ::fallocate64(
++        descriptor,
++        FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
++        static_cast<off64_t>(begin),
++        static_cast<off64_t>(end - begin)
++    );
++#elif defined(__APPLE__)
++    fpunchhole_t hole{};
++    hole.fp_flags = 0;
++    hole.fp_offset = static_cast<off_t>(begin);
++    hole.fp_length = static_cast<off_t>(end - begin);
++    const int result = ::fcntl(descriptor, F_PUNCHHOLE, &hole);
++#else
++    errno = ENOTSUP;
++    const int result = -1;
++#endif
++    if (result != 0) {
++        const auto failed = fail("punch");
++        ::close(descriptor);
++        return failed;
++    }
++    ::close(descriptor);
++    return true;
++#endif
++}
++
++}
+diff --git a/src/storage/streaming_window.hpp b/src/storage/streaming_window.hpp
+new file mode 100644
+index 0000000..db590fc
+--- /dev/null
++++ b/src/storage/streaming_window.hpp
+@@ -0,0 +1,125 @@
++#ifndef NUVIO_ENGINE_STREAMING_WINDOW_HPP
++#define NUVIO_ENGINE_STREAMING_WINDOW_HPP
++
++// Streaming window: keep only a window of the file on
++// disk while it plays. Two halves share this store:
++//
++//  - the disk back-end (WindowDiskIo, libtorrent network thread) records which
++//    pieces were written and refuses to read a piece that was freed: the read
++//    fails, it never returns the zeros of the hole;
++//  - the stream bridge (engine thread) picks pieces far from the playhead,
++//    marks them freed here, punches them out of the file and then tells
++//    libtorrent to forget them (torrent_handle::nuvio_drop_piece).
++//
++// A freed piece that is needed again (seek backwards) is simply downloaded
++// again: libtorrent no longer has it, so the scheduler asks for it like any
++// other missing piece, and the first write clears the freed mark.
++//
++// Stremio Origin: storage that cannot free bytes inside a file and caps files at
++// 4 GB (FAT32, most USB sticks) keeps a torrent as segment files of a few
++// whole pieces each instead of its own files (libtorrent's mapped files: the
++// same bytes, laid out differently). A segment file is deleted once none of
++// its pieces is kept, which frees what a punched hole would.
++
++#include <cstdint>
++#include <filesystem>
++#include <memory>
++#include <mutex>
++#include <optional>
++#include <set>
++#include <string>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++#include <libtorrent/fwd.hpp>
++#include <libtorrent/io_context.hpp>
++
++namespace nuvio::storage {
++
++class StreamingWindowStore {
++public:
++    // Keys are hex(info_hash_t::get_best()): the hash libtorrent hands the
++    // disk back-end (v2 truncated for hybrid/v2 torrents, v1 otherwise).
++    static std::string key_for(const std::string& torrent_id);
++
++    // segment files of about this many bytes for torrents added from now on;
++    // 0 = the torrent's own files, freed by punching holes
++    void set_segment_bytes(std::uint64_t bytes);
++    [[nodiscard]] std::uint64_t segment_bytes() const;
++
++    // disk back-end side (libtorrent network thread); segments is null for a
++    // torrent kept in its own files
++    void attach(
++        int storage,
++        const std::string& torrent_id,
++        std::shared_ptr<const lt::file_storage> segments = {},
++        std::string save_path = {},
++        std::uint32_t segment_pieces = 0
++    );
++    void detach(int storage);
++    [[nodiscard]] bool is_freed(int storage, std::uint32_t piece) const;
++    void note_write(int storage, std::uint32_t piece);
++
++    // bridge side
++    [[nodiscard]] std::vector<std::uint32_t> resident_pieces(const std::string& torrent_id) const;
++    // moves a resident piece to "freed"; false if it was not resident
++    bool mark_freed(const std::string& torrent_id, std::uint32_t piece);
++    // undo mark_freed when the bytes could not be released
++    void unmark_freed(const std::string& torrent_id, std::uint32_t piece);
++    [[nodiscard]] bool is_freed(const std::string& torrent_id, std::uint32_t piece) const;
++
++    struct Location {
++        std::string path;
++        std::uint64_t offset = 0;  // in that file
++        std::uint64_t length = 0;  // bytes from there to the file's end
++    };
++    // where a torrent byte lives when the torrent is in segments (nullopt
++    // when it is in its own files)
++    [[nodiscard]] std::optional<Location> segment_location(
++        const std::string& torrent_id,
++        std::uint64_t absolute
++    ) const;
++    // after mark_freed: the piece's segment files go once none of the
++    // segment's pieces is kept; false when the torrent is not in segments
++    bool release_segment(const std::string& torrent_id, std::uint32_t piece);
++    // the storage moved to an empty folder: nothing is kept any more
++    void relocate(const std::string& torrent_id, const std::string& save_path);
++
++private:
++    struct Torrent {
++        std::set<std::uint32_t> resident;
++        std::unordered_set<std::uint32_t> freed;
++        std::shared_ptr<const lt::file_storage> segments;
++        std::string save_path;
++        std::uint32_t segment_pieces = 0;
++    };
++
++    mutable std::mutex mutex_;
++    std::unordered_map<int, std::string> storages_;
++    std::unordered_map<std::string, Torrent> torrents_;
++    std::uint64_t segment_bytes_ = 0;
++};
++
++// posix_disk_io wrapped with the store above.
++std::unique_ptr<lt::disk_interface> make_window_disk_io(
++    lt::io_context& io,
++    const lt::settings_interface& settings,
++    lt::counters& counters,
++    std::shared_ptr<StreamingWindowStore> store
++);
++
++// Frees [offset, offset + length) of the file without changing its size.
++// Only whole filesystem blocks inside the range are released. 64-bit offsets
++// on every ABI (armv7 included). Returns false (and errno-style text in
++// *error) when the filesystem cannot do it.
++bool punch_hole(
++    const std::filesystem::path& path,
++    std::uint64_t offset,
++    std::uint64_t length,
++    std::string* error
++);
++
++}
++
++#endif
+diff --git a/src/torrent/libtorrent_backend.cpp b/src/torrent/libtorrent_backend.cpp
+index bb2d232..7236eae 100644
+--- a/src/torrent/libtorrent_backend.cpp
++++ b/src/torrent/libtorrent_backend.cpp
+@@ -105,11 +105,16 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
+     lt::settings_pack settings;
+     const auto profile = torrent_profile_settings(config.torrent_profile);
+     settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.5");
++#ifdef __APPLE__
++    settings.set_str(lt::settings_pack::listen_interfaces, "127.0.0.1:0"); // the desktop preview: no open port (macOS asks for network access for each new build); peers are reached outward
++#else
+     settings.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:0,[::]:0");
++#endif
+     settings.set_bool(lt::settings_pack::enable_dht, true);
+     settings.set_bool(lt::settings_pack::enable_lsd, true);
+-    settings.set_bool(lt::settings_pack::enable_upnp, true);
+-    settings.set_bool(lt::settings_pack::enable_natpmp, true);
++    // Stremio Origin: no UPnP/NAT-PMP port mapping (router churn on home routers seen on the TV)
++    settings.set_bool(lt::settings_pack::enable_upnp, false);
++    settings.set_bool(lt::settings_pack::enable_natpmp, false);
+     settings.set_bool(lt::settings_pack::announce_to_all_tiers, true);
+     settings.set_bool(lt::settings_pack::announce_to_all_trackers, true);
+     settings.set_bool(lt::settings_pack::close_redundant_connections, false);
+@@ -169,12 +174,26 @@ std::filesystem::path state_root(const ProtocolBackendConfig& config) {
+ struct SessionBootstrap {
+     lt::session_params params;
+     std::string diagnostic;
++    std::shared_ptr<storage::StreamingWindowStore> window_store{};
+ };
+ 
+ SessionBootstrap make_session_bootstrap(const ProtocolBackendConfig& config) {
+     SessionBootstrap bootstrap{lt::session_params(make_settings(config)), {}};
+ #if !defined(_WIN32)
+     bootstrap.params.disk_io_constructor = lt::posix_disk_io_constructor;
++    if (config.streaming_window_bytes > 0) {
++        // streaming window (#334): posix storage that can free played pieces
++        auto store = std::make_shared<storage::StreamingWindowStore>();
++        store->set_segment_bytes(config.streaming_segment_bytes);
++        bootstrap.window_store = store;
++        bootstrap.params.disk_io_constructor = [store](
++            lt::io_context& io,
++            const lt::settings_interface& settings,
++            lt::counters& counters
++        ) {
++            return storage::make_window_disk_io(io, settings, counters, store);
++        };
++    }
+ #endif
+     try {
+         const auto state = storage::read_bounded_file(
+@@ -294,6 +313,13 @@ public:
+             : MetadataSource::cold;
+         if (auto resume = load_resume_state(id); resume.has_value()) {
+             params = std::move(*resume);
++            if (streaming_window_) {
++                // pieces freed by the window leave holes in the file; a resume
++                // file written before a free must not bring them back as "have"
++                params.have_pieces.clear();
++                params.verified_pieces.clear();
++                params.unfinished_pieces.clear();
++            }
+             if (params.ti) {
+                 metadata_source = MetadataSource::restored;
+             } else if (provided_metadata) {
+@@ -388,7 +414,13 @@ public:
+         pending_removals_.emplace(id, request_id);
+         try {
+             if (!cache_removal_pending) {
+-                session_.remove_torrent(torrent->second);
++                // Stremio Origin: with the streaming window the payload is a
++                // scratch file full of holes (a resume never trusts it), so it
++                // goes with the torrent instead of waiting for the cache LRU
++                session_.remove_torrent(
++                    torrent->second,
++                    streaming_window_ ? lt::session_handle::delete_files : lt::remove_flags_t{}
++                );
+             }
+         } catch (...) {
+             pending_removals_.erase(id);
+@@ -453,6 +485,71 @@ public:
+         queued_events_.push_back(std::move(event));
+     }
+ 
++    void set_rate_limits(const std::uint64_t download_bps, const std::uint64_t upload_bps) override {
++        lt::settings_pack limits;
++        limits.set_int(lt::settings_pack::download_rate_limit, bounded_rate(download_bps));
++        limits.set_int(lt::settings_pack::upload_rate_limit, bounded_rate(upload_bps));
++        session_.apply_settings(std::move(limits));
++    }
++
++    void set_streaming_window(const std::uint64_t bytes) override {
++        if (streaming_window_ && stream_bridge_) {
++            stream_bridge_->set_window_bytes(bytes);
++        }
++    }
++
++    // Stremio Origin: the payload's place changes while torrents run (the old one
++    // vanished with its drive, or the app picked a better one between films).
++    // Nothing is copied: each torrent's save path is reset to an empty folder
++    // in the new place without touching the old one (it may be gone), the
++    // pieces it had are forgotten and downloaded again there, and its streams
++    // keep their addresses.
++    void relocate(const std::string& download_directory, const std::uint64_t segment_bytes) override {
++        payload_directory_ = std::filesystem::path(download_directory) / "payload";
++        disk_cache_ = cache::DiskCacheManager(payload_directory_, disk_cache_.stats().capacity_bytes);
++        if (window_store_) {
++            window_store_->set_segment_bytes(segment_bytes);
++        }
++        for (const auto& [id, handle] : handles_) {
++            if (!handle.is_valid()) {
++                continue;
++            }
++            try {
++                const auto path = prepare_payload_path(id).string();
++                if (window_store_) {
++                    window_store_->relocate(lt::aux::to_hex(handle.info_hashes().get_best()), path);
++                }
++                handle.move_storage(path, lt::move_flags_t::reset_save_path_unchecked);
++                handle.nuvio_forget_all();
++                if (stream_bridge_) {
++                    stream_bridge_->relocated(id, path);
++                }
++            } catch (const std::exception& error) {
++                queued_events_.push_back({BackendEventType::torrent_error, 0, id, std::string("relocate: ") + error.what(), {}});
++            }
++        }
++    }
++
++    bool apply_setting(const char* const name, const int value) override {
++        const int index = lt::setting_by_name(name);
++        if (index < 0) {
++            return false;
++        }
++        lt::settings_pack pack;
++        switch (index & lt::settings_pack::type_mask) {
++        case lt::settings_pack::int_type_base:
++            pack.set_int(index, value);
++            break;
++        case lt::settings_pack::bool_type_base:
++            pack.set_bool(index, value != 0);
++            break;
++        default:
++            return false;
++        }
++        session_.apply_settings(std::move(pack));
++        return true;
++    }
++
+     void reclaim_disk_cache(
+         const std::uint64_t request_id,
+         const std::uint64_t target_bytes
+@@ -697,6 +794,12 @@ public:
+         result.memory_cache_misses = stream.cache.misses;
+         result.memory_cache_evictions = stream.cache.evictions;
+         result.memory_cache_entries = stream.cache.entries;
++        result.window_capacity_bytes = stream.window_capacity_bytes;
++        result.window_resident_bytes = stream.window_resident_bytes;
++        result.window_freed_bytes = stream.window_freed_bytes;
++        result.window_freed_pieces = stream.window_freed_pieces;
++        result.window_refetched_pieces = stream.window_refetched_pieces;
++        result.window_unsupported = stream.window_unsupported;
+         result.streams = stream.streams;
+         result.warm_torrents = bounded_count(warm_since_.size());
+         result.quiesced_torrents = bounded_count(quiesced_torrents_.size());
+@@ -794,8 +897,12 @@ private:
+             config.listen_port,
+             config.memory_cache_capacity_bytes,
+             config.disk_cache_capacity_bytes,
+-            std::chrono::milliseconds(config.stream_inactivity_timeout_milliseconds)
++            std::chrono::milliseconds(config.stream_inactivity_timeout_milliseconds),
++            config.streaming_window_bytes,
++            bootstrap.window_store
+         );
++        streaming_window_ = bootstrap.window_store != nullptr;
++        window_store_ = bootstrap.window_store;
+     }
+ 
+     static std::string torrent_id(const lt::info_hash_t& hashes) {
+@@ -1082,7 +1189,9 @@ private:
+             last_resume_checkpoint_ = now;
+         }
+         if (now - last_session_checkpoint_ >= std::chrono::minutes(5)) {
+-            try {
++            /* the DHT state is kept at shutdown only: saving it mid-play (session_state on the network thread)
++               crashed the app on 32-bit TVs, twice at the same place, during long torrent plays */
++            if (false) try {
+                 save_session_state();
+             } catch (const std::exception& error) {
+                 events.push_back({
+@@ -1813,6 +1922,8 @@ private:
+     bool fast_session_tick_ = false;
+     lt::session session_;
+     std::unique_ptr<LibtorrentStreamBridge> stream_bridge_;
++    bool streaming_window_ = false;
++    std::shared_ptr<storage::StreamingWindowStore> window_store_;
+ };
+ 
+ }
+diff --git a/src/torrent/libtorrent_stream_bridge.cpp b/src/torrent/libtorrent_stream_bridge.cpp
+index 3e218b9..66933b0 100644
+--- a/src/torrent/libtorrent_stream_bridge.cpp
++++ b/src/torrent/libtorrent_stream_bridge.cpp
+@@ -9,6 +9,7 @@
+ #include "storage/payload_reader.hpp"
+ 
+ #include <algorithm>
++#include <cerrno>
+ #include <atomic>
+ #include <chrono>
+ #include <cctype>
+@@ -59,6 +60,79 @@ std::uint64_t readahead_for_disk_budget(const std::uint64_t disk_capacity_bytes)
+     );
+ }
+ 
++// Streaming window (#334). Bytes kept on disk while a file plays are:
++// protected head + protected tail + what stays behind the playhead + the
++// read-ahead in front of it. The window trims at high_water and stops at
++// low_water, so the read-ahead must fit under low_water with the rest.
++// Stremio Origin: every part scales with the window (TVs with a few dozen MB of
++// storage): at 160 MB and more it is the original split; at 48 MB it is a
++// 3 MB head, 6 MB tail, 6 MB behind, 6 MB critical and ~11 MB in front.
++constexpr std::uint64_t mib = 1024 * 1024;
++constexpr std::chrono::milliseconds window_check_interval{100};
++// verified bytes are read from the payload file in pieces of this size (a
++// whole 16 MB piece in one buffer per HTTP worker was too much for a TV)
++constexpr std::uint64_t payload_read_chunk_bytes = 256 * 1024;
++
++std::uint64_t window_low_water(const std::uint64_t window_bytes) {
++    return window_bytes / 4 * 3;
++}
++
++std::uint64_t window_high_water(const std::uint64_t window_bytes) {
++    return window_bytes / 20 * 17;
++}
++
++std::uint64_t window_head_bytes(const std::uint64_t window_bytes) {
++    return std::clamp(window_bytes / 16, 2 * mib, 8 * mib);
++}
++
++std::uint64_t window_tail_bytes(const std::uint64_t window_bytes) {
++    return std::clamp(window_bytes / 8, 4 * mib, 16 * mib);
++}
++
++std::uint64_t window_behind_bytes(const std::uint64_t window_bytes) {
++    return std::clamp(window_bytes / 8, 4 * mib, 64 * mib);
++}
++
++std::uint64_t window_critical_bytes(const std::uint64_t window_bytes) {
++    return std::clamp(window_bytes / 8, 4 * mib, critical_window_bytes);
++}
++
++// playback + read-ahead in front of the critical bytes
++std::uint64_t window_front_bytes(const std::uint64_t window_bytes) {
++    const auto fixed = window_head_bytes(window_bytes) + window_tail_bytes(window_bytes) +
++        window_behind_bytes(window_bytes) + window_critical_bytes(window_bytes);
++    const auto low = window_low_water(window_bytes);
++    const auto available = low > fixed ? low - fixed : 0;
++    return std::clamp(available / 4 * 3, 4 * mib, maximum_readahead_bytes);
++}
++
++scheduler::StreamWindow make_stream_window(
++    const std::uint64_t disk_capacity_bytes,
++    const std::uint64_t window_bytes
++) {
++    if (window_bytes == 0) {
++        return {
++            critical_window_bytes,
++            critical_piece_limit,
++            playback_window_bytes,
++            readahead_for_disk_budget(disk_capacity_bytes) - playback_window_bytes,
++            metadata_tail_bytes,
++        };
++    }
++    const auto front = std::min(
++        window_front_bytes(window_bytes),
++        readahead_for_disk_budget(disk_capacity_bytes)
++    );
++    const auto playback = std::min(playback_window_bytes, std::max(front / 3 * 2, 4 * mib));
++    return {
++        window_critical_bytes(window_bytes),
++        critical_piece_limit,
++        std::min(playback, front),
++        front > playback ? front - playback : 0,
++        std::min(metadata_tail_bytes, window_tail_bytes(window_bytes)),
++    };
++}
++
+ std::string torrent_id(const lt::torrent_handle& handle) {
+     const auto hashes = handle.info_hashes();
+     if (hashes.has_v1()) {
+@@ -217,6 +291,8 @@ struct LibtorrentStreamBridge::Impl {
+         std::uint64_t file_size = 0;
+         std::filesystem::path payload_path;
+         std::shared_ptr<StreamActivity> activity;
++        // what the disk back-end knows the torrent by (info_hash_t::get_best)
++        std::string window_key;
+         std::shared_ptr<StreamCounters> counters = std::make_shared<StreamCounters>();
+     };
+ 
+@@ -307,15 +383,15 @@ struct LibtorrentStreamBridge::Impl {
+         const std::uint16_t requested_port,
+         const std::uint64_t memory_capacity_bytes,
+         const std::uint64_t disk_capacity_bytes,
+-        const std::chrono::milliseconds inactivity
++        const std::chrono::milliseconds inactivity,
++        const std::uint64_t streaming_window_bytes,
++        std::shared_ptr<storage::StreamingWindowStore> streaming_window_store
+     )
+-        : window{
+-              critical_window_bytes,
+-              critical_piece_limit,
+-              playback_window_bytes,
+-              readahead_for_disk_budget(disk_capacity_bytes) - playback_window_bytes,
+-              metadata_tail_bytes,
+-          },
++        : window(make_stream_window(
++              disk_capacity_bytes,
++              streaming_window_store ? streaming_window_bytes : 0
++          )),
++          disk_capacity(disk_capacity_bytes),
+           inactivity_timeout(inactivity),
+           piece_cache(memory_capacity_bytes),
+           server(std::make_unique<http::LoopbackServer>(
+@@ -328,7 +404,9 @@ struct LibtorrentStreamBridge::Impl {
+                   handle_http(request, writer, token);
+               },
+               stream_worker_count
+-          )) {
++          )),
++          window_bytes(streaming_window_store ? streaming_window_bytes : 0),
++          window_store(std::move(streaming_window_store)) {
+     }
+ 
+     ~Impl() {
+@@ -366,8 +444,17 @@ struct LibtorrentStreamBridge::Impl {
+                 handle.status(lt::torrent_handle::query_save_path).save_path
+             )),
+             std::make_shared<StreamActivity>(std::chrono::steady_clock::now()),
++            lt::aux::to_hex(handle.info_hashes().get_best()),
+         };
+         route.target = "/stream/" + route.stream_id;
++        {
++            std::lock_guard lock(routes_mutex);
++            save_paths.insert_or_assign(id, std::filesystem::path(
++                handle.status(lt::torrent_handle::query_save_path).save_path
++            ));
++            relative_paths.insert_or_assign(id + "/" + std::to_string(file_index),
++                std::filesystem::path(metadata->files().file_path(lt::file_index_t(static_cast<int>(file_index)))));
++        }
+         std::vector<std::string> previous_streams;
+         {
+             std::lock_guard lock(routes_mutex);
+@@ -560,7 +647,10 @@ struct LibtorrentStreamBridge::Impl {
+         };
+         auto cursor = slice.begin;
+         auto deadline = std::chrono::steady_clock::now() + piece_wait_timeout;
+-        auto payload_readable = !payload.has_value() || payload->is_open();
++        // Stremio Origin: each piece tries the file again (the reader reopens when
++        // the payload moved): a read that failed while a drive went away must
++        // not leave the rest of the request on the slow whole-piece path
++        auto payload_readable = true;
+         std::vector<char> buffer;
+         while (cursor < slice.end) {
+             std::shared_ptr<std::vector<char>> verified;
+@@ -583,10 +673,9 @@ struct LibtorrentStreamBridge::Impl {
+                 if (waiter->done) {
+                     verified = waiter->data;
+                 } else if (unverified_ready()) {
+-                    unverified_end = finished_run_end(
+-                        waiter->finished_blocks,
+-                        cursor,
+-                        slice.end
++                    unverified_end = std::min(
++                        finished_run_end(waiter->finished_blocks, cursor, slice.end),
++                        cursor + payload_read_chunk_bytes
+                     );
+                 } else {
+                     waiter->cancelled = true;
+@@ -607,13 +696,22 @@ struct LibtorrentStreamBridge::Impl {
+                 add_delivered_bytes(route.counters, static_cast<std::uint64_t>(bytes.size()));
+                 return true;
+             }
+-            if (!payload.has_value()) {
+-                payload.emplace(route.payload_path);
++            const auto absolute = slice.piece_start + cursor;
++            const auto source = payload_source(route, absolute);
++            if (!source || source->length == 0) {
++                payload_readable = false;
++                continue;
++            }
++            unverified_end = std::min(unverified_end, cursor + source->length);
++            // Stremio Origin: the file is opened again when the payload moved, and for
++            // segments every time (a freed segment comes back as a new file)
++            const auto generation = storage_generation.load();
++            if (!payload.has_value() || !payload->is_open() || source->segment ||
++                payload->tag() != generation || payload->path() != source->path) {
++                payload.emplace(source->path, generation);
+             }
+             buffer.resize(static_cast<std::size_t>(unverified_end - cursor));
+-            const auto absolute = slice.piece_start + cursor;
+-            if (absolute < route.file_offset ||
+-                !payload->read_exact(absolute - route.file_offset, buffer)) {
++            if (!payload->read_exact(source->offset, buffer)) {
+                 payload_readable = false;
+                 continue;
+             }
+@@ -669,7 +767,109 @@ struct LibtorrentStreamBridge::Impl {
+         wake = std::move(callback);
+     }
+ 
++    struct PayloadSource {
++        std::filesystem::path path;
++        std::uint64_t offset = 0;  // in that file
++        std::uint64_t length = 0;  // readable from there in that file
++        bool segment = false;
++    };
++
++    // Stremio Origin: where a byte of the streamed file is now: its segment file,
++    // or the torrent's own file under the current save path (it changes when
++    // the payload is relocated)
++    std::optional<PayloadSource> payload_source(const StreamRoute& route, const std::uint64_t absolute) {
++        if (absolute < route.file_offset || absolute >= route.file_offset + route.file_size) {
++            return std::nullopt;
++        }
++        if (window_store) {
++            if (auto segment = window_store->segment_location(route.window_key, absolute)) {
++                return PayloadSource{std::move(segment->path), segment->offset, segment->length, true};
++            }
++        }
++        std::filesystem::path path = route.payload_path;
++        {
++            std::lock_guard lock(routes_mutex);
++            const auto root = save_paths.find(route.torrent_id);
++            const auto relative = relative_paths.find(route.torrent_id + "/" + std::to_string(route.file_index));
++            if (root != save_paths.end() && relative != relative_paths.end()) {
++                path = root->second / relative->second;
++            }
++        }
++        return PayloadSource{
++            std::move(path),
++            absolute - route.file_offset,
++            route.file_offset + route.file_size - absolute,
++            false,
++        };
++    }
++
++    // Stremio Origin: the torrent's payload now lives under save_path and starts
++    // empty: what was freed or being read from the old place is forgotten,
++    // and readers reopen their files
++    void relocated(const std::string& id, const std::filesystem::path& save_path) {
++        {
++            std::lock_guard lock(routes_mutex);
++            save_paths.insert_or_assign(id, save_path);
++        }
++        storage_generation.fetch_add(1);
++        freed_pieces.erase(id);
++        std::erase_if(requested_reads, [&](const auto& entry) {
++            return entry.first.torrent_id == id;
++        });
++        std::erase_if(partial_blocks, [&](const auto& entry) {
++            return entry.first.torrent_id == id;
++        });
++        window_unsupported = false;
++        next_window_check = {};
++        next_disk_retry = {};
++        // every piece is missing again: the schedule is sent to libtorrent in
++        // full (it only sends changes otherwise, and the pieces at the
++        // playhead had none: they were there), deadlines included
++        current_schedules.erase(id);
++        for (auto& [demand_id, demand] : active_demands) {
++            static_cast<void>(demand_id);
++            if (demand.route.torrent_id == id) {
++                demand.needs_data = true;
++            }
++        }
++        recompute_schedule(id);
++    }
++
++    void set_window_bytes(const std::uint64_t bytes) {
++        if (window_bytes.load() == 0 || !window_store || bytes == 0) {
++            return;
++        }
++        pending_window_bytes.store(bytes);
++        std::lock_guard lock(commands_mutex);
++        if (wake) {
++            wake();
++        }
++    }
++
++    // Stremio Origin: a new window size from the app (storage running low, or the
++    // stream's bitrate became known): new read-ahead, schedules recomputed,
++    // and a trim right away
++    void apply_pending_window() {
++        const auto bytes = pending_window_bytes.exchange(0);
++        if (bytes == 0 || bytes == window_bytes.load()) {
++            return;
++        }
++        window_bytes.store(bytes);
++        window = make_stream_window(disk_capacity, bytes);
++        std::vector<std::string> ids;
++        ids.reserve(current_schedules.size());
++        for (const auto& [id, schedule] : current_schedules) {
++            static_cast<void>(schedule);
++            ids.push_back(id);
++        }
++        for (const auto& id : ids) {
++            recompute_schedule(id);
++        }
++        next_window_check = {};
++    }
++
+     void poll() {
++        apply_pending_window();
+         std::deque<HttpCommand> available;
+         {
+             std::lock_guard lock(commands_mutex);
+@@ -726,8 +926,239 @@ struct LibtorrentStreamBridge::Impl {
+         for (const auto& id : changed_torrents) {
+             recompute_schedule(id);
+         }
++        if (!changed_torrents.empty()) {
++            // a new schedule is about to be downloaded: make room right away
++            next_window_check = {};
++        }
+         reissue_stalled_reads();
+         expire_inactive_streams();
++        enforce_streaming_window();
++    }
++
++    // ---- streaming window (#334) ------------------------------------------
++
++    struct WindowCandidate {
++        std::uint32_t piece = 0;
++        std::uint64_t distance = 0;
++    };
++
++    void enforce_streaming_window() {
++        if (window_bytes == 0 || !window_store || window_unsupported) {
++            return;
++        }
++        const auto now = std::chrono::steady_clock::now();
++        if (now < next_window_check) {
++            return;
++        }
++        next_window_check = now + window_check_interval;
++        std::vector<StreamRoute> active;
++        {
++            std::lock_guard lock(routes_mutex);
++            for (const auto& [target, route] : routes) {
++                static_cast<void>(target);
++                if (std::ranges::none_of(active, [&](const StreamRoute& other) {
++                        return other.torrent_id == route.torrent_id;
++                    })) {
++                    active.push_back(route);
++                }
++            }
++        }
++        std::uint64_t resident_total = 0;
++        for (const auto& route : active) {
++            resident_total += trim_route(route);
++        }
++        // Stremio Origin: a write that hit a full disk put the torrent in upload
++        // mode (libtorrent's answer to ENOSPC), and nothing takes it out for a
++        // torrent that is not auto-managed: the stream would wait forever.
++        // The window frees room (and the app shrinks it), so try again every
++        // two seconds; a disk still full only sends it back.
++        if (now >= next_disk_retry) {
++            next_disk_retry = now + std::chrono::seconds(2);
++            for (const auto& route : active) {
++                try {
++                    if (route.handle.is_valid() &&
++                        (route.handle.flags() & lt::torrent_flags::upload_mode)) {
++                        route.handle.unset_flags(lt::torrent_flags::upload_mode);
++                        disk_full_retries.fetch_add(1, std::memory_order_relaxed);
++                    }
++                    // Stremio Origin: a read or write that hit a vanished drive paused
++                    // the torrent with an error; once the payload has moved (the
++                    // app does it within seconds) it carries on in the new place
++                    if (route.handle.is_valid() && storage_generation.load() > 0) {
++                        const auto status = route.handle.status({});
++                        if (status.errc && storage_gone(status.errc)) {
++                            route.handle.clear_error();
++                            route.handle.resume();
++                        }
++                    }
++                } catch (...) {
++                }
++            }
++        }
++        window_resident_bytes.store(resident_total, std::memory_order_relaxed);
++    }
++
++    // returns the bytes left resident for this torrent
++    std::uint64_t trim_route(const StreamRoute& route) {
++        const auto& id = route.torrent_id;
++        const auto resident = window_store->resident_pieces(route.window_key);
++        const std::uint64_t piece_size = route.piece_size;
++        if (piece_size == 0 || route.file_size == 0) {
++            return 0;
++        }
++        auto resident_bytes = static_cast<std::uint64_t>(resident.size()) * piece_size;
++        // the whole file fits in the window: keep everything, as without one
++        if (route.file_size <= window_bytes) {
++            return resident_bytes;
++        }
++        // a piece freed earlier and written again was downloaded twice
++        if (auto freed = freed_pieces.find(id); freed != freed_pieces.end()) {
++            for (const auto piece : resident) {
++                if (freed->second.erase(piece) > 0) {
++                    window_refetched_pieces.fetch_add(1, std::memory_order_relaxed);
++                }
++            }
++        }
++        // what will be on disk once the current schedule is downloaded
++        const auto schedule = current_schedules.find(id);
++        auto committed_bytes = resident_bytes;
++        if (schedule != current_schedules.end()) {
++            for (const auto& [piece, priority] : schedule->second.priorities) {
++                static_cast<void>(priority);
++                if (!std::ranges::binary_search(resident, piece)) {
++                    committed_bytes += piece_size;
++                }
++            }
++        }
++        if (committed_bytes <= window_high_water(window_bytes)) {
++            return resident_bytes;
++        }
++        const auto target = window_low_water(window_bytes);
++        const auto behind = window_behind_bytes(window_bytes);
++        const auto ahead = window.critical_bytes + window.playback_bytes +
++            window.readahead_bytes + 2 * piece_size;
++        const auto file_start = route.file_offset;
++        const auto file_end = route.file_offset + route.file_size;
++        const auto head_end = file_start + std::min(window_head_bytes(window_bytes), route.file_size);
++        const auto tail_start = file_end - std::min(window_tail_bytes(window_bytes), route.file_size);
++
++        // playheads, in absolute torrent bytes
++        std::vector<std::uint64_t> positions;
++        for (const auto& [demand_id, demand] : active_demands) {
++            static_cast<void>(demand_id);
++            if (demand.route.torrent_id == id) {
++                positions.push_back(route.file_offset + demand.range.start);
++            }
++        }
++        if (const auto anchor = anchors.find(id); anchor != anchors.end()) {
++            positions.push_back(route.file_offset + anchor->second.range.start);
++        }
++        if (positions.empty()) {
++            return resident_bytes;
++        }
++
++        std::vector<WindowCandidate> candidates;
++        for (const auto piece : resident) {
++            const auto piece_start = static_cast<std::uint64_t>(piece) * piece_size;
++            const auto piece_end = piece_start + piece_size;
++            // only pieces that lie entirely inside this file: border pieces
++            // carry bytes of other files
++            if (piece_start < file_start || piece_end > file_end) {
++                continue;
++            }
++            if (piece_start < head_end || piece_end > tail_start) {
++                continue;
++            }
++            const PieceKey key{id, piece};
++            if (piece_waiters.contains(key) || requested_reads.contains(key) ||
++                partial_blocks.contains(key)) {
++                continue;
++            }
++            if (schedule != current_schedules.end() &&
++                schedule->second.priorities.contains(piece)) {
++                continue;
++            }
++            auto nearest = std::numeric_limits<std::uint64_t>::max();
++            bool keep = false;
++            for (const auto position : positions) {
++                if (piece_end <= position) {
++                    const auto distance = position - piece_end;
++                    keep = keep || distance < behind;
++                    nearest = std::min(nearest, distance);
++                } else if (piece_start >= position) {
++                    const auto distance = piece_start - position;
++                    keep = keep || distance < ahead;
++                    nearest = std::min(nearest, distance);
++                } else {
++                    keep = true;
++                }
++            }
++            if (!keep) {
++                candidates.push_back({piece, nearest});
++            }
++        }
++        std::ranges::sort(candidates, [](const WindowCandidate& left, const WindowCandidate& right) {
++            return left.distance > right.distance;
++        });
++
++        for (const auto& candidate : candidates) {
++            if (committed_bytes <= target) {
++                break;
++            }
++            const auto result = free_piece(route, candidate.piece);
++            if (result == FreeResult::unsupported) {
++                break;
++            }
++            if (result == FreeResult::freed) {
++                resident_bytes -= piece_size;
++                committed_bytes -= piece_size;
++            }
++        }
++        return resident_bytes;
++    }
++
++    enum class FreeResult { freed, skipped, unsupported };
++
++    FreeResult free_piece(const StreamRoute& route, const std::uint32_t piece) {
++        const auto index = lt::piece_index_t(static_cast<int>(piece));
++        try {
++            // only verified pieces: a piece still downloading may be read
++            // block by block from the file by an HTTP worker
++            if (!route.handle.is_valid() || !route.handle.have_piece(index)) {
++                return FreeResult::skipped;
++            }
++        } catch (...) {
++            return FreeResult::skipped;
++        }
++        // 1. reads of this piece fail from now on (never the hole's zeros)
++        if (!window_store->mark_freed(route.window_key, piece)) {
++            return FreeResult::skipped;
++        }
++        // 2. release the bytes: a hole in the file, or (segments) the segment
++        // file once none of its pieces is kept
++        const auto piece_start = static_cast<std::uint64_t>(piece) * route.piece_size;
++        std::string error = "payload path unknown";
++        bool released = window_store->release_segment(route.window_key, piece);
++        if (!released) {
++            const auto source = payload_source(route, piece_start);
++            released = source && storage::punch_hole(source->path, source->offset, route.piece_size, &error);
++        }
++        if (!released) {
++            window_store->unmark_freed(route.window_key, piece);
++            window_unsupported = true;
++            window_unsupported_reason = error;
++            return FreeResult::unsupported;
++        }
++        // 3. libtorrent forgets it; a later demand downloads it again
++        try {
++            route.handle.nuvio_drop_piece(index);
++        } catch (...) {
++        }
++        requested_reads.erase(PieceKey{route.torrent_id, piece});
++        freed_pieces[route.torrent_id].insert(piece);
++        window_freed_pieces.fetch_add(1, std::memory_order_relaxed);
++        window_freed_bytes.fetch_add(route.piece_size, std::memory_order_relaxed);
++        return FreeResult::freed;
+     }
+ 
+     void reissue_stalled_reads() {
+@@ -881,16 +1312,18 @@ struct LibtorrentStreamBridge::Impl {
+         piece_waiters[key].push_back(command.waiter);
+         demand.needs_data = !piece_available(command.route, command.piece);
+         if (!demand.needs_data) {
+-            if (requested_reads.try_emplace(key, std::chrono::steady_clock::now()).second) {
+-                try {
+-                    command.route.handle.read_piece(
+-                        lt::piece_index_t(static_cast<int>(command.piece))
+-                    );
+-                } catch (...) {
+-                    requested_reads.erase(key);
+-                    fail_piece(key, "failed to read a downloaded piece");
+-                }
+-            }
++            // Stremio Origin: a verified piece is served by the HTTP worker straight from the payload
++            // file (pread, as for unverified blocks) instead of read_piece(), which copies the
++            // whole piece into RAM twice: 64 MB per read for the 32 MB pieces of a 100 GB torrent,
++            // on a TV with ~1 GB for everything. Pieces freed by the streaming window are not
++            // "have", so this never reads a punched hole.
++            last_ready_pieces.insert_or_assign(command.route.torrent_id, command.piece);
++            const auto index = lt::piece_index_t(static_cast<int>(command.piece));
++            const auto piece_bytes = static_cast<std::uint64_t>(std::max(metadata->piece_size(index), 0));
++            publish_blocks(
++                command.waiter,
++                std::vector<bool>(static_cast<std::size_t>((piece_bytes + block_bytes - 1) / block_bytes), true)
++            );
+             return;
+         }
+         auto partial = partial_blocks.find(key);
+@@ -1245,6 +1678,20 @@ struct LibtorrentStreamBridge::Impl {
+         };
+         requested_reads.erase(key);
+         partial_blocks.erase(key);
++        if (alert.error && storage_gone(alert.error)) {
++            // Stremio Origin: the piece's bytes are gone with its drive (the app
++            // moves the payload within seconds; a piece verified in that very
++            // moment can also be missing in the new place): it is forgotten and
++            // downloaded again, the schedule sent in full so it gets its
++            // deadline, and the stream waits for it instead of failing
++            try {
++                alert.handle.nuvio_drop_piece(alert.piece);
++            } catch (...) {
++            }
++            current_schedules.erase(key.torrent_id);
++            recompute_schedule(key.torrent_id);
++            return;
++        }
+         if (alert.error || !alert.buffer || alert.size <= 0) {
+             fail_piece(key, alert.error ? alert.error.message() : "verified piece is empty");
+             return;
+@@ -1265,6 +1712,16 @@ struct LibtorrentStreamBridge::Impl {
+         piece_waiters.erase(found);
+     }
+ 
++    static bool storage_gone(const lt::error_code& error) {
++        if (error.category() != boost::system::generic_category() &&
++            error.category() != boost::system::system_category()) {
++            return false;
++        }
++        const auto value = error.value();
++        return value == ENOENT || value == EIO || value == ENODEV || value == ENXIO ||
++            value == ENOTDIR || value == EACCES || value == EROFS || value == ESTALE;
++    }
++
+     static void complete_waiter(
+         const std::shared_ptr<PieceWaiter>& waiter,
+         std::shared_ptr<std::vector<char>> data,
+@@ -1311,7 +1768,15 @@ struct LibtorrentStreamBridge::Impl {
+     }
+ 
+     void remove_torrent(const std::string& id) {
++        {
++            std::lock_guard lock(routes_mutex);
++            save_paths.erase(id);
++            std::erase_if(relative_paths, [&](const auto& entry) {
++                return entry.first.starts_with(id + "/");
++            });
++        }
+         revoked_torrents.insert(id);
++        freed_pieces.erase(id);
+         anchors.erase(id);
+         piece_cache.erase_torrent(id);
+         last_ready_pieces.erase(id);
+@@ -1537,6 +2002,13 @@ struct LibtorrentStreamBridge::Impl {
+         }
+         result.pending_piece_reads = static_cast<std::uint32_t>(pending_reads);
+         result.cache = piece_cache.stats();
++        result.window_capacity_bytes = window_bytes;
++        result.window_resident_bytes = window_resident_bytes.load(std::memory_order_relaxed);
++        result.window_freed_bytes = window_freed_bytes.load(std::memory_order_relaxed);
++        result.window_freed_pieces = window_freed_pieces.load(std::memory_order_relaxed);
++        result.window_refetched_pieces =
++            window_refetched_pieces.load(std::memory_order_relaxed);
++        result.window_unsupported = window_unsupported;
+         return result;
+     }
+ 
+@@ -1585,9 +2057,15 @@ struct LibtorrentStreamBridge::Impl {
+         stream_progress_cache.clear();
+     }
+ 
+-    const scheduler::StreamWindow window;
++    scheduler::StreamWindow window;          // engine thread
++    const std::uint64_t disk_capacity;
+     const std::chrono::milliseconds inactivity_timeout;
+     std::mutex routes_mutex;
++    // Stremio Origin: each torrent's save path and each streamed file's path in it
++    // (under routes_mutex); bumped when payloads move
++    std::unordered_map<std::string, std::filesystem::path> save_paths;
++    std::unordered_map<std::string, std::filesystem::path> relative_paths;
++    std::atomic<std::uint64_t> storage_generation{0};
+     std::unordered_map<std::string, StreamRoute> routes;
+     std::vector<BackendStats::Stream> stream_progress_cache;
+     std::chrono::steady_clock::time_point next_progress_sample{};
+@@ -1611,6 +2089,19 @@ struct LibtorrentStreamBridge::Impl {
+     cache::VerifiedPieceCache piece_cache;
+     std::atomic_bool shutting_down = false;
+     std::unique_ptr<http::LoopbackServer> server;
++    std::atomic_uint64_t window_bytes;           // set on the engine thread, read anywhere
++    std::atomic_uint64_t pending_window_bytes = 0; // Stremio Origin: a live change, applied by poll()
++    const std::shared_ptr<storage::StreamingWindowStore> window_store;
++    std::chrono::steady_clock::time_point next_window_check{};
++    std::chrono::steady_clock::time_point next_disk_retry{};
++    std::atomic_uint64_t disk_full_retries = 0;
++    std::unordered_map<std::string, std::unordered_set<std::uint32_t>> freed_pieces;
++    std::atomic_uint64_t window_resident_bytes = 0;
++    std::atomic_uint64_t window_freed_bytes = 0;
++    std::atomic_uint64_t window_freed_pieces = 0;
++    std::atomic_uint64_t window_refetched_pieces = 0;
++    std::atomic_bool window_unsupported = false;
++    std::string window_unsupported_reason;
+ 
+     static std::uint32_t saturating_count(const std::size_t count) {
+         return static_cast<std::uint32_t>(std::min(
+@@ -1624,13 +2115,17 @@ LibtorrentStreamBridge::LibtorrentStreamBridge(
+     const std::uint16_t requested_port,
+     const std::uint64_t memory_capacity_bytes,
+     const std::uint64_t disk_capacity_bytes,
+-    const std::chrono::milliseconds inactivity_timeout
++    const std::chrono::milliseconds inactivity_timeout,
++    const std::uint64_t streaming_window_bytes,
++    std::shared_ptr<storage::StreamingWindowStore> window_store
+ )
+     : impl_(std::make_unique<Impl>(
+           requested_port,
+           memory_capacity_bytes,
+           disk_capacity_bytes,
+-          inactivity_timeout
++          inactivity_timeout,
++          streaming_window_bytes,
++          std::move(window_store)
+       )) {
+ }
+ 
+@@ -1653,6 +2148,14 @@ void LibtorrentStreamBridge::poll() {
+     impl_->poll();
+ }
+ 
++void LibtorrentStreamBridge::set_window_bytes(const std::uint64_t bytes) {
++    impl_->set_window_bytes(bytes);
++}
++
++void LibtorrentStreamBridge::relocated(const std::string& torrent_id, const std::string& save_path) {
++    impl_->relocated(torrent_id, save_path);
++}
++
+ std::vector<StoppedStream> LibtorrentStreamBridge::pop_expired_streams() {
+     return impl_->pop_expired_streams();
+ }
+diff --git a/src/torrent/libtorrent_stream_bridge.hpp b/src/torrent/libtorrent_stream_bridge.hpp
+index 19c87e4..0a5f40c 100644
+--- a/src/torrent/libtorrent_stream_bridge.hpp
++++ b/src/torrent/libtorrent_stream_bridge.hpp
+@@ -11,6 +11,7 @@
+ #include <libtorrent/fwd.hpp>
+ 
+ #include "cache/verified_piece_cache.hpp"
++#include "storage/streaming_window.hpp"
+ #include "torrent/protocol_backend.hpp"
+ 
+ namespace nuvio::torrent {
+@@ -32,6 +33,13 @@ struct StreamBridgeStats {
+     std::uint32_t pending_piece_reads = 0;
+     cache::PieceCacheStats cache{};
+     std::vector<BackendStats::Stream> streams{};
++    // streaming window (#334); all zero when the window is off
++    std::uint64_t window_capacity_bytes = 0;
++    std::uint64_t window_resident_bytes = 0;
++    std::uint64_t window_freed_bytes = 0;
++    std::uint64_t window_freed_pieces = 0;
++    std::uint64_t window_refetched_pieces = 0;
++    bool window_unsupported = false;
+ };
+ 
+ class LibtorrentStreamBridge {
+@@ -40,7 +48,9 @@ public:
+         std::uint16_t requested_port,
+         std::uint64_t memory_capacity_bytes,
+         std::uint64_t disk_capacity_bytes,
+-        std::chrono::milliseconds inactivity_timeout
++        std::chrono::milliseconds inactivity_timeout,
++        std::uint64_t streaming_window_bytes = 0,
++        std::shared_ptr<storage::StreamingWindowStore> window_store = {}
+     );
+     ~LibtorrentStreamBridge();
+ 
+@@ -55,6 +65,10 @@ public:
+     );
+     void set_wakeup(std::function<void()> wake);
+     void poll();
++    // Stremio Origin: a new streaming window size (applied by the next poll)
++    void set_window_bytes(std::uint64_t bytes);
++    // Stremio Origin: the torrent's payload moved to an empty save path (engine thread)
++    void relocated(const std::string& torrent_id, const std::string& save_path);
+     [[nodiscard]] std::vector<StoppedStream> pop_expired_streams();
+     void handle_read_piece(const lt::read_piece_alert& alert);
+     void handle_block_finished(const lt::block_finished_alert& alert);
+diff --git a/src/torrent/protocol_backend.hpp b/src/torrent/protocol_backend.hpp
+index 0629e17..b26c192 100644
+--- a/src/torrent/protocol_backend.hpp
++++ b/src/torrent/protocol_backend.hpp
+@@ -24,6 +24,8 @@ struct ProtocolBackendConfig {
+     std::uint32_t warm_torrent_timeout_milliseconds;
+     nuvio_engine_torrent_profile torrent_profile;
+     std::string tls_ca_bundle_path;
++    std::uint64_t streaming_window_bytes = 0;
++    std::uint64_t streaming_segment_bytes = 0;
+ };
+ 
+ enum class TorrentInputType {
+@@ -118,6 +120,12 @@ struct BackendStats {
+     std::uint64_t peer_disconnect_other = 0;
+     std::uint64_t torrent_finished_events = 0;
+     bool disk_cache_over_budget = false;
++    std::uint64_t window_capacity_bytes = 0;
++    std::uint64_t window_resident_bytes = 0;
++    std::uint64_t window_freed_bytes = 0;
++    std::uint64_t window_freed_pieces = 0;
++    std::uint64_t window_refetched_pieces = 0;
++    bool window_unsupported = false;
+     struct Stream {
+         std::string stream_id;
+         std::uint32_t file_index = 0;
+@@ -167,6 +175,13 @@ public:
+         std::uint64_t target_bytes
+     ) = 0;
+     virtual void shutdown() = 0;
++    // Stremio Origin: live session-wide limits, bytes per second, 0 = unlimited; safe from any thread
++    virtual void set_rate_limits(std::uint64_t, std::uint64_t) {}
++    // Stremio Origin: live streaming window (bytes, > 0); one libtorrent setting by name
++    virtual void set_streaming_window(std::uint64_t) {}
++    [[nodiscard]] virtual bool apply_setting(const char*, int) { return false; }
++    // Stremio Origin: the payload moves to another download directory (engine thread)
++    virtual void relocate(const std::string&, std::uint64_t) {}
+     virtual void set_wakeup(std::function<void()>) {
+     }
+     [[nodiscard]] virtual std::vector<BackendEvent> pop_events() = 0;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 157451c..f6bfea1 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -51,3 +51,18 @@ add_test(NAME nuvio_engine_c_api_smoke COMMAND nuvio_engine_c_api_smoke)
+ if(WIN32)
+     target_link_libraries(nuvio_engine_tests PRIVATE ws2_32 bcrypt)
+ endif()
++
++# Streaming window: engine + in-process web seed,
++# sequential play and seek back with a small window. POSIX only.
++if(NUVIO_ENGINE_ENABLE_LIBTORRENT AND NOT WIN32)
++    add_executable(nuvio_engine_streaming_window_test streaming_window_test.cpp)
++    target_link_libraries(
++        nuvio_engine_streaming_window_test
++        PRIVATE Nuvio::Engine torrent-rasterbar
++    )
++    target_compile_features(nuvio_engine_streaming_window_test PRIVATE cxx_std_20)
++    add_test(
++        NAME nuvio_engine_streaming_window_test
++        COMMAND nuvio_engine_streaming_window_test
++    )
++endif()
+diff --git a/tests/streaming_window_test.cpp b/tests/streaming_window_test.cpp
+new file mode 100644
+index 0000000..225dd16
+--- /dev/null
++++ b/tests/streaming_window_test.cpp
+@@ -0,0 +1,463 @@
++// Streaming window, end to end and offline:
++//
++//   source file (deterministic bytes) -> .torrent with a web seed served by a
++//   tiny Range-capable HTTP server in this process -> nuvio_engine with a
++//   small streaming_window_bytes -> read the stream URL like a player:
++//   sequential to the end, then a seek back into freed pieces.
++//
++// Asserts: every byte read equals the source; the payload on disk (allocated
++// blocks, not the sparse size) never goes past window + margin; pieces were
++// actually freed and the seek back downloaded them again.
++
++#include "nuvio_engine/nuvio_engine.h"
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <libtorrent/bencode.hpp>
++#include <libtorrent/create_torrent.hpp>
++#include <libtorrent/file_storage.hpp>
++
++namespace fs = std::filesystem;
++using namespace std::chrono_literals;
++
++namespace {
++
++constexpr std::uint64_t mib = 1024 * 1024;
++constexpr std::uint64_t file_size = 320 * mib;
++constexpr int piece_size = static_cast<int>(1 * mib);
++// NUVIO_WINDOW_TEST_MB: the window to test (default 160; Stremio Origin runs it at 48 too)
++const std::uint64_t window_bytes = (std::getenv("NUVIO_WINDOW_TEST_MB") ? std::strtoull(std::getenv("NUVIO_WINDOW_TEST_MB"), nullptr, 10) : 160) * mib;
++// trims start at 85% of the window; nothing may pass the window itself
++constexpr std::uint64_t margin_bytes = 0;
++constexpr std::uint64_t read_pace_bytes_per_second = 48 * mib;
++
++fs::path test_root;
++
++[[noreturn]] void fail(const std::string& message) {
++    std::cerr << "FAIL: " << message << std::endl;
++    // the source and payload are hundreds of MB: never leave them behind
++    std::error_code ignored;
++    fs::remove_all(test_root, ignored);
++    std::_Exit(1);
++}
++
++std::uint8_t source_byte(const std::uint64_t offset) {
++    std::uint64_t x = (offset / 8 + 1) * 0x9E3779B97F4A7C15ULL;
++    x ^= x >> 31;
++    x *= 0xBF58476D1CE4E5B9ULL;
++    x ^= x >> 29;
++    return static_cast<std::uint8_t>(x >> ((offset % 8) * 8));
++}
++
++void write_source(const fs::path& path) {
++    std::ofstream out(path, std::ios::binary);
++    std::vector<char> chunk(mib);
++    for (std::uint64_t base = 0; base < file_size; base += mib) {
++        for (std::uint64_t i = 0; i < mib; ++i) {
++            chunk[i] = static_cast<char>(source_byte(base + i));
++        }
++        out.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
++    }
++}
++
++std::uint64_t allocated_bytes(const fs::path& root) {
++    std::uint64_t total = 0;
++    std::error_code error;
++    for (fs::recursive_directory_iterator it(root, error), end; it != end; it.increment(error)) {
++        if (error) {
++            break;
++        }
++        struct stat information {};
++        if (::lstat(it->path().c_str(), &information) == 0 && S_ISREG(information.st_mode)) {
++            total += static_cast<std::uint64_t>(information.st_blocks) * 512;
++        }
++    }
++    return total;
++}
++
++bool send_all(const int socket, const char* data, std::size_t size) {
++    while (size > 0) {
++        const auto sent = ::send(socket, data, size, 0);
++        if (sent <= 0) {
++            return false;
++        }
++        data += sent;
++        size -= static_cast<std::size_t>(sent);
++    }
++    return true;
++}
++
++// Web seed: GET with Range, keep-alive, requests answered in order.
++class SeedServer {
++public:
++    explicit SeedServer(fs::path file) : file_(std::move(file)) {
++        listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
++        const int yes = 1;
++        ::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
++        sockaddr_in address{};
++        address.sin_family = AF_INET;
++        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++        if (::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
++            ::listen(listener_, 16) != 0) {
++            fail("seed server bind/listen");
++        }
++        socklen_t length = sizeof(address);
++        ::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length);
++        port_ = ntohs(address.sin_port);
++        thread_ = std::thread([this] { accept_loop(); });
++    }
++
++    ~SeedServer() {
++        stopping_ = true;
++        ::shutdown(listener_, SHUT_RDWR);
++        ::close(listener_);
++        thread_.join();
++        std::lock_guard lock(mutex_);
++        for (const auto socket : clients_) {
++            ::shutdown(socket, SHUT_RDWR);
++        }
++        for (auto& worker : workers_) {
++            worker.join();
++        }
++    }
++
++    [[nodiscard]] std::uint16_t port() const { return port_; }
++    [[nodiscard]] std::uint64_t served_bytes() const { return served_.load(); }
++
++private:
++    void accept_loop() {
++        while (!stopping_) {
++            const int client = ::accept(listener_, nullptr, nullptr);
++            if (client < 0) {
++                return;
++            }
++            std::lock_guard lock(mutex_);
++            clients_.push_back(client);
++            workers_.emplace_back([this, client] { serve(client); });
++        }
++    }
++
++    void serve(const int client) {
++        std::ifstream in(file_, std::ios::binary);
++        std::string pending;
++        char buffer[4096];
++        std::vector<char> body;
++        while (!stopping_) {
++            auto end = pending.find("\r\n\r\n");
++            while (end == std::string::npos) {
++                const auto received = ::recv(client, buffer, sizeof(buffer), 0);
++                if (received <= 0) {
++                    ::close(client);
++                    return;
++                }
++                pending.append(buffer, static_cast<std::size_t>(received));
++                end = pending.find("\r\n\r\n");
++            }
++            const auto request = pending.substr(0, end);
++            pending.erase(0, end + 4);
++            std::uint64_t first = 0;
++            std::uint64_t last = file_size - 1;
++            bool ranged = false;
++            std::string lower = request;
++            std::ranges::transform(lower, lower.begin(), [](unsigned char c) {
++                return static_cast<char>(std::tolower(c));
++            });
++            if (const auto at = lower.find("range: bytes="); at != std::string::npos) {
++                ranged = true;
++                unsigned long long a = 0;
++                unsigned long long b = 0;
++                const auto count = std::sscanf(request.c_str() + at + 13, "%llu-%llu", &a, &b);
++                first = a;
++                if (count == 2) {
++                    last = std::min<std::uint64_t>(b, file_size - 1);
++                }
++            }
++            const auto length = last - first + 1;
++            std::string headers = std::string(ranged ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n") +
++                "Content-Length: " + std::to_string(length) + "\r\n" +
++                (ranged ? "Content-Range: bytes " + std::to_string(first) + "-" +
++                        std::to_string(last) + "/" + std::to_string(file_size) + "\r\n"
++                        : std::string()) +
++                "Content-Type: application/octet-stream\r\nConnection: keep-alive\r\n\r\n";
++            if (!send_all(client, headers.data(), headers.size())) {
++                break;
++            }
++            body.resize(static_cast<std::size_t>(length));
++            in.seekg(static_cast<std::streamoff>(first));
++            in.read(body.data(), static_cast<std::streamsize>(length));
++            if (!send_all(client, body.data(), body.size())) {
++                break;
++            }
++            served_ += length;
++        }
++        ::close(client);
++    }
++
++    fs::path file_;
++    int listener_ = -1;
++    std::uint16_t port_ = 0;
++    std::atomic_bool stopping_ = false;
++    std::atomic_uint64_t served_ = 0;
++    std::thread thread_;
++    std::mutex mutex_;
++    std::vector<int> clients_;
++    std::vector<std::thread> workers_;
++};
++
++struct Engine {
++    nuvio_engine* handle = nullptr;
++    ~Engine() {
++        if (handle != nullptr) {
++            nuvio_engine_destroy(handle);
++        }
++    }
++};
++
++nuvio_engine_event wait_event(nuvio_engine* engine, const nuvio_engine_event_type type) {
++    const auto deadline = std::chrono::steady_clock::now() + 30s;
++    while (std::chrono::steady_clock::now() < deadline) {
++        nuvio_engine_event event;
++        nuvio_engine_event_init(&event);
++        const auto status = nuvio_engine_poll_event(engine, &event);
++        if (status == NUVIO_ENGINE_STATUS_OK) {
++            if (event.type == type) {
++                return event;
++            }
++            if (event.type == NUVIO_ENGINE_EVENT_TORRENT_ERROR) {
++                std::cerr << "  engine event: error " << event.message << std::endl;
++            }
++            continue;
++        }
++        std::this_thread::sleep_for(10ms);
++    }
++    fail("timed out waiting for engine event " + std::to_string(type));
++}
++
++nuvio_engine_stats stats_of(nuvio_engine* engine) {
++    nuvio_engine_stats stats;
++    nuvio_engine_stats_init(&stats);
++    if (nuvio_engine_get_stats(engine, &stats) != NUVIO_ENGINE_STATUS_OK) {
++        fail("get_stats");
++    }
++    return stats;
++}
++
++struct UrlParts {
++    std::uint16_t port = 0;
++    std::string path;
++};
++
++UrlParts parse_url(const std::string& url) {
++    const auto host = url.find("127.0.0.1:");
++    if (host == std::string::npos) {
++        fail("unexpected stream url " + url);
++    }
++    const auto colon = host + 10;
++    const auto slash = url.find('/', colon);
++    return {static_cast<std::uint16_t>(std::stoi(url.substr(colon, slash - colon))), url.substr(slash)};
++}
++
++// Reads [first, last] from the stream like a player would (one request,
++// paced), compares every byte with the source. Returns bytes verified.
++std::uint64_t read_range(const UrlParts& url, const std::uint64_t first, const std::uint64_t last) {
++    const int socket = ::socket(AF_INET, SOCK_STREAM, 0);
++    sockaddr_in address{};
++    address.sin_family = AF_INET;
++    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    address.sin_port = htons(url.port);
++    if (::connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
++        fail("connect to stream");
++    }
++    timeval timeout{70, 0};
++    ::setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++    const auto request = "GET " + url.path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=" +
++        std::to_string(first) + "-" + std::to_string(last) + "\r\nConnection: close\r\n\r\n";
++    send_all(socket, request.data(), request.size());
++    std::string headers;
++    char byte = 0;
++    while (headers.find("\r\n\r\n") == std::string::npos) {
++        if (::recv(socket, &byte, 1, 0) != 1) {
++            fail("stream closed before headers");
++        }
++        headers.push_back(byte);
++    }
++    if (headers.find(" 206 ") == std::string::npos) {
++        fail("stream answered " + headers.substr(0, headers.find('\r')));
++    }
++    std::vector<char> buffer(256 * 1024);
++    auto position = first;
++    const auto started = std::chrono::steady_clock::now();
++    while (position <= last) {
++        const auto want = std::min<std::uint64_t>(buffer.size(), last - position + 1);
++        const auto received = ::recv(socket, buffer.data(), static_cast<std::size_t>(want), 0);
++        if (received <= 0) {
++            fail("stream ended at " + std::to_string(position) + " of " + std::to_string(last + 1) +
++                " (" + std::strerror(errno) + ")");
++        }
++        for (ssize_t i = 0; i < received; ++i) {
++            if (static_cast<std::uint8_t>(buffer[static_cast<std::size_t>(i)]) !=
++                source_byte(position + static_cast<std::uint64_t>(i))) {
++                fail("byte mismatch at offset " + std::to_string(position + static_cast<std::uint64_t>(i)));
++            }
++        }
++        position += static_cast<std::uint64_t>(received);
++        // pace like a player: never faster than read_pace_bytes_per_second
++        const auto expected = std::chrono::duration<double>(
++            static_cast<double>(position - first) / static_cast<double>(read_pace_bytes_per_second)
++        );
++        const auto elapsed = std::chrono::steady_clock::now() - started;
++        if (elapsed < expected) {
++            std::this_thread::sleep_for(expected - elapsed);
++        }
++    }
++    ::close(socket);
++    return position - first;
++}
++
++}
++
++int main() {
++    // NUVIO_WINDOW_TEST_DIR: where the ~500 MB of scratch go (default: temp)
++    const char* scratch = std::getenv("NUVIO_WINDOW_TEST_DIR");
++    const auto root = (scratch != nullptr && scratch[0] != '\0'
++        ? fs::path(scratch)
++        : fs::temp_directory_path()) / ("nuvio-window-" + std::to_string(::getpid()));
++    test_root = root;
++    fs::remove_all(root);
++    fs::create_directories(root / "seed");
++    fs::create_directories(root / "engine-data");
++    fs::create_directories(root / "engine-cache");
++    const auto source = root / "seed" / "movie.mkv";
++    write_source(source);
++
++    SeedServer seed(source);
++
++    lt::file_storage files;
++    lt::add_files(files, source.string());
++    lt::create_torrent creator(files, piece_size);
++    creator.add_url_seed("http://127.0.0.1:" + std::to_string(seed.port()) + "/movie.mkv");
++    lt::set_piece_hashes(creator, (root / "seed").string());
++    std::vector<char> torrent;
++    lt::bencode(std::back_inserter(torrent), creator.generate());
++
++    const auto payload_root = root / "engine-cache";
++    Engine engine;
++    {
++        nuvio_engine_config config;
++        nuvio_engine_config_init(&config);
++        const auto data = (root / "engine-data").string();
++        const auto cache = payload_root.string();
++        config.data_directory = data.c_str();
++        config.cache_directory = cache.c_str();
++        config.upload_mode = NUVIO_ENGINE_UPLOAD_DISABLED;
++        config.streaming_window_bytes = window_bytes;
++        if (nuvio_engine_create(&config, &engine.handle) != NUVIO_ENGINE_STATUS_OK) {
++            fail("nuvio_engine_create");
++        }
++    }
++    if (nuvio_engine_api_version() != 4) {
++        fail("API version is not 4");
++    }
++
++    nuvio_engine_torrent_request request;
++    nuvio_engine_torrent_request_init(&request);
++    request.source_type = NUVIO_ENGINE_TORRENT_SOURCE_DATA;
++    request.torrent_data = reinterpret_cast<const std::uint8_t*>(torrent.data());
++    request.torrent_data_size = torrent.size();
++    std::uint64_t request_id = 0;
++    if (nuvio_engine_add_torrent(engine.handle, &request, &request_id) != NUVIO_ENGINE_STATUS_OK) {
++        fail("add_torrent");
++    }
++    const auto ready = wait_event(engine.handle, NUVIO_ENGINE_EVENT_TORRENT_METADATA_READY);
++    nuvio_engine_stream_request stream;
++    nuvio_engine_stream_request_init(&stream);
++    stream.torrent_id = ready.torrent_id;
++    stream.file_index = 0;
++    if (nuvio_engine_prepare_stream(engine.handle, &stream, &request_id) != NUVIO_ENGINE_STATUS_OK) {
++        fail("prepare_stream");
++    }
++    const auto prepared = wait_event(engine.handle, NUVIO_ENGINE_EVENT_STREAM_PREPARED);
++    const auto url = parse_url(prepared.stream_url);
++    std::cout << "stream " << prepared.stream_url << " (" << prepared.file_size / mib << " MiB)\n";
++
++    std::atomic_bool sampling = true;
++    std::atomic_uint64_t peak = 0;
++    std::thread sampler([&] {
++        while (sampling) {
++            const auto now = allocated_bytes(payload_root);
++            auto seen = peak.load();
++            while (now > seen && !peak.compare_exchange_weak(seen, now)) {
++            }
++            std::this_thread::sleep_for(20ms);
++        }
++    });
++
++    const auto t0 = std::chrono::steady_clock::now();
++    std::uint64_t verified = 0;
++    // 1. header + tail like a player probing the container
++    verified += read_range(url, 0, 1 * mib - 1);
++    verified += read_range(url, file_size - 2 * mib, file_size - 1);
++    // 2. play sequentially to the end
++    verified += read_range(url, 0, file_size - 1);
++    const auto after_play = stats_of(engine.handle);
++    const auto peak_play = peak.load();
++    std::cout << "played " << file_size / mib << " MiB: peak on disk " << peak_play / mib
++              << " MiB, now " << allocated_bytes(payload_root) / mib << " MiB, freed "
++              << after_play.window_freed_pieces << " pieces ("
++              << after_play.window_freed_bytes / mib << " MiB)\n";
++    // 3. seek back to 25%..40% (freed long ago) and play from there
++    const auto back_first = file_size / 4;
++    const auto back_last = file_size / 4 * 2 - 1;
++    verified += read_range(url, back_first, back_last);
++    sampling = false;
++    sampler.join();
++    const auto after_seek = stats_of(engine.handle);
++    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
++
++    std::cout << "seek back " << back_first / mib << ".." << (back_last + 1) / mib
++              << " MiB: refetched " << after_seek.window_refetched_pieces
++              << " pieces; peak on disk " << peak.load() / mib << " MiB (window "
++              << window_bytes / mib << " MiB + margin " << margin_bytes / mib << ")\n";
++    std::cout << "verified " << verified / mib << " MiB byte-for-byte; web seed served "
++              << seed.served_bytes() / mib << " MiB; " << elapsed << " s\n";
++
++    if (after_seek.window_unsupported) {
++        fail("filesystem refused to punch holes");
++    }
++    if (after_play.window_capacity_bytes != window_bytes) {
++        fail("engine did not report the window");
++    }
++    if (after_play.window_freed_pieces == 0) {
++        fail("no piece was freed");
++    }
++    if (after_seek.window_refetched_pieces == 0) {
++        fail("seek back did not download freed pieces again");
++    }
++    if (peak.load() > window_bytes + margin_bytes) {
++        fail("payload on disk went past the window: " + std::to_string(peak.load() / mib) + " MiB");
++    }
++    engine = Engine{};
++    fs::remove_all(root);
++    std::cout << "PASS\n";
++    return 0;
++}

@@ -949,7 +949,7 @@ $(FFABI_STAMP): ci/ffabi-assert.c $(FFMPEG_INC)/libavformat/avformat.h Makefile
 # rule would leave every later `make` linking a library built by the OLD one. Cargo's own
 # `rerun-if-changed` cannot save that — it is only consulted when make decides to invoke cargo at
 # all, and this target is an ordinary timestamp comparison.
-RUST_INPUTS := $(shell find rust-modules/src rust-modules/base rust-modules/machine rust-modules/net rust-modules/platform rust-modules/gfx rust-modules/ui rust-modules/plex rust-modules/telemetry rust-modules/data rust-modules/session rust-modules/media rust-modules/appkit rust-modules/screens rust-modules/build_support locales assets -type f 2>/dev/null)
+RUST_INPUTS := $(shell find rust-modules/src rust-modules/base rust-modules/machine rust-modules/net rust-modules/platform rust-modules/gfx rust-modules/ui rust-modules/plex rust-modules/telemetry rust-modules/data rust-modules/session rust-modules/storage rust-modules/media rust-modules/appkit rust-modules/screens rust-modules/stremio rust-modules/pmsshim rust-modules/build_support locales assets -type f 2>/dev/null)
 $(RUST_LIB): LICENSE $(RUST_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.lock rust-modules/build.rs ci/install-identities.json rust-modules/.cargo/config.toml Makefile ci/check-staticlib-artifact.py $(FFABI_STAMP)
 	@# BEFORE the mkdir: the seed is only ever cloned into a target dir that does not exist yet.
 	$(CARGO_SEED) restore $(RUST_TDIR) rust-modules/$(RUST_TDIR)
@@ -1339,6 +1339,10 @@ deploy: pkg/plxnative pkg/plxnative-storage $(FFMPEG_STAGED) $(SENTRY_NATIVE_STA
 	@# basenames; the app respawns the child on its next launch.
 	$(SSH) 'mkdir -p $(APPDIR)/js-service'
 	$(SCP) $(JS_SERVICE_FILES) tv:$(APPDIR)/js-service/
+	@# The C engine (`libsbengine.so`) sits beside the binary; Node stays as fallback.
+	@if [ -f "$(SBENGINE_SO)" ]; then $(SCP) "$(SBENGINE_SO)" tv:$(APPDIR)/libsbengine.so; \
+	 elif [ -f "$(SBENGINE_SO_ALT)" ]; then $(SCP) "$(SBENGINE_SO_ALT)" tv:$(APPDIR)/libsbengine.so; \
+	 else echo "note: libsbengine.so not built — skipping (Node fallback)"; fi
 	@# The subtitle faces go to their own directory (see SUBS_FONT_FILES), in one more connection.
 	$(SSH) 'mkdir -p $(APPDIR)/$(SUBS_FONT_DIR)'
 	$(SCP) $(SUBS_FONT_FILES) tv:$(APPDIR)/$(SUBS_FONT_DIR)/
@@ -1972,6 +1976,12 @@ STAGE       := ipkroot/data/usr/palm/applications/$(APPID)
 # this firmware's Node lacks `palmbus`/`pmloglib`, so the Rust app spawns `node server.js` as a
 # direct child from `paths::app_dir()/js-service`.
 JS_SERVICE_FILES = js-service/server.js
+# The C torrent engine (libsbengine.so) sits beside the binary for `sbengine::available()` to
+# dlopen. Missing is not an error: `cargo build` never stages it; a TV without it just falls
+# back to Node. `ci/build-sbengine.sh` writes the STRIPPED library to `build/sbengine/`; the
+# build tree's copy keeps its symbols and is only a fallback for the deploy path.
+SBENGINE_SO ?= build/sbengine/libsbengine.so
+SBENGINE_SO_ALT := build/sbengine/build/libsbengine.so
 
 # The .ipk is REPRODUCIBLE: same commit + same toolchain -> same sha256. That matters because the
 # manifest carries that hash and every user's TV verifies it at install time (there is no code
@@ -2084,6 +2094,14 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 	@# `paths::app_dir()/js-service`. Its settings/cache are generated under /tmp, not shipped.
 	@mkdir -p $(STAGE)/js-service
 	cp $(JS_SERVICE_FILES) $(STAGE)/js-service/
+	@# The C torrent engine sits beside the binary (dlopened by `sbengine::available()`); the
+	@# Node js-service above stays as the fallback on firmware where it cannot load. It is a
+	@# CMake artifact with no Rust link receipt, so it ships under a digest pin (below), not a
+	@# `.link.json`: `ci/build-sbengine.sh` is its provenance.
+	@if [ -f "$(SBENGINE_SO)" ]; then cp "$(SBENGINE_SO)" "$(STAGE)/libsbengine.so"; \
+	 elif [ -f "$(SBENGINE_SO_ALT)" ]; then cp "$(SBENGINE_SO_ALT)" "$(STAGE)/libsbengine.so"; \
+	 else echo "note: libsbengine.so not built — the package uses the Node server"; fi
+	@if [ -f "$(STAGE)/libsbengine.so" ]; then chmod 755 "$(STAGE)/libsbengine.so"; fi
 	@# Strip the STAGED copy only, never pkg/plxnative. ~2.4 MB of .symtab+.strtab (30% of the
 	@# download, on a device whose app partition is 615 MB total and shared with every other app).
 	@# It must not be pkg/plxnative because tools/crash-report.sh symbolizes a crash PC against
@@ -2096,6 +2114,12 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 	  python3 ci/stage-link-evidence.py "$$source" "$(STAGE)/$$(basename "$$source")" --stripped \
 	    --evidence-base "pkg/link-evidence/$(FLAVOR)/$$(basename "$$source")" || exit $$?; \
 	done
+	@# libsbengine.so is built by CMake, outside the Rust link path that emits `.link.json`
+	@# receipts. Pin the exact bytes this package carries instead, so the packaging gate still
+	@# proves the shipped engine is the artifact the build tree produced.
+	@if [ -f "$(STAGE)/libsbengine.so" ]; then \
+	  ( cd "$(STAGE)" && $(SHA256SUM) libsbengine.so ) > pkg/link-evidence/$(FLAVOR)/unreceipted.sha256; \
+	fi
 	@# Only THIS flavour's artifact — packaging one must never delete the other's.
 	rm -f pkg/$(APPID)_*_arm.ipk
 	FLAVOR=$(FLAVOR) python3 ci/mkipk.py
@@ -2113,7 +2137,10 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 	@# written because something shipped broken, and until this line the machine that built the
 	@# package was the one machine that never ran them — the first sight of a failure was a push.
 	python3 ci/check-package.py
-	python3 ci/check-packaged-elf.py $(IPK) pkg/link-evidence/$(FLAVOR)
+	@if [ -f pkg/link-evidence/$(FLAVOR)/unreceipted.sha256 ]; then \
+	  python3 ci/check-packaged-elf.py $(IPK) pkg/link-evidence/$(FLAVOR) \
+	    --unreceipted pkg/link-evidence/$(FLAVOR)/unreceipted.sha256; \
+	 else python3 ci/check-packaged-elf.py $(IPK) pkg/link-evidence/$(FLAVOR); fi
 
 # THE STABLE INSTALL IS ALWAYS A RELEASE BUILD, and that is a gate rather than a habit.
 #

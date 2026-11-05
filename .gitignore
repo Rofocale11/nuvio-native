@@ -235,3 +235,12 @@ pkg/lib*
 # appears only when somebody deliberately runs an upload — which is exactly when a 40 MB npm tree
 # must not be one `git add -A` away.
 node_modules/
+
+# The C torrent engine's build tree: CMake output, the unstripped copy and the stripped
+# `build/sbengine/libsbengine.so` that `make ipk` stages. 1.3 GB of objects, never source.
+/build/
+# Statically cross-built OpenSSL: `ci/build-openssl.sh` fetches the pinned tarball through
+# ci/deps.py into vendor/openssl-src and installs the ARM archives into vendor/openssl-prefix.
+# Both are derived from ci/dependencies.json (id: openssl); neither is source.
+/vendor/openssl-src/
+/vendor/openssl-prefix/
