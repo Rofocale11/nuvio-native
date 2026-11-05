@@ -1,5 +1,12 @@
 # The disk budget
 
+> **Status:** current for the tooling it describes, with one base-ref mismatch. `tools/disk-budget.py`
+> and `tools/build-gc.sh --worktrees` judge a lane "merged" against `origin/main`, but this fork's
+> trunk is `nuvio-native` and its lanes are cut from `forward-port/v0.9-hq`. A landed lane therefore
+> reads `unmerged` and is kept (the conservative direction, since nothing is deleted on a false
+> positive); judge it yourself with `git merge-base --is-ancestor <sha> origin/nuvio-native`. See
+> `CLAUDE.md` and `AGENTS.md`.
+
 Build output is bounded by the tooling, not by briefing every agent to clean up after itself. This
 page is the design record of that tooling and the reference for the pieces that exist today:
 
@@ -150,10 +157,16 @@ subprocess and `open` made to raise), so `ci/test_disk_budget.py` feeds it synth
 - `$PLX_BUILD_CACHE` (default `~/.cache/plxnative`): the cargo seed, and leftover `.tmp.`,
   `.restore.`, `.old.` and `.tombstone.` entries. The FFmpeg cache's live entries are never listed.
 
-**Merged lanes are judged against `origin/main`** (by the report, the planner and `build-gc.sh --worktrees` alike) when it exists, because the local `main` can be days
-behind it (then every squash-merged lane reads "unmerged"); with no `origin/main` the local `main` is
-used, and the report's `lanes judged` line says which. A lane is merged if its HEAD is an ancestor, or if
-a three-way `git merge-tree --write-tree` of the two leaves `origin/main`'s own tree. That command
+**Merged lanes are judged against `origin/main`** (by the report, the planner and
+`build-gc.sh --worktrees` alike) when it exists, because the local `main` can be days behind it;
+with no `origin/main` the local `main` is used, and the report's `lanes judged` line says which.
+**That base is wrong for this fork.** Its trunk is `nuvio-native`, `main` holds none of its commits,
+and lanes are cut from `forward-port/v0.9-hq`, so a lane that has landed reads `unmerged` here and
+is kept — the conservative direction. Judge a fork lane with
+`git merge-base --is-ancestor <sha> origin/nuvio-native`, and never delete one on this report's
+verdict. Teaching `resolve_base_ref` the fork's trunk is a code change that needs the fixtures in
+`ci/test_build_gc.py` updated with it. A lane is merged if its HEAD is an ancestor, or if a
+three-way `git merge-tree --write-tree` of the two leaves `origin/main`'s own tree. That command
 writes the merged tree, so the report and `build-gc.sh --worktrees` (which `--auto` runs hourly) point it at a
 throwaway object directory with the real one as an alternate: no object is added to the repository (git may refresh the mtime of an object that
 already exists, which is what "already landed" looks like). Rung 0 additionally requires the lane to
