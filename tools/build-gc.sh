@@ -1234,6 +1234,8 @@ derived_output() {
   case "$1" in
     rust-modules/target*) ;;                                    # every feature set's cargo target dir
     vendor/ffmpeg-*|vendor/sentry-native-*|vendor/libass-*|vendor/downloads|vendor/nanosvg|vendor/vendor) ;;
+    vendor/openssl-*) ;;                                       # ci/build-openssl.sh: the pinned tarball and its ARM prefix
+    build) ;;                                                  # ci/build-sbengine.sh: CMake output and the unstripped engine
     pkg/plxnative|pkg/plxnative-storage|pkg/plxnative-stackwalk|pkg/plxnative.debug|pkg/threadprobe) ;;
     pkg/mali-irq-sample|pkg/sockprobe|pkg/logmprobe) ;;
     pkg/*.ipk|pkg/ipk.sha256|pkg/lib*-plx.so.*|pkg/libass-plx-host.so.0*|pkg/libass-plx.0.dylib.*.new) ;;
