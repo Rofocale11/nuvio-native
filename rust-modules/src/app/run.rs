@@ -205,6 +205,9 @@ pub(crate) unsafe fn run(app: &mut App) {
         // A timed-out native Load parked by teardown is released here, on the main thread, the
         // first frame after its media thread returns (`player::engine::AbandonedLoad`).
         plx_media::player::engine::reap_abandoned_load(&mut app.adapters.player);
+        // …and a real stop's off-frame `Unload` gets its main-thread tail (gate, epoch, ACB,
+        // D1) the first frame after it returns (`player::engine::PendingRelease`).
+        plx_media::player::engine::poll_release_frame(&mut app.player.session, &mut app.adapters.player);
         app.player.session.repair_status = app.player.repair.state();
         app.bridge.publish_playback(&app.player.session, was_player);
         // The container runs its frame: the pending navigation's commit (at `PageDip`'s floor),
@@ -2369,10 +2372,13 @@ fn finish_landed_play(app: &mut App, resume_prepared: bool) {
     // A preview is the exception: the detail page stays mounted, and an off-route
     // engine is the feature, not a violation.
     if resume_prepared {
-        let started = plx_media::player::start_bufferfeed(
+        let outcome = plx_media::player::start_bufferfeed_tracked(
             &mut app.player.session,
             &mut app.adapters.player,
         );
+        let started = app.player.session.jail_load_blocked || outcome.accepted();
+        // Queued behind the previous object's `Unload`: not started yet, so not admitted yet.
+        let deferred = outcome == plx_media::player::BufferfeedStartOutcome::Deferred;
         let preview = plx_media::route::is_preview(&app.player.session);
         if started && !matches!(app.route(), AppArg::Player) && !preview {
             log("pump_play: engine started off-route → restoring AppArg::Player");
@@ -2389,7 +2395,11 @@ fn finish_landed_play(app: &mut App, resume_prepared: bool) {
             // admitted slot. Counting it spends the cycle and the later failure
             // opens the breaker, so every later title is skipped.
             let seam_absent = cfg!(feature = "hostsim") && !plx_base::devtrig::flag("clocksink");
-            if started && !seam_absent {
+            if deferred {
+                // Admission is taken when the queued start launches (or refused if the deadline
+                // refuses it), by the runner that starts it.
+                app.adapters.player.admit_preview_at_launch(!seam_absent);
+            } else if started && !seam_absent {
                 plx_media::player::preview::note_admitted();
             } else if plx_media::route::url(&app.player.session).is_empty() {
                 plx_media::player::preview::note_refused_direct(
@@ -2997,18 +3007,43 @@ pub(crate) unsafe fn heartbeat(app: &mut App, fr: &mut Frame) {
         }
 }
 
+/// How the process ends once [`shutdown`] has flushed everything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Teardown {
+    /// SDL is quit and nothing native is running: return to `main`, drop the `App`, let libc exit.
+    Return,
+    /// A native worker is still inside firmware, so no destructor, `atexit` handler or C++ static
+    /// finalizer may run under it: the caller ends the process with `_exit` without unwinding.
+    ExitNow,
+}
+
+/// The decision [`shutdown`] acts on, apart from the teardown it performs.
+pub(crate) fn teardown_for(native_exit: plx_media::player::engine::NativeExit) -> Teardown {
+    match native_exit {
+        plx_media::player::engine::NativeExit::Clean => Teardown::Return,
+        plx_media::player::engine::NativeExit::WorkerInFirmware => Teardown::ExitNow,
+    }
+}
+
 /// Teardown after the loop: abandon the pending report, stop the feed, wait for the stop
-/// scrobble, close the capture stream and the poster workers, quit SDL.
+/// scrobble, close the capture stream and the poster workers, quit SDL (unless a worker is still
+/// in firmware, which returns [`Teardown::ExitNow`]).
 pub(crate) unsafe fn shutdown(
     ps: &mut plx_media::route::PlaybackSession,
     pa: &mut plx_media::player::adapter::PlayerAdapter,
-) {
+) -> Teardown {
     // Kill the `node server.js` child this app spawned, before the process group goes away.
     super::boot::stop_p2p_service();
     plx_media::player::report::abandon_pending(ps);
     if is_started() {
         plx_media::player::stop_bufferfeed(ps, pa);
     }
+    // The stop's `Unload` runs off-frame; the process must not exit inside it, nor with the
+    // object it is releasing left undestroyed. The wait is bounded, and a worker still inside
+    // firmware (an overdue `Unload`, or a timed-out Load's media thread) means the display must not
+    // be torn down under it, and nothing may run the firmware libraries' destructors either: the
+    // caller (`app::run_and_shutdown`) ends the process with `_exit` on `Teardown::ExitNow`.
+    let native_exit = plx_media::player::engine::exit_native(pa);
     // The stop scrobble is posted off-thread now, and this process is about to die with any
     // worker still running — so THIS is the one place its result has to be waited for, or the
     // resume point the user just earned is silently dropped. Same cost the old inline call
@@ -3016,7 +3051,14 @@ pub(crate) unsafe fn shutdown(
     plx_media::route::drain_scrobble();
     crate::capture::shutdown();
     crate::app::adapters::poster::shutdown();
-    SDL_Quit();
+    let teardown = teardown_for(native_exit);
+    match teardown {
+        Teardown::Return => SDL_Quit(),
+        Teardown::ExitNow => {
+            log("shutdown: a native worker is still inside firmware; SDL_Quit skipped, exiting without unwinding");
+        }
+    }
+    teardown
 }
 
 /// Re-inject one recorded input (`app::recorder`'s encodings) for the frame being replayed: SDL

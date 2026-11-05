@@ -37,17 +37,48 @@ and seeks by time via `av_seek_frame` (libavformat's own Cues index).
   2026-10-15 (release build, mock, Guest): `StarfishMediaAPIs::Unload` alone held the frame that
   handled BACK for 113-150 ms on every return (`teardown spans:` line, `sf_unload:`); the sched
   trace put the main thread in D state in `ioctl` (~31 ms), then in `futex` (~74 ms), inside that
-  call. `teardown` (real stop only: `for_reload == false`) now moves the native phase to
-  `Releasing`, hands the Unload to an `sf-unload` worker with an `UnloadTicket`, and parks the
-  worker on the adapter. The rest of the release — callback gate, epoch retire, ACB
-  `setState(UNLOADED)`, D1 or quarantine, `destroy_window` — stays on the main thread and runs in
-  `settle_release`: on the first frame after the Unload returns (`run.rs` → `poll_release`), or
-  at once, blocking, from `start_bufferfeed_inner`, `pa.mt()`, `pa.split()` and `shutdown`, so
-  nothing reaches the seam or builds a new object while the old one is still inside Unload. While
-  `Releasing`, only that epoch's `UnloadCompleted` callback is admitted (it is D1's evidence) and no
-  native session can begin. Reloads, suspend and the decoder-release park (`for_reload == true`)
-  keep the synchronous release. The log reads `native lifecycle: off-frame Unload epoch=N released
-  X ms after the stop`, with `(a caller waited for it)` when a blocking caller had to wait.
+  call. `teardown` (real stop only: `for_reload == false`) moves the native phase to `Releasing`,
+  hands the Unload to an `sf-unload` worker with an `UnloadTicket`, and parks the worker on the
+  adapter. The rest of the release — callback gate, epoch retire, ACB `setState(UNLOADED)`, D1 or
+  quarantine, `destroy_window` — stays on the main thread and is driven by
+  `engine::poll_release_frame`, which `app::run` calls once a frame: it joins the worker only once
+  `is_finished()` says the join cannot block, feeds that return to the release machine, runs the
+  tail, and then launches anything that was queued behind it.
+- **A hung `Unload` fails typed after 10 s, and nothing waits on it (PLX-NATIVE-1Q,
+  `player/release.rs`).** The release lifecycle is the pure machine `NativeRelease`
+  (`Idle → Releasing → (tail, queued start) → Idle`, with `Overdue` once
+  `RELEASE_DEADLINE` = 10 s passes). On a set where `Unload` never returns (PLX-NATIVE-1Q,
+  webOS 4.9.6), the UI thread used to block in the `JoinHandle::join` of the next start, the token
+  accessors and the exit, with no bound. Now:
+  - **A start is never joined.** `start_bufferfeed_for` asks the machine; while the object is
+    `Releasing` the start is queued and answered `BufferfeedStartOutcome::Deferred` (accepted: the
+    HUD reads Connecting, from `SHARED.start_queued`), and the frame that runs the tail launches it.
+    `start_bufferfeed_tracked` records the transaction; the foreground restore watches it through
+    `PlayerAdapter::{watch_queued_start, take_queued_landing}` and lands on
+    `ForegroundLoadStart::Deferred`.
+  - **The seam is fenced, not joined.** `player::sink()` answers
+    `plx_platform::tv::sink::RefusingSink` while the native phase is `Releasing` (every verb a
+    no-op, the memoized queries real), so `PlayerAdapter::mt()`/`split()` hand out the token at
+    once. Only the release itself uses `player::raw_sink()` (the `sf-unload` worker and its tail).
+  - **Overdue is a read-out, never a destroy.** A start asked for after the deadline (or after it
+    passed with one queued) is refused with `ps.native_start_refused = Some(StartRefusal::
+    ReleaseTimeout)` — `FailureKind::ReleaseTimeout`, wire code `release_timeout`, with Try Again —
+    and **the object stays parked**: `Overdue` never D1s or destroys it, because the worker may
+    still be inside firmware. A late `Unload` still runs the full tail when it returns.
+  - **Exit is bounded too.** `engine::exit_native` waits at most the deadline; a worker still in
+    firmware returns `NativeExit::WorkerInFirmware`, the parked Engine/payload are leaked
+    (`leak_parked_for_exit`) and `app::run::shutdown` returns `Teardown::ExitNow`, so
+    `app::mod::run_and_shutdown` calls `plx_base::process::exit_now` instead of returning through
+    `App`'s destructor (`SDL_Quit` and libc/static finalizers would race the live call).
+  - **A stop cancels a queued start** (`teardown` sends `CancelQueued` before its early returns),
+    and a landing that replaced the session cannot strand one: the queue lives in the adapter's
+    machine, not in `PlaybackSession`. The machine publishes its one derived fact to
+    `SHARED.start_queued`; `reset_session` deliberately does not clear it.
+  - Reloads, suspend and the decoder-release park (`for_reload == true`) keep the synchronous
+    release. Logs: `start_bufferfeed: the previous Unload is still running; start deferred`,
+    `native lifecycle: the previous Unload is overdue (refusing native start)`,
+    `native lifecycle: off-frame Unload epoch=N released X ms after the stop`, and
+    `shutdown: a native worker is still inside firmware; SDL_Quit skipped…`.
 - `pump.rs` — the **main-thread pump** (was `bufferfeed_pump`): each frame it drives bind → Play →
   feed and services seeks.
 - `threads.rs` — the workers beside the demuxer: **`load_thread`** (construct Starfish + `Load()`,
@@ -169,8 +200,11 @@ something.
   refused, and `reap_abandoned_load` runs the ordinary Unload → gate → retire → D1 release on the
   main thread once Load returns; a Load that never returns leaks its object. A refusal says why:
   a reload refused for the parked Load (`pump::settle_reload`) republishes `load_timed_out`, and a
-  refused FRESH start sets `ps.native_start_refused`, which `player::state` derives `Error` from
-  (cause `load_timeout`, Try Again offered) because no Engine exists to publish it; the first start that is not refused (`start_bufferfeed_for`, which every reload shares) clears it. A Load that has not
+  refused FRESH start sets `ps.native_start_refused = Some(StartRefusal::LoadTimeout)`, which
+  `player::state` derives `Error` from (cause `load_timeout`, Try Again offered) because no Engine
+  exists to publish it; the release deadline's refusal uses the same field with
+  `StartRefusal::ReleaseTimeout` (`release_timeout`, above). The first start that is not refused
+  (`start_bufferfeed_for`, which every reload shares) clears it. A Load that has not
   timed out is still joined. The host concurrent tests model this boundary, not
   the firmware's native initialization. ACB dispatch is additionally constrained by stage/bind
   ordering; the C Starfish gate does not wrap ACB calls.

@@ -30,6 +30,7 @@ pub mod lifecycle;
 pub mod machine;
 pub mod playurl; // the `plxnative-playurl` dev trigger: a stream and its Load declaration, parsed beside the engine that acts on it
 pub mod preview;
+pub mod release; // the native object's off-frame release lifecycle (pure machine); `engine` runs it
 // `test` here is THIS crate's own test build only, not `any(test, feature = "test-support")`: the
 // application crate's `port.rs` names `StarfishSink` in every build of its library that is not its
 // own test build, and `cargo check --lib --tests` builds that library with this crate's
@@ -79,12 +80,32 @@ use shared::{
 /// (`player::ffi::StarfishSink`) or the simulator's (`player::ffi_host::HostSink`) once at boot; a
 /// hostsim test binary reads the host sink directly, so it needs no port. Everything in `player/`
 /// reaches the seam as `sink().<verb>(mt, ..)`, and nothing branches on which platform it is.
-#[cfg(not(all(any(test, feature = "test-support"), feature = "hostsim")))]
+///
+/// **While an off-frame `Unload` owns the native object this answers [`FENCE`]**, so the
+/// main thread cannot reach the object the worker is inside (the fence `PlayerAdapter::mt` used to
+/// provide by joining the worker, without a bound: PLX-NATIVE-1Q). The release itself, which has
+/// to reach the real seam, uses [`raw_sink`].
 fn sink() -> &'static dyn plx_platform::tv::sink::VideoSink {
+    if SHARED.native_releasing() {
+        &FENCE
+    } else {
+        raw_sink()
+    }
+}
+
+/// What a main-thread verb gets while the object is inside its off-frame `Unload`: nothing happens
+/// (every verb refused, `NoSink`'s answers), except the memoized queries that say nothing about the
+/// object, which keep the real answer.
+static FENCE: plx_platform::tv::sink::RefusingSink = plx_platform::tv::sink::RefusingSink(raw_sink);
+
+/// The seam itself, unfenced: only the native release (the `Unload` worker and its main-thread
+/// tail) may use it while the object is `Releasing`.
+#[cfg(not(all(any(test, feature = "test-support"), feature = "hostsim")))]
+fn raw_sink() -> &'static dyn plx_platform::tv::sink::VideoSink {
     plx_platform::tv::sink::installed()
 }
 #[cfg(all(any(test, feature = "test-support"), feature = "hostsim"))]
-fn sink() -> &'static dyn plx_platform::tv::sink::VideoSink {
+fn raw_sink() -> &'static dyn plx_platform::tv::sink::VideoSink {
     &ffi_host::HostSink
 }
 
@@ -763,7 +784,7 @@ pub fn state(ps: &crate::route::PlaybackSession) -> shared::PlaybackState {
     // the Resolving spinner until it lands. So does every recovery no Engine waits on (the
     // foreground restore's resume, a rollback after a Load that failed before its Engine
     // existed): `route::engineless_flight_outstanding`.
-    if crate::route::play_pending() || crate::route::engineless_flight_outstanding() {
+    if crate::route::play_pending() || crate::route::engineless_flight_outstanding() || SHARED.start_queued.load(Relaxed) {
         return shared::PlaybackState::Resolving;
     }
     // …and so is the PRE-FLIGHT refusal, for exactly the same reason: `/decision` answers before a
@@ -771,11 +792,11 @@ pub fn state(ps: &crate::route::PlaybackSession) -> shared::PlaybackState {
     // that owns `pb_state` never runs. Deriving it in the one reader keeps a single writer — the
     // alternative is poking `Error` into the player's state from the frame loop. It sits BELOW the
     // resolve check because a fresh resolve is the thing that retires the last verdict.
-    // A start refused because a timed-out Load is still parked (`ps.native_start_refused`) is the
-    // same kind of fact: no Engine was built, so the pump that owns `pb_state` never runs and
+    // A start refused because a timed-out Load is still parked, or because the previous object's
+    // off-frame Unload outlived `RELEASE_DEADLINE` (`ps.native_start_refused`) is the same kind of fact: no Engine was built, so the pump that owns `pb_state` never runs and
     // nothing else could say why the player is empty.
     if ps.jail_load_blocked
-        || ps.native_start_refused
+        || ps.native_start_refused.is_some()
         || crate::route::play_refused(ps)
         || crate::route::play_resolution_failed(ps)
     {
@@ -897,6 +918,10 @@ pub enum FailureKind {
     /// reported: this is a HANG, and conflating the two made a k5lp-style stall indistinguishable
     /// from an ordinary rejection on the wire.
     LoadTimeout,
+    /// The previous native object's off-frame `Unload` had not returned after
+    /// [`release::RELEASE_DEADLINE`], so a new start was refused rather than handed a second object
+    /// (PLX-NATIVE-1Q). A hang like [`LoadTimeout`](Self::LoadTimeout), on the other side of the session.
+    ReleaseTimeout,
     /// Everything else. Honest rather than tidy — see the type's doc.
     Unspecified,
 }
@@ -917,6 +942,7 @@ impl FailureKind {
             FailureKind::TvPipeline => C::TvPipeline,
             FailureKind::JailMissingRtkmem => C::JailMissingRtkmem,
             FailureKind::LoadTimeout => C::LoadTimeout,
+            FailureKind::ReleaseTimeout => C::ReleaseTimeout,
             FailureKind::Unspecified => C::Unspecified,
         }
     }
@@ -983,7 +1009,7 @@ pub fn failure_actions(kind: FailureKind, cx: FailureContext) -> Vec<FailureActi
     use FailureAction as A;
     use FailureKind as K;
     let transient = matches!(kind, K::MediaSource | K::PlaybackInterrupted | K::LoadTimeout
-        | K::Unspecified);
+        | K::ReleaseTimeout | K::Unspecified);
     let mut v = Vec::with_capacity(4);
     match kind {
         // A device finding: nothing about the request changes it; only the repair can.
@@ -1077,6 +1103,8 @@ enum RuntimeFailure {
     PlaybackInterrupted,
     /// Starfish refused the Load declaration, so no decoder session could start.
     TvPipeline,
+    /// The previous object's `Unload` is overdue. See [`FailureKind::ReleaseTimeout`].
+    ReleaseTimeout,
     /// Issue #74 D.1.4's `NATIVE_LOAD_BUDGET` fired — a hang, not a firmware refusal. See
     /// [`FailureKind::LoadTimeout`].
     LoadTimeout,
@@ -1216,6 +1244,16 @@ fn error_shape(
         // refusal — see `RuntimeFailure::LoadTimeout`'s doc), and now its own reader-facing wording
         // too: the pipeline never actually answered, so "rejected" would claim a firmware verdict
         // that was never given.
+        // The read-out reuses the load-timeout wording: both are "the television did not answer in
+        // time", and a new sentence needs every language (the catalog is not extended here).
+        RuntimeFailure::ReleaseTimeout => ErrorShape {
+            kind: FailureKind::ReleaseTimeout,
+            caption: plx_platform::i18n::msg::widgets_failure_load_timeout_c(),
+            panel: plx_platform::i18n::msg::widgets_panel_load_timeout(),
+            readout: plx_platform::i18n::msg::widgets_reason_load_timeout(),
+            detail: std::borrow::Cow::Borrowed(""),
+            no_pass: false,
+        },
         RuntimeFailure::LoadTimeout => ErrorShape {
             kind: FailureKind::LoadTimeout,
             caption: plx_platform::i18n::msg::widgets_failure_load_timeout_c(),
@@ -1292,18 +1330,26 @@ pub fn error_now(ps: &crate::route::PlaybackSession) -> ErrorShape {
     let demux_io_failed = SHARED
         .demux_io_failed
         .load(std::sync::atomic::Ordering::Acquire);
-    with_forced_playback_context(error_shape(
-        SHARED.demux_no_video.load(Relaxed),
-        crate::route::is_transcoding(ps),
-        playing_subscription(&ps),
-        crate::route::play_verdict(ps).as_deref(),
+    // The refused start's cause wins over the other signals: the refused start builds no Engine,
+    // so nothing else can identify why the player is empty.
+    let cause = if ps.native_start_refused == Some(crate::route::StartRefusal::ReleaseTimeout) {
+        RuntimeFailure::ReleaseTimeout
+    } else {
         runtime_failure(
             demux_failed,
             demux_io_failed,
             SHARED.load_failed.load(Relaxed),
             // The refused start's cause: an abandoned Load exists only after the budget fired.
-            SHARED.load_timed_out.load(Relaxed) || ps.native_start_refused,
-        ),
+            SHARED.load_timed_out.load(Relaxed)
+                || ps.native_start_refused == Some(crate::route::StartRefusal::LoadTimeout),
+        )
+    };
+    with_forced_playback_context(error_shape(
+        SHARED.demux_no_video.load(Relaxed),
+        crate::route::is_transcoding(ps),
+        playing_subscription(&ps),
+        crate::route::play_verdict(ps).as_deref(),
+        cause,
     ), crate::route::forced_direct_play(ps))
 }
 
@@ -2608,7 +2654,7 @@ pub fn every_failure_row() -> Vec<(FailureKind, FailureContext, Vec<FailureActio
     use FailureKind as K;
     let kinds = [K::DecisionRefused, K::PlaybackPolicy, K::NoVideoTranscodeTarget, K::NoVideoTrack,
         K::MediaSource, K::PlaybackInterrupted, K::TvPipeline, K::LoadTimeout,
-        K::JailMissingRtkmem, K::Unspecified];
+        K::ReleaseTimeout, K::JailMissingRtkmem, K::Unspecified];
     let mut out = Vec::new();
     for kind in kinds {
         for forced in [false, true] {
@@ -2687,6 +2733,7 @@ mod tests {
             (K::TvPipeline, "tv_pipeline"),
             (K::JailMissingRtkmem, "jail_missing_rtkmem"),
             (K::LoadTimeout, "load_timeout"),
+            (K::ReleaseTimeout, "release_timeout"),
             (K::Unspecified, "unspecified"),
         ];
         for (kind, code) in table {

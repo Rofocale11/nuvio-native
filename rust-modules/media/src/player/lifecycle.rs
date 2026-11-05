@@ -811,6 +811,9 @@ pub trait ForegroundActuator {
 pub enum ForegroundLoadStart<Attempt> {
     /// A rollback flight owns the way forward ([`ForegroundActuator::land_recovery`]).
     Pending,
+    /// The start is queued behind the previous native object's `Unload`
+    /// ([`crate::player::release::NativeRelease`]): parked like `Pending`, landed by the same poll.
+    Deferred,
     AlreadyRunning,
     Launched(Attempt),
     Failed,
@@ -935,7 +938,7 @@ fn settle_load_start<A: ForegroundActuator>(
 ) -> bool {
     match start {
         ForegroundLoadStart::Launched(attempt) => lifecycle.finish_load_launch(id, attempt),
-        ForegroundLoadStart::Pending => {
+        ForegroundLoadStart::Pending | ForegroundLoadStart::Deferred => {
             let _ = lifecycle.finish_load_pending(id);
             false
         }

@@ -635,6 +635,11 @@ pub struct Shared {
     /// `error_shape` tell a k5lp-style hang apart from an ordinary firmware refusal on the wire,
     /// as `FailureKind::LoadTimeout` rather than the generic `FailureKind::TvPipeline`.
     pub load_timed_out: AtomicBool,
+    /// A native start is queued behind the previous object's still-running `Unload`. Written ONLY
+    /// by the `PlayerAdapter` after each release-machine step (it publishes the machine's
+    /// `has_queued`), never by a session; `state()` derives `Resolving` from it. Not part of
+    /// `reset_session`: the queue outlives a session reset exactly as the machine does.
+    pub start_queued: AtomicBool,
     /// The pipeline took the video decoder back from an ESTABLISHED session: `type=18 num=600`
     /// (`"VDEC resource is released by policy action"`) after a picture. Measured on the dev set
     /// (webOS 4, 2026-10-13): a direct play left paused until the screensaver came on got this
@@ -1032,6 +1037,7 @@ impl Shared {
             demux_no_video: AtomicBool::new(false),
             load_failed: AtomicBool::new(false),
             load_timed_out: AtomicBool::new(false),
+            start_queued: AtomicBool::new(false),
             decoder_revoked: AtomicBool::new(false),
             native_load_deferred_logged_epoch: AtomicU32::new(0),
             native_load_elapsed_ms: AtomicU64::new(0),
@@ -1295,6 +1301,18 @@ impl Shared {
         }
         state.phase = to;
         true
+    }
+
+    /// Whether an off-frame `Unload` owns the native object ([`NativeSessionPhase::Releasing`]):
+    /// `player::sink()` answers the fenced sink for the main thread while this holds.
+    pub fn native_releasing(&self) -> bool {
+        matches!(
+            self.native_session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phase,
+            NativeSessionPhase::Releasing { .. }
+        )
     }
 
     /// Whether a timed-out Load is parked ([`NativeSessionPhase::Abandoned`]): the native object
