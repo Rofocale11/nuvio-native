@@ -1,7 +1,8 @@
 //! **The sign-in screen, as an owned `Screen`** (restructure spec §13, phase 6 — `ui/login.rs`
-//! moved). Plex's own server-rendered QR PNG (fetched by [`plx_session::auth`], decoded + tinted here)
-//! plus the typed short-code fallback, driven by the flow's phase. Scanning the QR on a phone
-//! opens plex.tv pre-filled with the pin; the flow's background poll then advances us onward.
+//! moved). The in-process shim's server-rendered QR PNG for Nuvio's device login (fetched by
+//! [`plx_session::auth`], decoded + tinted here) plus the typed short-code fallback, driven by the
+//! flow's phase. Scanning the QR on a phone opens `nuvio.tv/link` pre-filled with the pin; the
+//! flow's background poll then advances us onward.
 //!
 //! It has no panel of its own and is not a table. Its controls are ONE group of up to two
 //! `ElemKind::Bare` elements, walked in order: the read-out's primary action (the failed/stalled/
@@ -1786,13 +1787,13 @@ impl LoginScreen {
         let status = self.waiting_label();
         let right = qr_layout(layout, status, f.measure);
 
-        TextView::new("plex.tv/link", theme::size::TITLE, theme::TEXT_HEADING)
+        TextView::new("nuvio.tv/link", theme::size::TITLE, theme::TEXT_HEADING)
             .bold()
             .h(HAlign::Center)
             .draw(p, right.url);
 
-        // QR on a bright card (the white border is the scan quiet-zone). Plex's own PNG → we just
-        // show it.
+        // QR on a bright card (the white border is the scan quiet-zone). The shim's served PNG →
+        // we just show it.
         let card = right.card;
         p.rrect(card, 24.0, 24.0, theme::SURFACE_QR_PLATE);
         if self.qr_tex != 0 {
@@ -1803,9 +1804,9 @@ impl LoginScreen {
                 card.w - 2.0 * pad,
                 card.h - 2.0 * pad,
             );
-            // Plex's PNG is WHITE modules on a transparent ground; tint black so the modules render
-            // dark on the white card (the transparent ground shows the card) → a scannable
-            // black-on-white QR.
+            // The served PNG wears plex.tv's shape — WHITE modules on a transparent ground — so
+            // tint black to render dark modules on the white card (the transparent ground shows the
+            // card) → a scannable black-on-white QR.
             p.tex(self.qr_tex, inner, 0.0, theme::scrim_black(1.0));
         } else {
             plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::PageSpinner, "login-qr");

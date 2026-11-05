@@ -622,12 +622,18 @@ posters, a tile opens the shim-backed Detail (`rk=10369`), the Detail's bookmark
 title's membership, and the Sort & Filter menu opens (`overlay=watchlist_menu`) with the grid
 reflowing under it. The 2026-11-02 television pass below exercised these.
 
-Two further tier-C presentation defects were found on the same simulator and are fixed:
+Further tier-C presentation defects were found on the same simulator and are fixed:
 
 - **The shared strip's capsule froze on the pill the user came from while the Watchlist was on
   top.** The Watchlist wears the bar, but `run::update`'s chrome chain only stepped
   `Bridge::update_home_chrome` on Home, Library and Search, so the capsule's springs never saw the
-  Watchlist's selection. The arm covers `AppArg::Watchlist` too now.
+  Watchlist's selection. The arm covers `AppArg::Watchlist` too now. **The same freeze came back on
+  the Library's pushed Collections and Recommended pages** (2026-11-05): they wear the bar, draw it,
+  and let Up seat focus on the page's own pill, but `app.route()` is neither `AppArg::Library` nor
+  `AppArg::Search`/`AppArg::Watchlist`, so no arm stepped the capsules and nothing highlighted. The
+  hand-written route list is gone: `update` gates the step on `bridge::wears_tab_bar`, the predicate
+  the bar is published and painted by, and
+  `update_steps_the_shared_strip_on_every_page_that_wears_the_tab_bar` pins that shape.
 - **OK on a Continue Watching tile did nothing under "Open details".** Home asks
   `deck_press().press_plays()` and emits either `Play` (which carries a resume point) or `Detail`.
   The port's `activate_home_item` then passed `home_menu_from_deck` as `activate_card`'s
@@ -635,9 +641,14 @@ Two further tier-C presentation defects were found on the same simulator and are
   stream, silently lost — instead of opening the page. `want_play` now comes from the request
   itself (`resume_ns.is_some()`), and the route-test pump performs the production opener so a World
   test grades that wiring.
+- **The sign-in screen still named `plex.tv/link`** while the flow it drives is Nuvio's: the QR is
+  minted by the in-process shim from `DEVICE_LOGIN_WEB_BASE_URL` (`https://nuvio.tv/link`), but the
+  label under it was the upstream literal. It reads `nuvio.tv/link` now;
+  `ci/localization-exceptions.json` follows the literal, and the screenshot mock's QR encodes the
+  same host.
 
-Both were verified on the simulator: Movies → Watchlist leaves the capsule on the bookmark, and a
-Continue Watching tile opens its Detail page.
+The first two were verified on the simulator: Movies → Watchlist leaves the capsule on the bookmark,
+and a Continue Watching tile opens its Detail page.
 
 **Fixed 2026-11-04, and it was four different causes.** The four `plx_data` failures above: the two
 `…forty_servers…` fan-out cases forged their servers on a hard-coded low loopback port, which this

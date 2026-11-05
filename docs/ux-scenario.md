@@ -236,15 +236,15 @@ draws rather than cutting to it. (LG's guidance is explicit that the splash shou
 
 Reached automatically when there is no usable session, and on demand from the account menu. It shows
 a **QR code** and a **four-character link code**, with the instruction to scan it or go to
-`plex.tv/link` and enter the code. A spinner reads *"Waiting for you to sign in…"* and the screen
+`nuvio.tv/link` and enter the code. A spinner reads *"Waiting for you to sign in…"* and the screen
 advances by itself the moment the account is linked. Nothing needs pressing; after a minute with no
 answer the spinner's line becomes *"Still waiting — press OK for a new code"*, and OK mints a fresh
 code without leaving the screen.
 
-*The code in the figure, DEMO, and its QR are the mock server's stand-in for plex.tv's pin
+*The code in the figure, DEMO, and its QR are the mock server's stand-in for Nuvio's device-login
 service (§9); a real code is a one-time, short-lived claim code that names no account.*
 
-Account **creation** happens on plex.tv, not in the app.
+Account **creation** happens on nuvio.tv, not in the app.
 
 ### 5.3 Who's watching
 

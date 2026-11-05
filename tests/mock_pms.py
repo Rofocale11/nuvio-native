@@ -1343,9 +1343,10 @@ DEMO_ACCOUNT_TOKEN = "s" + hashlib.sha1(b"mock-pms-demo-account").hexdigest()[:8
 # sign-in over a stored Demo session can be shown to publish the new account, not the old one.
 SECOND_ACCOUNT_TOKEN = "s" + hashlib.sha1(b"mock-pms-second-account").hexdigest()[:8]
 SECOND_ACCOUNT = {"id": 2001, "uuid": "second-user", "username": "second", "title": "Alex Example"}
-# What the demo sign-in QR encodes: the page a person types a code into. A scan of a screenshot
-# lands on plex.tv's own link page, which asks for a code this server invented — harmless.
-DEMO_QR_TEXT = b"https://plex.tv/link"
+# What the demo sign-in QR encodes: the page a person types a code into, matching the label the
+# sign-in screen draws under the QR. A scan of a screenshot lands on Nuvio's link page, which asks
+# for a code this server invented — harmless.
+DEMO_QR_TEXT = b"https://nuvio.tv/link"
 
 
 def demo_cache_dir():

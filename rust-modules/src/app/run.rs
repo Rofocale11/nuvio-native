@@ -2152,51 +2152,40 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         // delivers every frame through `bridge::frame` — not a second call from this function.
         // dev: /tmp/plxnative-pickuser=<index> — `crate::dev::scenarios::pickuser_tick`.
         crate::dev::scenarios::pickuser_tick(app);
-        // **The bare route, for every screen below** — `page_of` stood on each of these three
-        // guards while a popover was a ROUTE that had to be resolved onto the page beneath it.
-        // Neither menu is a route since phase 10, so a `Route` names exactly one page. Whether
-        // that page also UPDATES is the CONTAINER's question and is asked beside it, once, as
+        // **The bare route, for every screen below** — `page_of` stood on each of these guards
+        // while a popover was a ROUTE that had to be resolved onto the page beneath it. Neither
+        // menu is a route since phase 10, so a `Route` names exactly one page. Whether that page
+        // also UPDATES is the CONTAINER's question and is asked beside it, once, as
         // `bridge::host_frozen` — the host fold, off the surfaces' own `Style`.
 
-        if !super::bridge::host_frozen(&app.pages)
-            && matches!(app.route(), AppArg::Home)
-        {
-            crate::dev::scenarios::hero_osc_tick(app, fr.now);
-            crate::dev::scenarios::home_fold_osc_tick(app, fr.now);
-            crate::dev::scenarios::home_osc_tick(app, fr.now);
-            // only when home is actually drawn — stepping its 16×24 cell springs during
-            // Player/Detail frames was pure waste on the A53 (the ui::press dip/commit is driven
-            // route-agnostically right after `dt` above)
-            let (_, moving) = plx_machine::idle::scoped_motion(|| {
-                app.bridge.update_home_chrome(&mut app.pages, &mut app.glass, fr.dt);
-            });
-            fr.underlay_moving |= moving;
-        } else if !super::bridge::host_frozen(&app.pages)
-            && matches!(app.route(), AppArg::Library)
-        {
-            crate::dev::scenarios::lib_osc_tick(app, fr.now);
-            crate::dev::scenarios::lib_switch_tick(app, fr.now);
-            // scoped like Home's above, because this page can be the one UNDER the account
-            // popover now and its glass backdrop is refreshed off the underlay's motion
-            let (_, moving) = plx_machine::idle::scoped_motion(|| {
-                app.bridge.update_home_chrome(&mut app.pages, &mut app.glass, fr.dt);
-            });
-            fr.underlay_moving |= moving;
-        } else if !super::bridge::host_frozen(&app.pages)
-            && matches!(app.route(), AppArg::Search | AppArg::Watchlist)
-        {
-            // Search and the Watchlist wear the same shared bar as Home/Library
-            // (`ScreenArg::chrome() == Chrome::TabBar`, `screens/registry.rs`), and neither screen's
-            // `tick` steps the strip's capsule/scroll/chip springs — those live in `Bridge`'s own
-            // `strip: StripRender` field. Without this arm those springs freeze at whatever the
-            // previously-drawn page left them at (the capsule stayed on the pill the user came
-            // FROM while the Watchlist was on top), and `ChromeSnapshot::members`'s published
-            // strip rects (read by pointer hit-testing and focus) go stale. This mirrors the
-            // Home/Library arms above rather than adding another call site.
-            let (_, moving) = plx_machine::idle::scoped_motion(|| {
-                app.bridge.update_home_chrome(&mut app.pages, &mut app.glass, fr.dt);
-            });
-            fr.underlay_moving |= moving;
+        if !super::bridge::host_frozen(&app.pages) {
+            let route = app.route();
+            if matches!(&route, AppArg::Home) {
+                // only when home is actually drawn — stepping its 16×24 cell springs during
+                // Player/Detail frames was pure waste on the A53 (the ui::press dip/commit is
+                // driven route-agnostically right after `dt` above)
+                crate::dev::scenarios::hero_osc_tick(app, fr.now);
+                crate::dev::scenarios::home_fold_osc_tick(app, fr.now);
+                crate::dev::scenarios::home_osc_tick(app, fr.now);
+            } else if matches!(&route, AppArg::Library) {
+                crate::dev::scenarios::lib_osc_tick(app, fr.now);
+                crate::dev::scenarios::lib_switch_tick(app, fr.now);
+            }
+            // **EVERY page that wears the bar, by the predicate the bar is published and painted
+            // by** — never a hand-written route list. The strip's focus/selection capsules, its
+            // scroll and the profile chip's unfurl live in `Bridge`'s own `strip: StripRender` and
+            // are stepped only here; a bar-wearing page missing from this gate still draws the bar
+            // and still lets the engine seat focus on it, so Up navigates and NOTHING highlights.
+            // That was the Watchlist once (docs/nuvio/UPSTREAM.md), then the Library's Collections
+            // and Recommended pages, which are pushed pages rather than `AppArg::Library`.
+            // Scoped because the page can be the one UNDER the account popover, whose glass
+            // backdrop is refreshed off the underlay's motion.
+            if super::bridge::wears_tab_bar(&route) {
+                let (_, moving) = plx_machine::idle::scoped_motion(|| {
+                    app.bridge.update_home_chrome(&mut app.pages, &mut app.glass, fr.dt);
+                });
+                fr.underlay_moving |= moving;
+            }
         }
         // dev: /tmp/plxnative-searchosc — `crate::dev::scenarios::search_osc_tick`.
         crate::dev::scenarios::search_osc_tick(app, fr.now);

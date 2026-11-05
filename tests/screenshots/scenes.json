@@ -82,7 +82,7 @@
     },
     {
       "name": "signin",
-      "state": "The QR sign-in screen with the mock's pin: code DEMO and a QR that the mock generated (it encodes https://plex.tv/link). No token is armed on this scene.",
+      "state": "The QR sign-in screen with the mock's pin: code DEMO and a QR that the mock generated (it encodes https://nuvio.tv/link). No token is armed on this scene.",
       "triggers": {"login": ""},
       "no_token": true,
       "expect": ["auth: qr png", "coldopen screen=login"],
