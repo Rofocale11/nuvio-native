@@ -93,10 +93,11 @@ gh run list --workflow build-ipk.yml --limit 3
 gh run watch <run-id>
 ```
 
-On a tag, `build-ipk` runs, in order: version agreement, tag/version guard, build, package
-assertions, ELF, binary size, font hinting, webosbrew compatibility, firmware load matrix. Then it
-attaches the `.ipk` and `ipk.sha256` to the GitHub Release. A manual dispatch on a branch builds
-the same package but creates no release.
+On a tag, `build-ipk` runs, in order: version agreement, tag/version guard, the C torrent engine
+(`ci/build-sbengine.sh`, which builds the static OpenSSL prefix on a cache miss), build, package
+assertions, "the package carries the C engine", ELF, binary size, font hinting, webosbrew
+compatibility, firmware load matrix. Then it attaches the `.ipk` and `ipk.sha256` to the GitHub
+Release. A manual dispatch on a branch builds the same package but creates no release.
 
 ### 8. Verify what a user downloads
 

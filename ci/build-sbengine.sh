@@ -66,8 +66,13 @@ echo "=== cmake configure (webOS ARM) ==="
 # configure here always starts clean. PKG_CONFIG is disabled for the same reason: on a desktop
 # it reads /usr/lib/pkgconfig, not the sysroot.
 rm -rf "$REPO_ROOT/build/sbengine/build"
+# FetchContent's clones and tarballs go OUTSIDE `build/`: this configure wipes that directory on
+# every run, and in CI `build/sbengine/deps` is the one part of the engine build a cache can
+# carry between runs (Boost 1.86 is a 140 MB tarball and libtorrent a full clone). Locally it
+# simply avoids re-downloading on rebuild.
 cmake -S "$WORK" -B "$REPO_ROOT/build/sbengine/build" -G "Unix Makefiles" \
   -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE \
+  -DFETCHCONTENT_BASE_DIR="$REPO_ROOT/build/sbengine/deps" \
   -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/ci/cmake-toolchains/webos-arm.cmake" \
   -DOPENSSL_USE_STATIC_LIBS=TRUE \
   -DOPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.a" \

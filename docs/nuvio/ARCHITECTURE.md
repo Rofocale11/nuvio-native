@@ -240,8 +240,10 @@ preferred when available and the Node server kept as fallback:
   inventory, 1.2 to 11.2. Where `dlopen` still fails (an unknown firmware, a missing file)
   `available()` is false and the Node path is used unchanged. A missing `libsbengine.so` is a normal state, not an error:
   `make deploy` carries it to a device when built, and neither deploy nor `make ipk` fails for
-  its absence. `make ipk` ships it when built; because the engine is a CMake artifact with no
-  Rust link receipt, the packaging gate pins its exact SHA-256 instead of a `.link.json`.
+  its absence. `make ipk` ships it when built, and `build-ipk.yml` builds it before packaging
+  (`ci/build-sbengine.sh`) and then fails if the staged package has no `libsbengine.so`, so a
+  release cannot ship a Node-only package by accident; because the engine is a CMake artifact with
+  no Rust link receipt, the packaging gate pins its exact SHA-256 instead of a `.link.json`.
 - **Node fallback (`js-service/server.js`)** — Stremio's desktop `server.js` as a direct child
   process on `127.0.0.1:11470`, spawned only when the C engine is unavailable or failed to
   start. It is not a mid-session fallback: if the engine started, there is no Node process to

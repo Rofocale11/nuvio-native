@@ -60,14 +60,15 @@ firmware older than 7.4 and none newer than 8.3.
 
 ## Deliberate limits in this worktree
 - `.ipk` carries the `.so` when it was built, under a digest pin (see above). When it was not
-  built, the package ships without it and uses Node; that is not an error.
+  built, the package ships without it and uses Node; that is not an error on the device, but a
+  release is required to carry it: `build-ipk.yml` runs `ci/build-sbengine.sh` before `make ipk`
+  and then asserts the staged package contains `libsbengine.so`, so a release cannot silently
+  ship a Node-only package.
 - Node is **not** spawned when the engine starts (`start_p2p_service_inner` returns early), so the
   engine owns torrents on every firmware it loads on; there is no mid-session Node fallback. If
   the engine cannot load, Node is spawned exactly as before.
 - File pick under the engine uses `stream.file_idx`, else largest file; `(season, episode)` still
   only feeds the Node guesser.
-- Nothing here has been measured for RSS or frame drops on the television (`tv-lock` + `profile-tv`
-  needed, and owner approval first).
 
 ## Verification actually run
 - `cargo nextest -p plx_pmsshim -p plx_stremio`: 150 passed, 0 skipped.
@@ -82,7 +83,10 @@ firmware older than 7.4 and none newer than 8.3.
   `libsbengine.so` is byte-identical to `build/sbengine/libsbengine.so`.
 - `tools/fwcompat.py build/sbengine/libsbengine.so`: **OK on every release in the inventory**
   (1.2.0 … 11.2.0); `DT_NEEDED` is libdl/libpthread/libm/librt/libc/ld-linux only.
-- The engine has **never executed**; no device or simulator result exists yet.
+- **On the television** (debug install, `--guest`): `sbengine: engine started (0.1.5)`, then
+  `sbengine: serving <hash> via engine (file 0)`; no `node` process in `/proc`; 5–12 MB/s, steady
+  48 fps, `VmRSS` ~142 MiB, `VmHWM` ~151 MiB, `VmSwap` ~20 MiB; switching source A→B→A logs
+  `released previous torrent <a>` then serves B, and the player recovers instead of 404ing.
 
 ## Building and handing over a test build
 ```

@@ -72,7 +72,8 @@ jobs:
           timeout 120 sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential python3 curl tar xz-utils bzip2 \
-            libssl-dev pkg-config file
+            libssl-dev pkg-config file \
+            cmake perl
 
       - name: Install Rust nightly + rust-src
         run: |
@@ -111,6 +112,39 @@ jobs:
             vendor/ffmpeg-build
           key: ffmpeg-${{ runner.arch }}-${{ hashFiles('ci/build-ffmpeg.sh') }}
 
+      - name: Cache the torrent engine's downloads
+        # Boost 1.86 is a 140 MB tarball and libtorrent a full clone; both land in
+        # `build/sbengine/deps` (FETCHCONTENT_BASE_DIR in ci/build-sbengine.sh) precisely because
+        # the engine's own `build/` directory is wiped on every configure. `vendor/downloads` is
+        # ci/deps.py's cache, which is where the pinned OpenSSL tarball goes.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/downloads
+            build/sbengine/deps
+          key: sbengine-deps-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-sbengine.sh', 'vendor/engine-sources/engine.patch', 'vendor/engine-sources/nuvio-engine/cmake/Dependencies.cmake') }}
+
+      - name: Cache the static OpenSSL prefix
+        # ci/build-openssl.sh installs libssl.a/libcrypto.a here; ci/build-sbengine.sh rebuilds it
+        # only when the prefix is missing, so a hit skips the ~5 minutes of OpenSSL entirely. The
+        # key carries the pin (ci/dependencies.json) and the script, so a version change is a miss.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor/openssl-prefix
+          key: openssl-${{ runner.arch }}-${{ hashFiles('ci/build-openssl.sh', 'ci/dependencies.json') }}
+
+      - name: Build the C torrent engine
+        # libsbengine.so beside the binary is what makes the package use the in-process engine
+        # instead of the Node child. Without this step the package still builds and passes every
+        # gate — it just ships 7 ELFs and falls back to Node, which is how a release could look
+        # green and still not contain the engine.
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          export WEBOS_SDK="$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot"
+          ./ci/build-sbengine.sh
+          test -f build/sbengine/libsbengine.so
+
       - name: Build the IPK
         shell: bash
         run: |
@@ -137,6 +171,22 @@ jobs:
         env:
           REQUIRE_PACKAGE: "1"
         run: python3 ci/check-package.py
+
+      - name: The package carries the C engine
+        # A package without it is legal (Node fallback) and passes every other gate, so a release
+        # built from a checkout where the engine step was skipped would look green while shipping
+        # no engine at all. This is the assertion that distinguishes the two.
+        run: |
+          set -euo pipefail
+          staged=$(find ipkroot/data/usr/palm/applications -maxdepth 2 -name libsbengine.so)
+          [ -n "$staged" ] || {
+            echo "::error::libsbengine.so is not staged in the package — did the engine build run?"
+            exit 1
+          }
+          printf '%s\n' "$staged"
+          [ "$(printf '%s\n' "$staged" | wc -l)" -eq 1 ]
+          file "$staged"
+          cat pkg/link-evidence/*/unreceipted.sha256
 
       - name: ELF assertions (tagged releases)
         if: startsWith(github.ref, 'refs/tags/v')
