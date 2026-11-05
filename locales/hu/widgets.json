@@ -1,6 +1,8 @@
 {
   "widgets.menu.options": "Opciók",
   "widgets.menu.quality": "Minőség",
+  "widgets.menu.speed": "Lejátszási sebesség",
+  "widgets.speed.normal": "Normál",
   "widgets.menu.stats": "Részletes statisztika",
   "widgets.menu.diagnostics": "Diagnosztika küldése",
   "widgets.badge.forced": "KÉNYSZERÍTETT",

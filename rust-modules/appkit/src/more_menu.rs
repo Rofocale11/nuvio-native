@@ -83,6 +83,9 @@ pub enum Action {
     ToggleStats,
     /// select a specific Addon stream by index
     SetStream(usize), // <--- Just the index, no String!
+    /// select a playback speed, in thousandths (one of `plx_media::player::PLAY_RATES`;
+    /// `plx_media::player::set_play_rate`)
+    SetSpeed(i32),
     /// **Lab builds only** — snapshot and upload the diagnostic ring (`crate::lab`). Here as well
     /// as in `account_menu` because the account menu is unreachable during playback, and playback
     /// is what a Cloud Test Lab session is usually reproducing.
@@ -102,6 +105,9 @@ pub enum MorePage {
     Source,
     /// One addon's streams, best first ([`MoreRow::Act`] of a [`Action::SetStream`]).
     Addon(usize),
+    /// The playback speeds, slowest first, Normal checked ([`MoreRow::Act`] of a
+    /// [`Action::SetSpeed`]).
+    Speed,
 }
 
 impl MorePage {
@@ -109,6 +115,7 @@ impl MorePage {
     fn title(self, streams: &[(usize, String, String, Option<u32>)]) -> String {
         match self {
             Self::Source => plx_platform::i18n::msg::widgets_menu_source().to_string(),
+            Self::Speed => plx_platform::i18n::msg::widgets_menu_speed().to_string(),
             Self::Addon(i) => match crate::source_list::addon_groups(streams).get(i) {
                 Some((name, _)) if !name.is_empty() => name.clone(),
                 Some(_) => crate::source_list::untagged_source().to_string(),
@@ -121,6 +128,7 @@ impl MorePage {
     fn code(self) -> u32 {
         match self {
             Self::Source => 1,
+            Self::Speed => 0x8000_0000,
             Self::Addon(i) => 2 + i as u32,
         }
     }
@@ -132,6 +140,8 @@ impl MorePage {
 pub enum MoreRow {
     /// The root's Source row ([`MorePage::Source`]): reads out the stream count.
     OpenSource,
+    /// The root's Playback speed row ([`MorePage::Speed`]): reads out the current speed.
+    OpenSpeed,
     /// A drill-in to one addon's streams, by its position in [`stream_groups`].
     OpenAddon(usize),
     Act(Action),
@@ -183,6 +193,11 @@ pub struct MoreMenuState {
     /// The route's revision of that list as of the last rebuild, so the tick's poll is one atomic
     /// load rather than a copy of every label on every frame.
     stream_rev: u32,
+    /// The speed the root's Playback speed row reads out and the Speed page checks, as of the last
+    /// build ([`plx_media::player::play_rate_permille`]).
+    speed: i32,
+    /// The speeds this playback offers ([`plx_media::player::speed_offer`]); 0 or 1 hides the row.
+    speeds: Vec<i32>,
 }
 
 /// The hand-assigned focus key of each row — none of these is a discriminant, a position or a
@@ -194,6 +209,10 @@ impl FormId for Action {
             Action::ToggleStats => 1,
             Action::SendDiagnostics => 2,
             Action::SetStream(i) => 100 + *i as u32,
+            // 0x2000 up: clear of `SetStream` (100 + index) and of the addon drill-ins (0x1000 + i)
+            Action::SetSpeed(r) => {
+                0x2000 + plx_media::player::PLAY_RATES.iter().position(|x| x == r).map_or(0, |i| i as u32)
+            }
         })
     }
 }
@@ -203,6 +222,7 @@ impl FormId for MoreRow {
         match self {
             // free in `Action`'s key space (0..=2)
             MoreRow::OpenSource => RowKey(3),
+            MoreRow::OpenSpeed => RowKey(4),
             // 0x1000 up: one band per addon, clear of every `SetStream` (100 + index). An addon
             // page's rows are `Act` rows and never collide with a drill-in, so the only keys that
             // must stay apart are these and the actions of the page BENEATH, which they do.
@@ -231,23 +251,52 @@ fn streams_of(
 }
 
 /// The ROOT as a pure form: the Source drill-in (headerless, like the Subtitles root's Style —
-/// it reads out how many streams there are), then Options.
-fn root_form(rows: &[Action], streams: &[(usize, String, String, Option<u32>)]) -> MoreForm {
+/// it reads out how many streams there are), then Playback speed when the playback offers one,
+/// then Options.
+fn root_form(rows: &[Action], streams: &[(usize, String, String, Option<u32>)], speed: i32, speeds: &[i32]) -> MoreForm {
     let mut options = FormSection::new(plx_platform::i18n::msg::widgets_menu_options());
 
     // the streams are reached through the Source row, so they are not an option
-    for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetStream(_))) {
+    for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetStream(_) | Action::SetSpeed(_))) {
         options = options.item(MoreRow::Act(a), RowKind::Button, a, row_for(a));
     }
 
-    let source = FormSection::new("").item_if(
-        source_offered(streams),
-        MoreRow::OpenSource,
-        RowKind::Nav(MorePage::Source),
-        Action::None,
-        Row::new(plx_platform::i18n::msg::widgets_menu_source()).value(streams.len().to_string()),
-    );
+    let source = FormSection::new("")
+        .item_if(
+            source_offered(streams),
+            MoreRow::OpenSource,
+            RowKind::Nav(MorePage::Source),
+            Action::None,
+            Row::new(plx_platform::i18n::msg::widgets_menu_source()).value(streams.len().to_string()),
+        )
+        // A speed changes how fast the picture plays, not what the server sends, so the row is
+        // offered beside whichever stream is playing. Hidden where this playback can play only 1x
+        // (`player::speed_offer`): a row that cannot change the outcome is not shown.
+        .item_if(
+            speeds.len() > 1,
+            MoreRow::OpenSpeed,
+            RowKind::Nav(MorePage::Speed),
+            Action::None,
+            Row::new(plx_platform::i18n::msg::widgets_menu_speed()).value(speed_label(speed)),
+        );
     Form::new().section(source).section(options)
+}
+
+/// **The Speed PAGE**: one choice row per offered speed (Plex Web's seven, in order, less any this
+/// source cannot play — `player::speed_offer`), the current one checked.
+fn speed_form(speed: i32, speeds: &[i32]) -> MoreForm {
+    let sec = speeds.iter().map(|r| Action::SetSpeed(*r)).fold(FormSection::new(""), |sec, a| {
+        sec.choice(MoreRow::Act(a), a, row_for(a), |id| *id == MoreRow::Act(Action::SetSpeed(speed)))
+    });
+    Form::new().section(sec)
+}
+
+/// A speed's name: `Normal` at 1x, else the multiplier (`plx_media::player::rate_name`).
+fn speed_label(permille: i32) -> String {
+    if permille == plx_media::player::RATE_NORMAL {
+        return plx_platform::i18n::msg::widgets_speed_normal().to_string();
+    }
+    plx_media::player::rate_name(permille)
 }
 
 /// **The Source PAGE**: one drill-in row per addon that answered for the item, stating how many
@@ -298,13 +347,15 @@ fn addon_form(group: usize, streams: &[(usize, String, String, Option<u32>)]) ->
 
 impl MoreMenuState {
     /// `on_open`: open straight on the Source page (the failure read-out's OK), no slide.
-    fn open_focused(on_open: bool) -> Self {
+    fn open_focused(on_open: bool, ps: &plx_media::route::PlaybackSession) -> Self {
         let rows = rows_for();
+        let speed = plx_media::player::play_rate_permille();
+        let speeds = plx_media::player::speed_offer(ps);
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true; // a short action list — BODY labels, like the profile menu
         form.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
         let streams = plx_media::route::available_streams();
-        form.set_or_open(root_form(&rows, &streams), None);
+        form.set_or_open(root_form(&rows, &streams, speed, &speeds), None);
         let mut st = MoreMenuState {
             form,
             rows,
@@ -312,6 +363,8 @@ impl MoreMenuState {
             motion: PanelMotion::new(),
             streams,
             stream_rev: plx_media::route::streams_rev(),
+            speed,
+            speeds,
         };
         // An on_open entry (the failure screen's OK) opens straight on the Source page, no slide:
         // the viewer is fixing a bad decision, not browsing. Nothing is focused in particular —
@@ -340,12 +393,16 @@ impl MoreMenuState {
         match page {
             MorePage::Source => source_form(&self.streams),
             MorePage::Addon(i) => addon_form(i, &self.streams),
+            MorePage::Speed => speed_form(self.speed, &self.speeds),
         }
     }
 
     /// The explicit initial focus of a pushed page: none for either — the root's opener is restored
     /// by a pop and a fresh push starts on the page's opening row.
     fn page_initial(&self, page: MorePage) -> Option<MoreRow> {
+        if page == MorePage::Speed {
+            return Some(MoreRow::Act(Action::SetSpeed(self.speed)));
+        }
         // Force the engine to start focused on the first focusable row of the new page (the same
         // read `pop` uses: an inert note is not a row to land on).
         self.page_form(page).slots().into_iter().flatten().next().map(|b| b.id)
@@ -374,7 +431,7 @@ impl MoreMenuState {
         // the page BENEATH the one that just left: the root, or the Source page an addon came from
         let (form, title) = match self.pages.top() {
             Some(page) => (self.page_form(page), Some(page.title(&self.streams))),
-            None => (root_form(&self.rows, &self.streams), None),
+            None => (root_form(&self.rows, &self.streams, self.speed, &self.speeds), None),
         };
         // Land on a row we can NAME: the opener when it is still on offer (a re-rank can drop it),
         // else the page's first focusable row — never the table's own opening slot, which may be
@@ -418,17 +475,19 @@ impl MoreMenuState {
     /// pushed page it is refreshed IN PLACE (focus kept by id), and a page the change emptied pops
     /// back one level instead of leaving the viewer on a blank sheet. The panel's height follows,
     /// and the card animates to it ([`Self::update`]). Returns whether it rebuilt.
-    pub fn refresh(&mut self) -> bool {
+    pub fn refresh(&mut self, ps: &plx_media::route::PlaybackSession) -> bool {
         let rev = plx_media::route::streams_rev();
-        // `rows_for` is a function of the stream list and nothing else, so when the list has not
-        // moved there is nothing the page could draw differently — which is what keeps the tick's
-        // poll down to one atomic load, instead of copying every stream label each frame.
-        if rev == self.stream_rev {
+        let speed = plx_media::player::play_rate_permille();
+        let speeds = plx_media::player::speed_offer(ps);
+        // `rows_for` is a function of the stream list and nothing else, so when neither the list
+        // nor the speed offer has moved there is nothing the page could draw differently — which
+        // is what keeps the tick's poll down to one atomic load plus the offer predicate.
+        if rev == self.stream_rev && speed == self.speed && speeds == self.speeds {
             return false;
         }
         self.stream_rev = rev;
         let streams = plx_media::route::available_streams();
-        self.refresh_to(rows_for(), streams)
+        self.refresh_to(rows_for(), streams, speed, speeds)
     }
 
     /// [`Self::refresh`] against explicit answers (what a test or a probe supplies in place of the
@@ -437,14 +496,28 @@ impl MoreMenuState {
         &mut self,
         rows: Vec<Action>,
         streams: Vec<(usize, String, String, Option<u32>)>,
+        speed: i32,
+        speeds: Vec<i32>,
     ) -> bool {
-        if rows == self.rows && streams == self.streams {
+        if rows == self.rows && streams == self.streams && speed == self.speed && speeds == self.speeds {
             return false;
         }
         self.rows = rows;
         self.streams = streams;
+        self.speed = speed;
+        self.speeds = speeds;
         let addons = crate::source_list::addon_groups(&self.streams);
         if let Some(first) = self.pages.first().copied() {
+            // The Speed page goes back to the root when the offer goes away under it (a reload
+            // that cannot play a speed, a television that refused PCM).
+            if matches!(self.pages.top(), Some(MorePage::Speed)) && self.speeds.len() <= 1 {
+                self.pages.clear();
+                let form = root_form(&self.rows, &self.streams, self.speed, &self.speeds);
+                self.form.restore(form, Some(&first.return_id), first.scroll);
+                self.form.table.set_title(None);
+                self.motion.cancel_slide();
+                return true;
+            }
             // An addon page is addressed by the addon's POSITION in the list the Source page was
             // built from. A re-rank that drops that addon leaves nothing to show and the position
             // naming somebody else, so the page goes back one level instead of quietly listing a
@@ -468,20 +541,20 @@ impl MoreMenuState {
                 // nothing left to pick from: back to the root, restoring the opener and scroll the
                 // stack saved at its first push
                 self.pages.clear();
-                let form = root_form(&self.rows, &self.streams);
+                let form = root_form(&self.rows, &self.streams, self.speed, &self.speeds);
                 self.form.restore(form, Some(&first.return_id), first.scroll);
                 self.form.table.set_title(None);
                 self.motion.cancel_slide();
             }
         } else {
             let keep = self.form.selected_id().copied();
-            self.form.set_or_open(root_form(&self.rows, &self.streams), keep.as_ref());
+            self.form.set_or_open(root_form(&self.rows, &self.streams, self.speed, &self.speeds), keep.as_ref());
         }
         true
     }
 
-    pub fn new() -> Self {
-        Self::open_focused(false)
+    pub fn new(ps: &plx_media::route::PlaybackSession) -> Self {
+        Self::open_focused(false, ps)
     }
 
     /// The same menu, opened ON the Source page.
@@ -490,8 +563,8 @@ impl MoreMenuState {
     /// directly — a viewer arriving here is fixing a bad decision, not browsing the list. It is
     /// still the SAME menu, form and action map as the ordinary `…` menu; only the page it opens
     /// on differs (BACK pops to the root, as from any pushed page).
-    pub fn new_source() -> Self {
-        Self::open_focused(true)
+    pub fn new_source(ps: &plx_media::route::PlaybackSession) -> Self {
+        Self::open_focused(true, ps)
     }
 
     /// Every row's focus key, in drawn order (for a test that walks the rows).
@@ -595,8 +668,8 @@ impl MoreMenuState {
         self.motion.warm_open(&self.form.table, || self.panel_rect(measure), measure);
     }
 
-    pub fn update(&mut self, dt: f32, measure: &dyn plx_machine::machine::Measure) {
-        self.refresh();
+    pub fn update(&mut self, dt: f32, measure: &dyn plx_machine::machine::Measure, ps: &plx_media::route::PlaybackSession) {
+        self.refresh(ps);
         // A page can be installed before its rows exist (and the engine's key can name none of
         // them): the cursor must not be left on nothing while there is a row to focus.
         self.seat_valid_focus();
@@ -767,6 +840,7 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
                 .into()
         }
         Action::SendDiagnostics => plx_platform::i18n::msg::widgets_menu_diagnostics().into(),
+        Action::SetSpeed(permille) => speed_label(permille).into(),
         Action::None => "".into(),
     }
 }
@@ -795,7 +869,7 @@ fn stats_on() -> bool {
 fn is_on(a: Action) -> bool {
     match a {
         Action::ToggleStats => stats_on(),
-        Action::SendDiagnostics | Action::None | Action::SetStream(_) => false,
+        Action::SendDiagnostics | Action::None | Action::SetStream(_) | Action::SetSpeed(_) => false,
     }
 }
 
@@ -805,6 +879,8 @@ fn is_on(a: Action) -> bool {
 fn row_for(a: Action) -> Row {
     match a {
         Action::SetStream(_) => Row::new(label(a)),
+        // a picker row like a stream: the leading mark comes from the page's `choice`
+        Action::SetSpeed(_) => Row::new(label(a)),
         _ => Row::new(label(a)).toggle(is_on(a)),
     }
 }
@@ -845,7 +921,7 @@ mod tests {
     fn state(rows: Vec<Action>, streams: &[(usize, String, String, Option<u32>)]) -> MoreMenuState {
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true;
-        form.set_or_open(root_form(&rows, streams), None);
+        form.set_or_open(root_form(&rows, streams, plx_media::player::RATE_NORMAL, &[]), None);
         MoreMenuState {
             form,
             rows,
@@ -853,6 +929,8 @@ mod tests {
             motion: PanelMotion::new(),
             streams: streams.to_vec(),
             stream_rev: 0,
+            speed: plx_media::player::RATE_NORMAL,
+            speeds: Vec::new(),
         }
     }
 
@@ -1032,7 +1110,7 @@ mod tests {
 
         // the background fetch lands under the open root: the row appears
         let mut st = st;
-        assert!(st.refresh_to(rows_for(), two_addons()));
+        assert!(st.refresh_to(rows_for(), two_addons(), plx_media::player::RATE_NORMAL, Vec::new()));
         assert!(st.form.index_of(&MoreRow::OpenSource).is_some());
     }
 
@@ -1092,7 +1170,7 @@ mod tests {
         let mut st = menu();
         st.stream_rev = plx_media::route::streams_rev();
         st.form.table.sel = st.form.table.n_rows();
-        st.update(DT, &m);
+        st.update(DT, &m, &plx_media::route::PlaybackSession::default());
         assert_eq!(
             st.form.selected_id(),
             Some(&MoreRow::OpenSource),
@@ -1238,8 +1316,8 @@ mod tests {
         // Sootio answers once more: the list this page was built from has changed under it
         let mut longer = two_addons();
         longer.push((9, "720p".to_string(), "Sootio".to_string(), Some(11)));
-        assert!(st.refresh_to(rows_for(), longer.clone()), "a longer list is a change");
-        assert!(!st.refresh_to(rows_for(), longer.clone()), "and only once");
+        assert!(st.refresh_to(rows_for(), longer.clone(), plx_media::player::RATE_NORMAL, Vec::new()), "a longer list is a change");
+        assert!(!st.refresh_to(rows_for(), longer.clone(), plx_media::player::RATE_NORMAL, Vec::new()), "and only once");
         assert_eq!(st.page(), Some(MorePage::Addon(1)), "still on the page");
         assert_eq!(st.form.table.title(), Some("Sootio"), "the band stays");
         assert_eq!(
@@ -1265,13 +1343,13 @@ mod tests {
 
         // the second addon answers no more: the page's position now names nobody
         let narrower = vec![(3, "4k DV".to_string(), "Torrentio".to_string(), Some(123))];
-        assert!(st.refresh_to(rows_for(), narrower.clone()));
+        assert!(st.refresh_to(rows_for(), narrower.clone(), plx_media::player::RATE_NORMAL, Vec::new()));
         assert_eq!(st.page(), Some(MorePage::Source), "back to the addon list");
         assert!(!st.transitioning(), "a page that vanished does not slide away");
         assert_eq!(ids(&st), vec![MoreRow::OpenAddon(0)]);
 
         // everything goes away: back to the root, without a Source row
-        assert!(st.refresh_to(rows_for(), Vec::new()));
+        assert!(st.refresh_to(rows_for(), Vec::new(), plx_media::player::RATE_NORMAL, Vec::new()));
         assert_eq!(st.page(), None);
         assert_eq!(st.form.table.title(), None);
         assert!(st.form.index_of(&MoreRow::OpenSource).is_none());
@@ -1288,7 +1366,7 @@ mod tests {
         let m = plx_base::fontcov::advances::ShippedMeasure;
         let step = |st: &mut MoreMenuState| {
             plx_machine::idle::frame_begin(DT);
-            st.update(DT, &m);
+            st.update(DT, &m, &plx_media::route::PlaybackSession::default());
             plx_machine::idle::present_moving()
         };
         // opened with nothing to pick: Options only, a short panel
@@ -1299,7 +1377,7 @@ mod tests {
         assert_eq!(st.shown_rect(&m), short);
 
         // the streams land: the Source row appears and the panel grows
-        assert!(st.refresh_to(rows_for(), two_addons()), "the row set moved");
+        assert!(st.refresh_to(rows_for(), two_addons(), plx_media::player::RATE_NORMAL, Vec::new()), "the row set moved");
         let tall = st.panel_rect(&m);
         assert!(tall.h > short.h, "the Source row makes the panel taller: {} > {}", tall.h, short.h);
         assert_eq!(
@@ -1330,7 +1408,7 @@ mod tests {
         let m = plx_base::fontcov::advances::ShippedMeasure;
         let step = |st: &mut MoreMenuState| {
             plx_machine::idle::frame_begin(DT);
-            st.update(DT, &m);
+            st.update(DT, &m, &plx_media::route::PlaybackSession::default());
             plx_machine::idle::present_moving()
         };
         let mut st = menu();
@@ -1359,6 +1437,73 @@ mod tests {
         }
         assert!(!st.motion.sliding() && !st.transitioning());
         assert!(!step(&mut st));
+    }
+
+    /// **The root offers Playback speed only where this playback offers one**, reads out the
+    /// current one, and the Speed page lists Plex Web's seven with the current one checked.
+    #[test]
+    fn the_speed_row_follows_the_offer_and_the_page_checks_the_current_speed() {
+        let mut st = state(rows_for(), &two_addons());
+        assert!(st.form.index_of(&MoreRow::OpenSpeed).is_none(), "no offer, no row");
+        st.speeds = plx_media::player::PLAY_RATES.to_vec();
+        st.speed = 1500;
+        st.form.set(root_form(&st.rows, &st.streams, st.speed, &st.speeds), None);
+        assert!(st.form.index_of(&MoreRow::OpenSpeed).is_some(), "the offer draws the row");
+        assert_eq!(value_of(&mut st, MoreRow::OpenSpeed), Some("1.5×".into()));
+
+        st.focus_key(MoreRow::OpenSpeed.key().0);
+        st.push(MorePage::Speed);
+        st.motion.cancel_slide();
+        assert_eq!(st.page(), Some(MorePage::Speed));
+        assert_eq!(st.form.table.title(), Some(plx_platform::i18n::msg::widgets_menu_speed()));
+        let want: Vec<MoreRow> =
+            plx_media::player::PLAY_RATES.iter().map(|r| MoreRow::Act(Action::SetSpeed(*r))).collect();
+        assert_eq!(ids(&st), want, "the seven speeds, slowest first");
+        assert_eq!(
+            st.form.selected_id(),
+            Some(&MoreRow::Act(Action::SetSpeed(1500))),
+            "the page opens on the current speed"
+        );
+        assert_eq!(st.on_ok(), MoreOk::Action(Action::SetSpeed(1500)));
+        assert!(st.pop(), "BACK returns to the root");
+        assert_eq!(st.form.selected_id(), Some(&MoreRow::OpenSpeed), "on the row that opened it");
+    }
+
+    /// The names: Normal at 1x, the multiplier otherwise, the way Plex Web spells them.
+    #[test]
+    fn speeds_are_named_like_plex_webs() {
+        let names: Vec<String> = plx_media::player::PLAY_RATES.iter().map(|r| speed_label(*r)).collect();
+        assert_eq!(names, ["0.5×", "0.75×", "Normal", "1.25×", "1.5×", "1.75×", "2×"]);
+    }
+
+    /// **No offer, no page**: when the offer goes away under an open Speed page (a reload that
+    /// cannot play a speed), the page goes back to the root and the row is gone.
+    #[test]
+    fn a_vanished_speed_offer_pops_the_page_to_the_root() {
+        let mut st = state(rows_for(), &two_addons());
+        st.speeds = plx_media::player::PLAY_RATES.to_vec();
+        st.form.set(root_form(&st.rows, &st.streams, st.speed, &st.speeds), None);
+        st.focus_key(MoreRow::OpenSpeed.key().0);
+        st.push(MorePage::Speed);
+        st.motion.cancel_slide();
+        assert_eq!(st.page(), Some(MorePage::Speed));
+        assert!(st.refresh_to(rows_for(), two_addons(), plx_media::player::RATE_NORMAL, Vec::new()));
+        assert_eq!(st.page(), None, "the page went with its offer");
+        assert!(st.form.index_of(&MoreRow::OpenSpeed).is_none());
+    }
+
+    /// Every speed row has its own focus key, clear of every other row's.
+    #[test]
+    fn every_speed_row_has_a_distinct_key() {
+        let mut keys: Vec<u32> =
+            plx_media::player::PLAY_RATES.iter().map(|r| Action::SetSpeed(*r).key().0).collect();
+        keys.extend([MoreRow::OpenSource.key().0, MoreRow::OpenSpeed.key().0]);
+        keys.extend([Action::None, Action::ToggleStats, Action::SendDiagnostics].iter().map(|a| a.key().0));
+        keys.extend((0..200).map(|i| Action::SetStream(i).key().0));
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "a key is shared: {keys:?}");
     }
 }
 
@@ -1413,6 +1558,8 @@ mod focus_tests {
             motion: PanelMotion::new(),
             streams: Vec::new(),
             stream_rev: 0,
+            speed: plx_media::player::RATE_NORMAL,
+            speeds: Vec::new(),
         }
     }
 
@@ -1510,23 +1657,32 @@ mod focus_tests {
         };
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
-            let mut root = MoreMenuState::new();
-            root.form.set(root_form(&rows, &streams), None);
+            let ps = plx_media::route::PlaybackSession::default();
+            let mut root = MoreMenuState::new(&ps);
+            root.form.set(root_form(&rows, &streams, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES), None);
             check(language.tag(), &root.form);
-            let mut page = MoreMenuState::new();
+            let mut page = MoreMenuState::new(&ps);
             page.rows = rows.clone();
             page.streams = streams.clone();
             page.push(MorePage::Source);
             check(language.tag(), &page.form);
-            let mut addon = MoreMenuState::new();
+            let mut addon = MoreMenuState::new(&ps);
             addon.rows = rows.clone();
             addon.streams = streams.clone();
             addon.push(MorePage::Addon(0));
             check(language.tag(), &addon.form);
+            // the Speed page: every translated "Normal" beside the numerals
+            let mut speed = MoreMenuState::new(&ps);
+            speed.rows = rows.clone();
+            speed.speeds = plx_media::player::PLAY_RATES.to_vec();
+            speed.push(MorePage::Speed);
+            check(language.tag(), &speed.form);
             // the root with nothing to pick (Options only)
-            let empty = MoreMenuState::new();
+            let empty = MoreMenuState::new(&ps);
             check(language.tag(), &empty.form);
         }
         plx_ui::table::assert_no_fit_failures(&out);
     }
+
+
 }

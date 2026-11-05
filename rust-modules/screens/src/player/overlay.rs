@@ -301,10 +301,10 @@ impl PlayerOverlayScreen {
                 Panel::Chapters(plx_appkit::chapters_panel::ChaptersState::new(meta))
             }
             OverlayKind::More { source: false } => {
-                Panel::More(plx_appkit::more_menu::MoreMenuState::new())
+                Panel::More(plx_appkit::more_menu::MoreMenuState::new(ps))
             }
             OverlayKind::More { source: true } => {
-                Panel::More(plx_appkit::more_menu::MoreMenuState::new_source())
+                Panel::More(plx_appkit::more_menu::MoreMenuState::new_source(ps))
             }
             OverlayKind::Timing => {
                 let (lo, hi) = plx_media::player::subtitle_offset_range_ms();
@@ -858,7 +858,7 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                 // The Source pages fill in as the addons reply: `refresh` owns noticing that the
                 // ranked stream list moved, so this only reports it as a landing.
                 if let Panel::More(ref mut p) = self.panel {
-                    if p.refresh() {
+                    if p.refresh(ps) {
                         fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
                     }
                 }
@@ -903,7 +903,7 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                     }
                     Panel::Info(p) => p.update(dt),
                     Panel::Chapters(p) => p.update(dt, H::metadata(cx)),
-                    Panel::More(p) => p.update(dt, cx.measure),
+                    Panel::More(p) => p.update(dt, cx.measure, ps),
                     Panel::Timing(p) => p.update(dt),
                 }
                 // The transport must not auto-hide out from under a panel a viewer is reading —

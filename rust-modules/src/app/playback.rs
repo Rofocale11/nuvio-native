@@ -119,7 +119,11 @@ pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: 
                 retry_failed_playback(ps, pa, bridge.metadata_mut(), None, plx_media::player::report::AttemptOrigin::QualityChange);
             }
         }
-
+        // A playback speed: a reload at the viewer's position at the new speed
+        // (`player::set_play_rate`). Picking the current speed does nothing.
+        plx_appkit::more_menu::Action::SetSpeed(r) => {
+            plx_media::player::set_play_rate(ps, r);
+        }
         // Lab builds only. Nothing about playback changes: the snapshot is taken and the toast
         // reports, over whatever the player is doing.
         plx_appkit::more_menu::Action::SendDiagnostics => crate::lab::request_upload("menu", ps),

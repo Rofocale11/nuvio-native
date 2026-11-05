@@ -60,15 +60,22 @@ pub mod dv;
 /// the app and leaves it as PCM, native PCM tracks are converted to the declared sample width,
 /// and Opus is fed as-is with its `opusInfo` (`player::engine::with_audio_info`). Each is admitted
 /// only with a MEASURED channel row in the device table, like DTS.
-pub const DP_AUDIO_CODECS: &str = "aac,ac3,eac3,dts,flac,pcm,opus";
+pub const DP_AUDIO_CODECS: &str = "aac,ac3,eac3,dts,flac,alac,pcm,opus";
 
 /// FORK (RichiL10): the lanes that are admitted only with a measured channel ceiling.
-const MEASURED_ONLY: [&str; 4] = ["dts", "flac", "pcm", "opus"];
+const MEASURED_ONLY: [&str; 5] = ["dts", "flac", "alac", "pcm", "opus"];
 
 /// FORK (RichiL10): the PCM lane's channel layouts — the `pcmInfo.channelMode` strings the
 /// television's pipeline is known to accept (`mono`, `stereo`, `6-channel`).
 pub fn pcm_lane_channels_ok(channels: i64) -> bool {
     matches!(channels, 1 | 2 | 6)
+}
+
+/// FORK (RichiL10): can the PCM lane declare an MP3/Vorbis source at this rate? The sink knows
+/// the source's own rate up to 48 kHz, and a whole-ratio reduction above it (the lane's
+/// `Downsampler` takes only integer ratios, exactly as for the lossless lane).
+pub fn lossy_rate_ok(rate: i64) -> bool {
+    rate <= 0 || rate <= 48_000 || rate % 44_100 == 0 || rate % 48_000 == 0
 }
 
 /// FORK (RichiL10): is a DTS track ABOVE the device's DTS ceiling direct-playable? The demuxer
@@ -240,7 +247,12 @@ impl Caps {
             return false;
         }
         // FORK (RichiL10): the PCM lane can only declare mono, stereo or 6-channel.
-        if matches!(codec, "flac" | "pcm") && !pcm_lane_channels_ok(channels) {
+        if matches!(codec, "flac" | "alac" | "pcm") && !pcm_lane_channels_ok(channels) {
+            return false;
+        }
+        // FORK (RichiL10): MP3/Vorbis are declared stereo at a rate the PCM sink knows: the
+        // source's own rate up to 48 kHz, or a whole-ratio reduction of it (`lossy_rate_ok`).
+        if matches!(codec, "mp3" | "vorbis") && !lossy_rate_ok(rate) {
             return false;
         }
         match self.audio_channels.get(codec) {
@@ -294,7 +306,7 @@ impl Caps {
         match dp_audio_key(codec) {
             "truehd" | "mlp" => channels >= 0,
             "dts" => true,
-            c @ ("flac" | "pcm") => {
+            c @ ("flac" | "alac" | "pcm") => {
                 self.audio_has(c) && (3..=8).contains(&channels) && !self.pcm_lane_admits(c, channels)
             }
             _ => false,
@@ -308,7 +320,10 @@ impl Caps {
             return (rate == 0 || rate == ENC_LANE_RATE).then_some(AudioLane::Ac3Encode);
         }
         let codec = dp_audio_key(codec);
-        (matches!(codec, "flac" | "pcm") && self.pcm_lane_admits(codec, channels)).then_some(AudioLane::Pcm)
+        if matches!(codec, "mp3" | "vorbis") {
+            return (self.audio_has(codec) && lossy_rate_ok(rate)).then_some(AudioLane::Pcm);
+        }
+        (matches!(codec, "flac" | "alac" | "pcm") && self.pcm_lane_admits(codec, channels)).then_some(AudioLane::Pcm)
     }
 
     /// FORK (RichiL10): the codecs the encode lane adds to the PMS direct-play profile beyond
@@ -336,8 +351,13 @@ impl Caps {
     /// MDE answers direct play for the tracks the app now converts itself.
     pub fn profile_channel_limit_with(&self, codec: &str, encode: bool) -> Option<u32> {
         let codec = dp_audio_key(codec);
+        // FORK (RichiL10): an app-decoded MP3/Vorbis track plays downmixed to stereo, so the
+        // profile must not refuse the 5.1 Vorbis the television would have converted itself.
+        if matches!(codec, "mp3" | "vorbis") && self.audio_has(codec) {
+            return Some(8);
+        }
         if encode && self.enc_sink_ok() {
-            if matches!(codec, "truehd" | "mlp" | "dts") || (matches!(codec, "flac" | "pcm") && self.audio_has(codec)) {
+            if matches!(codec, "truehd" | "mlp" | "dts") || (matches!(codec, "flac" | "alac" | "pcm") && self.audio_has(codec)) {
                 return Some(8);
             }
         }
@@ -601,10 +621,16 @@ fn parse(s: &str) -> Option<Caps> {
             audio_channels.remove("flac");
         }
     }
+    // FORK (RichiL10): ALAC is decoded by the same bundled FFmpeg and leaves the app as the same
+    // PCM the FLAC row has already proven the sink takes; the table's own audio rows need not name
+    // it (no firmware inventory has an ALAC row). A set with no FLAC row does not admit it either.
+    if let Some(&flac) = audio_channels.get("flac") {
+        audio_channels.insert("alac".to_string(), flac);
+    }
     let table_audio: Vec<String> = t.audio_codecs.iter().map(|r| canon(&r.name)).collect();
     let audio: Vec<&str> = DP_AUDIO_CODECS
         .split(',')
-        .filter(|c| table_audio.iter().any(|t| t == c))
+        .filter(|c| table_audio.iter().any(|t| t == c) || (*c == "alac" && audio_channels.contains_key("alac")))
         .filter(|c| !MEASURED_ONLY.contains(c) || audio_channels.contains_key(*c))
         .collect();
     let audio = if audio.is_empty() {
@@ -704,24 +730,54 @@ pub fn probe() {
         caps,
         plx_base::forkknobs::get("flac").as_deref(),
         plx_base::forkknobs::get("opus").as_deref(),
+        plx_base::forkknobs::get("lossy").as_deref(),
     ));
+}
+
+/// FORK (RichiL10): the `lossy` knob. Off by default: this set's own table names MPEG and
+/// Vorbis, so its pipeline plays them compressed. A set whose table lacks a row (or whose
+/// pipeline refuses the track) turns the knob on and the app decodes them to stereo PCM.
+pub fn lossy_for(knob: Option<&str>) -> bool {
+    matches!(knob, Some("on"))
 }
 
 /// FORK (RichiL10): `flac=off` / `opus=off` in the fork's knob file hand those tracks back to the
 /// server (read once at boot, like the table). Pure, so the rule is host-testable.
-fn with_fork_knobs(mut caps: Caps, flac: Option<&str>, opus: Option<&str>) -> Caps {
-    let drop = |c: &str| (c == "flac" && flac == Some("off")) || (c == "opus" && opus == Some("off"));
+///
+/// ALAC rides the same lossless decode lane and is admitted off the FLAC row's ceiling, so
+/// `flac=off` turns it off too: a knob that quietly left half the lane on would make the two
+/// codecs take different routes with no visible reason.
+fn with_fork_knobs(mut caps: Caps, flac: Option<&str>, opus: Option<&str>, lossy: Option<&str>) -> Caps {
+    let drop = |c: &str| {
+        (matches!(c, "flac" | "alac") && flac == Some("off")) || (c == "opus" && opus == Some("off"))
+    };
     let kept: Vec<&str> = caps.audio.split(',').filter(|c| !drop(c)).collect();
     if kept.len() != caps.audio.split(',').count() {
         caps.audio = kept.join(",");
         plx_base::eventlog::log(&format!("devcaps: fork knobs -> audio={}", caps.audio));
     }
+    // FORK (RichiL10): `lossy=on` admits MP3 and Vorbis to the app-decode lane. The table's own
+    // rows are not needed: a set with no row is exactly the set the knob is for, and the sink the
+    // lane actually feeds is the PCM one (already enforced when the table parsed). The channel
+    // bound is the pipeline's own feed limit (8) for the same reason — the lane downmixes whatever
+    // arrives to stereo, so a source wider than the table's row is still playable here.
+    if lossy_for(lossy) && caps.audio_has("pcm") {
+        for key in ["mp3", "vorbis"] {
+            if !caps.audio.split(',').any(|c| c == key) {
+                caps.audio.push(',');
+                caps.audio.push_str(key);
+            }
+            caps.audio_channels.insert(key.to_string(), 8);
+        }
+        plx_base::eventlog::log(&format!("devcaps: lossy lane -> audio={}", caps.audio));
+    }
     let lane = |c: &str| caps.audio_channels.get(c).map_or(0, |v| *v);
     let enc = encode_lane_on() && !caps.enc_lane_profile_codecs(true).is_empty();
     if caps.audio_has("flac") || caps.audio_has("pcm") || caps.audio_has("opus") || enc {
         plx_base::eventlog::log(&format!(
-            "devcaps: fork lanes flac<={} pcm<={} opus<={} dts<={} (dts above it: {}) {}",
+            "devcaps: fork lanes flac<={} alac<={} pcm<={} opus<={} dts<={} (dts above it: {}) {}",
             lane("flac"),
+            lane("alac"),
             lane("pcm"),
             lane("opus"),
             lane("dts"),
@@ -1198,7 +1254,7 @@ mod tests {
     #[test]
     fn the_b4_table_admits_the_fork_lanes_at_their_measured_ceilings() {
         let c = parse(B4).expect("the B4 table parses");
-        assert_eq!(c.audio, "aac,ac3,eac3,dts,flac,pcm,opus");
+        assert_eq!(c.audio, "aac,ac3,eac3,dts,flac,alac,pcm,opus");
         for (codec, ch, ok) in [
             ("flac", 1, true), ("flac", 2, true), ("flac", 6, false), ("flac", 8, false),
             ("flac", 0, false), ("pcm", 2, true), ("pcm", 6, false), ("opus", 2, true),
@@ -1259,7 +1315,7 @@ mod tests {
         assert_eq!(c.enc_lane_profile_codecs(true), ["truehd", "mlp", "dts"]);
         assert!(c.enc_lane_profile_codecs(false).is_empty());
         // flac=off hands FLAC back to the server in both lanes
-        let no_flac = with_fork_knobs(c.clone(), Some("off"), None);
+        let no_flac = with_fork_knobs(c.clone(), Some("off"), None, None);
         assert!(!no_flac.audio_supports_lanes("flac", 8, 48_000, true, true));
         assert!(no_flac.audio_supports_lanes("truehd", 8, 48_000, true, true));
         assert!(encode_lane_for(None) && encode_lane_for(Some("ac3")) && !encode_lane_for(Some("off")));
@@ -1298,11 +1354,39 @@ mod tests {
     #[test]
     fn fork_knobs_hand_flac_and_opus_back_to_the_server() {
         let c = parse(B4).unwrap();
-        assert_eq!(with_fork_knobs(c.clone(), None, None).audio, "aac,ac3,eac3,dts,flac,pcm,opus");
-        assert_eq!(with_fork_knobs(c.clone(), Some("off"), None).audio, "aac,ac3,eac3,dts,pcm,opus");
-        assert_eq!(with_fork_knobs(c, Some("pcm"), Some("off")).audio, "aac,ac3,eac3,dts,flac,pcm");
+        assert_eq!(with_fork_knobs(c.clone(), None, None, None).audio, "aac,ac3,eac3,dts,flac,alac,pcm,opus");
+        assert_eq!(with_fork_knobs(c.clone(), Some("off"), None, None).audio, "aac,ac3,eac3,dts,pcm,opus");
+        assert_eq!(with_fork_knobs(c, Some("pcm"), Some("off"), None).audio, "aac,ac3,eac3,dts,flac,alac,pcm");
         assert!(dts_over_ceiling_for(None));
         assert!(dts_over_ceiling_for(Some("auto")));
         assert!(!dts_over_ceiling_for(Some("never")));
+    }
+
+    /// **`lossy=on` admits MP3 and Vorbis to the PCM lane, `lossy` absent changes nothing.** The
+    /// lane downmixes to stereo, so the bound announced is the pipeline's feed limit (8) whether
+    /// or not the table names a row — and a set whose table names neither still gets them: that
+    /// set is the one the knob exists for.
+    #[test]
+    fn the_lossy_knob_admits_mp3_and_vorbis_to_the_pcm_lane() {
+        assert!(!lossy_for(None) && !lossy_for(Some("off")) && lossy_for(Some("on")));
+        let plain = with_fork_knobs(parse(B4).unwrap(), None, None, None);
+        assert_eq!(plain.audio, "aac,ac3,eac3,dts,flac,alac,pcm,opus");
+        assert_eq!(plain.audio_lane("mp3", 2, 44_100, true), None);
+        assert_eq!(plain.audio_lane("vorbis", 6, 48_000, true), None);
+
+        let on = with_fork_knobs(parse(B4).unwrap(), None, None, Some("on"));
+        assert_eq!(on.audio, "aac,ac3,eac3,dts,flac,alac,pcm,opus,mp3,vorbis");
+        assert_eq!(on.audio_lane("mp3", 2, 44_100, true), Some(AudioLane::Pcm));
+        assert_eq!(on.audio_lane("vorbis", 6, 48_000, true), Some(AudioLane::Pcm), "a 5.1 Vorbis plays downmixed");
+        assert!(on.audio_supports_at("mp3", 2, 44_100));
+        assert!(on.audio_supports_at("vorbis", 8, 48_000), "the lane downmixes, so the feed limit is 8");
+        assert!(!on.audio_supports_at("mp3", 2, 50_000), "no PCM declaration for a rate the lane cannot feed");
+        assert_eq!(on.profile_channel_limit("vorbis"), Some(8));
+
+        // A table with no MPEG/Vorbis row still gets the lane: the sink is what matters.
+        let bare = parse(&B4.replace(r#"{ "name" : "Vorbis", "channels" : 6 },"#, "").replace(r#"{ "name" : "MPEG", "channels" : 2 },"#, "")).unwrap();
+        let bare_on = with_fork_knobs(bare, None, None, Some("on"));
+        assert!(bare_on.audio_has("mp3") && bare_on.audio_has("vorbis"));
+        assert_eq!(bare_on.audio_lane("vorbis", 2, 44_100, true), Some(AudioLane::Pcm));
     }
 }

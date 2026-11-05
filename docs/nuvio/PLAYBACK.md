@@ -190,18 +190,40 @@ An explicit user audio choice takes precedence over this initial selection.
 
 | track | lane |
 |---|---|
-| FLAC / native PCM inside the PCM lane's counts (mono, stereo, 6-ch) | PCM lane, lossless (`ff_pcm.rs`) |
-| FLAC / PCM 3–8 ch the PCM lane does not admit | **AC3 encode lane** (`ff_enc.rs`) |
+| FLAC / ALAC / native PCM inside the PCM lane's counts (mono, stereo, 6-ch) | PCM lane, lossless (`ff_pcm.rs`) |
+| FLAC / ALAC / PCM 3–8 ch the PCM lane does not admit | **AC3 encode lane** (`ff_enc.rs`) |
 | TrueHD / MLP, any channel count | **AC3 encode lane** |
 | DTS, any channel count — **whether or not the table has a `dts` row** | **AC3 encode lane** |
+| MP3 / Vorbis — only with `lossy=on` (off by default) | PCM lane, stereo S16 (`ff_pcm.rs`) |
+
+ALAC rides the lossless PCM lane: the bundled FFmpeg decodes it with the same
+`avcodec_send_packet`/`receive_frame` path as FLAC, and it is admitted only where a FLAC row
+exists, with that row's channel ceiling (`devcaps`). `flac=off` turns both off together, because
+they are one lane and one knob.
+
+**The lossless PCM lane resamples the stereo it cannot declare at the source rate.** libpf's PCM
+table names no rate above 48 kHz on any image from 2018 to 2025, so a stereo FLAC/ALAC at 96,
+88.2, 192 or 176.4 kHz is decimated in-app by a Kaiser-windowed sinc (`ff_pcm::Downsampler`,
+integer ratios only) and the Load declares 48 kHz (44.1 kHz for the 44.1 family). A ratio that is
+not whole keeps the source rate, which the sink may refuse — the route then leaves the track with
+the server. A surround hi-res track is untouched here: the lane never remixes, so its rate stays
+as authored and the encode lane or the server decides its fate.
+
+**MP3 and Vorbis are app-decoded only with `lossy=on`.** This set's own table names MPEG and
+Vorbis, so its pipeline plays them compressed and the gate is off by default; a set whose table
+lacks a row (or whose pipeline refuses the track) turns the knob on and the app decodes it,
+downmixes whatever layout arrives to stereo (`speed_audio::downmix`) and feeds S16 at the source
+rate (decimated above 48 kHz like the lossless lane). The knob also announces `mp3`/`vorbis` in
+the direct-play profile and states an 8-channel bound, because the lane downmixes locally.
 
 The encode lane is real and shipped: the bundled FFmpeg carries `dca`/`truehd`/`mlp`/`flac`
 decoders and the `ac3_fixed` encoder (`ci/build-ffmpeg.sh`), the demux thread decodes the track,
 folds it to 5.1(side) by channel role in Q15 integer arithmetic, and encodes AC3 640 kbps at
 48 kHz. The Load then declares it exactly as a native AC3 5.1 track (`AudioLaneInfo::Ac3Encode`),
-so the television's hardware sees a format it already decodes. No resampler exists in the build
-(`--disable-swresample`), so the lane takes 48 kHz sources only; the route leaves any other rate
-with the server. A rate the Media does not state takes the lane anyway and the lane's own open
+so the television's hardware sees a format it already decodes. The encode lane has no resampler of
+its own (`--disable-swresample`), so it takes 48 kHz sources only; the route leaves any other rate
+with the server. (The lossless PCM lane is the exception: it decimates stereo hi-res itself, see
+above.) A rate the Media does not state takes the lane anyway and the lane's own open
 refuses it if the stream reports anything else — the shim publishes the probed `samplingRate`
 (`shim_probe::Audio::sample_rate`), and before that every track arrived with the rate unstated,
 which refused the TrueHD Load outright (2026-11-01).
@@ -244,6 +266,28 @@ AAC/AC3/EAC3 sibling when one exists. **When there is no track any lane takes, t
 the server to convert it — the shim cannot.** The shim must answer such a decision with a
 refusal and the UI says "audio format not supported"; `ff::probe::preferred_audio` is the helper
 that tells the shim this ahead of time (rank such streams last / mark them in the source list).
+
+### Playback speed
+
+The player's `…` menu carries a **Playback speed** row (0.5×, 0.75×, Normal, 1.25×, 1.5×, 1.75×,
+2×) when the current playback can actually offer a speed. LG's own `SetPlayRate` cannot drive this
+pipeline — the buffer-feed source's next SEGMENT resets it to 1× and libpf mutes audio at any other
+rate — so the speed is done the way a browser does it:
+
+- every timestamp sent to the pipeline is divided by the speed (`player::to_sink_ns`) and every
+  presented one multiplied back (`from_sink_ns`), so the UI stays in film time;
+- the sound is decoded in the app (`ff::SpeedDecoder`), time-stretched pitch-correctly by
+  `speed_audio`'s WSOLA and fed as 48 kHz stereo PCM, because the compressed track cannot be
+  pitched by the TV;
+- a speed change is a seek to the viewer's own position marked `rate_reload`; at 1× a direct-play
+  seek stays in place, off 1× every mode reloads (`pump::seek_must_reload`).
+
+`player::play_rate_permille` is the viewer's choice and persists across reloads;
+`applied_rate_permille` is what the current pipeline is playing and is reset with the session.
+`speed_offer` hides the row where a speed cannot be honoured: previews, segmented HLS, a source
+whose audio has no decoder in the bundled FFmpeg, and a source that at this speed would feed more
+frames per second than the Load envelope (60.5) or the device's measured decoder row allows (24p
+reaches 2×; 50p/60p offer nothing above Normal).
 
 ### Dolby Vision on the CX
 
@@ -336,3 +380,40 @@ and visible English subtitles with the physical remote. P7 HDR10 fallback remain
 unverified. Fresh follow-up release QR approval reached the local server and loaded
 account addons. English audio default behavior is host-tested; physical confirmation
 on a newly started stream remains pending.
+
+### Verified on the CX (2026-11-05, stable install, `forward-port/v0.9-hq` + the audio wave)
+
+A TrueHD 8-channel 4K source played through the AC3 encode lane and at elevated speed.
+The event log shows, in order:
+
+- `start_bufferfeed: truehd 8ch -> AC3 5.1 encode lane (declared AC3)`, then
+  `ff: audio lane truehd 8ch 48000 Hz decoded in-app -> AC3 5.1 640 kbps (encoded in-app)`
+  and `ff: encode lane folds roles [0, 1, 2, 3, 9, 10] to 5.1(side)` — the encode lane and
+  its channel mapping, on the device;
+- at 1.5× and 2×, `speed: this Load plays at 1500|2000 (audio decoded in the app, fed as
+  PCM)`, `speed: audio decoder for 1500|2000 open`, `speed: decoding audio fmt=2 ch=8
+  rate=48000`, and `speed: pipeline audio audio/x-raw 48 kHz x2 -> ok` — the pipeline
+  accepted the PCM the speed path fed, with one `"pcmInfo"` node
+  (`channelMode stereo, S16LE, 48.0 kHz, 16 bit, interleaved`) in the Load;
+- audio transcoding to `eac3,ac3,aac,dts` on `sound output=tv_speaker` behaved as
+  specified.
+
+The reported experience was normal playback, working speed changes and working AC3/
+transcoded audio, with no error path; nothing in the log was a failure (the
+`sched_setscheduler` and Matroska resync lines are long-standing and benign).
+
+### Not yet verified on the CX (the lossless and lossy lanes)
+
+This household plays ordinary film sources (AAC/AC3/E-AC3/DTS/TrueHD in MKV/MP4), so
+the following paths are **host-verified only** — the unit and hostsim suites above, no
+device run. They are correct by construction and by test, not by measurement on a
+television:
+
+- the lossless **PCM lane** for **FLAC** and **ALAC** (`ff_pcm.rs`), including the
+  declaration and the demuxer feed;
+- the **hi-res stereo decimator** (96 / 88.2 / 192 / 176.4 kHz → 48 / 44.1 kHz);
+- the **`lossy=on` MP3/Vorbis lane** (off unless the knob is set; nothing in the
+  default configuration touches it).
+
+The first report from a device playing one of these should be recorded here. Until
+then, treat a defect in them as unmeasured rather than absent.

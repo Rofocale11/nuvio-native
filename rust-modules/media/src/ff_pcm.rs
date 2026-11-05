@@ -3,13 +3,21 @@
 //!
 //! LG's buffer-feed pipeline accepts `codec.audio = "PCM"` with a `contents.pcmInfo` block
 //! (format, channelMode, layout, sampleRate, bitsPerSample: read off `libpf-1.0.so` on the B4,
-//! and the same block moonlight-tv's webOS driver plays with). The fork feeds two kinds of
+//! and the same block moonlight-tv's webOS driver plays with). The fork feeds three kinds of
 //! source through it:
 //!
-//! * **FLAC**, decoded HERE with the bundled FFmpeg's `flac` decoder (`ci/build-ffmpeg.sh`). It
-//!   leaves the app bit-exact: the decoder's MSB-aligned S32 output is written at the declared
-//!   width, so a 24-bit source declared S32LE or S24LE loses nothing.
+//! * **FLAC and ALAC**, decoded HERE with the bundled FFmpeg's own decoders
+//!   (`ci/build-ffmpeg.sh`). They leave the app bit-exact at or below 48 kHz: the decoder's
+//!   MSB-aligned S32 output is written at the declared width, so a 24-bit source declared S32LE or
+//!   S24LE loses nothing. A stereo source above 48 kHz is not declared at its own rate — libpf's
+//!   PCM table names no rate above 48 kHz on any image from 2018 to 2025 — so it is resampled here
+//!   to 48 kHz (or 44.1 kHz when the source is a multiple of it) by a Kaiser-windowed sinc
+//!   ([`Downsampler`]), and the Load declares that rate.
 //! * **Native PCM tracks** (Matroska `A_PCM/*`), converted to the declared width/endianness.
+//! * **MP3 and Vorbis** (only with the `lossy` fork knob on): decoded here for a set whose own
+//!   pipeline lacks them, downmixed to stereo ([`crate::speed_audio::downmix`]) and declared S16
+//!   at the source rate (or a whole-ratio reduction of it, like the lossless lane). The knob is
+//!   off by default — this set's own table names MPEG and Vorbis, so it plays them compressed.
 //!
 //! The Load payload is composed from the ROUTE's metadata before this demuxer opens the stream,
 //! so the format is declared first ([`PcmSpec`], published by the engine through [`declare`])
@@ -66,7 +74,14 @@ impl PcmSpec {
         if rate <= 0 || !plx_platform::devcaps::pcm_lane_channels_ok(channels) {
             return None;
         }
-        let width = if (1..=16).contains(&bit_depth) {
+        // A stereo source above the PCM table's top is resampled here, and the Load declares the
+        // rate it actually receives (`downsample_target`). A surround hi-res track keeps its own
+        // rate: the lane does not resample or remix it, and the route's encode lane / the server
+        // decide its fate.
+        let resampled = (channels <= 2).then(|| downsample_target(rate as u32)).flatten();
+        let width = if resampled.is_some() {
+            PcmWidth::S32
+        } else if (1..=16).contains(&bit_depth) {
             PcmWidth::S16
         } else {
             match pcm_hi {
@@ -76,10 +91,24 @@ impl PcmSpec {
             }
         };
         Some(PcmSpec {
-            rate: u32::try_from(rate).ok()?,
+            rate: resampled.unwrap_or(u32::try_from(rate).ok()?),
             channels: channels as u32,
             width,
         })
+    }
+
+    /// The declaration for an app-decoded MP3/Vorbis track (`lossy=on`): always stereo at S16.
+    /// The source keeps its own rate up to 48 kHz; above it the lane's decimator takes a whole
+    /// ratio and the Load declares that (`downsample_target`). `None` for a rate that is neither:
+    /// the route then leaves the track to the server rather than declare a rate the lane cannot
+    /// produce.
+    pub fn for_lossy(rate: i64) -> Option<PcmSpec> {
+        if rate <= 0 {
+            return None;
+        }
+        let rate = u32::try_from(rate).ok()?;
+        let rate = if rate <= 48_000 { rate } else { downsample_target(rate)? };
+        Some(PcmSpec { rate, channels: 2, width: PcmWidth::S16 })
     }
 
     /// `pcmInfo.channelMode`.
@@ -89,6 +118,22 @@ impl PcmSpec {
             6 => "6-channel",
             _ => "stereo",
         }
+    }
+}
+
+/// The rate a stereo source above the PCM table's top is resampled to: the table's own top in the
+/// source's family (44.1 kHz for a multiple of 44.1, else 48 kHz). `None` when the source is at or
+/// below 48 kHz, or when the ratio is not a whole number (such a track keeps its declared rate).
+pub fn downsample_target(rate: u32) -> Option<u32> {
+    if rate <= 48_000 {
+        return None;
+    }
+    if rate % 44_100 == 0 {
+        Some(44_100)
+    } else if rate % 48_000 == 0 {
+        Some(48_000)
+    } else {
+        None
     }
 }
 
@@ -223,10 +268,22 @@ const OFF_AFRAME_DATA: usize = 0;
 const OFF_AFRAME_NB_SAMPLES: usize = 76;
 #[cfg(target_pointer_width = "32")]
 const OFF_AFRAME_FORMAT: usize = 80;
+#[cfg(target_pointer_width = "32")]
+const OFF_AFRAME_SAMPLE_RATE: usize = 132;
+#[cfg(target_pointer_width = "32")]
+const OFF_AFRAME_NB_CHANNELS: usize = 256 + 4;
+#[cfg(target_pointer_width = "32")]
+const OFF_AFRAME_EXTENDED_DATA: usize = 64;
 #[cfg(target_pointer_width = "64")]
 const OFF_AFRAME_NB_SAMPLES: usize = 112;
 #[cfg(target_pointer_width = "64")]
 const OFF_AFRAME_FORMAT: usize = 116;
+#[cfg(target_pointer_width = "64")]
+const OFF_AFRAME_SAMPLE_RATE: usize = 180;
+#[cfg(target_pointer_width = "64")]
+const OFF_AFRAME_NB_CHANNELS: usize = 384 + 4;
+#[cfg(target_pointer_width = "64")]
+const OFF_AFRAME_EXTENDED_DATA: usize = 96;
 
 #[inline]
 unsafe fn frame_i32(frame: *const c_void, off: usize) -> i32 {
@@ -238,17 +295,18 @@ unsafe fn frame_plane(frame: *const c_void, i: usize) -> *const u8 {
     *((frame as *const u8).add(OFF_AFRAME_DATA) as *const *const u8).add(i)
 }
 
-/// The bundled FFmpeg's FLAC decoder, owned for one demux run.
+/// The bundled FFmpeg's lossless decoder (FLAC or ALAC), owned for one demux run.
 struct Decoder {
     ctx: *mut AVCodecContext,
     frame: *mut c_void,
+    name: String,
 }
 
 impl Decoder {
-    unsafe fn open(acp: *const AVCodecParameters) -> Result<Decoder, String> {
+    unsafe fn open(acp: *const AVCodecParameters, name: &str) -> Result<Decoder, String> {
         let codec = avcodec_find_decoder((*acp).codec_id);
         if codec.is_null() {
-            return Err("the bundled FFmpeg has no flac decoder".into());
+            return Err(format!("the bundled FFmpeg has no {name} decoder"));
         }
         let mut ctx = avcodec_alloc_context3(codec);
         if ctx.is_null() {
@@ -256,14 +314,14 @@ impl Decoder {
         }
         if avcodec_parameters_to_context(ctx, acp) < 0 || avcodec_open2(ctx, codec, std::ptr::null_mut()) < 0 {
             avcodec_free_context(&mut ctx);
-            return Err("the flac decoder refused the stream parameters".into());
+            return Err(format!("the {name} decoder refused the stream parameters"));
         }
         let frame = av_frame_alloc();
         if frame.is_null() {
             avcodec_free_context(&mut ctx);
             return Err("av_frame_alloc failed".into());
         }
-        Ok(Decoder { ctx, frame })
+        Ok(Decoder { ctx, frame, name: name.to_string() })
     }
 }
 
@@ -277,7 +335,10 @@ impl Drop for Decoder {
 }
 
 enum Source {
-    Flac(Decoder),
+    Decoded(Decoder),
+    /// MP3/Vorbis behind the `lossy` knob: decoded, downmixed to stereo and resampled to the
+    /// declared rate (see [`decode_lossy`]).
+    Lossy(Decoder),
     Raw(SrcFmt),
 }
 
@@ -285,6 +346,9 @@ enum Source {
 pub(super) struct PcmLane {
     src: Source,
     spec: PcmSpec,
+    /// `Some` when the source rate is above the PCM table's top and the lane resamples it (the
+    /// Load declares `spec.rate`, not the file's rate).
+    down: Option<Downsampler>,
     buf: Vec<u8>,
     errors: u32,
 }
@@ -295,34 +359,69 @@ impl PcmLane {
     pub(super) unsafe fn open(acp: *const AVCodecParameters, spec: Option<PcmSpec>) -> Result<Option<PcmLane>, String> {
         let name = std::ffi::CStr::from_ptr(avcodec_get_name((*acp).codec_id)).to_string_lossy().into_owned();
         let raw = SrcFmt::from_pcm_codec(&name);
-        if name != "flac" && raw.is_none() {
+        // The knob's answer is already baked into the route's declaration (`devcaps` read it at
+        // boot): a declared PCM spec on an MP3/Vorbis stream is this lane's, and no spec means the
+        // route left the track to the pipeline, which is fed compressed as before.
+        let lossy = matches!(name.as_str(), "mp3" | "vorbis") && spec.is_some();
+        if !matches!(name.as_str(), "flac" | "alac") && raw.is_none() && !lossy {
             return Ok(None);
         }
         let Some(spec) = spec else {
             return Err(format!("{name}: the Load declared no PCM format for it"));
         };
-        let (channels, rate) = ((*acp).ch_layout.nb_channels, (*acp).sample_rate);
-        if channels as u32 != spec.channels || rate as u32 != spec.rate {
+        let (channels, rate) = ((*acp).ch_layout.nb_channels, (*acp).sample_rate as u32);
+        if lossy {
+            // The lane always declares the stereo it downmixes to, whatever the source carries.
+            if spec.channels != 2 {
+                return Err(format!("{name}: the Load declared {}ch, the lossy lane feeds 2", spec.channels));
+            }
+            let down = if rate == spec.rate {
+                None
+            } else if downsample_target(rate) == Some(spec.rate) {
+                Some(Downsampler::new(rate / spec.rate, 2))
+            } else {
+                return Err(format!("{name} {rate} Hz cannot be declared at {} Hz", spec.rate));
+            };
+            let dec = Decoder::open(acp, &name)?;
+            crate::player::log(&format!(
+                "ff: audio lane {name} {channels}ch {rate} Hz decoded in-app -> PCM {} 2ch {} Hz",
+                spec.width.format(),
+                spec.rate
+            ));
+            return Ok(Some(PcmLane { src: Source::Lossy(dec), spec, down, buf: Vec::new(), errors: 0 }));
+        }
+        if channels as u32 != spec.channels {
             return Err(format!(
-                "{name} {channels}ch {rate} Hz does not match the declared {}ch {} Hz",
-                spec.channels, spec.rate
+                "{name} {channels}ch does not match the declared {}ch",
+                spec.channels
             ));
         }
+        let down = if rate == spec.rate {
+            None
+        } else if channels <= 2 && downsample_target(rate) == Some(spec.rate) {
+            Some(Downsampler::new(rate / spec.rate, channels as usize))
+        } else {
+            return Err(format!(
+                "{name} {rate} Hz does not match the declared {} Hz",
+                spec.rate
+            ));
+        };
         let src = match raw {
             Some(fmt) => Source::Raw(fmt),
-            None => Source::Flac(Decoder::open(acp)?),
+            None => Source::Decoded(Decoder::open(acp, &name)?),
         };
         let what = match &src {
-            Source::Flac(_) => "FLAC decoded in-app".to_string(),
+            Source::Decoded(_) | Source::Lossy(_) => format!("{name} decoded in-app"),
             Source::Raw(_) => format!("PCM {name}"),
         };
         crate::player::log(&format!(
-            "ff: audio lane {what} -> PCM {} {}ch {} Hz",
+            "ff: audio lane {what}{} -> PCM {} {}ch {} Hz",
+            down.as_ref().map_or(String::new(), |d| format!(" ({}:1 resample from {rate} Hz)", d.factor)),
             spec.width.format(),
             spec.channels,
             spec.rate
         ));
-        Ok(Some(PcmLane { src, spec, buf: Vec::new(), errors: 0 }))
+        Ok(Some(PcmLane { src, spec, down, buf: Vec::new(), errors: 0 }))
     }
 
     /// One demuxed packet to the declared PCM. Empty when the packet produced no samples (a
@@ -337,12 +436,16 @@ impl PcmLane {
         };
         match &mut self.src {
             Source::Raw(fmt) => convert_interleaved(data, *fmt, out, &mut self.buf),
-            Source::Flac(dec) => {
+            Source::Lossy(dec) => {
+                decode_lossy(dec, self.down.as_mut(), out, &mut self.buf, pkt, &mut self.errors)
+            }
+            Source::Decoded(dec) => {
+                let codec = dec.name.clone();
                 let ret = avcodec_send_packet(dec.ctx, pkt);
                 if ret < 0 && ret != AVERROR_EAGAIN {
                     self.errors += 1;
                     if self.errors <= 3 {
-                        crate::player::log(&format!("ff: flac decode error {ret} (packet skipped)"));
+                        crate::player::log(&format!("ff: {codec} decode error {ret} (packet skipped)"));
                     }
                     return &self.buf;
                 }
@@ -355,7 +458,7 @@ impl PcmLane {
                     if r < 0 {
                         self.errors += 1;
                         if self.errors <= 3 {
-                            crate::player::log(&format!("ff: flac receive_frame error {r}"));
+                            crate::player::log(&format!("ff: {codec} receive_frame error {r}"));
                         }
                         break;
                     }
@@ -369,14 +472,23 @@ impl PcmLane {
                         other => {
                             self.errors += 1;
                             if self.errors <= 3 {
-                                crate::player::log(&format!("ff: flac decoder gave sample format {other}; frame skipped"));
+                                crate::player::log(&format!("ff: {codec} decoder gave sample format {other}; frame skipped"));
                             }
                             av_frame_unref(dec.frame);
                             continue;
                         }
                     };
                     let n = fmt.bytes();
-                    if planar {
+                    if let Some(down) = &mut self.down {
+                        let planes: Vec<&[u8]> = (0..channels.min(8))
+                            .map(|c| {
+                                let p = frame_plane(dec.frame, if planar { c } else { 0 });
+                                let len = if planar { samples * n } else { samples * channels * n };
+                                if p.is_null() { &[][..] } else { std::slice::from_raw_parts(p, len) }
+                            })
+                            .collect();
+                        down.push_frame(&planes, samples, fmt, planar, out, &mut self.buf);
+                    } else if planar {
                         let planes: Vec<&[u8]> = (0..channels.min(8))
                             .map(|c| {
                                 let p = frame_plane(dec.frame, c);
@@ -398,13 +510,220 @@ impl PcmLane {
         &self.buf
     }
 
-    /// After a seek: the decoder must not carry state across the discontinuity.
+    /// After a seek: neither the decoder nor the resampler may carry state across the gap.
     pub(super) unsafe fn flush(&mut self) {
-        if let Source::Flac(dec) = &mut self.src {
+        if let Source::Decoded(dec) | Source::Lossy(dec) = &mut self.src {
             avcodec_flush_buffers(dec.ctx);
+        }
+        if let Some(down) = &mut self.down {
+            down.reset();
         }
     }
 }
+
+/// Decode one packet of an MP3/Vorbis stream, downmix every frame to stereo and write it to
+/// `dst` as the declared PCM. `down` is the whole-ratio decimator for a source above 48 kHz.
+unsafe fn decode_lossy(
+    dec: &mut Decoder,
+    down: Option<&mut Downsampler>,
+    out: PcmWidth,
+    dst: &mut Vec<u8>,
+    pkt: *const AVPacket,
+    errors: &mut u32,
+) {
+    let ret = avcodec_send_packet(dec.ctx, pkt);
+    if ret < 0 && ret != AVERROR_EAGAIN {
+        *errors += 1;
+        if *errors <= 3 {
+            crate::player::log(&format!("ff: {} decode error {ret} (packet skipped)", dec.name));
+        }
+        return;
+    }
+    let mut down = down;
+    loop {
+        let r = avcodec_receive_frame(dec.ctx, dec.frame);
+        if r == AVERROR_EAGAIN || r == AVERROR_EOF {
+            break;
+        }
+        if r < 0 {
+            *errors += 1;
+            if *errors <= 3 {
+                crate::player::log(&format!("ff: {} receive_frame error {r}", dec.name));
+            }
+            break;
+        }
+        let nb = frame_i32(dec.frame, OFF_AFRAME_NB_SAMPLES).max(0) as usize;
+        let format = frame_i32(dec.frame, OFF_AFRAME_FORMAT);
+        let channels = frame_i32(dec.frame, OFF_AFRAME_NB_CHANNELS).max(0) as usize;
+        let ext = *((dec.frame as *const u8).add(OFF_AFRAME_EXTENDED_DATA) as *const *const *const u8);
+        if let Some((sf, planar)) = crate::speed_audio::SampleFormat::from_av(format) {
+            if nb > 0 && channels > 0 && !ext.is_null() {
+                let width = sf.bytes();
+                let planes: Vec<&[u8]> = if planar {
+                    (0..channels).map(|c| std::slice::from_raw_parts(*ext.add(c), nb * width)).collect()
+                } else {
+                    vec![std::slice::from_raw_parts(*ext, nb * width * channels)]
+                };
+                let stereo = crate::speed_audio::downmix(sf, planar, channels, nb, &planes);
+                match down.as_mut() {
+                    Some(d) => d.push_stereo(&stereo, out, dst),
+                    None => {
+                        for f in &stereo {
+                            write_from_f32(f[0], out, dst);
+                            write_from_f32(f[1], out, dst);
+                        }
+                    }
+                }
+            }
+        }
+        av_frame_unref(dec.frame);
+    }
+}
+
+/// A Kaiser-windowed sinc low-pass followed by whole-number decimation, per channel, stateful
+/// across packets. Used only for a stereo lossless source above the PCM table's top (96, 88.2,
+/// 192, 176.4 kHz and their multiples): the cutoff sits at the OUTPUT Nyquist, so nothing above it
+/// folds back into the audible band, and the ratio is an integer (`downsample_target` only accepts
+/// one), which makes the kernel one phase and the filter a plain FIR.
+struct Downsampler {
+    factor: usize,
+    /// Zero crossings kept on each side of the centre; the filter is `2 * half + 1` taps.
+    half: usize,
+    taps: Vec<f32>,
+    /// Per-channel input from global frame `start` on; trimmed as outputs consume it.
+    win: Vec<Vec<f32>>,
+    start: i64,
+    /// Global index of the next output frame.
+    next: i64,
+}
+
+impl Downsampler {
+    fn new(factor: u32, channels: usize) -> Downsampler {
+        let factor = factor.max(2) as usize;
+        let half = 32 * factor;
+        Downsampler {
+            factor,
+            half,
+            taps: kaiser_sinc_taps(factor, half),
+            win: vec![Vec::new(); channels],
+            start: 0,
+            // The filter needs `half` frames of run-up: the first output whose window is fully
+            // inside the stream is the one at or after that boundary.
+            next: half.div_ceil(factor) as i64,
+        }
+    }
+
+    fn reset(&mut self) {
+        for w in &mut self.win {
+            w.clear();
+        }
+        self.start = 0;
+        self.next = self.half.div_ceil(self.factor) as i64;
+    }
+
+    /// Append decoded stereo frames (as the lossy lane's downmix leaves them) and write every
+    /// output frame they complete. The S16 packing is lossless for the lossy sources this lane
+    /// takes, which declare S16 anyway.
+    fn push_stereo(&mut self, frames: &[[f32; 2]], out: PcmWidth, dst: &mut Vec<u8>) {
+        let mut bytes = Vec::with_capacity(frames.len() * 4);
+        for f in frames {
+            let l = (f[0].clamp(-1.0, 1.0) * 32_767.0).round() as i16;
+            let r = (f[1].clamp(-1.0, 1.0) * 32_767.0).round() as i16;
+            bytes.extend_from_slice(&l.to_le_bytes());
+            bytes.extend_from_slice(&r.to_le_bytes());
+        }
+        self.push_frame(&[&bytes], frames.len(), SrcFmt::S16Le, false, out, dst);
+    }
+
+    /// Append one decoded frame (interleaved or planar integer samples) and write every output
+    /// frame it completes, at `out`'s width, to `dst`.
+    fn push_frame(&mut self, planes: &[&[u8]], samples: usize, fmt: SrcFmt, planar: bool, out: PcmWidth, dst: &mut Vec<u8>) {
+        let width = fmt.bytes();
+        let channels = self.win.len();
+        for c in 0..channels {
+            for i in 0..samples {
+                let at = if planar { i * width } else { (i * channels + c) * width };
+                let s = &planes[c][at..at + width];
+                self.win[c].push(fmt.read(s) as f32 / 2_147_483_648.0);
+            }
+        }
+        // An output frame n needs input [n*factor - half, n*factor + half].
+        loop {
+            let last = self.start + self.win[0].len() as i64 - 1;
+            let need = self.next * self.factor as i64 + self.half as i64;
+            if last < need {
+                break;
+            }
+            let base = (self.next * self.factor as i64 - self.half as i64 - self.start) as usize;
+            for c in 0..channels {
+                let mut acc = 0.0f32;
+                for (k, &h) in self.taps.iter().enumerate() {
+                    acc += h * self.win[c][base + k];
+                }
+                write_from_f32(acc, out, dst);
+            }
+            self.next += 1;
+        }
+        // Drop what no future output can read: the oldest index still needed is next*factor - half.
+        let keep_from = self.next * self.factor as i64 - self.half as i64;
+        if keep_from > self.start {
+            let drop = (keep_from - self.start) as usize;
+            let drop = drop.min(self.win.first().map_or(0, Vec::len));
+            for w in &mut self.win {
+                w.drain(..drop);
+            }
+            self.start += drop as i64;
+        }
+    }
+}
+
+/// The filter's taps, normalized to unity gain at 0 Hz: `sin(pi*x/factor)/(pi*x/factor)` (cutoff at
+/// the output Nyquist) under a Kaiser window with `beta = 12.8` (about 120 dB of stop band, the
+/// value upstream's own resampler measured).
+fn kaiser_sinc_taps(factor: usize, half: usize) -> Vec<f32> {
+    let n = 2 * half + 1;
+    let beta = 12.8f64;
+    let i0b = bessel_i0(beta);
+    let mut taps: Vec<f64> = (0..n)
+        .map(|k| {
+            let x = (k as f64 - half as f64) / factor as f64;
+            let sinc = if x == 0.0 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+            let r = 2.0 * k as f64 / (n - 1) as f64 - 1.0;
+            let w = bessel_i0(beta * (1.0 - r * r).max(0.0).sqrt()) / i0b;
+            sinc * w
+        })
+        .collect();
+    let sum: f64 = taps.iter().sum();
+    if sum != 0.0 {
+        for t in &mut taps {
+            *t /= sum;
+        }
+    }
+    taps.into_iter().map(|t| t as f32).collect()
+}
+
+/// The zeroth-order modified Bessel function of the first kind, by its power series (converges in a
+/// few dozen terms for the betas a window uses).
+fn bessel_i0(x: f64) -> f64 {
+    let (mut sum, mut term) = (1.0f64, 1.0f64);
+    let q = x * x / 4.0;
+    for k in 1..64 {
+        term *= q / (k * k) as f64;
+        sum += term;
+        if term < sum * 1e-15 {
+            break;
+        }
+    }
+    sum
+}
+
+/// One full-scale float sample to the declared width, saturating (a filter overshoot is clipped,
+/// never wrapped).
+fn write_from_f32(v: f32, out: PcmWidth, dst: &mut Vec<u8>) {
+    let s = (v.clamp(-1.0, 1.0) as f64 * 2_147_483_647.0).round() as i32;
+    write(s, out, dst);
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -424,6 +743,93 @@ mod tests {
         assert!(PcmSpec::for_track(0, 2, 16, None).is_none());
         assert!(PcmSpec::for_track(48_000, 8, 24, None).is_none());
         assert!(PcmSpec::for_track(48_000, 0, 24, None).is_none());
+    }
+
+    /// A stereo lossless source above the PCM table's top is declared at the table's top and
+    /// resampled by the lane; a surround one keeps its rate (the lane never remixes).
+    #[test]
+    fn hi_res_stereo_is_declared_at_the_pcm_tables_top() {
+        assert_eq!(downsample_target(48_000), None);
+        assert_eq!(downsample_target(44_100), None);
+        assert_eq!(downsample_target(96_000), Some(48_000));
+        assert_eq!(downsample_target(192_000), Some(48_000));
+        assert_eq!(downsample_target(88_200), Some(44_100));
+        assert_eq!(downsample_target(176_400), Some(44_100));
+        assert_eq!(downsample_target(50_000), None, "not a whole ratio: left as declared");
+        let s = PcmSpec::for_track(96_000, 2, 24, None).unwrap();
+        assert_eq!((s.rate, s.width), (48_000, PcmWidth::S32));
+        let s = PcmSpec::for_track(88_200, 1, 16, None).unwrap();
+        assert_eq!((s.rate, s.width), (44_100, PcmWidth::S32));
+        assert_eq!(PcmSpec::for_track(96_000, 6, 24, None).unwrap().rate, 96_000);
+    }
+
+    /// An app-decoded MP3/Vorbis track is always declared stereo S16, at its own rate up to 48 kHz
+    /// and at the decimator's whole-ratio top above it.
+    #[test]
+    fn lossy_spec_is_stereo_s16_at_a_rate_the_sink_knows() {
+        let s = PcmSpec::for_lossy(44_100).unwrap();
+        assert_eq!((s.rate, s.channels, s.width), (44_100, 2, PcmWidth::S16));
+        assert_eq!(s.channel_mode(), "stereo");
+        assert_eq!(PcmSpec::for_lossy(48_000).unwrap().rate, 48_000);
+        assert_eq!(PcmSpec::for_lossy(96_000).unwrap().rate, 48_000);
+        assert_eq!(PcmSpec::for_lossy(88_200).unwrap().rate, 44_100);
+        assert_eq!(PcmSpec::for_lossy(50_000), None, "not a whole ratio: the server keeps it");
+        assert_eq!(PcmSpec::for_lossy(0), None);
+    }
+
+    /// The decimator keeps a constant level (unity gain at DC), consumes `factor` input frames per
+    /// output frame, and leaves the leading half-filter of run-up unconverted.
+    #[test]
+    fn the_decimator_halves_the_rate_at_unity_gain() {
+        let mut down = Downsampler::new(2, 1);
+        let mut out = Vec::new();
+        // 0.5 full scale, as S16 packed mono
+        let frame: Vec<u8> = 16_384i16.to_le_bytes().to_vec();
+        for _ in 0..9_600 {
+            down.push_frame(&[&frame], 1, SrcFmt::S16Le, false, PcmWidth::S32, &mut out);
+        }
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0)
+            .collect();
+        assert!(got.len() >= 4_600 && got.len() <= 4_800, "about half the 9,600 input frames: {}", got.len());
+        for v in &got[1..] {
+            assert!((v - 0.5).abs() < 1e-3, "unity gain at DC, got {v}");
+        }
+    }
+
+    /// A 1 kHz tone at 96 kHz comes out of the 2:1 decimator at 48 kHz still a 1 kHz tone at the
+    /// same level: the filter is a low-pass, not a rate label.
+    #[test]
+    fn the_decimator_keeps_a_passband_tone() {
+        let mut down = Downsampler::new(2, 1);
+        let mut out = Vec::new();
+        let n = 9_600usize;
+        for i in 0..n {
+            let v = (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 96_000.0).sin() * 0.5;
+            let s = (v * 32_767.0) as i16;
+            let bytes = s.to_le_bytes().to_vec();
+            down.push_frame(&[&bytes], 1, SrcFmt::S16Le, false, PcmWidth::S32, &mut out);
+        }
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0)
+            .collect();
+        // Compare the second half (past the filter's run-up) with the reference tone at 48 kHz.
+        let start = got.len() / 2;
+        let want = |i: usize| (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 48_000.0).sin() * 0.5;
+        // Align phase by picking the offset (the filter's delay) that fits best.
+        let best = (0..40)
+            .map(|off| {
+                let err: f32 = (start..got.len())
+                    .map(|i| (got[i] - want(i + off)).abs())
+                    .sum::<f32>()
+                    / (got.len() - start) as f32;
+                (err, off)
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+            .unwrap();
+        assert!(best.0 < 0.01, "the tone survives the filter (mean error {})", best.0);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 {
   "widgets.menu.options": "Opções",
   "widgets.menu.quality": "Qualidade",
+  "widgets.menu.speed": "Velocidade de reprodução",
+  "widgets.speed.normal": "Normal",
   "widgets.menu.stats": "Estatísticas avançadas",
   "widgets.menu.diagnostics": "Enviar diagnósticos",
   "widgets.badge.forced": "FORÇADAS",

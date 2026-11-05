@@ -19,6 +19,7 @@
 //! | `pcm_hi`       | `s32`, `s24`, `s16`           | feed: PCM sample format for sources deeper than 16 bit |
 //! | `flac`         | `pcm`, `off`                  | feed: FLAC decoded in-app to PCM, or left to the server |
 //! | `opus`         | `native`, `off`               | feed: Opus fed as-is, or left to the server |
+//! | `lossy`        | `off`, `on`                   | feed: MP3 and Vorbis decoded in-app to stereo PCM, for a set whose own decoder lacks them (`on` also announces them in the direct-play profile) |
 //! | `dts_core`     | `auto`, `never`               | gate: DTS-HD above the TV's DTS channel ceiling plays as its core (`never` = the server converts it) |
 //! | `encode`       | `ac3`, `off`                  | feed: FLAC/PCM above the PCM lane's channels and TrueHD/MLP (48 kHz) decoded and encoded to AC3 5.1 640 kbps in-app (`off` = the server converts them) |
 //! | `remux_dv`     | `on`, `off`                   | route: a server remux that copies the HEVC video declares the source's Dolby Vision as direct play does (`off` = declare nothing) |

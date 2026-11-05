@@ -120,8 +120,12 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
 ## Audio / video codec handling (fork)
 
 - Dolby Vision Profile 7 → 8.1 in-app conversion; DV preserved on every video-copy remux.
-- In-app AC3 encode lane for FLAC/PCM above 2ch and TrueHD (always direct play); DTS routed
-  through AC3 encode lane; native Opus, DTS-HD core above ceiling, lossless PCM lane.
+- In-app audio lanes: AC3 encode for FLAC/PCM above 2ch and TrueHD (always direct play); DTS
+  routed through the AC3 encode lane; native Opus; DTS-HD core above ceiling; lossless PCM lane
+  for FLAC/ALAC, with stereo above 48 kHz decimated in-app; MP3/Vorbis app decode behind the
+  `lossy` knob.
+- Playback speed 0.5×–2× done in the app: timestamps scaled, sound decoded and time-stretched
+  (WSOLA) to 48 kHz PCM.
 - Runtime playback knobs from `/media/developer/plxnative-fork.conf` (`dts_core` auto|never, etc.).
 - Direct-play Dolby Vision profiles 5/8; 50 MiB video / 4 MiB audio AU queues for high-bitrate
   direct play.

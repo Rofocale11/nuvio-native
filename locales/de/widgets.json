@@ -1,6 +1,8 @@
 {
   "widgets.menu.options": "Optionen",
   "widgets.menu.quality": "Qualität",
+  "widgets.menu.speed": "Wiedergabegeschwindigkeit",
+  "widgets.speed.normal": "Normal",
   "widgets.menu.stats": "Statistiken für Nerds",
   "widgets.menu.diagnostics": "Diagnosedaten senden",
   "widgets.badge.forced": "ERZWUNGEN",

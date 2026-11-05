@@ -284,10 +284,12 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   toolchain (`arm-webos-linux-gnueabi`); crates such as `innertube-rs`, `rusty_ytdl`, `rquickjs`
   or `boa_engine` pull C code or need `libclang`/`bindgen`, and the ARM build fails on them. The
   bundled FFmpeg is built `--disable-everything` plus the demuxers/decoders the player actually
-  uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump. The one place
-  audio is decoded and re-encoded in-app is the fork's AC3 encode lane (`media/src/ff_enc.rs`:
-  `dca`/`truehd`/`mlp`/`flac` decoders, the integer `ac3_fixed` encoder), which is why those
-  components are in the list — see `PLAYBACK.md`. The P2P server is an external `node` child
+  uses; adding one means a change to `ci/build-ffmpeg.sh` and the buffer-feed pump. Audio is
+  decoded and re-encoded in-app in two places: the lossless PCM lane (`media/src/ff_pcm.rs`:
+  `flac`/`alac`/PCM decoders, plus `mp3`/`vorbis` behind the `lossy` knob) and the AC3 encode lane
+  (`media/src/ff_enc.rs`: `dca`/`truehd`/`mlp`/`flac` decoders, the integer `ac3_fixed` encoder).
+  The playback-speed path (`ff::SpeedDecoder` + `media/src/speed_audio.rs`) decodes the selected
+  audio to PCM as well. Those are why the components are in the list — see `PLAYBACK.md`. The P2P server is an external `node` child
   process (see above), not an embedded JS engine: nothing here links a JS runtime into the app.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string like `"tmdb:603"`
   blanks the screen. `ID-MANAGEMENT.md` is how the shim keeps that promise.

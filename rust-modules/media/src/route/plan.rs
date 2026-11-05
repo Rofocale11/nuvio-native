@@ -446,8 +446,13 @@ fn audio_target_of(aud: i64) -> plx_plex::plex::AudioTarget {
     }
     match plx_platform::devcaps::dp_audio_key(&facts.codec) {
         "flac" => AudioTarget::CopyLane("flac"),
+        "alac" => AudioTarget::CopyLane("alac"),
         "pcm" => AudioTarget::CopyLane("pcm"),
         "opus" => AudioTarget::CopyLane("opus"),
+        // FORK (RichiL10): MP3/Vorbis only when the `lossy` knob admitted them (the caps answer
+        // that, so the target and the lane can never disagree).
+        "mp3" if plx_platform::devcaps::caps().audio_has("mp3") => AudioTarget::CopyLane("mp3"),
+        "vorbis" if plx_platform::devcaps::caps().audio_has("vorbis") => AudioTarget::CopyLane("vorbis"),
         "truehd" | "mlp" => AudioTarget::Encode,
         _ => AudioTarget::Unknown,
     }
