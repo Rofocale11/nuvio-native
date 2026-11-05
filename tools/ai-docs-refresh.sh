@@ -145,8 +145,15 @@ if [ -n "$REF" ]; then
     # reading and a PENDING one, and `check` accepts whichever the tree state allows.
     REF_FILES="$(git diff --name-only "$BASE" "$REF" | LC_ALL=C sort)"
     WORK_FILES_HEAD="$(git diff --name-only "$BASE" "$WORK" | LC_ALL=C sort)"
-    WORK_FILES_PENDING="$({ printf '%s\n' "$WORK_FILES_HEAD"; \
-        git diff --cached --name-only --diff-filter=ACMR; } | LC_ALL=C sort -u | sed '/^$/d')"
+    # The pending reading is ONE diff, base against the index — never the HEAD list unioned with
+    # `--cached`. The union counted a fork-ADDED file as "edited" the moment a commit staged a
+    # change to it, because `--cached` (index against HEAD) reports that file as `M` while against
+    # the base it is `A`: 17822681 wrote 226 edited files against a real 225 this way. A single
+    # `git diff --cached "$BASE"` sees the post-commit content and gets the statuses right.
+    # No `--diff-filter` here: this set is the fork's whole changed-file list, and a file the fork
+    # DELETED is still a file it changed. Filtering to A/C/M/R dropped 11 of them and shipped
+    # 661 against a real 672.
+    WORK_FILES_PENDING="$(git diff --cached --name-only "$BASE" | LC_ALL=C sort -u | sed '/^$/d')"
     count_lines() { printf '%s\n' "$1" | grep -c . || true; }
     contested_with_ref() { comm -12 <(printf '%s\n' "$1") <(printf '%s\n' "$REF_FILES") || true; }
 
@@ -161,13 +168,12 @@ if [ -n "$REF" ]; then
     # `edited`/`added` count statuses, so they cannot be unioned by name alone: the staged side is
     # asked with the same filter and the two lists are merged.
     ours_paths() {
-        # A staged file that is ALSO modified since the base appears in both diffs, and the answer
-        # is a COUNT of files, so the two sides are unioned here rather than concatenated: without
-        # `sort -u` the commit's own hook counted 15 edited files twice (240 against a real 225).
+        # Same shape as WORK_FILES_PENDING above, and for the same reason: `--cached "$BASE"` is
+        # the post-commit content with the right statuses. The old HEAD-plus-`--cached` union
+        # counted a fork-added file as edited as soon as a commit touched it (edited 226 against a
+        # real 225 in 17822681), because `--cached` sees `M` where the base sees `A`.
         if [ "$2" = pending ]; then
-            { git diff --name-only --diff-filter="$1" "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
-              git diff --cached --name-only --diff-filter="$1" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
-            } | LC_ALL=C sort -u
+            git diff --cached --name-only --diff-filter="$1" "$BASE" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
         else
             git diff --name-only --diff-filter="$1" "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
         fi
