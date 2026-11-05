@@ -4,8 +4,8 @@ Section: misc
 Priority: optional
 Architecture: arm
 Installed-Size: 10117
-Maintainer: Chris <dahl1376@umn.edu>
-Homepage: https://github.com/GLinnik21/plx-native
+Maintainer: Rofocale11 <Rofocale11@users.noreply.github.com>
+Homepage: https://github.com/Rofocale11/nuvio-native
 License: GPL-3.0-or-later
 Description: Nuvio Native — native Stremio-addon client for LG webOS, based on PlxNative (GPL-3.0)
 webOS-Package-Format-Version: 2
