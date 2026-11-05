@@ -31,7 +31,7 @@ the desktop simulator are valuable but cannot prove every device behaviour.
 - **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line.**
   `nuvio-native` is the trunk, the product and the repository's default branch. Short-lived
   branches and worktrees are cut from the working line (the stable `.ipk` line, currently
-  <!-- docs-fresh:ahead -->0<!-- /docs-fresh:ahead --> commits ahead of the trunk) and land back
+  <!-- docs-fresh:ahead -->2<!-- /docs-fresh:ahead --> commits ahead of the trunk) and land back
   on it; the trunk is fast-forwarded only when the owner asks. Merge and squash commits are both
   acceptable. `main` is **not** this project: it holds upstream-side history and none of the
   fork's commits — never cut work from it, never build or ship it.
