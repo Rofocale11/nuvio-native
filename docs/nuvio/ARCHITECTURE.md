@@ -45,9 +45,10 @@ path), `WATCH-PROGRESS.md` (local watch state and the account mirror), `DETAIL-L
      Stremio addons (Cinemeta, Torrentio, AIOStreams, …), Nuvio account backend
 ```
 
-The P2P streaming server is the one component outside that process: a `node` child spawned from
-the app's own `js-service/` directory. It is the streaming server torrent picks resolve through;
-see "The P2P streaming server" below.
+Torrent picks resolve through a streaming engine. When `libsbengine.so` loads it runs inside this
+process (`dlopen`, never linked); otherwise the fallback is a `node` child spawned from the app's
+own `js-service/` directory — the only component outside the process. See "The P2P streaming
+server" below.
 
 - Catalogs → PMS library sections and Home hubs. Metas → movie/show/season/episode items.
   Search → `/hubs/search`. Streams → the item's `Media[]` list (one Media per stream, with
@@ -174,9 +175,11 @@ see "The P2P streaming server" below.
   `route::restore_profile_rows`, and `bridge::SeatWatch` restores at every later seat change — never
   a republication of the same seat, so a pick in flight is not clobbered. A pick never writes the
   install-wide top-level key; that key is only the frozen fallback for a seat with no value of its own.
-- Torrents (`infoHash`): played through the headless Node server the app spawns from its own
-  `js-service/` directory, as `<server>/<infoHash>/<fileIdx>`, with
-  `http://127.0.0.1:11470` as the default address. See "The P2P streaming server" below.
+- Torrents (`infoHash`): played through the in-process C engine's own loopback Range URL when
+  `libsbengine.so` loads, or through the headless Node server the app spawns from its own
+  `js-service/` directory as `<server>/<infoHash>/<fileIdx>` when it does not, with
+  `http://127.0.0.1:11470` as the Node fallback's default address. See "The P2P streaming server"
+  below.
   Debrid-resolved HTTP links from Torrentio/AIOStreams play directly. Local server scanning is off
   by default and requires `enableTorrents`; a configured `torrentServer` can be used directly.
 - Release discovery permits plaintext credentials for the registered in-process shim
@@ -211,20 +214,43 @@ see "The P2P streaming server" below.
 
 ## The P2P streaming server
 
-Torrent (`infoHash`) streams need a Stremio-compatible streaming server. The app ships Stremio's
-desktop `server.js` and runs the server as a **direct child process** of the native app.
+Torrent (`infoHash`) streams need a streaming engine. The app has two, with the C engine
+preferred when available and the Node server kept as fallback:
 
-- **Why not an LS2 service.** `services.json` plus `luna-send` is the usual webOS shape, but this
-  firmware's Node lacks the `palmbus`/`pmloglib` native modules, so a Node service cannot register
-  or answer. A child process needs only the interpreter and the app's own directory.
-- **Payload.** `make ipk` stages `js-service/server.js` into
-  `usr/palm/applications/<APPID>/js-service/` inside the package. `make deploy` refreshes
-  `<app_dir>/js-service/` on the television, and `make install` re-installs the whole package.
-  `server.js` is the only JS payload: the old `js-service/server-settings.json` is gone, and both
-  `make deploy` and `verify-deploy` copy/check only `server.js`.
+- **C engine (`libsbengine.so`)** — primary when `sbengine::available()` is true. `boot.rs`
+  starts it via `sbengine::start_engine` with pre-created `state`/`cache` dirs under
+  `<runtime_dir>/serverp2p`, before the Node spawn in `start_p2p_service`, and stops it
+  first in `stop_p2p_service`. When it started, `start_p2p_service_inner` returns without
+  spawning `node` at all — the engine owns torrents and the idle child would only spend RAM.
+  The shim's `open_url` tries `sbengine::resolve_stream` first and only uses Node's `POST
+  /create` when the engine is unavailable; the engine serves the file itself on its own loopback
+  `127.0.0.1` Range URL, so nothing goes through the Node HTTP dialect on the engine path.
+  The Settings server URL is therefore optional: `Shim::torrent_server` falls back to the
+  default loopback address when the field is empty and the engine is loaded, so torrents stay
+  offered; the address is only dialled on the Node fallback.
+  The engine keeps every opened torrent downloading until it is removed, so resolving a
+  different hash removes the previous one (`sbengine: released previous torrent <hash>`), which
+  also deletes its payload. That invalidates every URL the engine handed out for it, so
+  `sbengine::active_hash()` names the live torrent and `open_url`'s resolved-URL cache reuses an
+  engine URL only while its `torrent:<hash>` marker still matches — after a source change back,
+  a stale entry is resolved again instead of 404ing forever.
+  `libsbengine.so` links libstdc++/libgcc and OpenSSL 1.1.1 statically — the NDK's libstdc++
+  would otherwise want three symbols the TV's lacks, and the firmware's `libssl` SONAME differs
+  across releases (1.0.x, 1.1, 3) — so `tools/fwcompat.py` grades it OK on every release in its
+  inventory, 1.2 to 11.2. Where `dlopen` still fails (an unknown firmware, a missing file)
+  `available()` is false and the Node path is used unchanged. A missing `libsbengine.so` is a normal state, not an error:
+  `make deploy` carries it to a device when built, and neither deploy nor `make ipk` fails for
+  its absence. `make ipk` ships it when built; because the engine is a CMake artifact with no
+  Rust link receipt, the packaging gate pins its exact SHA-256 instead of a `.link.json`.
+- **Node fallback (`js-service/server.js`)** — Stremio's desktop `server.js` as a direct child
+  process on `127.0.0.1:11470`, spawned only when the C engine is unavailable or failed to
+  start. It is not a mid-session fallback: if the engine started, there is no Node process to
+  take over.
+
 - **Data directory.** `appPath` is `<runtime_dir>/serverp2p` (the Rust half passes it as
   `APP_PATH`; `server.js`'s desktop default is never used on the television), and `cacheRoot`
-  follows `appPath`. The runtime root is per install — `/tmp` for the stable app, `/tmp/<app id>`
+  follows `appPath`; the C engine uses `<runtime_dir>/serverp2p/state` and `…/cache` under the
+  same root. The runtime root is per install — `/tmp` for the stable app, `/tmp/<app id>`
   for a developer install beside it (`paths::resolve_runtime_dir`) — which is required here, not
   cosmetic: the two installs run under different uids and the stable one could not write the
   debug one's directory, so a shared path made whichever booted second refuse to start P2P. The
@@ -289,8 +315,14 @@ desktop `server.js` and runs the server as a **direct child process** of the nat
   `flac`/`alac`/PCM decoders, plus `mp3`/`vorbis` behind the `lossy` knob) and the AC3 encode lane
   (`media/src/ff_enc.rs`: `dca`/`truehd`/`mlp`/`flac` decoders, the integer `ac3_fixed` encoder).
   The playback-speed path (`ff::SpeedDecoder` + `media/src/speed_audio.rs`) decodes the selected
-  audio to PCM as well. Those are why the components are in the list — see `PLAYBACK.md`. The P2P server is an external `node` child
-  process (see above), not an embedded JS engine: nothing here links a JS runtime into the app.
+  audio to PCM as well. Those are why the components are in the list — see `PLAYBACK.md`. The P2P
+  engine is the in-process `libsbengine.so` (C, dlopen'd, never linked) or, when it cannot load,
+  the external `node` child process (see above) — never an embedded JS engine: nothing here links
+  a JS runtime into the app. The `.so` is the one owner-approved exception to this rule: it is
+  staged beside the binary, its absence is normal (that package was built without it), and the app
+  is fully functional without it. Nuvio Engine is GPL-3.0-or-later, libtorrent BSD-3, Boost
+  BSL-1.0, OpenSSL 1.1.1 (dual OpenSSL/SSLeay, linked statically); `ci/build-sbengine.sh` and
+  `ci/build-openssl.sh` build it.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string like `"tmdb:603"`
   blanks the screen. `ID-MANAGEMENT.md` is how the shim keeps that promise.
 - **No native YouTube trailers.** In-app trailer playback was abandoned: extracting YouTube MP4s on

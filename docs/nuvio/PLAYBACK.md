@@ -115,6 +115,8 @@ the decoder, so they are the first thing to size honestly:
 | audio-ahead grant | `ff::AUDIO_AHEAD_HEADROOM` | 16 MiB | only for a file that stores more audio than video ahead of it |
 | poster pool | `ui::tex::TEX_RESIDENT_BYTES_MAX` | **32 MiB** | the measured zero-refusal point for one Home session; 24 MiB refused 171 arrivals (blank tiles) in a longer simulator session, 16 MiB re-armed constantly. The rest re-upload from the disk cache |
 | image-subtitle store | `player::SUB_BITMAP_BUDGET` | 40 MiB | **not** a cache: this IS the delayed-caption window, measured at 31.1 MB worst case for 4K PGS |
+| torrent engine RAM | `sbengine::DEFAULT_MEM_CACHE_BYTES` | **32 MiB** | verified pieces the in-process engine keeps for re-reads; it is a ceiling, and `sbengine: … mem=` shows it saturating |
+| torrent engine window | `sbengine::DEFAULT_WINDOW_BYTES` | **40 MiB on storage** | payload around the playhead, not RSS: trimmed every ~100 ms past 34 MiB down to 30, a file smaller than the window is kept whole, and the engine removes it with the torrent |
 | Starfish source buffers | `PAYLOAD_AV.bufferingCtrInfo` | 8 MiB video / 1 MiB audio | the pipeline's own, not ours |
 
 The two queues were 96/8 MiB until 2026-11-01 (an LG B4 sizing, 2026-09-22); on this set that peak
@@ -162,9 +164,9 @@ and the control-plane decision request has a 120 s deadline. A probe failure (`E
 container — the bundled FFmpeg demuxes only Matroska/WebM, MP4/MOV, MPEG-TS and raw H.264/HEVC —
 or unreachable); say so instead of starting the player.
 
-The probe also **pre-warms** slow sources: a cold torrent on the app's own streaming server
-(`js-service/server.js`, spawned as a child of the native app; see `ARCHITECTURE.md` "The P2P
-streaming server") can take far longer than the steady-state media inactivity timeout
+The probe also **pre-warms** slow sources: a cold torrent on the P2P engine (the in-process
+`libsbengine.so`, or the Node child when it cannot load; see `ARCHITECTURE.md` "The P2P streaming
+server") can take far longer than the steady-state media inactivity timeout
 (`stream.rs MEDIA_RECV_TIMEOUT_MS`, 15 s) and curl's 30 s low-speed floor; probing at decision
 time (generous deadline) means the player's own open hits a warmed torrent.
 

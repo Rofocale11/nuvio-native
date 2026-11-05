@@ -1187,12 +1187,15 @@ impl CurlSource {
                 ),
                 "CURLOPT_PROTOCOLS"
             );
-            // Torrent streams (127.0.0.1:11470) may need tens of seconds to fetch the
-            // requested pieces from the swarm on a resume; debrid direct links must
-            // still fail fast. Detect by host so the two policies never mix.
+            // Torrent streams (127.0.0.1:11470, or the C engine's 127.0.0.1 Range URLs) may need
+            // tens of seconds to fetch the requested pieces from the swarm on a resume; debrid
+            // direct links must still fail fast. Detect by host so the two policies never mix.
             let hop = self.hop_url.to_str().unwrap_or("");
-            let is_torrent = hop.contains("127.0.0.1:11470")
-                || hop.contains("localhost:11470");
+            // ponytail: keyed on loopback host (not port) — the C engine binds an ephemeral
+            // 127.0.0.1 port, so the 11470 literal would miss it; a non-localhost port key
+            // would be the upgrade path if a future engine ever leaves loopback.
+            let is_torrent = hop.contains("127.0.0.1:")
+                || hop.contains("localhost:");
             let connect_timeout_s: c_long = if is_torrent { 120 } else { CONNECT_TIMEOUT_S };
             plx_net::net::curl_easy_setopt_long(easy, CURLOPT_CONNECTTIMEOUT, connect_timeout_s);
             if let Some(at) = deadline {

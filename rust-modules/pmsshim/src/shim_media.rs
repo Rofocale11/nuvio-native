@@ -23,8 +23,25 @@ pub const TORRENT_SCHEME: &str = "torrent:";
 /// The URL the TV should open, a [`TORRENT_SCHEME`] marker for a torrent still to resolve, or None
 /// when this stream cannot play here (YouTube, external links, a torrent with no streaming server).
 pub fn playable_url(s: &Stream, torrent_server: Option<&str>) -> Option<String> {
-    if let Some(u) = plx_stremio::torrent::playable_url(s, torrent_server) {
-        return Some(u);
+    playable_url_with(s, torrent_server, plx_stremio::sbengine::available())
+}
+
+/// [`playable_url`] with the engine's availability passed in, so the branch this exists for — a
+/// torrent must become a marker, never a Node-style URL, when the engine will serve it — is
+/// testable on a host that cannot load the ARM library.
+fn playable_url_with(s: &Stream, torrent_server: Option<&str>, engine_available: bool) -> Option<String> {
+    // Debrid/HTTP links play as they are, engine or not.
+    if let Some(u) = plx_stremio::torrent::direct_url(s) {
+        return Some(u.to_string());
+    }
+    // The in-process engine resolves a torrent at open time (`open_url`). Handing the player the
+    // Node-style `/{hash}/{idx}` URL would bypass it and connect to a server this build does not
+    // start — the failure mode is `curlio: transport failed rc=7 — could not connect` on 11470.
+    // `torrent_server` still gates that torrents are offered at all.
+    if !engine_available {
+        if let Some(u) = plx_stremio::torrent::playable_url(s, torrent_server) {
+            return Some(u);
+        }
     }
     let hash = plx_stremio::torrent::info_hash(s)?;
     torrent_server.filter(|t| !t.trim().is_empty())?;
@@ -403,5 +420,35 @@ mod tests {
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);
         apply_subtitle_preference(&mut subs, Some("pt"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false]);
+    }
+
+    /// With the C engine loaded, a torrent with a known file index must still become the
+    /// `torrent:` marker: the Node-style `/{hash}/{idx}` URL is not dialled (no Node is spawned)
+    /// and produced `curlio: transport failed rc=7 — could not connect` on the television.
+    #[test]
+    fn an_engine_served_torrent_is_a_marker_even_with_a_file_index() {
+        let s = Stream {
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            file_idx: Some(3),
+            ..Default::default()
+        };
+        let server = Some("http://127.0.0.1:11470");
+        let marker = format!("{TORRENT_SCHEME}0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(playable_url_with(&s, server, true).as_deref(), Some(marker.as_str()));
+        let node_url = playable_url_with(&s, server, false).expect("server-backed torrent");
+        assert!(node_url.starts_with("http://127.0.0.1:11470/"), "got {node_url}");
+    }
+
+    /// A debrid/HTTP stream is never a marker, engine or not.
+    #[test]
+    fn a_direct_http_stream_stays_direct_with_the_engine() {
+        let s = Stream {
+            url: Some("https://example.invalid/movie.mkv".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            playable_url_with(&s, Some("http://127.0.0.1:11470"), true).as_deref(),
+            Some("https://example.invalid/movie.mkv")
+        );
     }
 }

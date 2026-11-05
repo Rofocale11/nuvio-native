@@ -44,9 +44,10 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
 - Addon configuration stored as an opaque JSON record in the app's private DB8 kind (separate records
   per debug/stable/nightly), loaded/saved through the authenticated storage helper with readback
   verification.
-- Torrents (`infoHash`) play through a Stremio-compatible streaming server URL when configured;
-  debrid-resolved HTTP links (Torrentio/AIOStreams) play directly; local server scanning off by
-  default, gated by `enableTorrents`.
+- Torrents (`infoHash`) play through the in-process C engine (`libsbengine.so`), or through a
+  Stremio-compatible streaming server URL when one is configured; debrid-resolved HTTP links
+  (Torrentio/AIOStreams) play directly; local server scanning off by default, gated by
+  `enableTorrents`.
 - Nuvio account sign-in surface on the TV; addon list imported from the account (Supabase) since
   WebView localStorage is unreadable cross-app in Developer Mode.
 - Release discovery permits plaintext credentials for the registered in-process shim only when its
@@ -65,8 +66,10 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
 - Source picker groups streams by addon on both Detail and in-player menu; Plex quality ladder
   removed.
 - Seeder counts shown on the in-player source page and leading stream details.
-- P2P streaming toggle and server URL in Playback settings; headless Stremio P2P server bundled as
-  a webOS service (node child spawned from `js-service/`).
+- P2P streaming toggle in Playback settings; the server URL is optional (the C engine needs none)
+  and names the Node fallback when set. Two engines ship: the in-process C engine
+  (`libsbengine.so`, preferred when it loads) and the Stremio `node` child from `js-service/`
+  (spawned only when it does not).
 - Buffer tuning for low-RAM TVs (50 MB video / 4 MB audio; later 15/2), skip disk cache when
   caching disabled.
 - Subtitle and audio preferences: `defaultAudioLanguage`, `defaultSubtitleLanguage`,
