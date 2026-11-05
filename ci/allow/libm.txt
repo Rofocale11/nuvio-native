@@ -1,6 +1,7 @@
-# count: 6
-# The transcendental surface OUTSIDE machine/src/motion.rs (spec §4.2). Every entry is RENDER or
-# COLOUR arithmetic — nothing here is logical state, hashed or replayed. Shrink, never grow.
+# count: 7
+# The transcendental surface OUTSIDE machine/src/motion.rs (spec §4.2). Every entry is arithmetic
+# on samples or pixels — RENDER, COLOUR or AUDIO DSP — and nothing here is logical state, hashed
+# or replayed. Shrink, never grow.
 # The test-support entry preserves widgets.rs's existing colour-test exception after its
 # cfg(test) module moved to a separate file; no production arithmetic was added.
 rust-modules/gfx/src/gfx.rs	sRGB/Lab colour conversions for the ground sampler (render)
@@ -9,3 +10,4 @@ rust-modules/ui/src/widgets_test_support.rs	sRGB linearisation moved from widget
 rust-modules/ui/src/testpat.rs	the synthetic test-pattern generator (dev diagnostic)
 rust-modules/ui/src/pill.rs	the capsule outline solve (render geometry)
 rust-modules/ui/src/route_screen.rs	sRGB linearisation for the ground contrast test (render)
+rust-modules/media/src/ff_pcm.rs	the Kaiser-windowed sinc kernel of the audio resampler (DSP, one sin per tap) and its two test tones
