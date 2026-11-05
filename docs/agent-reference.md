@@ -384,8 +384,11 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
     flag is a reason to read the logs, not a verdict. A job renamed or split in the window (the host
     jobs were one job until the split) only has the runs since.
   - *Budgets.* `ci/build-budgets.json` holds the deterministic ceilings and `ci/check-build-budgets.py`
-    enforces them: the stripped ARM `plxnative` that `make ipk` stages (the cross-build job, dev
-    flavour, `release` profile: CI selects it by itself, a local `make ipk` needs `ARM_PROFILE=release`), the number of third-party packages in the app crate's resolved graph for
+    enforces them: the stripped ARM `plxnative` that `make ipk FLAVOR=stable RELEASE=1` stages — the
+    binary inside the shipped `.ipk`, built by the cross-build job in exactly that configuration (a
+    local `make ipk` needs `ARM_PROFILE=release` to select the stripped profile); the unstripped
+    `pkg/plxnative` that `make deploy` copies is not what it grades. Then the number of third-party
+    packages in the app crate's resolved graph for
     `armv7-unknown-linux-gnueabi` (normal + build edges, dev-dependencies excluded; asked for both with
     default features and with `--no-default-features`, which is what ships), and the number of crate
     names present in two versions on the normal-edge graph (what `cargo tree -d --edges normal`
