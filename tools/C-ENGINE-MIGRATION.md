@@ -87,6 +87,16 @@ firmware older than 7.4 and none newer than 8.3.
   `sbengine: serving <hash> via engine (file 0)`; no `node` process in `/proc`; 5–12 MB/s, steady
   48 fps, `VmRSS` ~142 MiB, `VmHWM` ~151 MiB, `VmSwap` ~20 MiB; switching source A→B→A logs
   `released previous torrent <a>` then serves B, and the player recovers instead of 404ing.
+- **The GitHub-built package, on the television** (`build-ipk.yml` dispatch, run 42041322327 on
+  `84433947`): engine linked at 7.1 MB, `DT_NEEDED` unchanged; artifact
+  `com.nuvionative.app_0.8.0_arm.ipk` 24,863,668 bytes, `libsbengine.so` inside it hashes
+  `f9b83548…` (the digest the run pinned) and is the only staged copy. Installed stable and
+  played: `sbengine: engine started (0.1.5 / libtorrent …)`, `serving 343d7045b543 via engine
+  (file 0)` then a second title, **no `node` line at all**, 19–29 peers at 0–3 MB/s, engine
+  `window=40MB mem=32MB` (its ceiling holding), 45 minutes in at a steady **48 fps with 0
+  dropped / 0 carried / 0 evicted**. Memory on this build for that session: `VmRSS` 114 MB,
+  `VmHWM` **179 MB**, `VmSwap` 88 MB — a higher peak than the earlier debug session above, which
+  is the one number here that still wants a look during a long 4K playback run.
 
 ## Building and handing over a test build
 ```

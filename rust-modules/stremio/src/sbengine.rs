@@ -45,12 +45,25 @@ use std::sync::OnceLock;
 /// The engine's own compatibility gate (`SBE_API_VERSION` in sbengine.h).
 pub const API_VERSION: c_int = 3;
 
-/// Bytes of payload kept on storage around the playhead (the streaming window).
-pub const DEFAULT_WINDOW_BYTES: u64 = 40 * 1024 * 1024;
+/// Bytes of payload kept around the playhead (the streaming window).
+///
+/// **This is RAM on the television, not storage.** The window lives under
+/// `runtime_dir()/serverp2p/cache`, and the runtime root is a RAM-backed tmpfs on the set
+/// (`docs/ui-restructure-spec-v4.md` §5.3, settled on the device 2026-09-06). It is read with
+/// `pread`, so it lands in shmem and never appears in the process's `VmRSS` — which is exactly
+/// why it was easy to forget it while sizing: a set at `MemAvailable` ~80 MB pays for it as
+/// surely as for a heap allocation. 32 MiB is ~10 s of lookahead at the ~24 Mbit/s a real
+/// torrent measured on this set.
+pub const DEFAULT_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
 /// Upload budget, bytes/second (soft, against sharing, not against playback).
 pub const DEFAULT_UPLOAD_BPS: u64 = 2 * 1024 * 1024;
 /// Verified pieces kept in RAM, swept by the engine when memory tightens.
-pub const DEFAULT_MEM_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+///
+/// A second copy of bytes the window file already holds, kept only to make a re-read fast. With
+/// the window itself in RAM that is a duplicate, so it stays small: it saturates at its ceiling
+/// in practice (`sbengine: … mem=` in the event log shows it), and 8 MiB is enough to cover the
+/// re-reads around the playhead.
+pub const DEFAULT_MEM_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 /// Segment size for FAT32 storage that cannot punch holes; 0 = per-torrent files.
 pub const DEFAULT_SEGMENT_BYTES: u64 = 0;
 
@@ -444,3 +457,34 @@ pub fn relocate(cache_dir: &str, segment_bytes: u64) -> bool {
 // import would otherwise warn. `EngineApi` covers the table.
 #[allow(dead_code)]
 fn _assert_c_void(_: *mut c_void) {}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::{DEFAULT_MEM_CACHE_BYTES, DEFAULT_WINDOW_BYTES};
+
+    /// The engine's payload is one budget, not two independent knobs.
+    ///
+    /// Both terms are RAM on the television: the window lives on the RAM-backed tmpfs, and the
+    /// cache is a second copy of bytes the window already holds. They were 40 + 32 MiB, sized as
+    /// if the window were storage, and the set measured `MemAvailable` **78 MB** mid-film with
+    /// them in place. Raising either half means re-measuring on the device first; this test fails
+    /// so that cannot happen by editing one constant in passing.
+    #[test]
+    fn the_engine_payload_stays_inside_40_mib() {
+        let total = DEFAULT_WINDOW_BYTES + DEFAULT_MEM_CACHE_BYTES;
+        assert!(
+            total <= 40 * 1024 * 1024,
+            "engine payload is {} MiB; the set measured 78 MB MemAvailable mid-film",
+            total / (1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn the_window_can_still_hold_a_few_seconds_of_a_4k_remux() {
+        // 25 Mbit/s is a 4K remux at the low end; 8 s of lookahead is the floor below which a
+        // slow peer shows up as a stall rather than a moment of buffering.
+        let bytes_per_second = 25_000_000 / 8;
+        let seconds = DEFAULT_WINDOW_BYTES / bytes_per_second;
+        assert!(seconds >= 8, "window holds only {seconds} s at 25 Mbit/s");
+    }
+}

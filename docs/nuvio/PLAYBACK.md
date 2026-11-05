@@ -115,8 +115,8 @@ the decoder, so they are the first thing to size honestly:
 | audio-ahead grant | `ff::AUDIO_AHEAD_HEADROOM` | 16 MiB | only for a file that stores more audio than video ahead of it |
 | poster pool | `ui::tex::TEX_RESIDENT_BYTES_MAX` | **32 MiB** | the measured zero-refusal point for one Home session; 24 MiB refused 171 arrivals (blank tiles) in a longer simulator session, 16 MiB re-armed constantly. The rest re-upload from the disk cache |
 | image-subtitle store | `player::SUB_BITMAP_BUDGET` | 40 MiB | **not** a cache: this IS the delayed-caption window, measured at 31.1 MB worst case for 4K PGS |
-| torrent engine RAM | `sbengine::DEFAULT_MEM_CACHE_BYTES` | **32 MiB** | verified pieces the in-process engine keeps for re-reads; it is a ceiling, and `sbengine: … mem=` shows it saturating |
-| torrent engine window | `sbengine::DEFAULT_WINDOW_BYTES` | **40 MiB on storage** | payload around the playhead, not RSS: trimmed every ~100 ms past 34 MiB down to 30, a file smaller than the window is kept whole, and the engine removes it with the torrent |
+| torrent engine RAM | `sbengine::DEFAULT_MEM_CACHE_BYTES` | **8 MiB** | verified pieces the in-process engine keeps for re-reads; it is a ceiling, and it saturates (`sbengine: … mem=` in the event log). A duplicate of bytes the window file already holds, so it is small on purpose |
+| torrent engine window | `sbengine::DEFAULT_WINDOW_BYTES` | **32 MiB in RAM** | payload around the playhead, trimmed back below the cap, a file smaller than the window kept whole, and removed with the torrent. **Not "storage" on the set:** the runtime root is a RAM-backed tmpfs, the window is read with `pread`, so it is shmem — invisible in `VmRSS`, paid for out of the TV's 1.2 GB all the same |
 | Starfish source buffers | `PAYLOAD_AV.bufferingCtrInfo` | 8 MiB video / 1 MiB audio | the pipeline's own, not ours |
 
 The two queues were 96/8 MiB until 2026-11-01 (an LG B4 sizing, 2026-09-22); on this set that peak
@@ -127,6 +127,16 @@ visible grid) and refused 171 arrivals in a single simulator session, each a til
 until its cooldown cleared. The 8 MiB the pool takes back is still far inside the ~50 MB the queues
 gave up. `abr/sim.rs` carries the queue numbers by value and a test fails if the two models
 disagree.
+
+The engine's two rows above were 40 MiB window / 32 MiB RAM cache until 2026-11-05, and they were
+sized as if the window were storage. Measured on the set while a film played: `MemAvailable`
+**78 MB**, `/tmp` a 611 MB tmpfs holding **148.9 MB**, of which 48.8 MB was the engine's cache
+directory — a window that never showed in `VmRSS` and was invisible to every prior sizing
+decision. The set is also not the only thing in `/tmp`: four leftover
+`.hbchannel-incoming-*.ipk` uploads from Homebrew Channel installs were holding **93.8 MB** of
+it, and removing them took `MemFree` from 57.8 MB to **148.7 MB** and `MemAvailable` from 78.1 MB
+to **169.0 MB**. That is the first thing to check when the set looks short of memory — the
+package installer never cleans up after itself.
 
 ## Real metadata: `plx_media::ff::probe::probe_url`
 
