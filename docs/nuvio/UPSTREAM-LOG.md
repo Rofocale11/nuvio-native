@@ -709,5 +709,6 @@ The upstream catch-up is the next project, not a prerequisite for this merge: it
 table; this journal is the evidence behind them; `docs/nuvio/AGENT-GUIDE.md` carries the context
 map and tool inventory; `docs/README.md` indexes every document by status; the upstream README
 body moved to `docs/upstream-readme.md`, and the upstream-only pages carry a banner. No behaviour
-changed.
+changed. The reorg (`229b88e8`) and its numbers commit (`38b4a268`) were fast-forwarded into
+`nuvio-native` the same day, so both lines now point at the same tip.
 
