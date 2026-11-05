@@ -4,34 +4,21 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# `AGENTS.md` and `docs/nuvio/UPSTREAM.md` quote counts about the branch topology (how far the
-# working line is ahead of the trunk, the seam tables). They are generated, never hand-written:
-# `tools/ai-docs-refresh.sh update` rewrites them, `… check` (run by `make check` and CI) fails if
-# they are stale.
+# `AGENTS.md` and `docs/nuvio/UPSTREAM.md` quote counts about the fork's divergence (the seam
+# tables). They are generated, never hand-written: `tools/ai-docs-refresh.sh update` rewrites them,
+# `… check` (run by `make check` and CI) fails if they are stale. Counts that increment on every
+# commit are deliberately NOT stored — see the reason in that script's header.
 #
-# `update` writes the count the tree will have AFTER the commit, while `check` grades HEAD. That is
-# correct for a committed tree and impossible to satisfy before one — so the update form had to be
-# run and committed SEPARATELY, one commit behind the change it described. Every agent that finished
-# a task faced the same two-step: commit the work, then be told `check` is red and ask for a second,
-# docs-only commit. Forgetting it left the prose one commit stale and the gate red, which is the
-# exact failure the generator was written to prevent.
-#
-# This hook closes that hole: on every commit it runs the update form (which computes exactly the
-# number the tree will have once this commit exists) and stages the two generated files. One commit,
-# numbers right, nothing to remember.
+# `update --pending` counts the index this commit is about to turn into HEAD; plain `update`
+# counts HEAD. That distinction is now worth at most one number — a file this commit ADDS to the
+# seam tables. It used to also cover "commits ahead of the trunk", which is why an amend kept a
+# number one too many and needed a documented manual repair; that counter is no longer stored, so
+# an amend simply moves nothing and the hook has nothing to correct.
 #
 # WHY pre-commit AND NOT prepare-commit-msg: git builds the tree to commit from the INDEX *after*
 # prepare-commit-msg has run, so a `git add` there is silently lost — measured, twice: an amended
 # commit kept the numbers of the tree it replaced. pre-commit runs before that snapshot, and its
 # staging lands.
-#
-# AMEND: git does not tell a pre-commit hook that this is `--amend` (no flag, no environment
-# variable — measured), and an amend replaces HEAD instead of adding a commit, so the count must not
-# move. An amended commit therefore gets the same number it already had, one too many, and `check`
-# says so afterwards. The rare fix, in full:
-#
-#   ./tools/ai-docs-refresh.sh update --amend && git add AGENTS.md docs/nuvio/UPSTREAM.md
-#   PLX_DOCS_REFRESH=0 git commit --amend --no-edit
 #
 # INSTALL (once per repository — worktrees share the config; `git config core.hooksPath` is what
 # makes git look here instead of .git/hooks):
@@ -73,7 +60,7 @@ if [ -n "$dirty" ]; then
     exit 1
 fi
 
-out=$(./tools/ai-docs-refresh.sh update) || { printf '%s\n' "$out" >&2; exit 1; }
+out=$(./tools/ai-docs-refresh.sh update --pending) || { printf '%s\n' "$out" >&2; exit 1; }
 # Quiet on the common path (the numbers already said this): one line only when they moved.
 case "$out" in
     *updated*) printf '%s\n' "$out" ;;

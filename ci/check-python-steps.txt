@@ -186,6 +186,10 @@ python3 ci/test_ci_timeouts.py
 python3 ci/test_ci_workflows.py
 # The build-health budgets (ci/build-budgets.json): the checker against canned metadata, and the json schema.
 python3 ci/test_build_budgets.py
+# tools/ai-docs-refresh.sh against a throwaway repo: update writes the COMMITTED reading (the old
+# "+1 for the commit being prepared" is why every commit needed a second, numbers-only commit),
+# --pending differs by added files only, and touching a fork-added file must not count it as edited.
+python3 ci/test_ai_docs_refresh.py
 # tools/ci-durations.py (CI duration trends) against canned `gh api` output; no network.
 python3 tools/test_ci_durations.py
 # tools/ci-history.py (the live page's data: incremental merge, filtering, pull-request and nightly rows, re-runs,

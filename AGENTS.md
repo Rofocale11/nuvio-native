@@ -30,26 +30,29 @@ the desktop simulator are valuable but cannot prove every device behaviour.
   the working line, and to docs-only changes; approval from an earlier task never carries over.
 - **Trunk-based development on `nuvio-native`, with `forward-port/v0.9-hq` as the working line.**
   `nuvio-native` is the trunk, the product and the repository's default branch. Short-lived
-  branches and worktrees are cut from the working line (the stable `.ipk` line, currently
-  <!-- docs-fresh:ahead -->15<!-- /docs-fresh:ahead --> commits ahead of the trunk) and land back
+  branches and worktrees are cut from the working line (the stable `.ipk` line) and land back
   on it; the trunk is fast-forwarded only when the owner asks. Merge and squash commits are both
   acceptable. `main` is **not** this project: it holds upstream-side history and none of the
-  fork's commits — never cut work from it, never build or ship it.
-- **Derived numbers are generated, not hand-written.** `./tools/ai-docs-refresh.sh` rewrites the
-  branch/commit/file counts in this file and `docs/nuvio/UPSTREAM.md`; its `check` form runs in
-  `make check` and CI. **A commit does not require you to run it.** `.githooks/pre-commit`
-  runs the update form and stages both files with every commit, so one commit carries the change
-  *and* the numbers it implies. Enable it once per repository:
-  `git config core.hooksPath .githooks` (worktrees share that setting). Do not run the update form
-  by hand before a commit, do not add a second docs-only commit for it, never pass `--no-verify`,
-  and never hand-edit a marked number. The hook deliberately **aborts** if you have unstaged edits
-  in those two files (staging the whole file would sweep your prose into the commit): `git add`
-  them and run the commit again. It skips during a rebase. Git does not tell a pre-commit hook that
-  a commit is an `--amend` (which replaces HEAD rather than adding one), so an amended commit keeps
-  the number it had — one too many, which `check` then reports. The fix is
-  `./tools/ai-docs-refresh.sh update --amend`, `git add AGENTS.md docs/nuvio/UPSTREAM.md`, then
-  `PLX_DOCS_REFRESH=0 git commit --amend --no-edit`. `PLX_DOCS_REFRESH=0` is the general escape
-  hatch.
+  fork's commits — never cut work from it, never build or ship it. How far the working line is
+  ahead is a question for git, not a number kept here: `git rev-list --count
+  nuvio-native..forward-port/v0.9-hq` (and `git log --oneline` for the list).
+- **Derived numbers are generated, not hand-written — and only the ones that can be stored.**
+  `./tools/ai-docs-refresh.sh` rewrites the seam counts (files changed, contested, upstream-owned
+  edited/added, the reference and merge-base SHAs) in `docs/nuvio/UPSTREAM.md`; its `check` form
+  runs in `make check` and CI. Counts that increment on **every commit** are deliberately not
+  stored — a stored count that the next commit must rewrite turns every commit into a docs commit
+  and every commit made outside the hook (a GitHub rebase merge, an amend, a bot) into a follow-up
+  one. Store what moves when the *shape* of the fork changes; ask git for the rest.
+  **A commit does not require you to run it.** `.githooks/pre-commit` runs `update --pending` and
+  stages both files with every commit, so one commit carries the change *and* any number it
+  implies. Enable it once per repository: `git config core.hooksPath .githooks` (worktrees share
+  that setting). The only number a single commit can move is a file it adds to one of the seam
+  counts. Do not run the update form by hand before a commit, do not add a second docs-only commit
+  for it, never pass `--no-verify`, and never hand-edit a marked number. The hook deliberately
+  **aborts** if you have unstaged edits in those two files (staging the whole file would sweep your
+  prose into the commit): `git add` them and run the commit again. It skips during a rebase.
+  `PLX_DOCS_REFRESH=0` is the general escape hatch, and `check` now prints the exact line that
+  disagrees instead of telling you to regenerate and hope.
 - **A bug fix starts with a failing test or reproducible artifact.** Observe the failure,
   implement the fix, then observe it pass.
 - **Preserve unrelated changes and generated artifacts.** Never clean or reset a dirty tree to

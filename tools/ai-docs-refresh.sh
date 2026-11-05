@@ -3,25 +3,32 @@
 # ai-docs-refresh.sh — regenerate the derived numbers that AGENTS.md and
 # docs/nuvio/UPSTREAM.md quote about the branch topology.
 #
-# WHY THIS EXISTS
-# ---------------
-# Those docs carry counts that move on every commit: how far the working line is ahead of the
-# trunk, how many commits/files/contested paths sit on each side of the upstream seam. Hand-
-# editing them is how "three commits ahead" outlived the truth by sixteen commits. The numbers
-# are now generated; the prose around them is not.
+# WHAT THIS DOES AND WHAT IT DELIBERATELY DOES NOT
+# ------------------------------------------------
+# Two kinds of number live in those docs, and only one of them belongs in a commit.
+#
+# STORE: facts about the SHAPE of the fork — how many files it changed, how many of those the
+# reference branch also touched, how many upstream-owned files it edited or added, where the seam
+# sits. These move when files are added or removed. They are worth quoting, they drift slowly, and
+# a wrong one is a real lie about the divergence.
+#
+# DO NOT STORE: how far the working line is ahead of the trunk, or how many commits sit since the
+# seam. Those increment on EVERY commit, so storing them makes the docs part of the next commit's
+# input: every commit has to rewrite the number the commit itself changes, every commit made
+# outside the hook (a GitHub rebase merge, an amend, a bot, another worktree) leaves the tree
+# stale, and the only repair is another commit — 10 of 40 consecutive commits were once nothing
+# but this. Both docs now say how to ASK git instead, which cannot go stale.
 #
 # USAGE
 #   tools/ai-docs-refresh.sh                         # update: rewrite every marked number in place
-#   tools/ai-docs-refresh.sh update --trunk-follows  # ...for a commit the trunk will be ff'd to as well
-#   tools/ai-docs-refresh.sh update --amend          # ...for `git commit --amend` (replaces HEAD, adds none)
+#   tools/ai-docs-refresh.sh update --pending        # ...for the commit the index is about to create
 #   tools/ai-docs-refresh.sh check                   # read-only: exit 1 if any marked number is stale
 #
-# **A commit does not need you to run this.** `.githooks/prepare-commit-msg` runs the update form
-# and stages the two files with every commit, so ONE commit carries both the change and the numbers
-# it implies. It works because `update` writes the count the tree will have AFTER the commit while
-# `check` grades HEAD — which is why running the update form by hand before a commit used to need a
-# second commit, and why a forgotten one left `make check` red and the prose a commit stale.
-# Install it once per clone with `make hooks`.
+# `update` writes the reading of the COMMITTED tree by default, so running it by hand can never
+# write a number that only becomes true after a commit. Only `.githooks/pre-commit` passes
+# `--pending`, because it runs on the index just before that index becomes a commit: a file the
+# commit adds must be counted, and that is the only difference `--pending` makes.
+# Install the hook once per clone with `make hooks`.
 #
 # `check` is wired into ci/check-python-steps.txt, so `make check` and CI's host-python job (when
 # that job runs) execute it. A docs-only push starts no CI by design. Never hand-edit a value
@@ -33,14 +40,13 @@
 #
 # Ref resolution: the local branch first, then origin/<branch>, so this works in a plain
 # checkout and in CI. The upstream reference is optional: without it the seam tables are left
-# alone and `check` only grades the branch count. Run `git fetch upstream` for the full check.
+# alone and `check` grades nothing, which is not an error (see the exit-0 path below).
 #
 set -euo pipefail
 
 MODE="${1:-update}"
-TRUNK_FOLLOWS=0
-AMEND=0
-USAGE="usage: $0 [update|check] [--trunk-follows] [--amend]"
+PENDING=0
+USAGE="usage: $0 [update|check] [--pending]"
 case "$MODE" in
     update|check) ;;
     *) echo "$USAGE" >&2; exit 2 ;;
@@ -48,13 +54,12 @@ esac
 shift || true
 while [ $# -gt 0 ]; do
     case "$1" in
-        --trunk-follows) TRUNK_FOLLOWS=1; shift ;;
-        --amend) AMEND=1; shift ;;
+        --pending) PENDING=1; shift ;;
         *) echo "$USAGE" >&2; exit 2 ;;
     esac
 done
-if [ "$MODE" = check ] && [ $((TRUNK_FOLLOWS + AMEND)) -gt 0 ]; then
-    echo "ai-docs-refresh: --trunk-follows/--amend describe the commit about to be made, not a check" >&2
+if [ "$MODE" = check ] && [ "$PENDING" = 1 ]; then
+    echo "ai-docs-refresh: --pending describes the commit about to be made, not a check" >&2
     exit 2
 fi
 
@@ -94,35 +99,16 @@ if [ -z "$TRUNK" ] || [ -z "$WORK" ]; then
     exit 1
 fi
 
-AHEAD="$(git rev-list --count "$TRUNK..$WORK")"
-BEHIND="$(git rev-list --count "$WORK..$TRUNK")"
-# **Two readings of the same numbers, and both have to be legal.**
+# **Two readings of the file counts, and both have to be legal.**
 #
 # `HEAD` is the committed state: what CI grades, and what a clean checkout must match exactly.
-# `PENDING` is the state after the commit being prepared, which `update` writes and the hook
-# stages. Both differ from HEAD by exactly one commit, on whichever branch that commit extends:
-# the working line adds to `ahead`, the trunk adds to `behind`. Getting this wrong in ONE
-# direction is how 788b7bb7 landed saying 41 against a real 42.
-#
-# `--amend` replaces HEAD instead of extending it, so it bumps neither; `--trunk-follows` describes
-# a commit the trunk is then fast-forwarded to, which leaves both branches on the same commit, so
-# `ahead` is 0 afterwards.
-HEAD_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-AHEAD_HEAD=$AHEAD
-BEHIND_HEAD=$BEHIND
-AHEAD_PENDING=$AHEAD
-BEHIND_PENDING=$BEHIND
-if [ "$TRUNK_FOLLOWS" = 1 ]; then
-    AHEAD_PENDING=0
-elif [ "$AMEND" = 0 ]; then
-    if [ "$HEAD_BRANCH" = "$WORK" ]; then
-        AHEAD_PENDING=$((AHEAD + 1))
-    elif [ "$HEAD_BRANCH" = "$TRUNK" ]; then
-        BEHIND_PENDING=$((BEHIND + 1))
-    fi
-fi
+# `PENDING` is the same count taken over the index, for the hook: a commit that ADDS a file must
+# count it, and the committed tree cannot see it yet. That is the only difference the two readings
+# have — the per-commit counters (ahead/behind/commits-since-the-seam) are no longer stored at all,
+# because a stored count that increments on every commit is a loop, not a measurement (see the
+# header).
 HAVE_REF=0
-BASE="" OURS="" REF_AHEAD="" FILES_OURS="" FILES_REF="" CONTESTED="" CONTESTED_SM=""
+BASE="" REF_AHEAD="" FILES_OURS="" FILES_REF="" CONTESTED="" CONTESTED_SM=""
 EDITED="" ADDED="" BASE_SHA="" BASE_DATE="" BASE_SUBJECT="" REF_SHA="" REF_DATE=""
 
 if [ -n "$REF" ]; then
@@ -131,12 +117,6 @@ if [ -n "$REF" ]; then
     # argument: `git merge-base A B C` answers with the merge-base of A and B, which here is the
     # trunk itself, and that silently reports only the working line's own commits as the seam.
     BASE="$(git merge-base "$TRUNK" "$REF")"
-    OURS="$(git rev-list --count "$BASE..$WORK")"
-    # Same off-by-one as AHEAD, and the same two readings: a commit being prepared on the working
-    # line is on our side of the seam, and so is one the trunk will be fast-forwarded to.
-    OURS_HEAD=$OURS
-    OURS_PENDING=$OURS
-    if [ "$AHEAD_PENDING" -gt "$AHEAD_HEAD" ] || [ "$TRUNK_FOLLOWS" = 1 ]; then OURS_PENDING=$((OURS + 1)); fi
     REF_AHEAD="$(git rev-list --count "$BASE..$REF")"
 
     # **A table generated BEFORE a commit cannot see the paths that commit adds**, so a commit
@@ -201,9 +181,8 @@ if ! git diff --quiet HEAD -- AGENTS.md docs/nuvio/UPSTREAM.md 2>/dev/null; then
     PENDING_ALLOWED=1
 fi
 
-export MODE HAVE_REF PENDING_ALLOWED HEAD_BRANCH
-export AHEAD_HEAD BEHIND_HEAD AHEAD_PENDING BEHIND_PENDING
-export OURS_HEAD OURS_PENDING REF_AHEAD FILES_REF
+export MODE HAVE_REF PENDING_ALLOWED PENDING
+export REF_AHEAD FILES_REF
 export FILES_OURS_HEAD FILES_OURS_PENDING CONTESTED_HEAD CONTESTED_PENDING
 export CONTESTED_SM_HEAD CONTESTED_SM_PENDING EDITED_HEAD EDITED_PENDING ADDED_HEAD ADDED_PENDING
 export BASE BASE_SHA BASE_DATE BASE_SUBJECT REF_SHA REF_DATE
@@ -215,17 +194,11 @@ import sys
 
 mode = os.environ["MODE"]
 have_ref = os.environ["HAVE_REF"] == "1"
-# The two readings described in the shell half: the committed state and the state after the commit
-# being prepared. `update` writes the second; `check` accepts either, but only when the docs are
-# dirty (so a clean tree still has to match HEAD exactly, which is the case a stale number hides in).
-vals_head = {
-    "ahead": os.environ["AHEAD_HEAD"],
-    "behind": os.environ["BEHIND_HEAD"],
-}
-vals_pending = {
-    "ahead": os.environ["AHEAD_PENDING"],
-    "behind": os.environ["BEHIND_PENDING"],
-}
+# The two readings described in the shell half. `update` writes HEAD unless the hook asked for
+# `--pending`; `check` grades HEAD, and accepts the pending reading only on a dirty tree (where a
+# staged new file is legitimately not in HEAD yet).
+vals_head = {}
+vals_pending = {}
 pending_allowed = os.environ["PENDING_ALLOWED"] == "1"
 if have_ref:
     # Every seam number has a committed and a pending reading for the same reason (see the shell
@@ -233,7 +206,6 @@ if have_ref:
     for vals, suffix in ((vals_head, "HEAD"), (vals_pending, "PENDING")):
         vals.update(
             {
-                "ours": os.environ["OURS_" + suffix],
                 "files_ours": os.environ["FILES_OURS_" + suffix],
                 "files_ref": os.environ["FILES_REF"],
                 "contested": os.environ["CONTESTED_" + suffix],
@@ -249,9 +221,11 @@ def base_table(v):
         "|---|---|\n"
         f"| reference | `upstream/feature/v0.9-hq` (`{os.environ['REF_SHA']}`, {os.environ['REF_DATE']}) |\n"
         f"| merge-base with `nuvio-native` and `forward-port/v0.9-hq` | `{os.environ['BASE_SHA']}` — {os.environ['BASE_SUBJECT']}, {os.environ['BASE_DATE']} |\n"
-        f"| commits on our side since the base | {v['ours']} |\n"
         f"| commits on the reference side since the base | {os.environ['REF_AHEAD']} |\n"
         "\n"
+        # There is deliberately no \"commits on our side\" row: it increments on every commit, so it
+        # was the number that forced a docs commit after every work commit. Ask git instead —
+        # `git rev-list --count <merge-base>..forward-port/v0.9-hq`.
         "(Generated by `tools/ai-docs-refresh.sh`; `drift` is the authority when this drifts.)\n"
     )
 
@@ -295,10 +269,7 @@ for path in paths:
     with open(path, encoding="utf-8") as f:
         texts[path] = f.read()
 
-# A check that silently grades nothing is worse than no check: fail when a marker was removed.
-if "<!-- docs-fresh:ahead -->" not in "".join(texts.values()):
-    print("ai-docs-refresh: no <!-- docs-fresh:ahead --> marker found")
-    sys.exit(1)
+# A check that silently grades nothing is worse than no check.
 if have_ref:
     for name in blocks:
         begin = f"<!-- BEGIN docs-fresh:{name} -->"
@@ -306,24 +277,28 @@ if have_ref:
         if begin not in texts["docs/nuvio/UPSTREAM.md"] or end not in texts["docs/nuvio/UPSTREAM.md"]:
             print(f"ai-docs-refresh: missing block markers for {name!r} in docs/nuvio/UPSTREAM.md")
             sys.exit(1)
+elif mode == "check":
+    print("ai-docs-refresh: no upstream reference in this checkout — nothing to grade (not an error)")
 
 stale = []
 updated = []
 pending_only = []
 for path in paths:
     before = texts[path]
-    after = render(before, vals_pending)
+    head = render(before, vals_head)
+    pending = render(before, vals_pending)
     if mode == "update":
-        if after != before:
+        target = pending if os.environ["PENDING"] == "1" else head
+        if target != before:
             with open(path, "w", encoding="utf-8") as f:
-                f.write(after)
+                f.write(target)
             updated.append(path)
         continue
     # Committed already? Then HEAD's reading is the one that must match.
-    if render(before, vals_head) == before:
+    if head == before:
         continue
     # A dirty tree has a commit in flight; its numbers are the pending ones.
-    if pending_allowed and after == before:
+    if pending_allowed and pending == before:
         pending_only.append(path)
         continue
     stale.append(path)
@@ -331,7 +306,26 @@ for path in paths:
 if mode == "check":
     if stale:
         print("ai-docs-refresh: stale derived numbers in " + ", ".join(stale))
-        print("  run: ./tools/ai-docs-refresh.sh update")
+        # Say WHICH number and in which direction, instead of sending the reader back to a command
+        # that regenerates the whole file and hides the disagreement.
+        import difflib
+
+        for path in stale:
+            diff = list(
+                difflib.unified_diff(
+                    texts[path].splitlines(),
+                    render(texts[path], vals_head).splitlines(),
+                    fromfile=f"{path} (what the file says)",
+                    tofile=f"{path} (what git says)",
+                    lineterm="",
+                    n=0,
+                )
+            )
+            for line in diff[2:14]:
+                print("    " + line)
+            if len(diff) > 14:
+                print("    …")
+        print("  fix: ./tools/ai-docs-refresh.sh update   (writes the committed reading)")
         sys.exit(1)
     if pending_only:
         print(
