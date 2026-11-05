@@ -1457,14 +1457,14 @@ mod tests {
     #[test]
     fn forced_profile_offers_dca_only_with_a_dts_row() {
         let without = super::forced_direct_profile_for(&Caps::assumed());
-        // FORK (RichiL10): plus the fork's PCM lane (flac, pcm) and native Opus.
-        assert_eq!(list_of(&without, "audioCodec="), ["aac", "ac3", "eac3", "flac", "pcm", "opus"]);
+        // FORK (RichiL10): plus the fork's PCM lane (flac, alac, pcm) and native Opus.
+        assert_eq!(list_of(&without, "audioCodec="), ["aac", "ac3", "eac3", "flac", "alac", "pcm", "opus"]);
         assert!(!without.contains("dts") && !without.contains("dca"), "{without}");
         let mut caps = Caps::assumed();
         caps.audio.push_str(",dts");
         caps.audio_channels.insert("dts".into(), 6);
         let with = super::forced_direct_profile_for(&caps);
-        assert_eq!(list_of(&with, "audioCodec="), ["aac", "ac3", "eac3", "dca", "flac", "pcm", "opus"]);
+        assert_eq!(list_of(&with, "audioCodec="), ["aac", "ac3", "eac3", "dca", "flac", "alac", "pcm", "opus"]);
         assert!(!with.contains("dts"), "{with}");
     }
 
@@ -1475,8 +1475,8 @@ mod tests {
     #[test]
     fn force_profile_advertises_engine_formats_without_device_limits_or_transcode() {
         let p = super::forced_direct_profile();
-        // FORK (RichiL10): plus the fork's PCM lane (flac, pcm) and native Opus.
-        assert_eq!(list_of(&p, "audioCodec="), ["aac", "ac3", "eac3", "flac", "pcm", "opus"], "no DTS row on the assumed caps");
+        // FORK (RichiL10): plus the fork's PCM lane (flac, alac, pcm) and native Opus.
+        assert_eq!(list_of(&p, "audioCodec="), ["aac", "ac3", "eac3", "flac", "alac", "pcm", "opus"], "no DTS row on the assumed caps");
         assert_eq!(list_of(&p, "videoCodec="), ["h264", "hevc"]);
         assert!(!p.contains("add-limitation"));
         assert!(!p.contains("transcode-target"));
@@ -1764,8 +1764,8 @@ mod tests {
             super::forced_direct_profile_for(&Caps::assumed()),
             format!(
                 "add-direct-play-profile(type=videoProfile&container=mkv,mp4&videoCodec=h264,hevc&audioCodec={}&subtitleCodec={})",
-                // FORK (RichiL10): plus the fork's PCM lane (flac, pcm) and native Opus.
-                "aac,ac3,eac3,flac,pcm,opus",
+                // FORK (RichiL10): plus the fork's PCM lane (flac, alac, pcm) and native Opus.
+                "aac,ac3,eac3,flac,alac,pcm,opus",
                 super::DP_SUBTITLE_CODECS,
             )
         );

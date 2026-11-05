@@ -6589,7 +6589,7 @@ impl PersonOwnerGateFixture {
         "dump.txt": 9,  # files that may name the frame-dump switch (ci/check-dump-consumers.py); a new file fails the gate
         "layers.txt": 0,
         "language-lists.txt": 5,  # files allowed a pinned per-language table (ci/check-language-lists.py); a reviewed set, not a migration list
-        "libm.txt": 6,  # widgets.rs's existing test helper moved to widgets_test_support.rs
+        "libm.txt": 7,  # widgets.rs's existing test helper moved to widgets_test_support.rs; +1 for media/ff_pcm.rs's Kaiser-windowed sinc kernel (audio DSP)
         "mutators.txt": 0,
         "nav.txt": 0,
         "sibling-migration.txt": 0,
