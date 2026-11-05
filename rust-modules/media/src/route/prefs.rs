@@ -1,5 +1,5 @@
-//! **The twelve per-profile settings, live: one cell each, one restore, one write door.** (The ten
-//! player settings, hero trailer autoplay and Under posters.)
+//! **The thirteen per-profile settings, live: one cell each, one restore, one write door.** (The
+//! eleven player settings, Dolby Vision mode, hero trailer autoplay and Under posters.)
 //!
 //! The persisted half of each setting is a [`Setting`] row in `plex::session::prefs`; this is the
 //! other half, the in-memory copy the player reads every frame (a process-global [`LiveCell`], an
@@ -36,7 +36,7 @@
 //! frozen top-level keys: no pick in this module ever writes one.
 use super::plan::{supported_quality, Quality, QUALITY_LADDER};
 use plx_plex::plex::session::{
-    effective, own_prefs, persist_profile_pref, AudioEnhancementsPref, DeckPress, DeckPressPref, DirectPlayMode,
+    effective, own_prefs, persist_profile_pref, AudioEnhancementsPref, DeckPress, DeckPressPref, DolbyVisionMode, DolbyVisionModePref, DirectPlayMode,
     DirectPlayModePref, HdrOverlayBrightness, HdrOverlayBrightnessPref, NextEpisodeMode, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsRecord,
     ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipInterval, SkipIntervalPref, SubtitlePosition,
     SubtitlePositionPref, SubtitleSize, SubtitleSizePref, SubtitleTone, SubtitleTonePref, TrailerAutoplayPref, UnderPosters,
@@ -142,7 +142,7 @@ macro_rules! packed_by_index {
         }
     )*};
 }
-packed_by_index!(NextEpisodeMode = 0, SkipInterval = 1, DeckPress = 0, SubtitleSize = 1, SubtitlePosition = 0, SubtitleTone = 0, HdrOverlayBrightness = 1);
+packed_by_index!(DolbyVisionMode = 0, NextEpisodeMode = 0, SkipInterval = 1, DeckPress = 0, SubtitleSize = 1, SubtitlePosition = 0, SubtitleTone = 0, HdrOverlayBrightness = 1);
 
 impl Packed for DirectPlayMode {
     const SEED: u8 = 0;
@@ -253,6 +253,12 @@ live_cell!(
     pub(super) DECK_PRESS: DeckPress, "deck press preference"
 );
 live_cell!(
+    /// Whether Dolby Vision is declared when the television reports support (Settings > Playback >
+    /// Dolby Vision). Read by `route::frozen_dv_decision` where a route is planned; `Off` plans the
+    /// presentation as `Unsupported` without changing what the probe said.
+    pub(super) DOLBY_VISION_MODE: DolbyVisionMode, "Dolby Vision mode preference"
+);
+live_cell!(
     /// What sits under the focused poster (Settings > Libraries > Under posters). Read by every
     /// poster grid and row each frame, through `route::under_posters`.
     pub(super) UNDER_POSTERS: UnderPosters, "under posters preference"
@@ -322,6 +328,7 @@ macro_rules! live_setting {
 
 live_setting!(DirectPlayModePref, DIRECT_PLAY_MODE, "direct play mode");
 live_setting!(DeckPressPref, DECK_PRESS, "deck press");
+live_setting!(DolbyVisionModePref, DOLBY_VISION_MODE, "Dolby Vision mode");
 live_setting!(UnderPostersPref, UNDER_POSTERS, "under posters");
 live_setting!(SubtitleSizePref, SUBTITLE_SIZE, "subtitle size");
 live_setting!(SubtitlePositionPref, SUBTITLE_POSITION, "subtitle position");
@@ -381,6 +388,7 @@ pub const LIVE_ROWS: &[LiveRow] = &[
     LiveRow::of::<NextEpisodeModePref>(),
     LiveRow::of::<SkipIntervalPref>(),
     LiveRow::of::<DeckPressPref>(),
+    LiveRow::of::<DolbyVisionModePref>(),
     LiveRow::of::<UnderPostersPref>(),
     LiveRow::of::<AudioEnhancementsPref>(),
     LiveRow::of::<TrailerAutoplayPref>(),
@@ -764,6 +772,7 @@ choices! {
     NextEpisode => NextEpisodeModePref,
     SkipInterval => SkipIntervalPref,
     DeckPress => DeckPressPref,
+    DolbyVision => DolbyVisionModePref,
     UnderPosters => UnderPostersPref,
     TrailerAutoplay => TrailerAutoplayPref,
     SubtitleSize => SubtitleSizePref,
@@ -886,6 +895,11 @@ pub fn skip_interval() -> SkipInterval { SkipIntervalPref::live() }
 pub fn restore_skip_interval(interval: SkipInterval) { restore_live::<SkipIntervalPref>(interval) }
 /// Blocking persistence seam, as [`set_next_episode_mode`].
 pub fn set_skip_interval(interval: SkipInterval) -> bool { confirm::<SkipIntervalPref>(interval) }
+
+pub fn dolby_vision_mode() -> DolbyVisionMode { DolbyVisionModePref::live() }
+pub fn restore_dolby_vision_mode(mode: DolbyVisionMode) { restore_live::<DolbyVisionModePref>(mode) }
+/// Blocking persistence seam, as [`set_deck_press`].
+pub fn set_dolby_vision_mode(mode: DolbyVisionMode) -> bool { confirm::<DolbyVisionModePref>(mode) }
 
 pub fn deck_press() -> DeckPress { DeckPressPref::live() }
 pub fn restore_deck_press(mode: DeckPress) { restore_live::<DeckPressPref>(mode) }

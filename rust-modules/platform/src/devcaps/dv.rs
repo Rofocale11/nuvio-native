@@ -6,8 +6,11 @@
 
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Default` is [`DvCapability::Unknown`], the closed answer: a value built without an answer from
+/// the set must never read as support.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DvCapability {
+    #[default]
     Unknown,
     Supported,
     Unsupported,

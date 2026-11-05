@@ -170,6 +170,8 @@
   "settings.playback.deck_press": "Weiterschauen",
   "settings.playback.deck_press.details": "Details öffnen",
   "settings.playback.deck_press.play": "Abspielen",
+  "settings.playback.dolby_vision": "Dolby Vision",
+  "settings.playback.dolby_vision.off": "Aus",
   "settings.playback.skip_interval": "Sprungweite",
   "settings.playback.skip_interval.seconds": {
     "one": "{count} Sekunde",
@@ -188,6 +190,7 @@
   "settings.playback.subtitle_position.copy": "Wie hoch Untertitel im Bild stehen. Bild- und formatierte Untertitel behalten ihre eigene Position. Auch unter „Stil“ im Untertitelmenü des Players.",
   "settings.playback.next_episode.copy": "„Mit Countdown“ zeigt zu Beginn des Abspanns eine Schaltfläche „Nächste Episode“. „Nach dem Abspann“ lässt ihn laufen und startet dann die nächste Episode. „Aus“ schließt stattdessen den Player.",
   "settings.playback.deck_press.copy": "„Details öffnen“ öffnet die Filmseite, wenn du auf einer Karte in „Weiterschauen“ OK drückst, bei einer Episode die Serienseite. „Abspielen“ startet oder setzt sie sofort fort. Das Menü der Karte (OK gedrückt halten) bietet immer die andere Option.",
+  "settings.playback.dolby_vision.copy": "„Automatisch“ nutzt Dolby Vision, wenn der Fernseher es unterstützt. „Aus“ spielt die HDR10-Ebene ab. Dateien ohne HDR10-Ebene werden womöglich nicht abgespielt.",
   "settings.playback.skip_interval.copy": "Wie weit ein Druck auf Links oder Rechts im Player springt.",
   "settings.playback.enable_force": "Erzwingen",
   "settings.playback.force_question": "Direktwiedergabe erzwingen?",

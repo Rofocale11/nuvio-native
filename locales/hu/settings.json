@@ -170,6 +170,8 @@
   "settings.playback.deck_press": "Megtekintés folytatása",
   "settings.playback.deck_press.details": "Részletek megnyitása",
   "settings.playback.deck_press.play": "Lejátszás",
+  "settings.playback.dolby_vision": "Dolby Vision",
+  "settings.playback.dolby_vision.off": "Ki",
   "settings.playback.skip_interval": "Ugrás hossza",
   "settings.playback.skip_interval.seconds": {
     "one": "{count} másodperc",
@@ -188,6 +190,7 @@
   "settings.playback.subtitle_position.copy": "A feliratok magassága a képen. A képalapú és formázott feliratok megtartják saját helyüket. A lejátszó Feliratok menüjében, a Stílus alatt is elérhető.",
   "settings.playback.next_episode.copy": "A „Visszaszámlálás” beállítás a stáblista kezdetén megjeleníti a Következő epizód gombot. „A stáblista után” esetén a stáblista végigfut, majd elindul a következő epizód. A „Ki” beállítás ehelyett bezárja a lejátszót.",
   "settings.playback.deck_press.copy": "„Részletek megnyitása”: a Megtekintés folytatása sor kártyáján az OK a film adatlapját nyitja meg, epizódnál a sorozatét. „Lejátszás”: azonnal elindítja vagy folytatja a lejátszást. Az OK nyomva tartásával nyíló kártyamenü mindig tartalmazza a másik lehetőséget.",
+  "settings.playback.dolby_vision.copy": "Az Automatikus a Dolby Visiont használja, ha a TV támogatja. A Ki a HDR10 réteget játssza le. A HDR10 réteg nélküli fájlok lehet, hogy nem játszhatók le.",
   "settings.playback.skip_interval.copy": "Mekkorát ugrik a lejátszó a Bal vagy Jobb gomb egy megnyomására.",
   "settings.playback.enable_force": "Kényszerítés",
   "settings.playback.force_question": "Kényszeríti a közvetlen lejátszást?",

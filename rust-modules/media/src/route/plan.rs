@@ -1010,6 +1010,31 @@ pub(super) fn decision_copies_video(mc: &plx_plex::plex::MediaContainer, remux: 
     }
 }
 
+/// The Dolby Vision decision a route freezes, built at the two places a route is planned
+/// (`build_stream` and the URL-fed declaration, `set_stream_declaration`).
+///
+/// `probed` is the television's own answer (`devcaps::dv::capability`), and that is what the
+/// decision stores as its `capability`: Diagnostics and the `dv:` log lines print it, so it must
+/// say what the set reported, not what the viewer's setting did to it. `mode` is applied to the
+/// `presentation` only, through `DolbyVisionMode::gate` (`Off` plans as an unsupported set). An
+/// Off profile on a Supported set therefore reads `capability=supported presentation=base-layer`,
+/// and a quoted line can tell it from a failed probe or a set without Dolby Vision.
+pub fn frozen_dv_decision(
+    mode: plx_plex::plex::session::DolbyVisionMode,
+    probed: plx_platform::devcaps::dv::DvCapability,
+    dovi: plx_data::metadata::Dovi,
+    vcodec: &str,
+) -> plx_data::metadata::DvDecision {
+    plx_data::metadata::DvDecision {
+        capability: probed,
+        presentation: dovi.presentation(
+            !plx_data::metadata::dv_withheld(),
+            mode.gate(probed),
+            plx_data::metadata::dv_video_codec(vcodec),
+        ),
+    }
+}
+
 /// The Dolby Vision declaration a server-built stream feeds, as the raw record and its frozen
 /// decision (always paired, so a route mutation cannot clear one and leave a stale `Declare` of
 /// the other for Load). **The one place the rule lives** — the cold-start plan, the Original
@@ -1276,6 +1301,16 @@ pub struct ResolveEnv {
     pub quality: Quality,
     /// Captured with the quality preference; never re-read by a worker.
     pub direct_play_mode: DirectPlayMode,
+    /// The seated profile's Dolby Vision setting, captured with the direct-play mode for the same
+    /// reason: the worker must not read the cell the main thread moves. `Off` plans as an
+    /// `Unsupported` set ([`plx_plex::plex::session::DolbyVisionMode::gate`]): no node is sent and
+    /// a stream with a cross-compatible base layer plays that layer, while one without (Profile 5)
+    /// is refused direct play.
+    pub dolby_vision_mode: plx_plex::plex::session::DolbyVisionMode,
+    /// The set's Dolby Vision answer (`devcaps::dv::capability`), read once at the request beside
+    /// the mode so the worker never reads the process cache. A regression sets it directly: no
+    /// test mutates the production `OnceLock` or makes the whole host a DV set.
+    pub dv_capability: plx_platform::devcaps::dv::DvCapability,
     /// The SOURCE's whole-stream bitrate in **kbps**, or `0` when nobody has measured it — the
     /// other half of what [`quality_policy`] needs, beside the frame size the playing-item store
     /// already carries.
@@ -1315,10 +1350,6 @@ pub struct ResolveEnv {
     /// plex.tv call a unit test cannot make.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) account_subtitles: Option<(Option<String>, i64, i64)>,
-    /// Test-only replacement for the process cache. Capability is an explicit policy input in
-    /// regressions; no test mutates the production `OnceLock` or makes the whole host a DV set.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) dv_capability: Option<plx_platform::devcaps::dv::DvCapability>,
 }
 
 
@@ -1706,22 +1737,10 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // episode backfilled it). Absent store → default `Dovi`, which is all-zero and refuses
     // nothing.
     let dovi = plan.playing.as_ref().map(|p| p.dovi).unwrap_or_default();
-    // Freeze the capability and derived presentation together. A late configd answer affects the
-    // next route only; it cannot change this candidate between the gate and Starfish Load.
-    #[cfg(any(test, feature = "test-support"))]
-    let dv_decision = match env.dv_capability {
-        Some(capability) => plx_data::metadata::DvDecision {
-            capability,
-            presentation: dovi.presentation(
-                !plx_data::metadata::dv_withheld(),
-                capability,
-                plx_data::metadata::dv_video_codec(vcodec),
-            ),
-        },
-        None => dovi.decision_now(plx_data::metadata::dv_video_codec(vcodec)),
-    };
-    #[cfg(not(any(test, feature = "test-support")))]
-    let dv_decision = dovi.decision_now(plx_data::metadata::dv_video_codec(vcodec));
+    // Freeze the probe's answer and the presentation derived from it (through the profile's
+    // Dolby Vision setting) together. A late configd answer affects the next route only; it cannot
+    // change this candidate between the gate and Starfish Load.
+    let dv_decision = frozen_dv_decision(env.dolby_vision_mode, env.dv_capability, dovi, vcodec);
     let dv = dv_decision.presentation;
     // FORK (RichiL10): the item's HDR fact, kept for the whole playback (see `Plan::source_hdr`).
     plan.source_hdr = plan.playing.as_ref().is_some_and(|p| p.hdr);

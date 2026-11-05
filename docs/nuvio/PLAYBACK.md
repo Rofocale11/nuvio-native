@@ -301,6 +301,17 @@ cross-compatible (`bl_compat == 0`) is still refused ("dual-layer"): the buffer 
 elementary stream and there is no displayable base to fall back to. Details and evidence:
 `docs/dolby-vision.md` §1.
 
+**Settings > Playback > Dolby Vision is the second input, one pick per profile** (`Auto` by
+default; `Off`). It gates the *presentation* only, where a route is planned
+(`route::frozen_dv_decision`): `Off` plans every route as an unsupported set, so no `DolbyHdrInfo`
+node is sent, a P8/P7 file plays its HDR10 base layer, and a P5 — which has no base layer to fall
+back to — is refused direct play and answered by the shim's `/decision` with code `2000`, so it
+does not play at all (the shim has no transcoder to convert it, and the copy must not promise
+one). The frozen `DvDecision` keeps the probe's own `capability`, so Diagnostics' Video row still
+reads `base-layer (supported)` on a set that reports support, and only a failed probe or a set
+without Dolby Vision reads `unknown`/`unsupported`. The boot-latched `dvcaps0`/`dvcaps1` overrides
+change capability only; they do not bypass a profile's `Off`.
+
 ### Subtitles
 
 - Embedded (SRT/ASS/PGS/VOBSUB/mov_text/WebVTT in the container): drawn by the app from the

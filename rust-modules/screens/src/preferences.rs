@@ -18,7 +18,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver};
-use plx_plex::plex::session::UiResolution;
+use plx_plex::plex::session::{DolbyVisionMode, UiResolution};
 use plx_plex::plex::account::{AudioPreferences, PreferenceError, PreferenceRequest, PreferenceSnapshot, PreferenceUpdate};
 use plx_media::route::{Choice, DeckPress, DirectPlayMode, NextEpisodeMode, Quality, SkipInterval, SubtitlePosition, SubtitleSize, HdrOverlayBrightness};
 use plx_ui::form::{Form, FormId, FormSection, FormTable, RowKey, RowKind};
@@ -51,6 +51,7 @@ impl PickerKind {
         Self::HdrOverlay => plx_platform::i18n::msg::settings_playback_hdr_overlay(),
         Self::NextEpisode => plx_platform::i18n::msg::settings_playback_next_episode(),
         Self::DeckPress => plx_platform::i18n::msg::settings_playback_deck_press(),
+        Self::DolbyVision => plx_platform::i18n::msg::settings_playback_dolby_vision(),
         Self::SkipInterval => plx_platform::i18n::msg::settings_playback_skip_interval(),
         Self::UiResolution => plx_platform::i18n::msg::settings_resolution_title(),
         Self::AudioLanguage => plx_platform::i18n::msg::settings_audio_language(), Self::SubtitleMode => plx_platform::i18n::msg::settings_audio_subtitles(),
@@ -67,6 +68,7 @@ impl PickerKind {
         Self::HdrOverlay => plx_platform::i18n::msg::settings_playback_hdr_overlay_copy(),
         Self::NextEpisode => plx_platform::i18n::msg::settings_playback_next_episode_copy(),
         Self::DeckPress => plx_platform::i18n::msg::settings_playback_deck_press_copy(),
+        Self::DolbyVision => plx_platform::i18n::msg::settings_playback_dolby_vision_copy(),
         Self::SkipInterval => plx_platform::i18n::msg::settings_playback_skip_interval_copy(),
         Self::UiResolution => plx_platform::i18n::msg::settings_resolution_detail(),
         Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => plx_platform::i18n::msg::settings_audio_account_note(),
@@ -74,7 +76,7 @@ impl PickerKind {
     /// The field-list page this field belongs to; `None` for a field the Settings root lists itself.
     fn kind(self) -> Option<Kind> {
         match self {
-            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::HdrOverlay | Self::NextEpisode | Self::DeckPress | Self::SkipInterval | Self::RatingSource => Some(Kind::Playback),
+            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::HdrOverlay | Self::NextEpisode | Self::DeckPress | Self::DolbyVision | Self::SkipInterval | Self::RatingSource => Some(Kind::Playback),
             Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => Some(Kind::AudioSubtitles),
             Self::UiResolution => None,
         }
@@ -95,7 +97,7 @@ impl Kind {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), HdrOverlay(HdrOverlayBrightness), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), UiResolution(UiResolution), Language(String), Mode(i64), Forced(i64), P2pEnabled(bool), P2pServer(Option<String>) }
+enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), HdrOverlay(HdrOverlayBrightness), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), DolbyVision(DolbyVisionMode), SkipInterval(SkipInterval), UiResolution(UiResolution), Language(String), Mode(i64), Forced(i64), P2pEnabled(bool), P2pServer(Option<String>) }
 
 /// The hashed half of a transaction: what the page shows while a load or save is in flight.
 struct Io { busy: bool, status: String }
@@ -262,6 +264,7 @@ impl Txn {
             Value::HdrOverlay(brightness) => PreferenceCmd::Choose(Choice::HdrOverlayBrightness(brightness), reply),
             Value::NextEpisode(mode) => PreferenceCmd::Choose(Choice::NextEpisode(mode), reply),
             Value::DeckPress(mode) => PreferenceCmd::Choose(Choice::DeckPress(mode), reply),
+            Value::DolbyVision(mode) => PreferenceCmd::Choose(Choice::DolbyVision(mode), reply),
             Value::SkipInterval(interval) => PreferenceCmd::Choose(Choice::SkipInterval(interval), reply),
             // Install-wide, not a seated profile's live setting, so it has no `Choice`.
             Value::UiResolution(mode) => PreferenceCmd::UiResolution { mode, reply },
@@ -344,6 +347,7 @@ impl FormId for RowId {
             Self::Field(PickerKind::NextEpisode) => 4,
             Self::Field(PickerKind::SkipInterval) => 5,
             Self::Field(PickerKind::DeckPress) => 7,
+            Self::Field(PickerKind::DolbyVision) => 12,
             Self::Field(PickerKind::HdrOverlay) => 8,
             Self::Field(PickerKind::RatingSource) => 11,
             // Listed on the Settings root, never on a field list; the number only keeps the match total.
@@ -386,6 +390,7 @@ pub struct PreferencesPage {
     /// canonical state, like `look`).
     next_episode: NextEpisodeMode,
     deck_press: DeckPress,
+    dolby_vision: DolbyVisionMode,
     skip_interval: SkipInterval,
     /// Whose settings the list was last built for, with the profile publication it read that from
     /// (not canonical state, like `look`: the copy and the rows' dimming are not hashed either).
@@ -405,6 +410,7 @@ impl PreferencesPage {
             copy: String::new(), txn: Txn::new(false),
             look: (plx_media::route::subtitle_size(), plx_media::route::subtitle_position(), plx_media::route::hdr_overlay_brightness()),
             next_episode: plx_media::route::next_episode_mode(), deck_press: plx_media::route::deck_press(),
+            dolby_vision: plx_media::route::dolby_vision_mode(),
             skip_interval: plx_media::route::skip_interval(), whose: Whose::now(),
             p2p: plx_plex::plex::nuvio::p2p(), draft: None };
         s.rebuild(None);
@@ -433,6 +439,7 @@ impl PreferencesPage {
         self.look = (plx_media::route::subtitle_size(), plx_media::route::subtitle_position(), plx_media::route::hdr_overlay_brightness());
         self.next_episode = plx_media::route::next_episode_mode();
         self.deck_press = plx_media::route::deck_press();
+        self.dolby_vision = plx_media::route::dolby_vision_mode();
         self.skip_interval = plx_media::route::skip_interval();
         self.p2p = plx_plex::plex::nuvio::p2p();
         self.whose = Whose::now();
@@ -542,7 +549,7 @@ impl PreferencesPage {
 /// Which fields `kind`'s list shows: Audio & Subtitles has none until a snapshot has loaded.
 fn fields_of(inputs: &FieldListInputs<'_>) -> &'static [PickerKind] {
     match inputs.kind {
-        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval],
+        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::DolbyVision, PickerKind::SkipInterval],
         Kind::AudioSubtitles if inputs.prefs.is_some() => &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles],
         _ => &[],
     }
@@ -559,6 +566,7 @@ fn resolve_value(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
         PickerKind::HdrOverlay => Value::HdrOverlay(plx_media::route::hdr_overlay_brightness()),
         PickerKind::NextEpisode => Value::NextEpisode(plx_media::route::next_episode_mode()),
         PickerKind::DeckPress => Value::DeckPress(plx_media::route::deck_press()),
+        PickerKind::DolbyVision => Value::DolbyVision(plx_media::route::dolby_vision_mode()),
         PickerKind::SkipInterval => Value::SkipInterval(plx_media::route::skip_interval()),
         PickerKind::UiResolution => Value::UiResolution(plx_plex::plex::session::peek().ui_resolution()),
         // A deprecated code (`pb`) resolves to its replacement so the picker checks that entry.
@@ -589,6 +597,8 @@ fn field_options(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
             .map(|m| (next_episode_label(m).into(), Value::NextEpisode(m))).collect(),
         PickerKind::DeckPress => DeckPress::LADDER.into_iter()
             .map(|m| (deck_press_label(m).into(), Value::DeckPress(m))).collect(),
+        PickerKind::DolbyVision => DolbyVisionMode::LADDER.into_iter()
+            .map(|m| (dolby_vision_label(m).into(), Value::DolbyVision(m))).collect(),
         PickerKind::SkipInterval => SkipInterval::LADDER.into_iter()
             .map(|i| (skip_interval_label(i), Value::SkipInterval(i))).collect(),
         PickerKind::UiResolution => UiResolution::LADDER.into_iter()
@@ -718,6 +728,13 @@ fn deck_press_label(mode: DeckPress) -> &'static str {
         DeckPress::Play => plx_platform::i18n::msg::settings_playback_deck_press_play(),
     }
 }
+
+fn dolby_vision_label(mode: DolbyVisionMode) -> &'static str {
+    match mode {
+        DolbyVisionMode::Auto => plx_platform::i18n::msg::settings_playback_auto(),
+        DolbyVisionMode::Off => plx_platform::i18n::msg::settings_playback_dolby_vision_off(),
+    }
+}
 /// What the Interface resolution reads, on the Settings root and in its picker. The sizes are
 /// numbers, not words, so only Automatic (the native 1920x1080 canvas on every set) is translated.
 pub(crate) fn resolution_label(mode: UiResolution) -> String {
@@ -772,6 +789,7 @@ impl Machine<InnerHost> for PreferencesPage {
                     || self.look != (plx_media::route::subtitle_size(), plx_media::route::subtitle_position(), plx_media::route::hdr_overlay_brightness())
                     || self.next_episode != plx_media::route::next_episode_mode()
                     || self.deck_press != plx_media::route::deck_press()
+                    || self.dolby_vision != plx_media::route::dolby_vision_mode()
                     || self.skip_interval != plx_media::route::skip_interval()
                     || self.whose.0 != plx_plex::plex::session::current_gen() {
                     self.rebuild_keeping();

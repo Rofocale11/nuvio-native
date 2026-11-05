@@ -9,12 +9,12 @@
 //! T-live and T-settings sit in media (`route/prefs_tests.rs`), where the lists they hold to these
 //! descriptors are declared.
 use super::prefs::{Descriptor, Fallback, ListRow, Parse, ProfileMemory, Row, Scope, Setting, SettingsWrite, DESCRIPTORS};
-use super::prefs::{AudioEnhancementsPref, AutoSignInPref, DeckPressPref, UnderPostersPref, DirectPlayModePref, LastHeroBlurPref,
+use super::prefs::{AudioEnhancementsPref, AutoSignInPref, DeckPressPref, DolbyVisionModePref, UnderPostersPref, DirectPlayModePref, LastHeroBlurPref,
     LastLibraryRow, LibraryViewsRow, NextEpisodeModePref, PlaintextConsentRow, QualityPref, ServerKeyPinsRow,
     HdrOverlayBrightnessPref, SkipIntervalPref, SubtitleOffsetsPref, SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref,
     HoldHintTaughtPref, P2pEnabledPref, P2pServerUrlPref, RatingSourcePref, TrailerAutoplayPref, UiResolutionPref};
 use super::{
-    CanonicalSessionPreferences, DeckPress, UnderPosters, UnderPostersDetails, DirectPlayMode, LastLibrary, LibraryViews, NextEpisodeMode,
+    CanonicalSessionPreferences, DeckPress, DolbyVisionMode, UnderPosters, UnderPostersDetails, DirectPlayMode, LastLibrary, LibraryViews, NextEpisodeMode,
     PlaintextChoice, PlaintextConsent, PlaybackQuality, Preferences, ServerKeyPin, Session, SkipInterval,
     HdrOverlayBrightness, HoldHintTaught, RatingSource, SubtitleOffsetEntry, SubtitlePosition, SubtitleSize, SubtitleTone, UiResolution,
 };
@@ -111,6 +111,7 @@ fn every_marker_names_its_own_field() {
     check_row::<NextEpisodeModePref>(NextEpisodeMode::Off);
     check_row::<SkipIntervalPref>(SkipInterval::Seconds30);
     check_row::<DeckPressPref>(DeckPress::Play);
+    check_row::<DolbyVisionModePref>(DolbyVisionMode::Off);
     check_row::<UnderPostersPref>(UnderPosters { title: true, details: UnderPostersDetails::Genre });
     check_row::<AudioEnhancementsPref>(crate::plex::AudioEnhancements { boost_dialog: true, normalize_loudness: false });
     // A5: the remaining `Copy` rows.
@@ -123,14 +124,14 @@ fn every_marker_names_its_own_field() {
     // and is `Row` only (`Option<String>` is not `Copy`), so it has no `check_row` here.
     check_row::<RatingSourcePref>(RatingSource::RottenTomatoes);
     check_row::<P2pEnabledPref>(true);
-    // The table lists exactly these eighteen `Setting` rows, the four list rows below, the two
+    // The table lists exactly these nineteen `Setting` rows, the four list rows below, the two
     // memory-door rows (`TrackMemoryPref`, whose field check is
     // `track_memory_tests::the_list_row_names_its_own_field`, and `SubtitleOffsetsPref`, checked by
     // `the_subtitle_offsets_row_names_its_own_field`), the per-profile record list
     // (`ProfilePrefsPref`, `profile_prefs_tests::nothing_picked_serializes_to_no_key`) and the one
     // scalar `Row` without `Setting` (`P2pServerUrlPref`): a row needs its line in one of the five
     // places.
-    assert_eq!(DESCRIPTORS.len(), 18 + 4 + 2 + 1 + 1);
+    assert_eq!(DESCRIPTORS.len(), 19 + 4 + 2 + 1 + 1);
 }
 
 /// `P2pServerUrlPref` is the one scalar row without `Setting` (its `Option<String>` is not `Copy`),
@@ -239,6 +240,7 @@ fn the_declared_live_and_settings_facts_are_the_ones_main_has() {
         ("next_episode_mode", Some(Confirm)),
         ("skip_interval", Some(Confirm)),
         ("deck_press", Some(Confirm)),
+        ("dolby_vision_mode", Some(Confirm)),
         ("under_posters", Some(Confirm)),
         ("subtitle_size", Some(Optimistic)),
         ("subtitle_position", Some(Optimistic)),
@@ -356,6 +358,7 @@ fn garbage_fixtures() -> Vec<(&'static str, Vec<Value>)> {
         ("next_episode_mode", generic()),
         ("skip_interval", generic()),
         ("deck_press", generic()),
+        ("dolby_vision_mode", generic()),
         ("under_posters", generic()),
         // FORK (Nuvio Native): a non-empty string is a valid engine URL, so it is not garbage.
         ("p2p_server_url", vec![Value::Null, json!(17), json!(true), json!([1, "x"]), json!({"unexpected": 1})]),

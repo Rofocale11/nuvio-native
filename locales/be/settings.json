@@ -174,6 +174,8 @@
   "settings.playback.deck_press": "Працягнуць прагляд",
   "settings.playback.deck_press.details": "Адкрыць падрабязнасці",
   "settings.playback.deck_press.play": "Прайграць",
+  "settings.playback.dolby_vision": "Dolby Vision",
+  "settings.playback.dolby_vision.off": "Выкл.",
   "settings.playback.skip_interval": "Крок перамоткі",
   "settings.playback.skip_interval.seconds": {
     "one": "{count} секунда",
@@ -203,6 +205,7 @@
   "settings.playback.subtitle_position.copy": "Як высока на экране стаяць субцітры. Субцітры-відарысы і са стылем маюць сваю пазіцыю. Таксама ў раздзеле «Стыль» меню «Субцітры» прайгравальніка.",
   "settings.playback.next_episode.copy": "Адлік «Далей» паказвае кнопку «Наступная серыя», калі пачынаюцца цітры. Пасля цітраў — дае ім скончыцца і запускае наступную серыю. Адключана — закрывае прайгравальнік.",
   "settings.playback.deck_press.copy": "«Адкрыць падрабязнасці» — OK у радку «Працягнуць прагляд» адкрывае старонку фільма або серыі. «Прайграць» — запускае ці працягвае прагляд адразу. Другі варыянт заўсёды ёсць у меню, якое адкрываецца доўгім націсканнем OK.",
+  "settings.playback.dolby_vision.copy": "«Аўтаматычна» выкарыстоўвае Dolby Vision, калі тэлевізар яго падтрымлівае. «Выкл.» прайгравае слой HDR10. Файлы без слоя HDR10 могуць не прайгравацца.",
   "settings.playback.skip_interval.copy": "На колькі секунд перамотваецца відэа пры адным націсканні стрэлкі ўлева або ўправа.",
   "settings.playback.enable_force": "Уключыць",
   "settings.playback.force_question": "Уключыць прымусовае прамое прайграванне?",

@@ -703,6 +703,14 @@
     "value": "Play",
     "description": "Continue Watching picker option: OK on a card starts or resumes the video at once."
   },
+  "settings.playback.dolby_vision": {
+    "value": "Dolby Vision",
+    "description": "Playback setting title. Whether Dolby Vision is used when the TV supports it; default Auto."
+  },
+  "settings.playback.dolby_vision.off": {
+    "value": "Off",
+    "description": "Choice for the Dolby Vision setting (singular): Dolby Vision is never used."
+  },
   "settings.playback.skip_interval": {
     "value": "Skip interval",
     "description": "Settings, consent or sign-in UI: how far one Left or Right press jumps while watching."
@@ -804,6 +812,10 @@
   "settings.playback.deck_press.copy": {
     "value": "Open details shows the movie or episode page when you press OK on a Continue Watching card. Play starts or resumes it at once. The card's menu, opened by holding OK, always has the other.",
     "description": "Explanation under the title of the Continue Watching picker. It names the two options by their picker labels (Open details, Play); keep those words identical to settings.playback.deck_press.details and .play."
+  },
+  "settings.playback.dolby_vision.copy": {
+    "value": "Auto uses Dolby Vision when the TV supports it. Off plays the HDR10 layer instead. A file with no HDR10 layer may not play.",
+    "description": "Explanation of the Dolby Vision playback setting. Names the picker's two labels: settings.playback.auto and settings.playback.dolby_vision.off. Off can stop a file with no HDR10 layer (Dolby Vision Profile 5) from playing."
   },
   "settings.playback.skip_interval.copy": {
     "value": "How far one press of Left or Right jumps in the player.",

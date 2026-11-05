@@ -172,6 +172,8 @@
   "settings.playback.deck_press": "Reprendre la lecture",
   "settings.playback.deck_press.details": "Ouvrir les détails",
   "settings.playback.deck_press.play": "Lire",
+  "settings.playback.dolby_vision": "Dolby Vision",
+  "settings.playback.dolby_vision.off": "Désactivé",
   "settings.playback.skip_interval": "Durée du saut",
   "settings.playback.skip_interval.seconds": {
     "one": "{count} seconde",
@@ -191,6 +193,7 @@
   "settings.playback.subtitle_position.copy": "La hauteur des sous-titres sur l’image. Les sous-titres image et stylisés conservent leur propre position. Également sous Style dans le menu Sous-titres du lecteur.",
   "settings.playback.next_episode.copy": "Compte à rebours affiche un bouton Épisode suivant au début du générique. Après le générique le laisse se terminer, puis lance l’épisode suivant. Désactivé ferme le lecteur à la place.",
   "settings.playback.deck_press.copy": "« Ouvrir les détails » ouvre la page du film ou de la série. « Lire » démarre ou reprend la vidéo. Maintenir OK ouvre le menu avec toutes les options.",
+  "settings.playback.dolby_vision.copy": "Auto utilise Dolby Vision si le téléviseur le prend en charge. Désactivé lit la couche HDR10. Les fichiers sans couche HDR10 risquent de ne pas être lus.",
   "settings.playback.skip_interval.copy": "La distance parcourue par un appui sur Gauche ou Droite dans le lecteur.",
   "settings.playback.enable_force": "Forcer",
   "settings.playback.force_question": "Forcer la lecture directe ?",

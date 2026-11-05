@@ -126,6 +126,9 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   `lossy` knob.
 - Playback speed 0.5×–2× done in the app: timestamps scaled, sound decoded and time-stretched
   (WSOLA) to 48 kHz PCM.
+- Settings > Playback > Dolby Vision (Auto / Off), one pick per profile: Off sends no Dolby
+  Vision node, so a P8/P7 file plays its HDR10 base layer and a P5 file with no base to fall back
+  to is refused. Diagnostics and the `dv:` log line still report what the set's probe answered.
 - Runtime playback knobs from `/media/developer/plxnative-fork.conf` (`dts_core` auto|never, etc.).
 - Direct-play Dolby Vision profiles 5/8; 50 MiB video / 4 MiB audio AU queues for high-bitrate
   direct play.

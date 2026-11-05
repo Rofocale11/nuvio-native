@@ -36,7 +36,7 @@
 //! assignment. `subtitle_offsets` is the other tenant of the door and is declared the same way
 //! ([`SubtitleOffsetsPref`]).
 use super::{
-    DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NextEpisodeMode, OpaqueExtensions, PlaintextConsent,
+    DolbyVisionMode, DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NextEpisodeMode, OpaqueExtensions, PlaintextConsent,
     HoldHintTaught, PlaybackQuality, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets, SubtitlePosition,
     SubtitleSize, SubtitleTone, UiResolution, UnderPosters,
 };
@@ -129,6 +129,14 @@ pub struct Preferences {
     /// committed replay fixtures included — serializes exactly as it did before.
     #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
     pub deck_press: DeckPress,
+    /// **Whether Dolby Vision is used when the television supports it** — see
+    /// [`DolbyVisionMode`]. A frozen fallback like [`Preferences::deck_press`]: each profile keeps
+    /// its own pick in `profile_prefs`, and a profile that has not picked reads this top-level key.
+    /// Absence is Auto, so a session written before the field existed keeps declaring Dolby Vision
+    /// exactly as it did. Skipped at the default so committed replay fixtures serialize unchanged.
+    /// Soft-parsed: a spelling this build does not know costs the setting, never the credentials.
+    #[serde(default, deserialize_with = "de_soft_dolby_vision_mode", skip_serializing_if = "DolbyVisionMode::is_default")]
+    pub dolby_vision_mode: DolbyVisionMode,
     /// **FORK (Nuvio Native): the score provider the app shows** — see [`RatingSource`]. Nuvio
     /// metadata carries no per-provider score, so a title without one shows none. Soft-parsed like
     /// every preference here: a spelling this build does not know degrades to IMDb.
@@ -515,6 +523,8 @@ setting!(SkipIntervalPref: SkipInterval = skip_interval, "skip_interval", Profil
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
 setting!(DeckPressPref: DeckPress = deck_press, "deck_press", Profile fallback LegacyInstallKey,
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
+setting!(DolbyVisionModePref: DolbyVisionMode = dolby_vision_mode, "dolby_vision_mode", Profile fallback LegacyInstallKey,
+    account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
 setting!(UnderPostersPref: UnderPosters = under_posters, "under_posters", Profile fallback LegacyInstallKey,
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
 // FORK (Nuvio Native): the shim's own settings. All three are install-wide (the P2P engine and the
@@ -647,6 +657,7 @@ pub const DESCRIPTORS: &[Descriptor] = &[
     Descriptor::of::<NextEpisodeModePref>(),
     Descriptor::of::<SkipIntervalPref>(),
     Descriptor::of::<DeckPressPref>(),
+    Descriptor::of::<DolbyVisionModePref>(),
     Descriptor::of::<UnderPostersPref>(),
     // FORK (Nuvio Native): the shim's install-wide settings.
     Descriptor::of::<RatingSourcePref>(),
@@ -1367,6 +1378,17 @@ where
 /// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
 fn is_default_deck_press(mode: &DeckPress) -> bool {
     *mode == DeckPress::default()
+}
+
+/// The Dolby Vision mode is a preference too: a spelling this build does not know degrades to Auto.
+fn de_soft_dolby_vision_mode<'de, D>(d: D) -> Result<DolbyVisionMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Ok(v) = serde_json::Value::deserialize(d) else {
+        return Ok(DolbyVisionMode::default());
+    };
+    Ok(serde_json::from_value::<DolbyVisionMode>(v).unwrap_or_default())
 }
 
 /// FORK (Nuvio Native): **the score provider shown by the app.** Missing scores stay absent.

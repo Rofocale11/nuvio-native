@@ -161,9 +161,15 @@ if [ -n "$REF" ]; then
     # `edited`/`added` count statuses, so they cannot be unioned by name alone: the staged side is
     # asked with the same filter and the two lists are merged.
     ours_paths() {
-        git diff --name-only --diff-filter="$1" "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
+        # A staged file that is ALSO modified since the base appears in both diffs, and the answer
+        # is a COUNT of files, so the two sides are unioned here rather than concatenated: without
+        # `sort -u` the commit's own hook counted 15 edited files twice (240 against a real 225).
         if [ "$2" = pending ]; then
-            git diff --cached --name-only --diff-filter="$1" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
+            { git diff --name-only --diff-filter="$1" "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
+              git diff --cached --name-only --diff-filter="$1" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
+            } | LC_ALL=C sort -u
+        else
+            git diff --name-only --diff-filter="$1" "$BASE" "$WORK" -- rust-modules src Makefile Cargo.toml Cargo.lock ipkroot
         fi
     }
     EDITED_HEAD="$(count_lines "$(ours_paths M head)")"

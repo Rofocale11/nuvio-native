@@ -49,7 +49,7 @@
 //!   cache rather than keep a second copy of the session live.
 use super::origin::Origin;
 use super::probe::Location;
-pub use prefs::{RatingSource, HoldHintTaughtPref, effective, own_prefs, persist_profile_pref, put_own, stored_effective, tenure, AudioEnhancementsPref,
+pub use prefs::{RatingSource, DolbyVisionModePref, HoldHintTaughtPref, effective, own_prefs, persist_profile_pref, put_own, stored_effective, tenure, AudioEnhancementsPref,
     DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsPref,
     ProfilePrefsRecord, ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipIntervalPref,
     SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref, UiResolutionPref, UnderPostersPref};
@@ -1254,6 +1254,52 @@ impl DeckPress {
     /// triangle, its press and its menu's Play row are all derived from.
     pub fn press_plays(self) -> bool {
         self == DeckPress::Play
+    }
+}
+
+/// Whether Dolby Vision is declared when the television reports support, or never — one per
+/// profile, like [`DeckPress`]. `Off` sends no Dolby Vision node, so a stream with a
+/// cross-compatible base layer (Profile 8.1) plays that layer, and one without (Profile 5) is
+/// refused direct play. Absence is `Auto`, which trusts the firmware capability probe
+/// (`tv.config.supportDolbyHDRContents`, `docs/dolby-vision.md`).
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DolbyVisionMode {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "off")]
+    Off,
+}
+
+impl DolbyVisionMode {
+    pub const DEFAULT: Self = Self::Auto;
+    /// Every option, the order the picker lists them in.
+    pub const LADDER: [DolbyVisionMode; 2] = [DolbyVisionMode::Auto, DolbyVisionMode::Off];
+
+    /// An in-memory index back to an option — out of range is the default, for the reason
+    /// [`SubtitleTone::from_index`] gives: the ladder can grow or shrink.
+    pub fn from_index(i: u8) -> DolbyVisionMode {
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u8 {
+        Self::LADDER.iter().position(|&m| m == self).unwrap_or(0) as u8
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The capability a route's presentation is planned from: `Auto` is the set's own answer, `Off`
+    /// is `Unsupported` whatever the set reports. Applied where a route is planned
+    /// (`route::frozen_dv_decision`), to the presentation only: never to the probe itself and never
+    /// to the capability a playing route's `DvDecision` stores, so Diagnostics and the `dv:` log
+    /// lines still show what the television said.
+    pub fn gate(self, probed: plx_platform::devcaps::dv::DvCapability) -> plx_platform::devcaps::dv::DvCapability {
+        match self {
+            DolbyVisionMode::Auto => probed,
+            DolbyVisionMode::Off => plx_platform::devcaps::dv::DvCapability::Unsupported,
+        }
     }
 }
 

@@ -172,6 +172,8 @@
   "settings.playback.deck_press": "Continua a guardare",
   "settings.playback.deck_press.details": "Apri dettagli",
   "settings.playback.deck_press.play": "Riproduci",
+  "settings.playback.dolby_vision": "Dolby Vision",
+  "settings.playback.dolby_vision.off": "Disattivato",
   "settings.playback.skip_interval": "Intervallo di salto",
   "settings.playback.skip_interval.seconds": {
     "one": "{count} secondo",
@@ -191,6 +193,7 @@
   "settings.playback.subtitle_position.copy": "L'altezza a cui si posizionano i sottotitoli sul video. I sottotitoli in formato immagine e stilizzati mantengono la propria posizione. Disponibile anche alla voce Stile nel menu Sottotitoli del lettore.",
   "settings.playback.next_episode.copy": "Conto alla rovescia mostra il pulsante Prossimo episodio all'inizio dei titoli di coda. Dopo i titoli di coda li lascia finire, poi avvia l'episodio successivo. Off chiude invece il lettore.",
   "settings.playback.deck_press.copy": "Apri dettagli apre la pagina del film premendo OK su una scheda di Continua a guardare, o quella della serie per un episodio. Riproduci lo avvia o riprende subito. Il menu della scheda, aperto tenendo premuto OK, offre sempre l'altra azione.",
+  "settings.playback.dolby_vision.copy": "Automatico usa Dolby Vision se la TV lo supporta. Disattivato riproduce il livello HDR10. I file senza livello HDR10 potrebbero non essere riprodotti.",
   "settings.playback.skip_interval.copy": "Di quanto saltano la pressione di Sinistra o Destra nel lettore.",
   "settings.playback.enable_force": "Forza",
   "settings.playback.force_question": "Forzare Direct Play?",
