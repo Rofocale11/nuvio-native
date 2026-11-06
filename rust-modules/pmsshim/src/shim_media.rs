@@ -126,6 +126,9 @@ fn container_of(c: &Classified) -> String {
 pub struct SubRef {
     pub id: i64,
     pub lang: String,
+    /// The release name, when the provider named one. PMS carries it in the stream's `title`,
+    /// and the player's Search page uses it to recognise a candidate the item already has.
+    pub title: String,
     /// Plex's `default`/`selected` for this track: the one the viewer's account language asks for
     /// (see [`apply_subtitle_preference`]). A sidecar carries no container ordinal, so this pair is
     /// the ONLY way the app can start with it on — `metadata::server_selected_sidecar` reads it.
@@ -185,6 +188,11 @@ const CODE3: &[(&str, &str)] = &[
     ("kir", "ky"), ("lug", "lg"), ("nde", "nd"), ("nno", "nn"), ("nob", "nb"), ("nya", "ny"),
     ("ori", "or"), ("oss", "os"), ("pli", "pi"), ("sag", "sg"), ("smo", "sm"), ("sot", "st"),
     ("ssw", "ss"), ("tsn", "tn"), ("tso", "ts"), ("xho", "xh"), ("zap", "za"), ("zha", "za"),
+    // Spellings OpenSubtitles v3 actually sends for languages the picker distinguishes no
+    // further: `pob` is Portuguese (Brazil), `spl` Spanish (Latin America), `scc` Serbian,
+    // `zht`/`zhe` Chinese. `tat` is Tatar, which the picker offers as `tt`.
+    ("pob", "pt"), ("spl", "es"), ("scc", "sr"), ("zht", "zh"), ("zhe", "zh"), ("mne", "sr"),
+    ("tat", "tt"),
 ];
 
 /// Full display names an addon may use instead of a code (`"Indonesian"`, `"English"`). Only the
@@ -205,7 +213,7 @@ const NAMES: &[(&str, &str)] = &[
 
 /// The language one tag names, folded to the picker's code. Mirrors `plx_data::metadata::lang_key`
 /// (the shim does not depend on the data crate). Only the primary subtag counts.
-fn lang_key(lang: &str) -> String {
+pub(crate) fn lang_key(lang: &str) -> String {
     let s = lang.trim().to_ascii_lowercase();
     // A display name may contain a space ("Bahasa Indonesia"), so it is checked WHOLE before the
     // primary-subtag split below.
@@ -281,7 +289,8 @@ pub fn media_json(rk: i64, idx: usize, c: &Classified, duration_ms: i64, subs: &
         streams.push(json!({
             "id": s.id, "streamType": 3, "codec": "srt", "index": 2 + n, "external": true,
             "key": format!("/library/streams/{}.srt", s.id), "language": s.lang, "languageCode": s.lang,
-            "displayTitle": format!("{} (SRT)", s.lang), "selected": s.selected, "default": s.selected,
+            "title": s.title, "displayTitle": format!("{} (SRT)", s.lang),
+            "selected": s.selected, "default": s.selected,
         }));
     }
     let ext = if container == "hls" { "m3u8".to_string() } else { container.clone() };
@@ -355,7 +364,7 @@ mod tests {
         let mut stream = s("x", Some("https://h/f.mkv?t=1"), None);
         stream.addon_name = "Torrentio".into();
         let c = Classified { stream, info: StreamInfo { height: Some(2160), hdr: Hdr::DolbyVision { with_hdr10_fallback: true }, size_bytes: Some(60_000_000_000), ..Default::default() }, url: "https://h/f.mkv?t=1".into() };
-        let m = media_json(10_001, 3, &c, 7_200_000, &[SubRef { id: 9, lang: "eng".into(), selected: false }]);
+        let m = media_json(10_001, 3, &c, 7_200_000, &[SubRef { id: 9, lang: "eng".into(), title: "Some.Release".into(), selected: false }]);
         assert_eq!(m["videoResolution"], "4k");
         assert_eq!(m["container"], "mkv");
         assert_eq!(m["addon_name"], "Torrentio", "the picker groups by addon");
@@ -364,6 +373,7 @@ mod tests {
         assert_eq!(m["Part"][0]["key"], "/library/parts/10001003/0/file.mkv");
         assert_eq!(m["Part"][0]["Stream"][0]["DOVIProfile"], 8);
         assert_eq!(m["Part"][0]["Stream"][2]["key"], "/library/streams/9.srt");
+        assert_eq!(m["Part"][0]["Stream"][2]["title"], "Some.Release", "the release name travels (docs/pms-api.md §8)");
         assert_eq!(m["Part"][0]["Stream"][2]["selected"], false);
         assert_eq!(m["bitrate"], 66_666);
     }
@@ -374,9 +384,9 @@ mod tests {
     #[test]
     fn the_account_language_marks_one_subtitle_selected() {
         let mut subs = [
-            SubRef { id: 1, lang: "fre".into(), selected: false },
-            SubRef { id: 2, lang: "English".into(), selected: false },
-            SubRef { id: 3, lang: "ger".into(), selected: false },
+            SubRef { id: 1, lang: "fre".into(), title: String::new(), selected: false },
+            SubRef { id: 2, lang: "English".into(), title: String::new(), selected: false },
+            SubRef { id: 3, lang: "ger".into(), title: String::new(), selected: false },
         ];
         apply_subtitle_preference(&mut subs, Some("de"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false, true]);
@@ -399,6 +409,9 @@ mod tests {
             ("spa", "es"), ("jpn", "ja"), ("swe", "sv"), ("bul", "bg"), ("jav", "jv"),
             ("ind", "id"), ("Indonesian", "id"), ("Bahasa Indonesia", "id"),
             ("may", "ms"), ("msa", "ms"),
+            // OpenSubtitles v3 spells Brazilian Portuguese `pob` (the picker has only `pt`),
+            // Latin-American Spanish `spl` (the picker has only `es`) and Tatar `tat` (`tt`).
+            ("pob", "pt"), ("spl", "es"), ("tat", "tt"),
         ] {
             assert_eq!(lang_key(lang), lang_key(pref), "{lang} vs {pref}");
         }
@@ -413,8 +426,8 @@ mod tests {
     #[test]
     fn an_exact_language_tag_outranks_a_folded_one() {
         let mut subs = [
-            SubRef { id: 1, lang: "pt".into(), selected: false },
-            SubRef { id: 2, lang: "pt-BR".into(), selected: false },
+            SubRef { id: 1, lang: "pt".into(), title: String::new(), selected: false },
+            SubRef { id: 2, lang: "pt-BR".into(), title: String::new(), selected: false },
         ];
         apply_subtitle_preference(&mut subs, Some("pt-BR"));
         assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);

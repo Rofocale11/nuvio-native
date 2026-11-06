@@ -36,6 +36,12 @@ pub trait Backend: Send + Sync {
     /// Streams for a movie (`id`) or an episode (the video id), progressively through `on_batch`.
     fn streams(&self, type_: &str, id: &str, deadline: Duration, on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream>;
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle>;
+    /// The player's on-demand subtitle search (Subtitles → Search), all languages. `None` means
+    /// the provider did not answer and is a fault; `Some(empty)` is its answer that it has none.
+    /// Defaults to an empty answer so test/pseudo backends need no search provider.
+    fn search_subtitles(&self, _type_: &str, _id: &str) -> Option<Vec<Subtitle>> {
+        Some(Vec::new())
+    }
 }
 
 /// The user's addons. Swappable at run time ([`AddonBackend::replace`]) so Settings can install,
@@ -104,6 +110,11 @@ impl Backend for AddonBackend {
     }
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle> {
         self.snapshot().subtitles(type_, id)
+    }
+    /// The **builtin** OpenSubtitles v3 addon, independent of the user's installed set: the
+    /// automatic lane above already reads that set, so searching there again would only repeat it.
+    fn search_subtitles(&self, type_: &str, id: &str) -> Option<Vec<Subtitle>> {
+        plx_stremio::addons::opensubtitles_candidates(type_, id, Duration::from_secs(10))
     }
 }
 

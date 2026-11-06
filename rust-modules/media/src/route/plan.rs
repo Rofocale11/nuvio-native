@@ -1830,58 +1830,64 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // legacy owner session.
     let active_profile = plx_plex::plex::session::current_snapshot();
     let mut account_subtitles = None;
-    let account_audio = match active_profile.user.as_ref() {
-        Some(user) => match plx_plex::plex::session::plex_tv_credential(user) {
-            Some(credential) => {
-                let stored_session = plx_plex::plex::session::peek();
-                if stored_session.client_id.is_empty() {
-                    AccountAudioLanguage::NoCredential
-                } else {
-                    match plx_plex::plex::account::AccountClient::audio_preferences(
-                        &stored_session.client_id, &credential, user, active_profile.generation,
-                    ) {
-                        plx_plex::plex::account::AudioPreferencesOutcome::Available(prefs) => {
-                            account_subtitles = Some((prefs.subtitle_language.clone(), prefs.subtitle_mode, prefs.subtitle_forced));
-                            match prefs.language {
-                            Some(language) => AccountAudioLanguage::Set(language),
-                            None => AccountAudioLanguage::NotSet {
-                                auto_select_audio: prefs.auto_select_audio,
-                                stated_language: prefs.stated_language,
-                            },
-                        } },
-                        plx_plex::plex::account::AudioPreferencesOutcome::TimedOut =>
-                            AccountAudioLanguage::TimedOut,
-                        plx_plex::plex::account::AudioPreferencesOutcome::Failed =>
-                            AccountAudioLanguage::Unavailable,
-                    }
-                }
+    // **A Nuvio account's preferences are `nuvio-session.json`.** The shim's `/api/v2/user`
+    // carries no `profile` block, so the HTTP account read answers defaults and every preference
+    // the Settings screen saved would be ignored — including the preferred subtitle language the
+    // track menu and the player's subtitle search start from. Both the signed-in account
+    // (`nuvio`) and a switched profile (`nuvio-profile-…`) have a synthetic shim credential, so
+    // the local check has to come BEFORE the credential branch.
+    let local_account = is_local_nuvio(active_profile.user.as_ref());
+    let account_audio = if local_account {
+        let apply = |prefs: plx_plex::plex::account::AudioPreferences,
+                     subtitles: &mut Option<(Option<String>, i64, i64)>| {
+            *subtitles = Some((
+                prefs.subtitle_language.clone(),
+                prefs.subtitle_mode,
+                prefs.subtitle_forced,
+            ));
+            match prefs.language {
+                Some(language) => AccountAudioLanguage::Set(language),
+                None => AccountAudioLanguage::NotSet {
+                    auto_select_audio: prefs.auto_select_audio,
+                    stated_language: prefs.stated_language,
+                },
             }
-            None if user.uuid.starts_with("nuvio-profile-") => {
-                // A Nuvio profile has no plex.tv credential, and the shim's `/api/v2/user` carries
-                // no `profile` block, so the HTTP account read would answer defaults. Its
-                // preferences ARE the shim's file: read that directly, off the playback path's
-                // network, and let the same value the Settings screen edits decide the pick.
-                match plx_plex::plex::account::local_preferences() {
-                    Some(prefs) => {
-                        account_subtitles = Some((
-                            prefs.subtitle_language.clone(),
-                            prefs.subtitle_mode,
-                            prefs.subtitle_forced,
-                        ));
-                        match prefs.language {
-                            Some(language) => AccountAudioLanguage::Set(language),
-                            None => AccountAudioLanguage::NotSet {
-                                auto_select_audio: prefs.auto_select_audio,
-                                stated_language: prefs.stated_language,
-                            },
+        };
+        match plx_plex::plex::account::local_preferences() {
+            Some(prefs) => apply(prefs, &mut account_subtitles),
+            None => AccountAudioLanguage::NoCredential,
+        }
+    } else {
+        match active_profile.user.as_ref() {
+            Some(user) => match plx_plex::plex::session::plex_tv_credential(user) {
+                Some(credential) => {
+                    let stored_session = plx_plex::plex::session::peek();
+                    if stored_session.client_id.is_empty() {
+                        AccountAudioLanguage::NoCredential
+                    } else {
+                        match plx_plex::plex::account::AccountClient::audio_preferences(
+                            &stored_session.client_id, &credential, user, active_profile.generation,
+                        ) {
+                            plx_plex::plex::account::AudioPreferencesOutcome::Available(prefs) => {
+                                account_subtitles = Some((prefs.subtitle_language.clone(), prefs.subtitle_mode, prefs.subtitle_forced));
+                                match prefs.language {
+                                Some(language) => AccountAudioLanguage::Set(language),
+                                None => AccountAudioLanguage::NotSet {
+                                    auto_select_audio: prefs.auto_select_audio,
+                                    stated_language: prefs.stated_language,
+                                },
+                            } },
+                            plx_plex::plex::account::AudioPreferencesOutcome::TimedOut =>
+                                AccountAudioLanguage::TimedOut,
+                            plx_plex::plex::account::AudioPreferencesOutcome::Failed =>
+                                AccountAudioLanguage::Unavailable,
                         }
                     }
-                    None => AccountAudioLanguage::NoCredential,
                 }
-            }
+                None => AccountAudioLanguage::NoCredential,
+            },
             None => AccountAudioLanguage::NoCredential,
-        },
-        None => AccountAudioLanguage::NoCredential,
+        }
     };
     // A unit test has no plex.tv to ask, so it states the account's subtitle rule itself.
     #[cfg(any(test, feature = "test-support"))]
@@ -2902,6 +2908,14 @@ pub(super) struct AudioLangPrefs<'a> {
     /// selection, so every walk over the intents — the direct-play pick, the remux and re-encode
     /// pick, the language the subtitle rules judge — inherits it.
     pub remembered: Option<usize>,
+}
+
+/// Is this account answered entirely by the in-process shim? Its preferences are
+/// `nuvio-session.json` — the file the Settings screen edits — and the shim's `/api/v2/user`
+/// carries no `profile` block, so an HTTP account read would answer defaults. Both the account
+/// signed in with Nuvio (`nuvio`) and a switched profile (`nuvio-profile-…`) are local.
+fn is_local_nuvio(user: Option<&plx_plex::plex::session::UserRef>) -> bool {
+    user.is_some_and(|user| user.uuid == "nuvio" || user.uuid.starts_with("nuvio-profile-"))
 }
 
 /// What happened while resolving the active profile's plex.tv audio preference. Keeping this

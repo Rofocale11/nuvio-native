@@ -270,6 +270,42 @@ pub struct Subtitle {
     pub id: Option<String>,
     pub url: String,
     pub lang: String,
+    /// OpenSubtitles v3's release name (`movieReleaseName`). The player's search page shows it,
+    /// and it is the identity the shim compares an installed sidecar by — the same rule a real
+    /// PMS follows (`docs/pms-api.md` §8).
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
+    pub movie_release_name: Option<String>,
+    /// The delivered file's name (`subtitleFileName`), the release-name fallback.
+    #[serde(deserialize_with = "crate::lenient::opt_string")]
+    pub subtitle_file_name: Option<String>,
+    /// The addon that answered with this row, stamped by [`AddonSet::subtitles`] where the addon
+    /// is known. Never on the wire: the player's search page shows it as the row's provider.
+    #[serde(skip)]
+    pub provider: Option<String>,
+}
+
+impl Subtitle {
+    /// The release name this candidate is identified by, or empty when the addon named nothing.
+    pub fn release_title(&self) -> String {
+        let named = |s: &Option<String>| {
+            s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+        };
+        if let Some(name) = named(&self.movie_release_name) {
+            return name;
+        }
+        if let Some(file) = named(&self.subtitle_file_name) {
+            return strip_subtitle_ext(&file).to_string();
+        }
+        self.id.clone().unwrap_or_default()
+    }
+}
+
+/// `Some.File.Name.srt` → `Some.File.Name`; anything but a subtitle extension is left alone.
+fn strip_subtitle_ext(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if matches!(ext.to_ascii_lowercase().as_str(), "srt" | "ass" | "ssa" | "vtt" | "sub" | "smi") => stem,
+        _ => name,
+    }
 }
 
 #[derive(Debug)]

@@ -68,3 +68,18 @@ fn prime_refusals_follow_the_issued_cause_not_the_clock_at_return() {
     ));
 }
 
+
+/// **The local Nuvio account's preferences are `nuvio-session.json`.** The shim's `/api/v2/user`
+/// carries no `profile` block, and a Nuvio profile still has a synthetic shim credential — so the
+/// account has to be recognised as local BEFORE any HTTP preference read, or the subtitle
+/// language saved in Settings reads as unset (the player's subtitle search then opens on the
+/// audio language instead of the preference).
+#[test]
+fn the_local_nuvio_account_is_recognised_before_any_credential_read() {
+    let user = |uuid: &str| plx_plex::plex::session::UserRef { uuid: uuid.into(), ..Default::default() };
+    assert!(is_local_nuvio(Some(&user("nuvio"))));
+    assert!(is_local_nuvio(Some(&user("nuvio-profile-2"))));
+    assert!(!is_local_nuvio(Some(&user("plex-owner"))));
+    assert!(!is_local_nuvio(Some(&user(""))));
+    assert!(!is_local_nuvio(None));
+}

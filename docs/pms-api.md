@@ -1229,6 +1229,20 @@ and documents no download parameter. All four claims are contradicted or unanswe
 Measured against a **shared, non-owned** server (the case the spec's `admin` scope implies should
 fail). Both operations succeeded, so the admin scope is not enforced here for a shared library.
 
+**NuvioNative's shim answers this endpoint from the builtin OpenSubtitles v3 addon**
+(`https://opensubtitles-v3.strem.io`) and the user's own subtitle addons, queried in parallel and
+deduplicated by URL — the page must not be narrower than the "Other languages" rows the same
+addons feed. The builtin takes no language parameter and spells languages the OpenSubtitles way
+(`eng`, `pob`, `spl`, …), so the shim asks for the item's IMDb id (an episode's `tt…:S:E` video
+id) and filters the rows onto the requested 2-letter code locally, folding through its own 639-2
+table. Each row gets a fresh `/library/streams/{id}.srt` key with its URL registered, the
+answering addon's name in `providerTitle`, and its release name in `title`.
+The `PUT` names such a key; the shim remembers the pick per rating key and lists it on the item's
+next read with that release name and `selected: true`. Two differences from the server below: the
+shim's candidate keys stay valid for the process instead of being ephemeral, and the install state
+is in memory (it does not survive a restart). A provider that did not answer is a `502`, which the
+page draws as a retry — never an empty answer it would read as "none found".
+
 ### Search — `GET /library/metadata/{rk}/subtitles`
 
 | param | type | notes |

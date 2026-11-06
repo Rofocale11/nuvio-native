@@ -3208,12 +3208,25 @@ pub fn two_letter_code(tag: &str) -> Option<String> {
     if primary.len() == 2 && primary.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Some(primary);
     }
-    LANG_SPELLINGS
+    if let Some(code) = LANG_SPELLINGS
         .iter()
         .filter(|spellings| spellings.contains(&primary.as_str()))
         .flat_map(|spellings| spellings.iter().copied())
         .find(|spelling| spelling.len() == 2)
-        .map(str::to_string)
+    {
+        return Some(code.to_string());
+    }
+    // A preference can arrive as the picker's display NAME (`"Bahasa Indonesia"`), which no
+    // spelling row names. Resolve it through the same catalog the Settings picker draws.
+    let whole = tag.trim();
+    plx_plex::plex::languages::LANGUAGES
+        .iter()
+        .find(|language| language.name.eq_ignore_ascii_case(whole))
+        .and_then(|language| {
+            let code = language.code.split(['-', '_']).next().unwrap_or("");
+            (code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()))
+                .then(|| code.to_ascii_lowercase())
+        })
 }
 
 /// **The one canonical spelling of a language tag's LANGUAGE**, the key [`lang_matches`] compares

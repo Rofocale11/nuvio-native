@@ -15,7 +15,7 @@ use plx_stremio::addons_tmdb::{
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -474,6 +474,23 @@ struct CatalogCache {
     exhausted: bool,
 }
 
+/// Rows a subtitle search may return. The page's language filter usually leaves far fewer; the
+/// cap keeps one answer from minting thousands of `/library/streams/{id}` keys.
+const SUBTITLE_SEARCH_MAX: usize = 60;
+/// Installs remembered per item, and items remembered, so a long session cannot grow either map
+/// without bound. The newest install is the one a later play starts with.
+const INSTALLED_SUBS_PER_ITEM: usize = 20;
+const INSTALLED_SUB_ITEMS: usize = 128;
+
+/// One candidate the Search page returned, remembered by the id its key names: the install `PUT`
+/// carries only `/library/streams/{id}`, so this is how it learns what it is attaching.
+#[derive(Clone, Debug)]
+struct SearchSub {
+    id: i64,
+    lang: String,
+    title: String,
+}
+
 #[derive(Default)]
 struct SlotState {
     /// Arrival order — a Part id names a stream by its position HERE, which never changes while the
@@ -526,6 +543,12 @@ pub struct Shim {
     cards: Mutex<HashMap<i64, Value>>,
     streams: Mutex<HashMap<i64, Arc<StreamSlot>>>,
     sub_urls: Mutex<HashMap<i64, String>>,
+    /// The candidates the Search page has handed out, by the id their key names ([`SearchSub`]).
+    search_subs: Mutex<HashMap<i64, SearchSub>>,
+    /// Subtitles the viewer installed from the Search page, by rating key. They are sidecars of
+    /// the item from then on — `ranked` merges them beside the addons' own — for this process:
+    /// nothing here persists, unlike the key table and watch state.
+    installed_subs: Mutex<HashMap<i64, Vec<SearchSub>>>,
     poster_fallbacks: Mutex<HashMap<String, String>>,
     tmdb_fallbacks: Mutex<HashMap<i64, TmdbMovie>>,
     /// The TMDB franchises a detail page has shown a collection shelf for, by TMDB collection id.
@@ -2383,6 +2406,8 @@ impl Shim {
             cards: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
             sub_urls: Mutex::new(HashMap::new()),
+            search_subs: Mutex::new(HashMap::new()),
+            installed_subs: Mutex::new(HashMap::new()),
             poster_fallbacks: Mutex::new(HashMap::new()),
             tmdb_fallbacks: Mutex::new(HashMap::new()),
             collections: Mutex::new(HashMap::new()),
@@ -2952,10 +2977,14 @@ impl Shim {
                 g.subs = subs
                     .into_iter()
                     .take(40)
-                    .map(|s| SubRef {
-                        id: 0,
-                        lang: format!("{}\u{0}{}", s.lang, s.url),
-                        selected: false,
+                    .map(|s| {
+                        let title = s.release_title();
+                        SubRef {
+                            id: 0,
+                            lang: format!("{}\u{0}{}", s.lang, s.url),
+                            title,
+                            selected: false,
+                        }
                     })
                     .collect();
                 g.subs_done = true;
@@ -3057,12 +3086,40 @@ impl Shim {
         // tracks are cloned below for every Part, so the mark has to live on the slot's own list.
         let pref = self.account.subtitle_language();
         shim_media::apply_subtitle_preference(&mut st.subs, pref.as_deref());
+        // Subtitles the viewer installed from the Search page ride beside the addons' own, and the
+        // newest install is the server's pick — exactly what a real PMS does with an installed
+        // sidecar (`docs/pms-api.md` §8). They outlive the slot, so they come from the shim, not
+        // from the addon threads that filled it.
+        let installed = self
+            .installed_subs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&rk)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(newest) = installed.last() {
+            for s in &installed {
+                if !st.subs.iter().any(|x| x.id == s.id) {
+                    st.subs.push(SubRef {
+                        id: s.id,
+                        lang: s.lang.clone(),
+                        title: s.title.clone(),
+                        selected: false,
+                    });
+                }
+            }
+            let newest = newest.id;
+            for s in st.subs.iter_mut() {
+                s.selected = s.id == newest;
+            }
+        }
         let subs: Vec<SubRef> = st
             .subs
             .iter()
             .map(|s| SubRef {
                 id: s.id,
                 lang: s.lang.clone(),
+                title: s.title.clone(),
                 selected: s.selected,
             })
             .collect();
@@ -5964,6 +6021,10 @@ impl Shim {
                 }
                 response
             }
+            // The player's Subtitles → Search page (`docs/pms-api.md` §8): candidates from the
+            // builtin OpenSubtitles v3 addon, and the install that makes one a sidecar.
+            ("GET", ["library", "metadata", rk, "subtitles"]) => self.subtitle_search(rk, req),
+            ("PUT", ["library", "metadata", rk, "subtitles"]) => self.subtitle_install(rk, req),
             (_, ["library", "metadata", _, ..]) => ok_empty(),
             ("PUT", ["library", "parts", ..]) => ok_empty(),
             (_, ["library", "parts", pid, ..]) => self.part(pid.parse().unwrap_or(-1)),
@@ -6690,6 +6751,124 @@ impl Shim {
             Some(url) => Response::redirect(&url),
             None => Response::bytes(502, "text/plain", b"stream no longer available".to_vec()),
         }
+    }
+
+    /// `GET /library/metadata/{rk}/subtitles` — the player's Subtitles → Search page. Candidates
+    /// come from the builtin OpenSubtitles v3 addon (independent of the user's installed set) and
+    /// from the user's own subtitle addons, are filtered to the 2-letter language the page asked
+    /// for, and each is handed a `/library/streams/{id}` key with its URL registered — so the
+    /// install that follows names exactly what the search showed.
+    fn subtitle_search(&self, rk: &str, req: &Request) -> Response {
+        let Some(key) = rk.parse::<i64>().ok() else {
+            return ok_empty();
+        };
+        let Some(ident) = self.keys.ident(key).or_else(|| synthetic_ident(key)) else {
+            return ok_empty();
+        };
+        let Some((type_, id)) = self.stream_target(&ident) else {
+            return ok_empty();
+        };
+        let addon_id = translate_to_stremio_id(key).unwrap_or(id);
+        let id = self.addon_id_for(&type_, &addon_id);
+        // The builtin provider AND the viewer's own subtitle addons — the same set that feeds the
+        // item's "Other languages" rows — answer CONCURRENTLY: a language the page is asked for
+        // may only be in one of the two, and neither read may push the other past the request's
+        // budget.
+        let (own, builtin) = std::thread::scope(|scope| {
+            let own = scope.spawn(|| self.backend.subtitles(&type_, &id));
+            (own.join().unwrap_or_default(), self.backend.search_subtitles(&type_, &id))
+        });
+        if builtin.is_none() && own.is_empty() {
+            // A fault, not an empty answer: the page draws a retry for this one only.
+            return Response::json_status(
+                502,
+                &container(json!({"Stream": [], "error": "subtitle search failed"})),
+            );
+        }
+        let want = req.q("language").unwrap_or("").trim().to_ascii_lowercase();
+        let mut hits = builtin.unwrap_or_default();
+        let mut seen: HashSet<String> = hits.iter().map(|s| s.url.clone()).collect();
+        for sub in own {
+            if seen.insert(sub.url.clone()) {
+                hits.push(sub);
+            }
+        }
+        let total = hits.len() as i64;
+        let mut streams = Vec::new();
+        for (i, sub) in hits.into_iter().enumerate() {
+            if !want.is_empty() && shim_media::lang_key(&sub.lang) != want {
+                continue;
+            }
+            if streams.len() >= SUBTITLE_SEARCH_MAX {
+                break;
+            }
+            let sid = self.next_sub.fetch_add(1, Ordering::Relaxed);
+            let title = sub.release_title();
+            let provider = sub.provider.clone().unwrap_or_else(|| "Subtitles".into());
+            self.sub_urls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(sid, sub.url);
+            let mut known = self.search_subs.lock().unwrap_or_else(|e| e.into_inner());
+            if known.len() > 4096 {
+                known.clear();
+            }
+            known.insert(sid, SearchSub { id: sid, lang: sub.lang.clone(), title: title.clone() });
+            drop(known);
+            // `score` is a STRING on the wire (`"2301"`), the field's type is lenient; the value
+            // only has to be descending so `hits_of`'s stable sort keeps the addon's own order.
+            streams.push(json!({
+                "id": sid,
+                "key": format!("/library/streams/{sid}.srt"),
+                "streamType": 3, "codec": "srt", "format": "srt",
+                "language": sub.lang.as_str(), "languageCode": sub.lang.as_str(),
+                "languageTag": sub.lang.as_str(),
+                "providerTitle": provider.as_str(),
+                "title": title.as_str(), "displayTitle": title.as_str(),
+                "extendedDisplayTitle": title.as_str(),
+                "score": (total - i as i64).to_string(),
+                "hearingImpaired": 0, "forced": 0,
+            }));
+        }
+        Response::json(&container(json!({"size": streams.len(), "Stream": streams})))
+    }
+
+    /// `PUT /library/metadata/{rk}/subtitles?key=/library/streams/{id}.srt` — make a searched
+    /// candidate a sidecar of the item. The answer is 200 with an empty body: the created stream
+    /// is not named, and the app finds it by re-reading the item (`docs/pms-api.md` §8). An
+    /// unknown id is accepted and does nothing, the way a stale candidate key behaves on a real
+    /// PMS.
+    fn subtitle_install(&self, rk: &str, req: &Request) -> Response {
+        let (Some(key), Some(candidate)) = (rk.parse::<i64>().ok(), req.q("key")) else {
+            return ok_empty();
+        };
+        let Some(sid) = candidate
+            .strip_prefix("/library/streams/")
+            .and_then(|tail| tail.split('.').next())
+            .and_then(|n| n.parse::<i64>().ok())
+        else {
+            return ok_empty();
+        };
+        let known = self
+            .search_subs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&sid)
+            .cloned();
+        let Some(sub) = known else { return ok_empty() };
+        let mut installed = self.installed_subs.lock().unwrap_or_else(|e| e.into_inner());
+        if installed.len() > INSTALLED_SUB_ITEMS {
+            installed.clear();
+        }
+        let list = installed.entry(key).or_default();
+        if !list.iter().any(|s| s.id == sub.id) {
+            if list.len() >= INSTALLED_SUBS_PER_ITEM {
+                list.remove(0);
+            }
+            list.push(sub);
+        }
+        drop(installed);
+        ok_empty()
     }
 
     fn subtitle(&self, sid: i64) -> Response {
@@ -9174,3 +9353,196 @@ mod trailer_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod subtitle_search_tests {
+    use super::*;
+    use plx_stremio::model::Subtitle;
+
+    /// Answers the on-demand search with one English and one German candidate, and records what
+    /// `(type, id)` the shim asked for.
+    #[derive(Default)]
+    struct SearchBackend {
+        asked: Mutex<Vec<(String, String)>>,
+        fail: bool,
+        /// What the viewer's own installed addons carry (the automatic lane's source).
+        own: Vec<Subtitle>,
+    }
+
+    impl Backend for SearchBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
+        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+            Ok(Vec::new())
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, type_: &str, id: &str) -> Option<Meta> {
+            Some(Meta { id: id.into(), type_: type_.into(), name: "Test Title".into(), ..Default::default() })
+        }
+        fn streams(&self, _type_: &str, _id_: &str, _deadline: Duration, _on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream> {
+            vec![Stream { url: Some("https://example.com/f.mkv".into()), name: Some("Source".into()), ..Default::default() }]
+        }
+        fn subtitles(&self, _type_: &str, _id_: &str) -> Vec<Subtitle> {
+            self.own.clone()
+        }
+        fn search_subtitles(&self, type_: &str, id: &str) -> Option<Vec<Subtitle>> {
+            self.asked.lock().unwrap().push((type_.into(), id.into()));
+            if self.fail {
+                return None;
+            }
+            Some(vec![
+                Subtitle {
+                    id: Some("a".into()),
+                    url: "https://subs.example/en.srt".into(),
+                    lang: "eng".into(),
+                    movie_release_name: Some("The.Matrix.1999.1080p.BluRay".into()),
+                    provider: Some("OpenSubtitles".into()),
+                    ..Default::default()
+                },
+                Subtitle {
+                    id: Some("b".into()),
+                    url: "https://subs.example/de.srt".into(),
+                    lang: "ger".into(),
+                    subtitle_file_name: Some("Matrix.german.srt".into()),
+                    provider: Some("OpenSubtitles".into()),
+                    ..Default::default()
+                },
+            ])
+        }
+    }
+
+    fn request(method: &str, path: &str, query: &[(&str, &str)]) -> Request {
+        Request {
+            method: method.into(),
+            path: path.into(),
+            query: query.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    fn body(response: &Response) -> Value {
+        serde_json::from_slice(&response.body).unwrap()
+    }
+
+    fn search_path(rk: i64) -> String {
+        format!("/library/metadata/{rk}/subtitles")
+    }
+
+    /// The Search page asks in a 2-letter language; the addon answers in 639-2 spellings. Only the
+    /// asked language comes back, each row carrying a servable key and the release name it will be
+    /// recognised by later.
+    #[test]
+    fn the_search_answers_the_builtin_provider_in_the_asked_language() {
+        let backend = Arc::new(SearchBackend::default());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt0133093".into() });
+
+        let response = shim.handle(&request("GET", &search_path(rk), &[("language", "en")]));
+        assert_eq!(response.status, 200);
+        let body = body(&response);
+        let streams = body["MediaContainer"]["Stream"].as_array().unwrap();
+        assert_eq!(streams.len(), 1, "the German row is on the page's other language");
+        let row = &streams[0];
+        assert_eq!(row["languageCode"], "eng");
+        assert_eq!(row["providerTitle"], "OpenSubtitles");
+        assert_eq!(row["title"], "The.Matrix.1999.1080p.BluRay");
+
+        let key = row["key"].as_str().unwrap();
+        assert!(key.starts_with("/library/streams/") && key.ends_with(".srt"), "{key}");
+        let sid: i64 = key.trim_start_matches("/library/streams/").trim_end_matches(".srt").parse().unwrap();
+        assert_eq!(
+            shim.sub_urls.lock().unwrap().get(&sid).map(String::as_str),
+            Some("https://subs.example/en.srt"),
+            "the key's id is how the install finds the URL"
+        );
+        assert_eq!(
+            *backend.asked.lock().unwrap(),
+            vec![("movie".to_string(), "tt0133093".to_string())]
+        );
+    }
+
+    /// A series is searched by the EPISODE's video id (`tt…:S:E`), which is what OpenSubtitles v3
+    /// indexes; asking for the show would return the show's own subtitles, not this episode's.
+    #[test]
+    fn an_episode_is_searched_by_its_video_id() {
+        let backend = Arc::new(SearchBackend::default());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Episode {
+            series: "tt0944947".into(),
+            video: "tt0944947:1:1".into(),
+        });
+        let _ = shim.handle(&request("GET", &search_path(rk), &[("language", "eng")]));
+        assert_eq!(
+            *backend.asked.lock().unwrap(),
+            vec![("series".to_string(), "tt0944947:1:1".to_string())]
+        );
+    }
+
+    /// The `PUT` names only the key; the item's next read must list the sidecar under that
+    /// release name, selected — the same shape a real PMS produces, which is what `identify`
+    /// diffs and the panel then auto-selects.
+    #[test]
+    fn an_installed_candidate_becomes_a_selected_sidecar_of_the_item() {
+        let shim = Arc::new(Shim::new(Arc::new(SearchBackend::default()), Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt0133093".into() });
+        let found = body(&shim.handle(&request("GET", &search_path(rk), &[("language", "en")])));
+        let key = found["MediaContainer"]["Stream"][0]["key"].as_str().unwrap().to_string();
+
+        let put = shim.handle(&request("PUT", &search_path(rk), &[("key", &key)]));
+        assert_eq!(put.status, 200);
+
+        let item = body(&shim.handle(&request("GET", &format!("/library/metadata/{rk}"), &[])));
+        let media = item["MediaContainer"]["Metadata"][0]["Media"].as_array().expect("a part carries the sidecars");
+        let streams = media[0]["Part"][0]["Stream"].as_array().unwrap();
+        let sub = streams
+            .iter()
+            .find(|s| s["streamType"] == 3)
+            .expect("the installed subtitle is on the item");
+        assert_eq!(sub["title"], "The.Matrix.1999.1080p.BluRay");
+        assert_eq!(sub["languageCode"], "eng");
+        assert_eq!(sub["selected"], true, "the newest install is the server's pick");
+    }
+
+    /// **The page searches what the viewer already has, too.** A language the builtin provider's
+    /// answer does not carry may still be on the item from the viewer's own subtitle addons — the
+    /// same set that fills "Other languages" — and the Search page must not say "none found" for
+    /// a subtitle the menu beside it lists. Rows carry the answering addon's name.
+    #[test]
+    fn a_language_only_the_viewers_addons_carry_is_found() {
+        let backend = Arc::new(SearchBackend {
+            own: vec![Subtitle {
+                id: Some("c".into()),
+                url: "https://subs.example/id.srt".into(),
+                lang: "ind".into(),
+                movie_release_name: Some("The.Matrix.1999.1080p.BluRay".into()),
+                provider: Some("SubDL".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let shim = Arc::new(Shim::new(backend, Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt0133093".into() });
+
+        let found = body(&shim.handle(&request("GET", &search_path(rk), &[("language", "id")])));
+        let rows = found["MediaContainer"]["Stream"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "the builtin answers only English/German");
+        assert_eq!(rows[0]["languageCode"], "ind");
+        assert_eq!(rows[0]["providerTitle"], "SubDL");
+        assert_eq!(rows[0]["title"], "The.Matrix.1999.1080p.BluRay");
+    }
+
+    /// A provider that did not answer is a fault the page offers a retry for, never "none found".
+    #[test]
+    fn a_provider_failure_is_a_fault_the_page_can_retry() {
+        let backend = Arc::new(SearchBackend { fail: true, ..Default::default() });
+        let shim = Arc::new(Shim::new(backend, Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt0133093".into() });
+        let response = shim.handle(&request("GET", &search_path(rk), &[("language", "en")]));
+        assert_eq!(response.status, 502);
+    }
+}
+

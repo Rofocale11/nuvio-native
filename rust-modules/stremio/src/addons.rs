@@ -417,6 +417,36 @@ pub fn builtin_opensubtitles() -> Addon {
     Addon { transport_url: OPENSUBTITLES_URL.into(), manifest: parse_manifest(v).expect("builtin manifest"), disabled: false, display_name: None }
 }
 
+/// The **builtin** OpenSubtitles v3 addon's candidates for one item, independent of the installed
+/// set. This is the on-demand search the player's Subtitles → Search page runs; playback's
+/// automatic subtitle lane ([`AddonSet::subtitles`]) is a separate read of the user's addons.
+///
+/// `None` means the addon did not answer (transport or an unparseable body) and must stay distinct
+/// from `Some(empty)`, which is the provider's answer that it has nothing for this item.
+pub fn opensubtitles_candidates(type_: &str, id: &str, deadline: Duration) -> Option<Vec<Subtitle>> {
+    let addon = builtin_opensubtitles();
+    // An id the builtin cannot serve (`tmdb:603` with no IMDb upgrade) is an ANSWER, not a fault.
+    let Some(t) = resolve_request_type(&addon, "subtitles", type_, id, false, false) else {
+        return Some(Vec::new());
+    };
+    let url = resource_url(&addon.transport_url, "subtitles", &t, id);
+    let body = http::get_json(&url, http::within_ms(deadline.as_millis() as u64)).ok()?;
+    let mut subs = candidates_from_body(body)?;
+    for sub in subs.iter_mut() {
+        sub.provider = Some("OpenSubtitles".into());
+    }
+    Some(subs)
+}
+
+/// The `subtitles` array of an addon answer, URL-less rows dropped. Split out so the shape — and
+/// the release names a search row is identified by — is gradeable without a socket.
+fn candidates_from_body(body: Value) -> Option<Vec<Subtitle>> {
+    let Value::Object(mut o) = body else { return None };
+    let mut subs: Vec<Subtitle> = lenient::decode_list(o.remove("subtitles"));
+    subs.retain(|s| !s.url.is_empty());
+    Some(subs)
+}
+
 /// Run `jobs` (one per addon index) on worker threads — or serially if libcurl's TLS is not
 /// thread-safe here — delivering results in completion order until `deadline`.
 fn fan_out<T: Send + 'static>(
@@ -793,10 +823,22 @@ impl AddonSet {
             .iter()
             .enumerate()
             .map(|(slot, (i, t))| {
-                let url = resource_url(&self.addons[*i].transport_url, "subtitles", t, id);
+                let addon = &self.addons[*i];
+                let url = resource_url(&addon.transport_url, "subtitles", t, id);
+                let provider = addon
+                    .display_name
+                    .clone()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| addon.manifest.name.clone());
                 (slot, Box::new(move |left: Duration| {
                     match http::get_json(&url, http::within_ms(left.as_millis() as u64)) {
-                        Ok(Value::Object(mut o)) => lenient::decode_list::<Subtitle>(o.remove("subtitles")),
+                        Ok(Value::Object(mut o)) => {
+                            let mut subs = lenient::decode_list::<Subtitle>(o.remove("subtitles"));
+                            for sub in subs.iter_mut() {
+                                sub.provider = Some(provider.clone());
+                            }
+                            subs
+                        }
                         _ => Vec::new(),
                     }
                 }) as Box<dyn FnOnce(Duration) -> _ + Send>)
@@ -1017,6 +1059,29 @@ mod tests {
         assert_eq!(s[0].file_idx, Some(0));
         assert_eq!(s[0].behavior_hints.filename.as_deref(), Some("Movie.2160p.mkv"));
         assert_eq!(s[1].subtitles.len(), 1);
+    }
+
+    #[test]
+    fn opensubtitles_rows_keep_their_release_names() {
+        let body = serde_json::json!({"subtitles": [
+            {"id": "1", "url": "https://s/a.srt", "lang": "eng",
+             "movieReleaseName": "Movie.2020.1080p.BluRay-GRP", "subtitleFileName": "x.srt"},
+            {"id": "2", "url": "", "lang": "eng", "subtitleFileName": "dropped.srt"},
+            {"id": "3", "url": "https://s/c.srt", "lang": "ger", "subtitleFileName": "Movie.ger.srt"}
+        ]});
+        let subs = candidates_from_body(body).unwrap();
+        assert_eq!(subs.len(), 2, "a row with no URL cannot be served");
+        assert_eq!(subs[0].release_title(), "Movie.2020.1080p.BluRay-GRP");
+        assert_eq!(subs[1].release_title(), "Movie.ger", "the file name stands in, extension off");
+        assert_eq!(subs[1].lang, "ger");
+    }
+
+    /// The provider's empty answer and its failure are what the player's Search page draws as
+    /// "none found" and "retry"; a body that is not an object must never read as the former.
+    #[test]
+    fn a_body_that_is_not_an_object_is_a_failure_not_an_empty_answer() {
+        assert!(candidates_from_body(serde_json::json!(null)).is_none());
+        assert_eq!(candidates_from_body(serde_json::json!({"subtitles": []})).unwrap().len(), 0);
     }
 
     #[test]

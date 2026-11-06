@@ -625,7 +625,9 @@ mod tests {
     #[test]
     fn every_spelling_of_a_language_folds_to_the_two_letter_code_the_server_accepts() {
         for (input, want) in [("nld", "nl"), ("dut", "nl"), ("nl", "nl"), ("eng", "en"),
-            ("en-GB", "en"), ("NL", "nl")] {
+            ("en-GB", "en"), ("NL", "nl"),
+            // a preference stored as the picker's display NAME still opens a real search
+            ("Bahasa Indonesia", "id")] {
             assert_eq!(fold_language(input).as_deref(), Some(want), "{input:?}");
         }
         assert_eq!(fold_language(""), None);

@@ -104,6 +104,10 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   client re-reads Home when the merge lands, so Continue Watching does not wait for a relaunch.
 - TMDB↔IMDb ID translation for My List sync, related items, and every addon-facing stream/subtitle
   request whose title is TMDB-only (`tmdb:<id>` → `tt…`, episode tails preserved).
+- Player subtitle search (`Subtitles → Search`) answered from the builtin OpenSubtitles v3 addon
+  and the account's own subtitle addons, filtered to the chosen language and opening on the
+  preferred subtitle language from `nuvio-session.json`; installing a candidate adds it to the
+  item as a sidecar and makes it the selected track.
 
 ## UI polish
 

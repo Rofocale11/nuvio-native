@@ -428,7 +428,7 @@ change capability only; they do not bypass a profile's `Off`.
   the shim must fetch the addon URL itself and answer **200 with UTF-8 text** (gunzip, transcode
   cp1252/etc. to UTF-8). SRT and WebVTT both parse; ASS goes to libass.
 - Auto-selection: the shim marks the sidecar whose language matches the account's
-  `defaultSubtitleLanguage` as `selected` (`shim_media::mark_preferred_subtitle`), so the app's
+  `defaultSubtitleLanguage` as `selected` (`shim_media::apply_subtitle_preference`), so the app's
   `restore_server_selection` enables it on direct play. An exact tag (`pt-BR`) outranks a folded
   one (`pt`). 639-2/B and /T spellings (`ind`, `spa`, `ger`) and display names (`Indonesian`,
   `Bahasa Indonesia`) fold to the picker's code through a curated table — **never by truncating to
@@ -439,6 +439,27 @@ change capability only; they do not bypass a profile's `Off`.
   decision waits (up to the 2.5 s stream grace) for subtitle addons to report before publishing the
   part, but only when a preferred language is set; a slow or absent addon never blocks playback and
   an empty result is handled without panicking.
+- Search on demand: the player's Subtitles → Search page reads
+  `GET /library/metadata/{rk}/subtitles?language=<2-letter>`, answered by the **builtin**
+  OpenSubtitles v3 addon (`https://opensubtitles-v3.strem.io`) **and** the user's own subtitle
+  addons (the same set the automatic lane above reads) in parallel, deduplicated by URL. The
+  builtin adds coverage the installed addons may not have; the installed addons add any language
+  the builtin's answer happens to lack, so the page is never narrower than the "Other languages"
+  rows beside it. The page opens on the account's preferred subtitle language as saved in
+  `nuvio-session.json` (`defaultSubtitleLanguage`) — the playback plan reads that file directly
+  for the local Nuvio account (`nuvio` and `nuvio-profile-…`), because the shim's
+  `/api/v2/user` carries no `profile` block and an HTTP preference read would answer defaults.
+  The builtin answers in 639-2 spellings, takes no language parameter and returns a capped list
+  per title, so the shim folds each candidate's code (`eng`, `pob`, `spl`, …) onto the page's
+  2-letter code and filters locally. Every row is keyed `/library/streams/{id}.srt` with its URL
+  registered, its release name in `title` (`movieReleaseName`, else the file name) and the
+  answering addon's name in `providerTitle`.
+  `PUT /library/metadata/{rk}/subtitles?key=/library/streams/{id}.srt` makes that candidate a
+  sidecar: the shim remembers it by rating key, `ranked()` merges it beside the addons' own, and
+  the item's next read — the one the app diffs with `identify` — lists it under the same release
+  name and `selected`. That install state lives for the process; it is not persisted across a
+  restart. A provider that did not answer is a `502` (the page's retry), never an empty answer the
+  page would draw as "none found".
 
 ## What the shim must answer during playback
 

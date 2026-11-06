@@ -119,16 +119,16 @@ command is right when this file disagrees.
 <!-- BEGIN docs-fresh:cost-stats -->
 | | |
 |---|---|
-| files this fork changed | 678 |
+| files this fork changed | 680 |
 | files the reference branch changed | 875 |
-| **contested** — changed on **both** sides | 271 |
+| **contested** — changed on **both** sides | 272 |
 | of those, under `rust-modules/screens` or `rust-modules/media` | 60 |
-| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 226 |
+| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 228 |
 | upstream-owned source **added** (the fork's own crates) | 40 |
 <!-- END docs-fresh:cost-stats -->
 
 Added files cannot conflict: they did not exist upstream. The
-<!-- docs-fresh:edited -->226<!-- /docs-fresh:edited --> edited files are the seam, and
+<!-- docs-fresh:edited -->228<!-- /docs-fresh:edited --> edited files are the seam, and
 it is concentrated where the Plex coupling had to be cut — `screens`, `media`, `appkit`, `plex`,
 `platform`, `data`, `src`. Two entries in the raw churn are not hand-written code and are tagged as
 such by the script: `js-service/server.js` (~102k lines, vendored Stremio server) and
@@ -154,7 +154,7 @@ Nuvio backend is ours. There is no third kind of change.**
 - Verify at the tier the change can reach (`which-tier`): host tests for addon/shim code,
   captures for UI, the television for playback.
   <!-- docs-fresh:contested-screens -->60<!-- /docs-fresh:contested-screens --> of the
-  <!-- docs-fresh:contested -->271<!-- /docs-fresh:contested --> contested files are
+  <!-- docs-fresh:contested -->272<!-- /docs-fresh:contested --> contested files are
   `screens`/`media`, so a pick there is a UI or playback change.
 
 ### Taking a fix, in order
