@@ -1715,21 +1715,28 @@ fn title_right(slot: ControlSlot, row: &TransportRow, measure: &dyn Measure) -> 
 /// The display title's clearLogo band: `LogoRung::Custom`'s floor and ceiling are the SAME height,
 /// so [`plx_ui::hero_logo::fit`] can only ever produce that height — a wider wordmark grows
 /// sideways, up to the band's own [`HUD_LOGO_MAX_W`] column.
-const HUD_LOGO_H: f32 = 160.0;
-const HUD_LOGO_MAX_W: f32 = 800.0;
+const HUD_LOGO_H: f32 = 120.0;
+const HUD_LOGO_MAX_W: f32 = 600.0;
 const HUD_LOGO_RUNG: plx_ui::hero_logo::LogoRung = plx_ui::hero_logo::LogoRung::Custom {
-    area: 128_000.0, // HUD_LOGO_MAX_W * HUD_LOGO_H
+    area: 72_000.0, // HUD_LOGO_MAX_W * HUD_LOGO_H
     h_min: HUD_LOGO_H,
     h_max: HUD_LOGO_H,
     fallback_sz: HUD_TITLE_SZ,
 };
 
-/// The clearLogo band's top, per kind of display title. An episode draws its "S1, E1 · Pilot"
-/// kicker UNDER the logo, so its band stays high; a film has no such line, and at the episode's
-/// height the logo would float above a gap, so it drops toward the playbar. Every other context
-/// label (an extra's kind, a movie's ctxline) takes the film's placement with it.
-const HUD_LOGO_Y_EPISODE: f32 = SCR_H - 420.0;
-const HUD_LOGO_Y_MOVIE: f32 = SCR_H - 390.0;
+/// An episode's kicker line's top: the logo band's BOTTOM edge (`h_min == h_max == HUD_LOGO_H`, so
+/// [`plx_ui::hero_logo::band_h`] is exactly `HUD_LOGO_H`). The kicker sits under the wordmark and
+/// ends above the playbar, which is what "below the logo" in [`draw_title_logo`] means.
+const HUD_LOGO_KICKER_Y: f32 = SCR_H - 260.0;
+
+/// The clearLogo band's top, per kind of display title. Each band is anchored by its BOTTOM — the
+/// episode's kicker line, the film's clearance above the playbar — so a smaller rung shrinks the
+/// wordmark UPWARD instead of lifting it off the line it rests on. An episode draws its
+/// "S1, E1 · Pilot" kicker UNDER the logo; a film has no such line, so its band sits lower, closer
+/// to the playbar. Every other context label (an extra's kind, a movie's ctxline) takes the
+/// film's placement with it.
+const HUD_LOGO_Y_EPISODE: f32 = HUD_LOGO_KICKER_Y - HUD_LOGO_H;
+const HUD_LOGO_Y_MOVIE: f32 = (SCR_H - 230.0) - HUD_LOGO_H;
 
 /// The rect a `src_w`×`src_h` logo is DRAWN in: [`plx_ui::hero_logo::fit`] sizes it inside the
 /// [`HUD_LOGO_MAX_W`] column, and it is anchored LEFT on [`SB_X`] — the playbar's own left edge —
@@ -1775,7 +1782,7 @@ pub fn draw_title_logo(
     // it), so with a logo up it is not drawn at all rather than colliding with the wordmark.
     let y = match kicker {
         Kicker::Episode(text) => {
-            p.text(text, SB_X, SCR_H - 420.0, theme::size::CAPTION, theme::TEXT_PRIMARY, 0, 1);
+            p.text(text, SB_X, HUD_LOGO_KICKER_Y, theme::size::CAPTION, theme::TEXT_PRIMARY, 0, 1);
             HUD_LOGO_Y_EPISODE
         }
         Kicker::Context(_) => HUD_LOGO_Y_MOVIE,
@@ -2473,6 +2480,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **An episode's kicker clears the wordmark.** It was drawn at the logo band's TOP, so on a
+    /// show the "S1, E1 · …" line ran through the clearLogo. It starts at the band's bottom edge
+    /// now and still ends above the progress bar.
+    #[test]
+    fn an_episodes_kicker_sits_between_the_wordmark_and_the_playbar() {
+        let band_bottom = HUD_LOGO_Y_EPISODE + plx_ui::hero_logo::band_h(HUD_LOGO_RUNG);
+        assert_eq!(HUD_LOGO_KICKER_Y, band_bottom, "the kicker must start where the logo band ends");
+        assert!(
+            HUD_LOGO_KICKER_Y + FM.line_h(theme::size::CAPTION) <= SB_Y,
+            "the kicker must end above the playbar"
+        );
     }
 
     /// **The transport's clocks are resident before the draw, this second's and the next one's.**

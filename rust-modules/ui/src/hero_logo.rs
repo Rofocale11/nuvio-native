@@ -256,7 +256,7 @@ mod tests {
         );
         let (w, h) = fit(Compact, 1500.0, 300.0, 1740.0);
         assert!(
-            (w - 270.0).abs() < 1e-3 && (h - 54.0).abs() < 1e-3,
+            (w - 202.5).abs() < 1e-3 && (h - 40.5).abs() < 1e-3,
             "compact wordmark: {w}×{h}"
         );
     }

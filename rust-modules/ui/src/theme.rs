@@ -231,23 +231,24 @@ pub mod logo {
     /// wordmarks where they are.
     pub const HERO_H_MAX: f32 = 268.0;
     /// COMPACT rung — the pinned title the detail page scrolls up to. The hero rung scaled by
-    /// ([`COMPACT_H_MIN`]/[`HERO_H_MIN`])² = 0.45², so the two rungs cannot drift apart: a 5:1
+    /// ([`COMPACT_H_MIN`]/[`HERO_H_MIN`])² = 0.3375², so the two rungs cannot drift apart: a 5:1
     /// wordmark lands on the floor at BOTH rungs, by construction.
-    pub const COMPACT_AREA: f32 = 14_580.0;
-    /// One line of [`super::size::TITLE`] text (40 × 1.32 ≈ 53) — the compact title's own text
-    /// fallback, which is what this rung stands in for. Unchanged from the literal 54 it replaces,
-    /// so a wordmark in the pinned strip is pixel-identical to today.
-    pub const COMPACT_H_MIN: f32 = 54.0;
-    /// Set by the BAND, not by the area rule (which would want 121 here): the pinned strip has to
+    pub const COMPACT_AREA: f32 = 8_201.25;
+    /// The pinned title's mark: one size step (×0.75 on height, the same step the player HUD's
+    /// wordmark took) below the 54 it was tuned to, so a non-hero clearLogo is never the size of a
+    /// hero's. Still about one line of [`super::size::TITLE`] text (40 × 1.32 ≈ 53) — the text
+    /// fallback this rung stands in for — with the mark sitting a hair under it.
+    pub const COMPACT_H_MIN: f32 = 40.5;
+    /// Set by the BAND, not by the area rule (which would want 90.6 here): the pinned strip has to
     /// clear the screen top and stop short of `detail::TOP_MARGIN`, where the first scrolled
-    /// section lifts to.
+    /// section lifts to. One size step below the 72 it was, with [`COMPACT_H_MIN`].
     ///
     /// Since 2026-08-23 the strip is solved from this number rather than fitted around it — "clear
     /// the screen top" now means clear the OVERSCAN frame (`consts::MARGIN_Y` 54), so
     /// `detail::COMPACT_TITLE_BOT` is `54 + this` and `TOP_MARGIN` is that plus 26px of air. Pulling
     /// this down (still the one knob to pull if a device capture says a square emblem crowds the
     /// pinned title) now lifts the whole strip with it instead of only shrinking the mark.
-    pub const COMPACT_H_MAX: f32 = 72.0;
+    pub const COMPACT_H_MAX: f32 = 54.0;
 }
 
 // ── Accent / control ─────────────────────────────────────────────────────────
