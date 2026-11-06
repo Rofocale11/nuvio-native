@@ -2439,9 +2439,8 @@ impl HomeScreen {
     /// restarts the clock; the data layer drops a repeat ask for the same key inside its TTL, so
     /// a later return to the card costs one command and no request.
     fn tick_prefetch<H: HomeLike>(&mut self, cx: &Cx<'_, H>, dt: f32, fx: &mut Effects<'_, H>) {
-        let key = self
-            .focused_item(cx.focus.current, cx)
-            .map(|item| (item.sid, item.rk.clone()));
+        let item = self.focused_item(cx.focus.current, cx);
+        let key = item.map(|item| (item.sid, item.rk.clone()));
         if key != self.prefetch.key {
             self.prefetch.key = key;
             self.prefetch.dwell = 0.0;
@@ -2465,6 +2464,23 @@ impl HomeScreen {
             StoreId::Metadata,
             StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmDetail { sid, rk }),
         )));
+        // The command above warms the shim's DATA caches only; the detail page's own first
+        // frame still fetched its backdrop cold (≈450-600 ms of fetch+decode, then a solo
+        // upload frame). Warm the exact key the page draws — same server, same path, same
+        // 1280×720 box as `DetailScreen::draw_backdrop` — so the page opens on art that is
+        // already resident. A probe rather than a warm: a warm is refused while ANY visible
+        // request is outstanding, which on a browsing page is almost always. Movies and
+        // collections are exact; a show whose detail page settles on an episode still warms the
+        // show backdrop, which that page also uses when the episode has none.
+        if let Some(item) = item.filter(|item| !item.art.is_empty()) {
+            plx_ui::widgets::resolve_tex_wh_on(
+                item.sid.raw(),
+                &item.art,
+                crate::detail::BACKDROP_W,
+                crate::detail::BACKDROP_H,
+                0,
+            );
+        }
     }
 
     pub fn grid_position<H: HomeLike>(

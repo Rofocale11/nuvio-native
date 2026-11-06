@@ -967,7 +967,7 @@ mirrored in `img.rs`'s decode-budget note.
 | Profile chip avatar | `width=128&height=128` | cropped at draw |
 | Player info panel still | `width=480&height=270` | cropped to its 320×180 box at draw |
 | Home hero backdrop | `width=1280&height=720`, `url=art` | overflowed off-panel (`Rect::cover`) |
-| Detail backdrop | `width=1920&height=1080`, `url=art` | overflowed off-panel (`Rect::cover`) |
+| Detail backdrop | `width=1280&height=720`, `url=art` | overflowed off-panel (`Rect::cover`) |
 | Hero clearLogo | `width=600&height=240&format=png` | contained in its column (`hero_logo::fit`) |
 
 **NuvioNative's shim chooses the CDN rung for that box.** A real PMS rescales any source to the
@@ -982,7 +982,7 @@ on the television (2026-11-02). TMDB keeps its own `w185/w342/w500/w780/…` lad
 all (`btttr.cc` serves 500×750 WebP for every variant, measured 2026-11-02). Any art whose decode
 is over `RESIDENCY_BYTES` is therefore cover-scaled to the request box on the worker, before the
 main thread uploads it — a **card** box is additionally bounded just under the threshold, so the
-card stays an ordinary `Poster` take; a **backdrop** box (Home's 1280×720, Detail's 1920×1080) is
+card stays an ordinary `Poster` take; a **backdrop** box (Home's and Detail's 1280×720) is
 the size the screen draws, so the box alone bounds it and the art keeps its `Residency` take.
 Cover rather than fit matters: the card crops its texture (`art_uv`), so fitting a
 landscape still inside a 2:3 card would shrink the band that survives the crop. Art already under

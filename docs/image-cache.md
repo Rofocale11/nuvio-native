@@ -4,11 +4,16 @@
 
 All reusable remote artwork enters `app/adapters/poster.rs` through the shared `ui::tex::Source`.
 Its demand workers read the disk tier before fetching and decode off the render thread. There are
-four of them: on a cold row their concurrency is the limit, and imgtrace of a 20-image Home row
+six of them: on a cold row their concurrency is the limit, and imgtrace of a 20-image Home row
 measured 450–600 ms of fetch+decode per image — 4.0 s to the last draw at two workers, 1.2 s at
-four (2026-11-02). `imgcache.rs` owns persistence; `ui::tex::TexCache` owns GPU residency. Screens choose the image
-and size, without choosing a caching policy. The sign-in QR code is transient authentication data
-and remains outside the artwork cache; bundled icons and fonts already live in the app package.
+four (2026-11-02). The pool was raised from four to six because most of that time is an upstream
+socket read, not a core; the workers are niced below the frame thread and the upload path is paced
+separately (below), so the extra two change throughput rather than frame pacing. Six is a reasoned
+step, not a device measurement: the television A/B (cold-row time to last draw and `loop=`) is
+what would confirm it. `imgcache.rs` owns persistence; `ui::tex::TexCache` owns GPU residency.
+Screens choose the image and size, without choosing a caching policy. The sign-in QR code is
+transient authentication data and remains outside the artwork cache; bundled icons and fonts
+already live in the app package.
 
 Disk entries contain compressed image bytes and a small versioned header with fetch time and
 payload length. A SHA-256 filename identifies the stable Plex machine id (canonical server origin
@@ -48,6 +53,17 @@ deferred unless the dev trigger `plxnative-cardspeed=<px/s>` arms the decline). 
 candidate directories; requests capture that epoch when queued, so old work cannot read, remove,
 write or publish images after account erasure. Profile switching within one account retains
 reusable artwork. Filesystem deletion failures remain best effort, like the existing avatar cache.
+
+**A hero backdrop is requested, not merely hoped for.** It is the app's largest image — 3.7 MB of
+RGBA at the 1280×720 box Home and Detail both draw — and an upload that size is a solo take that
+owns its frame. Three things stop it trailing the page it belongs to. Home's focus dwell warms the
+focused card's exact backdrop key through the demand probe, alongside the metadata warm, so a card
+that has rested before the press opens its detail page on art already resident; a speculative
+*warm* could not do this, because it is refused while any visible request is outstanding. The
+upload queue serves the first solo-sized entry ahead of older card posters, since a solo take can
+only land as a frame's first take and strict FIFO would spend one frame per poster in front of it.
+And Detail asks for the same 1280×720 box as Home: a 1.5× upscale under the scrim and blur, which
+also keeps one backdrop's decode from equalling the whole 8 MiB backlog admission budget.
 
 ## Reproducible television stress test
 

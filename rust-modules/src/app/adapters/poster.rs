@@ -74,9 +74,19 @@ const PT_CAP: usize = 96;
 /// the loopback shim, decode, publish — so this is how many cold tiles a newly scrolled-in row
 /// can bring in at once. Two made a cold Home row take ≈4 s on the simulator (imgtrace
 /// 2026-11-02: 20 identities in one row, each 450–600 ms of work, started in pairs; the last one
-/// queued 3.5 s before it began). Four halves that first fill, and [`DECODE_BACKLOG_MAX`] still
+/// queued 3.5 s before it began). Four halved that first fill, and [`DECODE_BACKLOG_MAX`] still
 /// bounds the pixels they may hold between them.
-const POSTER_WORKERS: usize = 4;
+///
+/// Six rather than four because the work is mostly a network read — the 450–600 ms per image is
+/// dominated by the shim's upstream fetch, so extra workers spend most of their life parked in a
+/// socket, not on a core. Everything that could make that unsafe is unchanged: every worker is
+/// niced below the frame thread ([`plx_base::task::yield_to_frame_thread`]), the upload is what
+/// actually stalls a frame and it is paced independently (`ui/src/frame/budget.rs`), speculation
+/// is still capped by [`PREFETCH_OUTSTANDING_MAX`], and the decoded backlog by
+/// [`DECODE_BACKLOG_MAX`]. **Not yet device-tuned**: the number is a reasoned step from the
+/// two-to-four measurement, and the television A/B (`imgtrace` cold row: time to last draw and
+/// `loop=`) is what promotes it to a measurement.
+const POSTER_WORKERS: usize = 6;
 /// Decoded pixels waiting for upload, independent of the persistent and GPU cache budgets.
 /// Existing active decodes can exceed this threshold; no further demand work starts until
 /// the upload queue drains. This prevents a fast disk from queuing 64 large backdrops.
@@ -142,7 +152,7 @@ const P_EVICTED: c_int = 8;
 /// an HTTP answer that is not transient, or bytes the decoder could not read.
 const P_RETRY: c_int = 7;
 
-/// Speculation may occupy one worker, never both. That leaves capacity for a visible miss that
+/// Speculation may occupy one worker at a time. That leaves the rest for a visible miss that
 /// arrives after the prefetch began; workers cannot interrupt a fetch already off-lock.
 const PREFETCH_OUTSTANDING_MAX: usize = 1;
 
@@ -1988,7 +1998,7 @@ fn request_box(key: &str) -> Option<(c_int, c_int)> {
 }
 
 /// The biggest box that is a CARD's. Above it the box is the size the screen DRAWS the art at (the
-/// Home hero's 1280×720, the detail hero's 1920×1080 — `plx_gfx::img`'s decode table), so the box
+/// Home and Detail heroes' 1280×720 — `plx_gfx::img`'s decode table), so the box
 /// alone bounds the decode and the art keeps its `Residency` take either way.
 const CAP_BOX_MAX_PX: i64 = 500 * 750;
 
@@ -2256,9 +2266,9 @@ mod tests {
         assert_eq!(cap_dims(3840, 2160, 1280, 720), Some((1280, 720)));
         // A source already at its backdrop box is left alone — the box is not a byte cap.
         assert_eq!(cap_dims(1280, 720, 1280, 720), None);
-        // The detail hero draws at 1920×1080, so that is where its cap sits.
-        assert_eq!(cap_dims(2460, 1384, 1920, 1080), Some((1920, 1080)));
-        assert_eq!(cap_dims(1920, 1080, 1920, 1080), None);
+        // A backdrop box is whatever the screen draws; the box, not a card threshold, is its cap.
+        assert_eq!(cap_dims(2460, 1384, 1280, 720), Some((1280, 720)));
+        assert_eq!(cap_dims(1280, 720, 1280, 720), None);
         // COVER, so the band the 2:3 tile crops keeps its resolution: a 500×750 poster into a
         // 300×300 headshot box becomes 300×450, not 200×300.
         assert_eq!(cap_dims(500, 750, 300, 300), Some((300, 450)));

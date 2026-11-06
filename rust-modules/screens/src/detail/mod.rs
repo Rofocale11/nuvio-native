@@ -84,6 +84,15 @@ fn compact_title_alpha(scroll: f32, first_top: f32, hero_visible: f32) -> f32 {
 }
 
 const HERO_FADE: f32 = 400.0;
+/// The backdrop's request box. The screen draws it at 1920×1080, but asking the shim for that
+/// produced an 8.3 MB RGBA decode and upload — the largest image in the app, equal to the whole
+/// decoded-backlog admission budget, and a solo upload frame costing multiples of the 6 ms it is
+/// priced at. 1280×720 is the box the Home hero already uses, it is a 1.5× upscale under a scrim
+/// and blur, and it is also the exact key Home warms for the same title — so a hero-to-detail nav
+/// finds the backdrop resident instead of fetching it again at another size.
+pub(crate) const BACKDROP_W: i32 = 1280;
+pub(crate) const BACKDROP_H: i32 = 720;
+
 /// Over how much scroll the pinned compact title leaves once the first below-hero block starts to
 /// travel. Half the hero's own fade: the title is chrome the page has already handed over, so it
 /// should be gone by the time the block above it is properly on its way.
@@ -2760,7 +2769,7 @@ impl DetailScreen {
         let art_alpha = (1.0 - sf) * self.preview_art;
         let (sid, _, path) = self.art_identity(d);
         let (texture, width, height) = if art_alpha > 0.01 {
-            plx_ui::widgets::resolve_tex_wh_on(sid.raw(), &path, 1920, 1080, 0)
+            plx_ui::widgets::resolve_tex_wh_on(sid.raw(), &path, BACKDROP_W, BACKDROP_H, 0)
         } else {
             (0, 0.0, 0.0)
         };

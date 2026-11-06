@@ -583,13 +583,13 @@ impl<K: Copy + Eq + Hash> TexCache<K> {
     ) -> usize {
         self.frame += 1;
         let mut n = 0;
-        while let Some((key, d)) = self.pending.front() {
-            let key = *key;
-            let class = class_for(d.rgba.len());
+        while let Some(at) = self.next_upload() {
+            let key = self.pending[at].0;
+            let class = class_for(self.pending[at].1.rgba.len());
             if !b.take(class, now_us()) {
                 break;
             }
-            let (_, d) = self.pending.pop_front().expect("front() was Some");
+            let (_, d) = self.pending.remove(at).expect("next_upload() was Some");
             let bytes = d.rgba.len();
             // a key already resident is replaced in place and needs no ROOM, but its new pixels
             // still count against the byte budget — `protect` keeps the key being replaced out of
@@ -634,6 +634,24 @@ impl<K: Copy + Eq + Hash> TexCache<K> {
             present.note(PresentEvent::Damage(Provenance::Resource(ResourceKind::Texture)));
         }
         n
+    }
+
+    /// Which queued entry to upload next. A `Residency` arrival — a hero backdrop, a full-bleed
+    /// still — is picked before anything ahead of it, because it can only land as a frame's FIRST
+    /// take (the budget's solo rule) and a FIFO queue would spend one frame per card poster in
+    /// front of it. That is the "the big picture always arrives last" tail: it decodes late
+    /// (largest work), then queues behind the batch the same cold row just decoded. Among
+    /// `Residency` arrivals, and for everything else, the queue stays FIFO.
+    fn next_upload(&self) -> Option<usize> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(
+            self.pending
+                .iter()
+                .position(|(_, d)| class_for(d.rgba.len()).is_solo())
+                .unwrap_or(0),
+        )
     }
 
     /// Drop one key's residency and any pending pixels for it (the source recycled its slot).
@@ -820,6 +838,35 @@ mod tests {
                 rgba: vec![0; 16].into_boxed_slice(),
             }),
         }
+    }
+
+    #[test]
+    fn a_residency_arrival_uploads_before_earlier_poster_arrivals() {
+        let _guard = plx_base::testlock::serial();
+        let old_cache = mutate_cache(|c| std::mem::replace(c, TexCache::with_budget(8, 8 << 20)));
+        let mut up = StubUp { next: 0, freed: vec![], warmed: vec![] };
+        let mut present = Present::new();
+        let mut budget = Budget::new();
+        // The queue a cold Home row leaves behind: card posters decoded first, the hero backdrop
+        // last because it is the slowest work.
+        let image = |key: u32, bytes: usize| PosterReady {
+            key: PosterKey(key),
+            result: Ok(Decoded { w: 1, h: 1, rgba: vec![0; bytes].into_boxed_slice() }),
+        };
+        accept(image(1, 16));
+        accept(image(2, 32));
+        accept(image(3, RESIDENCY_BYTES + 1));
+        budget.begin_frame(0);
+        assert_eq!(prepare(&mut budget, &mut up, &mut PresentHandle(&mut present), || 0), 1,
+            "the solo class spends the frame alone");
+        assert_eq!(resident_bytes(), RESIDENCY_BYTES + 1, "the backdrop is what landed, not poster 1");
+        assert_eq!(pending_bytes(), 48, "both posters are still queued");
+        budget.begin_frame(0);
+        assert_eq!(prepare(&mut budget, &mut up, &mut PresentHandle(&mut present), || 0), 2,
+            "the posters follow in their own order");
+        assert_eq!(pending_bytes(), 0);
+        shutdown(&mut up);
+        mutate_cache(|c| *c = old_cache);
     }
 
     #[test]
@@ -1292,17 +1339,19 @@ mod tests {
         assert_eq!(b.solo(), None);
         assert!(!c.has_pending());
 
-        // a backdrop BEHIND a poster does not jump the queue: the poster goes, the backdrop is
-        // refused for not being first, and the frame after gives it its own
+        // a backdrop BEHIND a poster is served FIRST: it can only land as a frame's first take,
+        // so the poster waits one frame rather than making the backdrop queue behind a batch
         c.accept(ready(4));
         c.accept(big(5));
         b.begin_frame(40_000);
         let mut ph = PresentHandle(&mut present);
         assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || 40_000), 1);
+        assert_eq!(b.solo(), Some(Class::Residency), "the backdrop took the frame");
+        assert!(c.has_pending(), "the poster decoded before it waits its turn");
         b.begin_frame(60_000);
         let mut ph = PresentHandle(&mut present);
         assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || 60_000), 1);
-        assert_eq!(b.solo(), Some(Class::Residency));
+        assert_eq!(b.solo(), None);
         assert!(!c.has_pending());
     }
 }
