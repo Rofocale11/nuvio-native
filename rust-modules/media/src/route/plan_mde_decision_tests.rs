@@ -43,6 +43,18 @@ fn mkv_and_mp4_parts_are_direct_playable() {
     assert!(part_is_streamable("/library/parts/1/2/movie.mp4"));
     assert!(part_is_streamable("/library/parts/1/2/movie.m4v"));
     assert!(
+        part_is_streamable("/library/parts/X/0/file.mpd"),
+        ".mpd trailer DASH is streamable via the Rust dash engine, not the FFmpeg dash demuxer"
+    );
+    assert!(
+        part_is_streamable("/library/parts/1/2/file.mpd?x=1"),
+        "the query must not defeat the .mpd gate"
+    );
+    assert!(
+        !part_is_streamable("/library/parts/1/2/file.m3u8"),
+        "HLS .m3u8 is not a progressive part; the HLS path handles it separately"
+    );
+    assert!(
         !part_is_streamable("/library/parts/1/2/movie.mov"),
         "mov still remuxes"
     );

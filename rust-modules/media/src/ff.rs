@@ -8987,6 +8987,443 @@ mod pre_audio_headroom_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DASH (trailer) demux: Rust engine over the shim's static SegmentBase MPD.
+//
+// The bundled FFmpeg has no `dash` demuxer, so `.mpd` can never open via the
+// progressive path. `dash::parse_manifest` validates the one shape the shim
+// generates (two AdaptationSets, SegmentBase, https BaseURLs) and each track
+// is then opened as a seekable progressive fMP4 source through the bundled
+// `mov` demuxer — two independent format contexts, packets alternated onto
+// the two AU lanes. No ABR for DASH v1: trailers are direct-play.
+// ---------------------------------------------------------------------------
+
+/// Fetch the MPD text from the shim loopback. The shim serves trailer DASH
+/// Parts with 200 regardless of token, so when no credential is captured the
+/// fetch falls back to an unauthenticated loopback GET (1 MiB cap, UTF-8).
+fn dash_fetch_manifest(
+    origin: &plx_plex::plex::Origin,
+    path: &str,
+    aq: *mut AuQueue,
+    hs: *mut HttpStream,
+) -> Result<String, HlsExit> {
+    const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+    let resource = crate::hls::Resource::new(origin.clone(), path)
+        .map_err(|_| HlsExit::Failed("invalid DASH manifest URL"))?;
+    let mut net = HlsNet { hs, curl: None };
+    let (mut src, size, _landed) = if let Ok(auth) = crate::hls::InheritedAuth::capture(&resource) {
+        let request_path = auth
+            .request_path(&resource)
+            .map_err(|_| HlsExit::Failed("DASH manifest credential rejected"))?;
+        hls_open_source(
+            &resource,
+            &request_path,
+            aq,
+            &mut net,
+            None,
+            &mut plx_base::checkpoint::NoCheckpoint,
+        )?
+    } else {
+        // No credential on the Part URL (the shim's trailer Part answers 200
+        // anyway): the same loopback open without a token.
+        let request_path = resource.path.clone();
+        hls_open_source(
+            &resource,
+            &request_path,
+            aq,
+            &mut net,
+            None,
+            &mut plx_base::checkpoint::NoCheckpoint,
+        )?
+    };
+    if size > MAX_MANIFEST_BYTES as i64 {
+        return Err(HlsExit::Failed("DASH manifest exceeds size cap"));
+    }
+    let mut body = Vec::with_capacity(if size > 0 { size as usize } else { 4096 });
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        if unsafe { crate::aq::aq_is_aborted(aq) } {
+            return Err(HlsExit::Aborted);
+        }
+        let n = hls_source_read(&mut src, aq, &mut chunk, None)?;
+        if n == 0 {
+            break;
+        }
+        if body.len().saturating_add(n) > MAX_MANIFEST_BYTES {
+            return Err(HlsExit::Failed("DASH manifest exceeds size cap"));
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    if !hls_body_complete(size, body.len() as i64) {
+        return Err(HlsExit::Failed("DASH manifest body ended before Content-Length"));
+    }
+    String::from_utf8(body).map_err(|_| HlsExit::Failed("DASH manifest is not UTF-8"))
+}
+
+/// Open one track's BaseURL (the `http://127.0.0.1` trailer-proxy URL, or the
+/// raw https googlevideo URL when the proxy is unavailable) as a reserved
+/// curl source. Never logs the URL body; only the transport error.
+fn dash_open_track(label: &str, url: &str, aq: *mut AuQueue) -> Result<(Src, i64), HlsExit> {
+    let reservation = crate::curlio::CurlSource::reserve_open().map_err(|e| {
+        crate::player::log(&format!("dash: {label} track open failed: {e:?}"));
+        if e == crate::curlio::OpenErr::Aborted {
+            HlsExit::Aborted
+        } else {
+            HlsExit::Failed("DASH track reservation failed")
+        }
+    })?;
+    if unsafe { crate::aq::aq_is_aborted(aq) } {
+        return Err(HlsExit::Aborted);
+    }
+    let cs = crate::curlio::CurlSource::open_reserved(url, 0, reservation).map_err(|e| {
+        if let crate::curlio::OpenErr::Status(st) = e {
+            SHARED.dg_http_status.store(st, Ordering::Relaxed);
+        }
+        crate::player::log(&format!("dash: {label} track open failed: {e:?}"));
+        if e == crate::curlio::OpenErr::Aborted {
+            HlsExit::Aborted
+        } else {
+            HlsExit::Failed("DASH track open failed")
+        }
+    })?;
+    let size = cs.size();
+    SHARED.file_size.store(size, Ordering::Release);
+    Ok((Src::Curl(cs), size))
+}
+
+/// A seekable progressive fMP4 input (init + segments contiguous): the same
+/// AVIO construction as the progressive open, with `seek_cb` so the `mov`
+/// demuxer can reach the `sidx`/moov like any seekable MP4.
+unsafe fn dash_input(src: Src, size: i64, aq: *mut AuQueue) -> Result<HlsInput, HlsExit> {
+    let mut input = HlsInput {
+        state: Box::new(AvioState {
+            src,
+            aq,
+            off: 0,
+            size,
+            io_failed: false,
+            body_active_us: 0,
+            body_bytes: 0,
+            first_byte_at: None,
+            reserve_deadline: ReserveDeadlineState::new(None, false),
+            transport_watchdog: None,
+            acquisition: None,
+            bounce: Vec::new(),
+            bounce_pos: 0,
+            parked_at_end: false,
+            heal: HealBudget::default(),
+        }),
+        avio: std::ptr::null_mut(),
+        fmt: std::ptr::null_mut(),
+        pkt: std::ptr::null_mut(),
+    };
+    let buf = av_malloc(65536) as *mut u8;
+    if buf.is_null() {
+        return Err(HlsExit::Failed("DASH AVIO buffer allocation failed"));
+    }
+    input.avio = avio_alloc_context(
+        buf,
+        65536,
+        0,
+        &mut *input.state as *mut AvioState as *mut c_void,
+        Some(read_cb),
+        None,
+        Some(seek_cb),
+    );
+    if input.avio.is_null() {
+        free_ptr(buf as *mut c_void);
+        return Err(HlsExit::Failed("DASH AVIO allocation failed"));
+    }
+    input.fmt = avformat_alloc_context();
+    if input.fmt.is_null() {
+        return Err(HlsExit::Failed("DASH format allocation failed"));
+    }
+    (*input.fmt).pb = input.avio;
+    let opened = avformat_open_input(
+        &mut input.fmt,
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    if crate::aq::aq_is_aborted(aq) {
+        return Err(HlsExit::Aborted);
+    }
+    if opened < 0 || input.fmt.is_null() {
+        crate::player::log(&open_input_failure_note(opened, crate::aq::aq_is_aborted(aq)));
+        return Err(HlsExit::Failed("DASH track open/probe failed"));
+    }
+    input.state.io_failed = false;
+    if avformat_find_stream_info(input.fmt, std::ptr::null_mut()) < 0 {
+        return Err(HlsExit::Failed("DASH track stream discovery failed"));
+    }
+    input.state.io_failed = false;
+    input.pkt = av_packet_alloc();
+    if input.pkt.is_null() {
+        return Err(HlsExit::Failed("DASH packet allocation failed"));
+    }
+    Ok(input)
+}
+
+fn dash_demux(
+    origin: &plx_plex::plex::Origin,
+    path: &str,
+    acodec: &str,
+    aq: *mut AuQueue,
+    aqa: *mut AuQueue,
+    hs: *mut HttpStream,
+) -> Result<(), HlsExit> {
+    crate::player::log("dash: demux start");
+    if unsafe { crate::aq::aq_is_aborted(aq) } {
+        return Err(HlsExit::Aborted);
+    }
+    let xml = dash_fetch_manifest(origin, path, aq, hs)?;
+    let manifest = crate::dash::parse_manifest(&xml).map_err(|e| {
+        crate::player::log(&format!("dash: manifest rejected: {e}"));
+        HlsExit::Failed("DASH manifest rejected")
+    })?;
+    crate::player::log(&format!(
+        "dash: manifest video={} {}x{} audio={} dur_ms={:?}",
+        manifest.video.mime,
+        manifest.video.width,
+        manifest.video.height,
+        manifest.audio.mime,
+        manifest.duration_ms
+    ));
+    if let Some(ms) = manifest.duration_ms {
+        SHARED
+            .duration_ns
+            .store(ms.saturating_mul(1_000_000), Ordering::Relaxed);
+    }
+    let (vsrc, vsize) = dash_open_track("video", &manifest.video.base_url, aq)?;
+    let (asrc, asize) = dash_open_track("audio", &manifest.audio.base_url, aq)?;
+    let mut vinput = unsafe { dash_input(vsrc, vsize, aq) }?;
+    let mut ainput = unsafe { dash_input(asrc, asize, aq) }?;
+
+    let vstreams = unsafe { (*vinput.fmt).streams };
+    let vi = unsafe {
+        av_find_best_stream(vinput.fmt, AVMEDIA_TYPE_VIDEO, -1, -1, std::ptr::null_mut(), 0)
+    };
+    if vi < 0 {
+        crate::player::log("dash: video track has no video stream");
+        return Err(HlsExit::Failed("DASH video track has no video stream"));
+    }
+    let vst = unsafe { *vstreams.add(vi as usize) };
+    let vcp = unsafe { stream_codecpar(vst) };
+    let astreams = unsafe { (*ainput.fmt).streams };
+    let ai = unsafe {
+        audio_stream_matching(ainput.fmt, acodec).unwrap_or_else(|| {
+            av_find_best_stream(
+                ainput.fmt,
+                AVMEDIA_TYPE_AUDIO,
+                -1,
+                -1,
+                std::ptr::null_mut(),
+                0,
+            )
+        })
+    };
+    if ai < 0 {
+        crate::player::log("dash: audio track has no audio stream");
+        return Err(HlsExit::Failed("DASH audio track has no audio stream"));
+    }
+    let ast = unsafe { *astreams.add(ai as usize) };
+    let acp = unsafe { stream_codecpar(ast) };
+    let aac_adts = if unsafe { (*acp).codec_id } == AV_CODEC_ID_AAC {
+        unsafe { adts_params(acp) }
+    } else {
+        None
+    };
+
+    let Some(framing) = VideoFraming::of_codec_id(unsafe { (*vcp).codec_id }) else {
+        let cname = unsafe {
+            std::ffi::CStr::from_ptr(avcodec_get_name((*vcp).codec_id)).to_string_lossy()
+        };
+        crate::player::log(&format!(
+            "dash: no framing for video codec {cname} (codec_id={}); refusing the stream",
+            unsafe { (*vcp).codec_id }
+        ));
+        return Err(HlsExit::Failed("DASH video codec has no framing"));
+    };
+    let is_hevc = framing == VideoFraming::AnnexB { hevc: true };
+    let is_av1 = framing == VideoFraming::Av1;
+    let is_vp9 = framing == VideoFraming::Vp9;
+    let (param_blob, nal_len_size) = if is_av1 || is_vp9 {
+        (Vec::new(), 0)
+    } else {
+        unsafe {
+            parse_extradata(
+                (*vcp).extradata,
+                (*vcp).extradata_size.max(0) as usize,
+                is_hevc,
+            )
+        }
+    };
+    let av1_ed: &[u8] = if unsafe { (*vcp).extradata.is_null() } || unsafe { (*vcp).extradata_size } <= 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts((*vcp).extradata, (*vcp).extradata_size as usize) }
+    };
+    let av1_cfg = if is_av1 { parse_av1c(av1_ed) } else { Vec::new() };
+    let av1_framing = if is_av1 {
+        Av1Framing::from_trigger(plx_base::devtrig::read("av1obu").as_deref())
+    } else {
+        Av1Framing::DEFAULT
+    };
+    *SHARED.container_hdr.lock().unwrap() = if is_vp9 {
+        Some(unsafe { container_hdr(vcp) })
+    } else {
+        None
+    };
+    let dur = unsafe { fmt_duration(vinput.fmt) };
+    if dur > 0 && manifest.duration_ms.is_none() {
+        SHARED.duration_ns.store(dur.saturating_mul(1000), Ordering::Relaxed);
+    }
+    SHARED.publish_video_raster(unsafe { (*vcp).width }, unsafe { (*vcp).height });
+    let cname = unsafe {
+        std::ffi::CStr::from_ptr(avcodec_get_name((*vcp).codec_id)).to_string_lossy()
+    };
+    crate::player::log(&format!(
+        "dash: v=#{vi} codec={cname} codec_id={} {}x{} a=#{ai} dur_ns={}",
+        unsafe { (*vcp).codec_id },
+        unsafe { (*vcp).width },
+        unsafe { (*vcp).height },
+        SHARED.duration_ns.load(Ordering::Relaxed)
+    ));
+
+    let mut aubuf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
+    let mut video_done = false;
+    let mut audio_done = false;
+    while !video_done || !audio_done {
+        if unsafe { crate::aq::aq_is_aborted(aq) } {
+            return Err(HlsExit::Aborted);
+        }
+        if !video_done {
+            // Read one relevant video packet.
+            loop {
+                let r = unsafe { av_read_frame(vinput.fmt, vinput.pkt) };
+                if unsafe { crate::aq::aq_is_aborted(aq) } {
+                    return Err(HlsExit::Aborted);
+                }
+                if r < 0 {
+                    let _ = frame_read_failed(&mut vinput.state, r);
+                    if vinput.state.io_failed {
+                        return Err(HlsExit::Failed("DASH video track transport failed"));
+                    }
+                    video_done = true;
+                    break;
+                }
+                if unsafe { (*vinput.pkt).stream_index } != vi {
+                    unsafe { av_packet_unref(vinput.pkt) };
+                    continue;
+                }
+                let pkt_bytes: &[u8] = if unsafe { (*vinput.pkt).data.is_null() } {
+                    &[]
+                } else {
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            (*vinput.pkt).data,
+                            (*vinput.pkt).size.max(0) as usize,
+                        )
+                    }
+                };
+                let is_key = if is_av1 {
+                    av1_packet_to_tu(pkt_bytes, unsafe { (*vinput.pkt).flags } & AV_PKT_FLAG_KEY != 0, &av1_cfg, av1_framing, &mut aubuf)
+                } else if is_vp9 {
+                    vp9_packet_to_frame(pkt_bytes, unsafe { (*vinput.pkt).flags } & AV_PKT_FLAG_KEY != 0, &mut aubuf)
+                } else {
+                    unsafe {
+                        packet_to_annexb(
+                            (*vinput.pkt).data,
+                            (*vinput.pkt).size.max(0) as usize,
+                            nal_len_size,
+                            is_hevc,
+                            false,
+                            (*vinput.pkt).flags & AV_PKT_FLAG_KEY != 0,
+                            &param_blob,
+                            &mut aubuf,
+                        )
+                    }
+                };
+                let pts = unsafe { pts_ns(vinput.pkt, vst) };
+                let pushed = crate::aq::aq_push_with_drain(
+                    aq,
+                    aubuf.as_ptr(),
+                    aubuf.len() as c_int,
+                    pts,
+                    if is_key { 1 } else { 0 },
+                    1,
+                    || vinput.state.drain_wire(),
+                );
+                unsafe { av_packet_unref(vinput.pkt) };
+                if pushed != 0 {
+                    return Err(HlsExit::Aborted);
+                }
+                PUSHED_ANY.store(true, Ordering::Relaxed);
+                SHARED.hls_video_tail_ns.store(pts, Ordering::Release);
+                break;
+            }
+        }
+        if !audio_done && FEED_AUDIO.load(Ordering::Relaxed) {
+            loop {
+                let r = unsafe { av_read_frame(ainput.fmt, ainput.pkt) };
+                if unsafe { crate::aq::aq_is_aborted(aq) } {
+                    return Err(HlsExit::Aborted);
+                }
+                if r < 0 {
+                    let _ = frame_read_failed(&mut ainput.state, r);
+                    if ainput.state.io_failed {
+                        return Err(HlsExit::Failed("DASH audio track transport failed"));
+                    }
+                    audio_done = true;
+                    break;
+                }
+                if unsafe { (*ainput.pkt).stream_index } != ai {
+                    unsafe { av_packet_unref(ainput.pkt) };
+                    continue;
+                }
+                let pts = unsafe { pts_ns(ainput.pkt, ast) };
+                let pushed = if let Some((freq_idx, chan_cfg)) = aac_adts {
+                    let plen = unsafe { (*ainput.pkt).size.max(0) as usize };
+                    let mut framed = Vec::with_capacity(7 + plen);
+                    framed.extend_from_slice(&adts_header(freq_idx, chan_cfg, plen));
+                    framed.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts((*ainput.pkt).data, plen)
+                    });
+                    crate::aq::aq_push_with_drain(
+                        aqa,
+                        framed.as_ptr(),
+                        framed.len() as c_int,
+                        pts,
+                        1,
+                        2,
+                        || ainput.state.drain_wire(),
+                    )
+                } else {
+                    crate::aq::aq_push_with_drain(
+                        aqa,
+                        unsafe { (*ainput.pkt).data },
+                        unsafe { (*ainput.pkt).size },
+                        pts,
+                        1,
+                        2,
+                        || ainput.state.drain_wire(),
+                    )
+                };
+                unsafe { av_packet_unref(ainput.pkt) };
+                if pushed != 0 {
+                    return Err(HlsExit::Aborted);
+                }
+                SHARED.hls_audio_tail_ns.store(pts, Ordering::Release);
+                break;
+            }
+        } else if !audio_done {
+            audio_done = true;
+        }
+    }
+    crate::player::log("dash: demux ended");
+    Ok(())
+}
+
 /// The demux thread body (spawned by `engine::start_bufferfeed`).
 ///
 /// Takes an [`Origin`](plx_plex::plex::Origin) rather than a `(host, port)` pair because **the scheme
@@ -9073,6 +9510,54 @@ pub fn demux(
         crate::aq::aq_set_eof(aq_p);
         crate::aq::aq_set_eof(aqa_p);
         crate::player::log("hls: segmented demux ended");
+        return;
+    }
+    if path
+        .split_once('?')
+        .map_or(path.as_str(), |(plain, _)| plain)
+        .to_ascii_lowercase()
+        .ends_with(".mpd")
+    {
+        // Trailer DASH: the Rust dash engine, never the FFmpeg dash demuxer
+        // (not in this build). No ABR for DASH v1 — trailers are direct-play,
+        // so any adaptive control that arrived is deliberately ignored.
+        if abr.is_some() {
+            crate::player::log("dash: adaptive control present for DASH; ignored (direct-play only)");
+        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dash_demux(&origin, &path, &acodec, aq_p, aqa_p, hs_p)
+        }));
+        match outcome {
+            Ok(Ok(())) | Ok(Err(HlsExit::Aborted)) => {}
+            Ok(Err(HlsExit::Failed(why))) => {
+                crate::player::log(&format!("dash: demux failed: {why}"));
+                if PUSHED_ANY.load(Ordering::Relaxed) {
+                    SHARED.demux_io_failed.store(true, Ordering::Release);
+                } else {
+                    SHARED.demux_failed.store(true, Ordering::Release);
+                }
+            }
+            Ok(Err(_)) => {
+                crate::player::log("dash: demux failed");
+                if PUSHED_ANY.load(Ordering::Relaxed) {
+                    SHARED.demux_io_failed.store(true, Ordering::Release);
+                } else {
+                    SHARED.demux_failed.store(true, Ordering::Release);
+                }
+            }
+            Err(_) => {
+                crate::player::log("dash: demux panicked");
+                SHARED.demux_failed.store(true, Ordering::Release);
+            }
+        }
+        if unproductive_exit_failed(PUSHED_ANY.load(Ordering::Relaxed), unsafe {
+            crate::aq::aq_is_aborted(aq_p)
+        }) {
+            SHARED.demux_failed.store(true, Ordering::Release);
+        }
+        crate::aq::aq_set_eof(aq_p);
+        crate::aq::aq_set_eof(aqa_p);
+        crate::player::log("dash: demux ended");
         return;
     }
     if let Some(watch) = auto_original.as_ref() {

@@ -137,6 +137,15 @@ pub struct TmdbCredits {
     pub cast: Vec<TmdbCast>,
 }
 
+/// The `videos` half of `append_to_response=videos`: every trailer, teaser and
+/// clip TMDB lists for a movie or a show. A title usually has more than one
+/// playable trailer, and the detail shelf shows them all.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TmdbVideos {
+    pub results: Vec<TmdbVideo>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TmdbRecommendations {
@@ -169,6 +178,9 @@ pub struct TmdbMovieDetails {
     pub credits: TmdbCredits,
     pub recommendations: TmdbRecommendations,
     pub images: Option<TmdbImages>,
+    /// `append_to_response=videos`: all of the title's trailers/teasers, not
+    /// just the first. `None` when TMDB did not answer that half.
+    pub videos: Option<TmdbVideos>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -185,6 +197,9 @@ pub struct TmdbShowDetails {
     pub credits: TmdbCredits,
     pub recommendations: TmdbShowRecommendations,
     pub images: Option<TmdbImages>,
+    /// `append_to_response=videos`: a show's trailers live on TMDB too, which
+    /// is the only source a synthetic related-show key has (`PLAYBACK.md`).
+    pub videos: Option<TmdbVideos>,
 }
 
 #[derive(Default, Deserialize)]
@@ -376,7 +391,7 @@ impl TmdbClient {
 
     pub fn movie_details(&self, movie_id: u64) -> Result<TmdbMovieDetails> {
         self.get(&format!(
-            "/movie/{movie_id}?append_to_response=credits,recommendations,images"
+            "/movie/{movie_id}?append_to_response=credits,recommendations,images,videos"
         ))
     }
 
@@ -412,7 +427,7 @@ impl TmdbClient {
 
     pub fn tv_details(&self, tv_id: u64) -> Result<TmdbShowDetails> {
         self.get(&format!(
-            "/tv/{tv_id}?append_to_response=credits,recommendations,images"
+            "/tv/{tv_id}?append_to_response=credits,recommendations,images,videos"
         ))
     }
 

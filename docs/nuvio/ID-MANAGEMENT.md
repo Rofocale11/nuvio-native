@@ -28,7 +28,10 @@ identity behind it. Two mechanisms do that:
 | Related **Movies** | `1_000_000_000 + TMDB_ID` | `1_000_000_603` (The Matrix) | `1_000_000_000 .. 2_000_000_000` |
 | Related **TV Shows** | `2_000_000_000 + TMDB_ID` | `2_000_001_396` (Breaking Bad) | `2_000_000_000 .. 3_000_000_000` |
 | **People** (Cast & Crew) | `3_000_000_000 + TMDB_PERSON_ID` | `3_000_000_638` (Keanu Reeves) | `3_000_000_000 .. 4_000_000_000` |
-| **Collections** (franchises) | `4_000_000_000 + TMDB_COLLECTION_ID` | `4_000_000_234` (The Dark Knight Collection) | `4_000_000_000 ..` |
+| **Collections** (franchises) | `4_000_000_000 + TMDB_COLLECTION_ID` | `4_000_000_234` (The Dark Knight Collection) | `4_000_000_000 .. 5_000_000_000` |
+| **Trailers** (clips) | `5_000_000_000 + parent_ratingKey` | `5_000_010_137` (trailer of `10_137`) | `5_000_000_000 .. 10_000_000_000` |
+
+A trailer clip's key is distinct from its parent title's key: sharing it made `/decision` for the clip resolve the film's ranked streams, so clicking the trailer played the debrid movie. `item_probed()`/`/library/metadata/{rk}` for a trailer key returns the trailer Media (already probe-gated), and `/library/parts/<id>` serves that clip's Parts — DASH `part_id = clip_rk * 1000 + 998` is 200 `application/dash+xml`, muxed `clip_rk * 1000 + 999` 302s to the CDN; neither collides with the parent's best part.
 
 The bases are a billion apart on purpose: TMDB movie ids already pass 100,000, so a narrower gap
 lets a real movie key (`9_641_052` = movie `141_052` on the old bases) cross into the show range and

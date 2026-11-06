@@ -19,6 +19,7 @@ path = "src/bin/serve.rs"
 # the app writes, so one grep on the television shows both sides of the loopback.
 plx_base = { path = "../base" }
 plx_net = { path = "../net" }
+libc = "0.2"
 # The app's own bounded artwork cache (`imgcache`): a cropped title logo is stored there once
 # instead of re-decoding and re-encoding the same PNG on every request.
 plx_platform = { path = "../platform" }

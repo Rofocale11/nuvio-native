@@ -72,8 +72,8 @@ rules an agent must not break:
   The ARM toolchain is ancient; crates that pull C code or need `bindgen` fail on it.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string such as
   `"tmdb:603"` blanks the screen. `docs/nuvio/ID-MANAGEMENT.md` is how the shim keeps that.
-- **No native YouTube trailers.** `/library/metadata/{rk}/trailer` is not a shim route; never
-  re-add extraction.
+- **No native YouTube trailers.** `/library/metadata/{rk}/trailer` is the shim's own
+  trailer-metadata route; never re-add a native YouTube extractor.
 - **The shim is a loopback PMS.** One in-process `plx_pmsshim` (default `127.0.0.1:32420`)
   speaking the Plex dialect over the addon backend; the front end registers it as its one server.
 - **Account preferences have one writer** (`Account::write_prefs`); playback reads through

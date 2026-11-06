@@ -78,6 +78,14 @@ pub struct ProbeInfo {
 /// `(url, deadline) -> probe`. `Err` = not playable here (unreachable or unsupported container).
 pub type Prober = Arc<dyn Fn(&str, Duration) -> Result<ProbeInfo, String> + Send + Sync>;
 
+/// `(url, at, deadline) -> total size`: open `url` at byte `at` and report the resource's total
+/// size, `Err` when the server refuses that offset. The DASH gate asks for each track's LAST
+/// 64 KiB: googlevideo grants most client identities only the first 60 s of an adaptive track, so
+/// it can answer its first window, pass the probe, and then fail every later range — a `Media`
+/// that starts and never finishes. Absent on the host bin and in tests, where the gate then trusts
+/// the probe alone.
+pub type Reacher = Arc<dyn Fn(&str, i64, Duration) -> Result<i64, String> + Send + Sync>;
+
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(45);
 const PROBE_TTL: Duration = Duration::from_secs(30 * 60);
 
@@ -91,6 +99,9 @@ const PROBE_TTL: Duration = Duration::from_secs(30 * 60);
 /// in the path) are kept byte-identical, as is any userinfo; only scheme/host
 /// casing is normalized. The stored `ProbeInfo` and the URL handed to the
 /// prober stay byte-identical to the caller's \u2014 only this key is normalized.
+/// **Exception — `*.googlevideo.com`:** /videoplayback is shared by many trailers;
+/// file identity is `id` + `itag` in the query. The key keeps those so one
+/// trailer's 403 cannot poison the edge for 30 min. See the inline note.
 fn cache_key(url: &str) -> String {
     let end = url.find(['?', '#']).unwrap_or(url.len());
     let base = &url[..end];
@@ -108,7 +119,36 @@ fn cache_key(url: &str) -> String {
         Some(at) => format!("{}@{}", &authority[..at], authority[at + 1..].to_ascii_lowercase()),
         None => authority.to_ascii_lowercase(),
     };
-    format!("{scheme}://{authority}{path}")
+    let mut key = format!("{scheme}://{authority}{path}");
+    // googlevideo: file identity is id+itag, not host+path (same edge serves
+    // different trailers). Stripping the query would let one trailer's 403
+    // poison all later trailers on that edge for 30 min. Keep id+itag so
+    // each deciphered format probes separately; re-signing the same id+itag
+    // (new sig) still shares an entry, as with debrid.
+    if authority.ends_with(".googlevideo.com") || authority == "googlevideo.com" {
+        let qstart = url.find('?').unwrap_or(url.len());
+        let q = if qstart < url.len() { &url[qstart + 1..] } else { "" };
+        let q = q.split('#').next().unwrap_or(q);
+        let mut id = "";
+        let mut itag = "";
+        for pair in q.split('&') {
+            if let Some(v) = pair.strip_prefix("id=") {
+                id = v;
+            } else if let Some(v) = pair.strip_prefix("itag=") {
+                itag = v;
+            }
+            if !id.is_empty() && !itag.is_empty() {
+                break;
+            }
+        }
+        if !id.is_empty() || !itag.is_empty() {
+            key.push_str("?id=");
+            key.push_str(id);
+            key.push_str("&itag=");
+            key.push_str(itag);
+        }
+    }
+    key
 }
 
 #[derive(Default)]
@@ -154,11 +194,17 @@ impl ProbeCache {
             return Some(r);
         }
         let r = prober(url, PROBE_DEADLINE);
-        let mut g = self.done.lock().unwrap_or_else(|e| e.into_inner());
-        if g.len() > 300 {
-            g.retain(|_, (at, _)| at.elapsed() < PROBE_TTL);
+        // YouTube 403s are transient (IP throttling / edge variance): caching
+        // a googlevideo failure for 30 min would freeze the shelf as empty.
+        // Successes cache normally; failures only keep the in-flight gate.
+        let cacheable = !(url.contains("googlevideo.com") && r.is_err());
+        if cacheable {
+            let mut g = self.done.lock().unwrap_or_else(|e| e.into_inner());
+            if g.len() > 300 {
+                g.retain(|_, (at, _)| at.elapsed() < PROBE_TTL);
+            }
+            g.insert(key.clone(), (Instant::now(), r.clone()));
         }
-        g.insert(key.clone(), (Instant::now(), r.clone()));
         self.inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         Some(r)
     }

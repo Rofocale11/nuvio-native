@@ -214,6 +214,10 @@ pub(crate) fn boot() {
         }
     };
     handle.shim.probes.set_prober(prober());
+    // The DASH gate's second question: can each trailer track be read at its END? googlevideo
+    // serves some signed URLs only up to a prefix, and such a pair passes the probe and then
+    // fails mid-playback (see `Shim::trailer_tracks_reachable`).
+    handle.shim.set_trailer_reacher(trailer_reacher());
     // FORK (RichiL10): the shim's `audio_ok` list is used to rank streams (a stream whose label
     // names a codec outside it sits below playable ones) and, more importantly, to decide
     // direct-play vs refusal in `refusal()`. The client-side AC3 encode lane (ff_enc.rs) rescues
@@ -360,6 +364,17 @@ pub(crate) fn restore_p2p(enabled: bool, server: Option<String>) {
 }
 
 /// The shim's view of `plx_media::ff::probe::probe_url`, with this TV's decode verdicts.
+/// Open `url` at byte `at` and report its total size — the DASH trailer gate's byte-offset reach.
+/// A private transfer (not the one `ACTIVE` holds), so asking never disturbs playback.
+fn trailer_reacher() -> plx_pmsshim::shim_probe::Reacher {
+    Arc::new(|url: &str, at: i64, deadline: std::time::Duration| {
+        let by = std::time::Instant::now() + deadline;
+        let (src, _abort) = plx_media::curlio::CurlSource::open_private_until(url, at, Some(by))
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(src.size())
+    })
+}
+
 fn prober() -> plx_pmsshim::shim_probe::Prober {
     use plx_pmsshim::shim_probe as p;
     Arc::new(|url: &str, deadline: std::time::Duration| {

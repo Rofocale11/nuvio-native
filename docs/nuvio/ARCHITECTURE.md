@@ -327,11 +327,32 @@ preferred when available and the Node server kept as fallback:
   `ci/build-openssl.sh` build it.
 - **`ratingKey` must be numeric.** PlxNative parses it as an `i64`; a string like `"tmdb:603"`
   blanks the screen. `ID-MANAGEMENT.md` is how the shim keeps that promise.
-- **No native YouTube trailers.** In-app trailer playback was abandoned: extracting YouTube MP4s on
-  the TV without C libraries is too unstable. A detail row may carry a trailer thumbnail
-  (`Extras` with `ratingKey: "trailer"` and a YouTube poster), but
-  `/library/metadata/{rk}/trailer` is not a route the shim answers — the press fails rather than
-  playing. Do not re-add extraction.
+- **Trailers play direct, never via a native YouTube extractor.** Trailer URLs are deciphered
+  and fetched by the Node child (`js-service/trailer-decipher.js`, Node v16.20.2 floor), and the
+  shim serves the resolved first clip at `/library/metadata/{rk}/trailer`, and `/library/metadata/{rk}/extras`
+  (the detail shelf source) gets one shelf row **per trailer** with `subtype: "trailer"`,
+  `extraType: 1` and a deterministic Part key, built **without** a YouTube resolve so a detail
+  open never spawns Node. TMDB `videos` rides in `append_to_response` on `/movie/{id}` and
+  `/tv/{id}`, so a show (including a synthetic related-show key, which has no Cinemeta meta) gets
+  the same shelf. Each `.mpd` comes from its clip's Part URL `/library/parts/<id>/0/file.mpd`,
+  which the shim resolves on that Part request (the first tile is also warmed in the background)
+  and the Rust DASH engine (`media/src/dash.rs` + `ff.rs dash_demux`) demuxes with the bundled
+  `mov` demuxer per track — no FFmpeg `dash` demuxer (it is not in the build), no new C library.
+  A detail row may carry trailer thumbnails (`Extras` with numeric clip keys and YouTube posters);
+  the clip's playable Media is the shim's own answer, not a native YouTube route. An
+  age-restricted (red-band) trailer answers `LOGIN_REQUIRED` to every anonymous client, so that
+  id is remembered and filtered out of the shelf; the title's other trailers/teasers are the
+  tiles that remain (`PLAYBACK.md`). The pair is resolved with YouTube's
+  `VISIONOS` client plus a `visitorData` identity — the only anonymous client
+  measured to be granted the whole adaptive track; every other one is cut at
+  60 s (`PLAYBACK.md`). Its track bytes come straight from the signed
+  googlevideo URLs the decipher returned: there is no proxy hop and no
+  user-agent override. Those URLs refuse the request *shape* — a GET
+  with no `Range` header, or an open-ended `bytes=N-`, answers `403`, while a
+  bounded `bytes=a-b` answers `206` — so `curlio` states an 8 MiB window for
+  `*.googlevideo.com` media and continues it at the next byte
+  (`GOOGLEVIDEO_WINDOW`). `js-service/trailer-proxy.js` stays in the tree but
+  carries no track bytes.
 - **The shim is a loopback PMS.** One in-process HTTP server (`plx_pmsshim`, default
   `127.0.0.1:32420`) speaking the Plex dialect, in the same process as the UI.
 - **Account preferences live in one file, with one writer.** `defaultAudioLanguage`,

@@ -49,17 +49,22 @@ single-key route falls through to the comma-list branch at `:3815`, which maps e
    `https://v3-cinemeta.strem.io/meta/{type}/{id}.json` (`addons.rs:21`). Candidates are tried
    **serially** (`addons.rs:659` order: id-prefix owners, then every addon serving the type, then
    the inferred type).
-5. `item_probed` starts the stream slot (`shim_pms.rs:1961`) and — since 1A — **no longer blocks**
-   on it: a detail read passes `Duration::ZERO` (`:3268`) and paints with the placeholder Part
+5. `item_probed` starts the stream slot (`shim_pms.rs:5092`) and — since 1A — **no longer blocks**
+   on it: a detail read passes `Duration::ZERO` (`:5144`) and paints with the placeholder Part
    while the slot keeps answering in the background.
-6. `enrich_row` (`:2285`, called at `:3829`) resolves the TMDB id and fetches cast/trailer/logo
+6. `enrich_row` (`:3235`, called at `:5922`) resolves the TMDB id and fetches cast/trailer/logo
    **synchronously**: since 1B the id comes from Cinemeta's `moviedb_id`, with `/find`
-   (`rust-modules/stremio/src/addons_tmdb.rs:289` for movies, `:378` for series) only as the
-   fallback; then `/movie/{id}?append_to_response=credits,recommendations,images` and
-   `/movie/{id}/videos` on a sibling thread (`shim_pms.rs:2332`).
-7. The app then requests `/extras` (local empty answer) and `/related` (TMDB recommendations,
-   usually a cache hit from step 6; `/collection/{id}` when the film has a franchise), plus
-   `/nuvio/library` for the watchlist state (60 s cache) and then the images.
+   (`rust-modules/stremio/src/addons_tmdb.rs:316` for movies, `:405` for series) only as the
+   fallback; then `/movie/{id}?append_to_response=credits,recommendations,images,videos` (a show
+   uses `/tv/{id}` the same way) — one request now carries the trailer list too, so the old
+   sibling `/movie/{id}/videos` call is gone.
+7. The app then requests `/extras` (the shim answers every trailer shelf row from cached meta and
+   the step-6 `videos`; it deliberately does **not** resolve any of them — `docs/nuvio/PLAYBACK.md`
+   — because a Node round-trip here cost 3–5 s per open and waited on the decipher gate; it does
+   start a background resolve of the first tile so the 2 s autoplay dwell covers it) and
+   `/related` (TMDB recommendations, usually a cache hit from step 6; `/collection/{id}` when the
+   film has a franchise), plus `/nuvio/library` for the watchlist state (60 s cache) and then the
+   images.
 8. Since 1C, resting on a card for 250 ms has already issued the step-4–6 GET and dropped the
    body, so pressing OK finds the shim's meta, TMDB and stream caches warm.
 

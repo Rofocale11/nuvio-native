@@ -26,6 +26,7 @@ pub mod shim_pms;
 pub mod shim_probe;
 pub mod shim_store;
 pub mod shim_subs;
+pub mod shim_trailer;
 pub mod shim_core;
 
 pub use shim_backend::{AddonBackend, Backend, CatalogInfo};

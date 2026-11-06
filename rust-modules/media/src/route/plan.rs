@@ -3896,14 +3896,17 @@ pub fn playback_preview_with_audio(
 
 /// True when the part's container is one the buffer-feed demuxer streams over HTTP: MKV, or
 /// MP4/M4V since the AVIO became seekable (see the `streamable` note at the decision site — the
-/// old mkv-only gate was measured obsolete on-device 2026-08-11). Other containers (mov/avi/…)
-/// are sent to Plex for a container remux instead of direct-play. Matches the container
-/// extension in the part-key filename; the m4v spelling is the same mov demuxer and the same
-/// `container=mp4` in PMS metadata.
+/// old mkv-only gate was measured obsolete on-device 2026-08-11). `.mpd` trailer DASH is also
+/// streamable: it is demuxed by the Rust DASH engine (`dash.rs` + `ff::dash_demux`), which
+/// opens each track's fMP4 BaseURL with the bundled `mov` demuxer — never the FFmpeg `dash`
+/// demuxer, which is not in the build. Other containers (mov/avi/…) are sent to Plex for a
+/// container remux instead of direct-play. Matches the container extension in the part-key
+/// filename; the m4v spelling is the same mov demuxer and the same `container=mp4` in PMS
+/// metadata.
 pub(super) fn part_is_streamable(part_key: &str) -> bool {
     let name = part_key.rsplit('/').next().unwrap_or(part_key);
     let name = name.split('?').next().unwrap_or(name);
-    name.ends_with(".mkv") || name.ends_with(".mp4") || name.ends_with(".m4v")
+    name.ends_with(".mkv") || name.ends_with(".mp4") || name.ends_with(".m4v") || name.ends_with(".mpd")
 }
 
 

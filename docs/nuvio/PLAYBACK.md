@@ -23,6 +23,99 @@ the shim (`plx_pmsshim`) must do for that to work. Read with `ARCHITECTURE.md`.
 - `Origin` 127.0.0.1/::1 may carry the token in plaintext even in a store build
   (`plex::origin::is_loopback`, this branch). Without it a RELEASE build refuses every shim request.
 
+## Trailer DASH (`.mpd`)
+
+The trailer shelf is `GET /library/metadata/{rk}/extras`: the shim returns a clip row for
+**every** trailer the title lists, each with `subtype: "trailer"`, `extraType: 1` and a playable
+`Media[0].Part[0].key`, so `pick_trailer` accepts them and the detail shelf draws them all. Rows
+are built **without a YouTube round-trip** (`trailer_shelf_rows`): each clip's DASH Part key is
+deterministic (`trailer_rk_at(parent, index) * 1000 + 998`), so `/extras` — which sits on the
+detail page's critical path — never spawns the Node child. The resolve happens on the player's
+first Part request (`part`), and the shelf's FIRST tile is also warmed in the background as soon
+as `/extras` is served: the detail page autoplays after its 2 s dwell, so that thread's work is
+normally already in `trailer_dash` by the time the player asks. This used to run inside `/extras`
+on the request thread, which measured as a 3–5 s detail open against a 1 s baseline because each
+resolve also waited on the 300 ms decipher gate. `/library/metadata/{rk}/trailer` still answers
+the *resolved* first row. A title whose meta and TMDB `videos` name no YouTube id at all (and
+whose IMDb fallback finds none) answers empty `Metadata:[]`, never a 404.
+
+**Where the ids come from.** TMDB `videos` is now part of `append_to_response` on both
+`/movie/{id}` and `/tv/{id}`, so a detail open pays no extra request and the shelf has the full
+list: trailers before teasers, then the ids Cinemeta names. This is also what gives a **related
+show** a trailer shelf: a synthetic `TMDB_SHOW_KEY_BASE` key has no Cinemeta meta to read, and the
+show's TMDB `videos` is its only source (`trailer_candidates_from_videos`). Clicking trailer N
+plays that row's own Part (`trailer_row_at(parent, n)`), not the first trailer again.
+
+A trailer Part (`/library/parts/<id>/0/file.mpd`) is direct-playable: `part_is_streamable`
+accepts `.mpd`, the demuxer fetches the shim's static SegmentBase MPD (200 with or without a
+token) and demuxes it with the Rust DASH engine (`media/src/dash.rs` + `ff.rs dash_demux`),
+which opens each track's BaseURL as a seekable progressive fMP4 source through the
+bundled `mov` demuxer. The bundled FFmpeg has no `dash` demuxer, so `.mpd` never goes through
+the progressive open. `ff_probe` still cannot probe `.mpd` directly — it validates a video
+track URL, not a manifest — so trailer metadata comes from the manifest/decode path, not the
+probe. 1080p H.264 trailers are verified on the dev set (`dash: manifest video=video/mp4
+1920x1080`, ten `trailer: dash pair served to its end` lines, no throttle refusal); a 2160p
+VP9/AV1 trailer has been resolved on the set but not yet played to its end, so that rung stays
+unclaimed until a log shows it.
+
+BaseURL origin — **which client is granted the whole track.** The DASH pair is resolved by the
+Node child (`trailer-decipher.js`) with YouTube's `VISIONOS` client (`clientVersion 1.02`) plus a
+`visitorData` identity read from the `www.youtube.com` page and sent as `X-Goog-Visitor-Id`, under
+the page's Safari `User-Agent`. That combination is the only one measured to be granted a trailer's
+adaptive tracks to their **end**. Every other anonymous client — IOS 18/19/20/21 and iPad, ANDROID
+20.10.38 and 21.03.36, `ANDROID_VR`, MWEB — is granted exactly the **first 60.0 seconds** of the
+same tracks and answers `403` past that byte. Measured 2026-11-06 over seven trailer IDs on one
+network: the IOS URL served 60.0–60.4 s and then refused from that byte onward (e.g. a 145 s
+trailer: `206` through byte 6 398 072, `403` at 6 398 073 — 41.6 %), while the same title under
+VISIONOS answered `206` at 99 % of the track, both video and audio. The muxed 360p file (`itag 18`)
+is exempt from that limit for every client, which is why it always played. Without `visitorData`
+VISIONOS itself answers `LOGIN_REQUIRED`; a real PO token attached to the IOS/ANDROID player request
+did not move the 60 s boundary, and neither did changing CDN host, IP family, `range=` or `rn=`.
+
+**Age-restricted trailers.** A red-band trailer answers `LOGIN_REQUIRED` ("Sign in to confirm your
+age") to *every* anonymous client — VISIONOS, IOS, ANDROID, TVHTML5, MWEB, WEB and the embedded
+player were all measured, and `yt-dlp` fails the same way without cookies. No client identity fixes
+it, so the child reports `login_required` as its own reason and `NodeTrailerResolver` remembers that
+id for six hours (`BLOCK_TTL`) instead of re-spawning. A blocked id is filtered out of
+`playable_candidates`, so it never becomes a shelf tile and no Node spawn is spent re-learning a
+permanent refusal; the title's other trailers/teasers are the tiles that remain. Measured on
+*Nightcrawler*: `7uaYhPpV7G4` (Red Band) is refused, and the shelf offers the 720p teaser instead
+of a dead Trailer button.
+The child asks each chosen track for its last 64 KiB before returning, retries the resolve once with
+a fresh visitor when either refuses, and reports the pair only when both answer.
+
+The manifest carries those signed googlevideo URLs directly — no proxy hop, and no user-agent
+override anywhere in `net`/`curlio`. What the edge refuses is the *shape* of the request — a GET
+with no `Range` header, and an open-ended `bytes=N-`, both answer `403` (or a `302` with no
+`Location`), while a bounded `bytes=a-b` answers `206`. `curlio` therefore states an 8 MiB window
+(`GOOGLEVIDEO_WINDOW`) for `*.googlevideo.com` media URLs — including the first open at offset 0,
+which used to send no `Range` at all — and continues it at the next byte when the window ends
+(`continue_window`), so a window boundary is not EOF. Every other host keeps the old shape: no
+`Range` at offset 0, `bytes=N-` for a seek.
+
+The shim probes the direct video URL (the address the player will open) and asks each track for
+its **last 64 KiB** (`Shim::trailer_tracks_reachable`, through the `Reacher` installed at boot).
+The probe and the tail check run together on separate threads, and the two tracks' head→tail walks
+run together, so the gate waits for its slowest ask instead of the sum of them. Both are hard
+gates: a limited grant passes the
+head probe and then fails mid-playback, so the tail ask is what catches it. A refused probe *or* tail does not publish the DASH `Media` at all — the
+row falls back to the verified muxed row, so playback still plays 360p instead of erroring. That
+refusal now happens at the Part request too: the shelf advertises the trailer, and a candidate that
+cannot be served simply leaves the MPD route 404 rather than hiding the control on the detail page.
+`js-service/trailer-proxy.js` remains in the tree but carries no track bytes. The video track is
+bounded by **the television's own codec table** (`devcaps`): the shim passes the child
+`PLX_TRAILER_CODECS` (preference order, `h264` always first, then `vp9`, `av1` only when the device
+table lists the row) and `PLX_TRAILER_MAXH` (that row's ceiling, at most 2160). A set with no VP9
+or AV1 row therefore never receives a 2160p track it cannot decode, and one with the row gets the
+best level YouTube offers — measured on the dev set (`k8lpn`, webOS TV Lite 10): `vp9=true
+4096x2176@60`, `av1=true 4096x2176@60`, so its trailers resolve to 2160p VP9 (or AV1) and the
+manifest declares `container=webm`, `videoCodec=vp9`, `videoResolution=4k`. The audio track is
+chosen by `audioTrack.audioIsDefault`
+— YouTube returns one m4a/AAC track per **auto-dub** (German, Spanish, Hindi, …) with the same
+itag and bitrate beside the original, and taking the first match gave every trailer a dubbed
+soundtrack; the original is the entry marked `audioIsDefault: true` and never one flagged
+`isAutoDubbed`.
+
 ## TLS (this branch)
 
 Debrid/addon hosts are verified against the TV's own store first. If that fails for a missing

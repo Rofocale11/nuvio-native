@@ -1975,7 +1975,9 @@ STAGE       := ipkroot/data/usr/palm/applications/$(APPID)
 # The headless Node P2P server rides INSIDE the application directory, not the LS2 service tree:
 # this firmware's Node lacks `palmbus`/`pmloglib`, so the Rust app spawns `node server.js` as a
 # direct child from `paths::app_dir()/js-service`.
-JS_SERVICE_FILES = js-service/server.js
+# The trailer decipher child rides in the same directory: spawn-per-resolve,
+# system Node, no bundled runtime.
+JS_SERVICE_FILES = js-service/server.js js-service/trailer-decipher.js js-service/trailer-proxy.js
 # The C torrent engine (libsbengine.so) sits beside the binary for `sbengine::available()` to
 # dlopen. Missing is not an error: `cargo build` never stages it; a TV without it just falls
 # back to Node. `ci/build-sbengine.sh` writes the STRIPPED library to `build/sbengine/`; the

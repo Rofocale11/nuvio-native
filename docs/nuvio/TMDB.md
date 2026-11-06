@@ -18,19 +18,27 @@ path.
 
 ```rust
 pub fn movie_details(&self, movie_id: u64) -> Result<TmdbMovieDetails> {
-    self.get(&format!("/movie/{movie_id}?append_to_response=credits,recommendations,images"))
+    self.get(&format!(
+        "/movie/{movie_id}?append_to_response=credits,recommendations,images,videos"
+    ))
 }
 
 pub fn tv_details(&self, tv_id: u64) -> Result<TmdbShowDetails> {
-    self.get(&format!("/tv/{tv_id}?append_to_response=credits,recommendations,images"))
+    self.get(&format!(
+        "/tv/{tv_id}?append_to_response=credits,recommendations,images,videos"
+    ))
 }
 ```
 
-- The only other requests are a movie's `/movie/{id}/videos` (trailer thumbnail) and, for a film in
-  a franchise, `/collection/{id}`. The first is spawned in parallel with the details call; the
-  second is the only one that adds latency to a detail page, and only for a film that has a
-  franchise at all. TV shows take their trailer from Cinemeta, so `tv_details` is genuinely one
-  request.
+- `videos` rides in the same `append_to_response`, so the details call also carries every
+  trailer/teaser the title lists: `TmdbMovieDetails.videos` / `TmdbShowDetails.videos`
+  (`TmdbVideos { results: Vec<TmdbVideo> }`). The detail shelf draws them all
+  (`docs/nuvio/PLAYBACK.md`); a show's shelf — including a synthetic related-show key, which has
+  no Cinemeta meta to read — comes from `tv_details` and nowhere else.
+- The only other request is `/collection/{id}`, for a film in a franchise. It is the only one
+  that adds latency to a detail page, and only for a film that has a franchise at all. The old
+  separate `/movie/{id}/videos` hop is gone: the trailer list is part of the details call now, so
+  `tv_details` is also genuinely one request.
 - Responses are cached for 15 minutes by the shared `TmdbClient` cache, keyed by API key + path.
 - `TMDB_API_KEY` is injected at compile time (`option_env!("TMDB_API_KEY")`, GitHub Secrets) with a
   runtime `std::env` fallback. An unset or blank key disables every TMDB lookup — the hub answers

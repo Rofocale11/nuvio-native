@@ -10,7 +10,7 @@ use crate::shim_store::{
 };
 use plx_stremio::addons_tmdb::{
     TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
-    TmdbPerson, TmdbShow, TmdbShowDetails, TmdbVideo,
+    TmdbPerson, TmdbShow, TmdbShowDetails,
 };
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
@@ -55,6 +55,11 @@ const TMDB_PERSON_KEY_BASE: i64 = 3_000_000_000;
 /// A TMDB collection's ratingKey — the franchise page a member film's collection heading opens.
 /// Above the person base, so no title or person key can land on one.
 const TMDB_COLLECTION_KEY_BASE: i64 = 4_000_000_000;
+/// A trailer clip's ratingKey — a billion above the collection base and a billion
+/// above every title base, so a clip key never decodes as a title, person or
+/// collection. The clip is its own row (own `Media`/`Part`s) so `/decision` for
+/// the clip never resolves the film's ranked streams.
+const TRAILER_KEY_BASE: i64 = 5_000_000_000;
 
 /// A synthetic related-movie ratingKey's TMDB id.
 /// Whether a cached resolve for `marker` is still usable while the engine's active torrent is
@@ -90,9 +95,107 @@ fn synthetic_person_id(rk: i64) -> Option<u64> {
         .then_some((rk - TMDB_PERSON_KEY_BASE) as u64)
 }
 
-/// A synthetic collection ratingKey's TMDB collection id.
+/// A synthetic collection ratingKey's TMDB collection id, bounded above by the
+/// trailer base so a trailer clip key (5B+) never decodes as a collection.
 fn synthetic_collection_id(rk: i64) -> Option<u64> {
-    (rk >= TMDB_COLLECTION_KEY_BASE).then_some((rk - TMDB_COLLECTION_KEY_BASE) as u64)
+    (TMDB_COLLECTION_KEY_BASE..TRAILER_KEY_BASE)
+        .contains(&rk)
+        .then_some((rk - TMDB_COLLECTION_KEY_BASE) as u64)
+}
+
+/// A title may list several trailers (official, teaser, red-band). Each is its
+/// own clip row, and its key sits one 10-billion-wide slot above the previous
+/// one: index 0 is the historical `5B + parent`, so a stored key still
+/// round-trips, and every later index is far from any title/person/collection
+/// key. At most this many rows are advertised.
+const TRAILER_KEY_SPAN: i64 = 10_000_000_000;
+const MAX_TRAILERS: usize = 12;
+
+/// The clip key for trailer `index` of `parent`.
+fn trailer_rk_at(parent: i64, index: usize) -> i64 {
+    TRAILER_KEY_BASE + parent + index as i64 * TRAILER_KEY_SPAN
+}
+
+/// The trailer clip key for a parent title's first trailer: `5B + parent`.
+#[cfg(test)]
+fn trailer_rk(parent: i64) -> i64 {
+    trailer_rk_at(parent, 0)
+}
+
+/// `(parent, index)` behind any trailer clip key.
+fn trailer_key_parts(rk: i64) -> Option<(i64, usize)> {
+    let offset = rk.checked_sub(TRAILER_KEY_BASE)?;
+    if offset < 0 {
+        return None;
+    }
+    let index = (offset / TRAILER_KEY_SPAN) as usize;
+    let parent = offset % TRAILER_KEY_SPAN;
+    (index < MAX_TRAILERS).then_some((parent, index))
+}
+
+/// The parent title key behind the FIRST trailer clip key (`5B..10B`), so a
+/// parent's own key (up to ~4B synthetic) round-trips and no collection,
+/// person or title key can alias into the clip range.
+#[cfg(test)]
+fn trailer_parent_rk(rk: i64) -> Option<i64> {
+    trailer_key_parts(rk)
+        .filter(|(_, index)| *index == 0)
+        .map(|(parent, _)| parent)
+}
+
+/// The parent title and trailer index behind a trailer **Part** id
+/// (`clip * 1000 + 998/999`), or `None` for any other part. Lets `part`
+/// resolve the exact trailer the player asked for, on its own thread.
+fn trailer_part_at(pid: i64) -> Option<(i64, usize)> {
+    let (clip, slot) = (pid / 1000, pid % 1000);
+    if slot != 998 && slot != 999 {
+        return None;
+    }
+    trailer_key_parts(clip)
+}
+
+/// One trailer the shim can offer: the YouTube id and the name TMDB/Cinemeta
+/// gave it ("Official Trailer", "Teaser 2", …).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrailerCandidate {
+    youtube_id: String,
+    title: String,
+}
+
+/// Append a candidate unless its id is already listed. An empty title reads as
+/// the generic "Official Trailer" rather than a blank tile.
+fn push_candidate(rows: &mut Vec<TrailerCandidate>, youtube_id: String, title: &str) {
+    if youtube_id.is_empty() || rows.iter().any(|row| row.youtube_id == youtube_id) {
+        return;
+    }
+    let title = title.trim();
+    rows.push(TrailerCandidate {
+        youtube_id,
+        title: if title.is_empty() {
+            "Official Trailer".to_string()
+        } else {
+            title.to_string()
+        },
+    });
+}
+
+/// TMDB's `videos` list as shelf candidates: trailers first, then teasers.
+fn video_candidates(videos: Option<&plx_stremio::addons_tmdb::TmdbVideos>) -> Vec<TrailerCandidate> {
+    let mut out = Vec::new();
+    let Some(videos) = videos else {
+        return out;
+    };
+    for kind in ["trailer", "teaser"] {
+        for video in videos.results.iter().filter(|video| {
+            video.site.eq_ignore_ascii_case("youtube")
+                && video.type_.eq_ignore_ascii_case(kind)
+        }) {
+            if let Some(yid) = youtube_id(&Value::String(video.key.clone())) {
+                push_candidate(&mut out, yid, &video.name);
+            }
+        }
+    }
+    out
 }
 
 /// The GLOBAL person identity the shim's cast rows carry as `tagKey`. On a real PMS that is
@@ -107,7 +210,10 @@ fn person_guid(person_id: u64) -> String {
 }
 
 fn person_id_of_guid(guid: &str) -> Option<u64> {
-    guid.strip_prefix(PERSON_GUID_PREFIX)?.parse().ok().filter(|id| *id > 0)
+    guid.strip_prefix(PERSON_GUID_PREFIX)?
+        .parse()
+        .ok()
+        .filter(|id| *id > 0)
 }
 
 /// The orders the shim can compute from a Stremio `MetaPreview` without another fetch. These are
@@ -161,21 +267,54 @@ fn sort_entries_for(addon_id: Option<&str>) -> Value {
 /// TMDB's standard movie genres. The shim offers these even when an addon declares no `genre`
 /// extra, and filters the fetched rows in memory against the same names.
 const TMDB_MOVIE_GENRES: &[&str] = &[
-    "Action", "Adventure", "Animation", "Comedy", "Crime", "Documentary", "Drama",
-    "Family", "Fantasy", "History", "Horror", "Music", "Mystery", "Romance",
-    "Science Fiction", "TV Movie", "Thriller", "War", "Western",
+    "Action",
+    "Adventure",
+    "Animation",
+    "Comedy",
+    "Crime",
+    "Documentary",
+    "Drama",
+    "Family",
+    "Fantasy",
+    "History",
+    "Horror",
+    "Music",
+    "Mystery",
+    "Romance",
+    "Science Fiction",
+    "TV Movie",
+    "Thriller",
+    "War",
+    "Western",
 ];
 
 /// TMDB's standard TV genres (they differ from the movie list in `help`/`format` only).
 const TMDB_TV_GENRES: &[&str] = &[
-    "Action & Adventure", "Animation", "Comedy", "Crime", "Documentary", "Drama",
-    "Family", "Kids", "Mystery", "News", "Reality", "Sci-Fi & Fantasy", "Soap",
-    "Talk", "War & Politics", "Western",
+    "Action & Adventure",
+    "Animation",
+    "Comedy",
+    "Crime",
+    "Documentary",
+    "Drama",
+    "Family",
+    "Kids",
+    "Mystery",
+    "News",
+    "Reality",
+    "Sci-Fi & Fantasy",
+    "Soap",
+    "Talk",
+    "War & Politics",
+    "Western",
 ];
 
 /// The TMDB baseline for a section's content type.
 fn tmdb_genres(series: bool) -> &'static [&'static str] {
-    if series { TMDB_TV_GENRES } else { TMDB_MOVIE_GENRES }
+    if series {
+        TMDB_TV_GENRES
+    } else {
+        TMDB_MOVIE_GENRES
+    }
 }
 
 /// Fold a genre name to its comparison key: letters and digits only, lower-cased, with the two
@@ -186,7 +325,11 @@ fn genre_key(name: &str) -> String {
         .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    if key == "scifi" { "sciencefiction".into() } else { key }
+    if key == "scifi" {
+        "sciencefiction".into()
+    } else {
+        key
+    }
 }
 
 /// The `&`/`/` halves of a compound genre (`Action & Adventure`), each folded by [`genre_key`].
@@ -254,7 +397,11 @@ fn catalog_date_of(meta: &MetaPreview) -> Option<String> {
 
 /// Merge a catalog's declared genre options with the TMDB baseline, de-duplicating spellings.
 fn merged_genres(declared: &[String], series: bool) -> Vec<String> {
-    let mut out: Vec<String> = declared.iter().filter(|g| !g.trim().is_empty()).cloned().collect();
+    let mut out: Vec<String> = declared
+        .iter()
+        .filter(|g| !g.trim().is_empty())
+        .cloned()
+        .collect();
     for genre in tmdb_genres(series) {
         if !out.iter().any(|have| genre_matches(have, genre)) {
             out.push((*genre).to_string());
@@ -396,6 +543,45 @@ pub struct Shim {
     permits: (Mutex<usize>, Condvar),
     /// Real stream metadata from the app's FFmpeg (installed at boot; absent on the host bin).
     pub probes: crate::shim_probe::ProbeCache,
+    /// Byte-offset reach (installed at boot; absent on the host bin). Proves a DASH pair can be
+    /// fetched to its END before the DASH `Media` is published — see
+    /// [`trailer_tracks_reachable`](Self::trailer_tracks_reachable).
+    trailer_reach: Mutex<Option<crate::shim_probe::Reacher>>,
+    /// Trailer Part targets `part_id -> resolved CDN URL` (the 360p muxed fallback
+    /// beside a DASH pair, and the muxed row when there is no DASH pair). A DASH
+    /// Part instead maps `part_id -> MPD XML` in `trailer_dash`; `part()` checks
+    /// the DASH map first, then this one.
+    trailer_parts: Mutex<HashMap<i64, String>>,
+    /// Trailer DASH manifests `part_id -> MPD XML` (see [`dash_manifest`]). The
+    /// Part itself is `file.mpd` and answers 200 `application/dash+xml`; the
+    /// MPD's BaseURLs are the signed googlevideo URLs themselves — `curlio`
+    /// states the bounded window those URLs require (see `GOOGLEVIDEO_WINDOW`
+    /// in `media/src/curlio.rs`), and `trailer_proxy` carries no track bytes.
+    trailer_dash: Mutex<HashMap<i64, String>>,
+    /// `youtubeId -> resolved candidate` for [`crate::shim_trailer::resolve_cached`],
+    /// with the 30-min/60-s TTL split [`crate::shim_trailer::TrailerCache`] owns.
+    trailer_cache: crate::shim_trailer::TrailerCache,
+    /// Single-flight gate for the same resolve: the `meta()` loop shape, so a
+    /// focus prefetch and the click that follows spawn one Node child, not two.
+    trailer_flight: plx_base::flight::Flight,
+    /// Parents whose first trailer a background thread is resolving right now.
+    /// The detail page's 2 s autoplay dwell is that thread's budget; without
+    /// this set a burst of `/extras` reads would queue N waiters on the flight.
+    #[cfg(not(test))]
+    trailer_warm: Mutex<std::collections::HashSet<i64>>,
+    /// The decipher seam. Production is the Node child (`NodeTrailerResolver`);
+    /// tests swap in a fake. A `Box<dyn>` keeps the spawn machinery behind one
+    /// trait so the shim stays testable without Node.
+    trailer_resolver: Box<dyn crate::shim_trailer::TrailerResolver>,
+    /// The persistent Node proxy child (`TrailerProxy`): IOS-UA loopback hop
+    /// for the DASH pair's bytes. Lazy (`NotStarted` until the first DASH
+    /// trailer) and degraded to direct googlevideo when it cannot start.
+    // Unused after the direct-libcurl switch (track bytes now go via curlio's
+    // googlevideo UA override; the Node proxy child's TLS/egress 403'd on TV).
+    // Kept so the child and its docs/tests stay in the tree for a future
+    // re-enable without a re-add.
+    #[allow(dead_code)]
+    trailer_proxy: crate::shim_trailer::TrailerProxy,
     /// Torrent markers resolved on a streaming server (`/create`), by marker + ratingKey.
     resolved: Mutex<HashMap<(i64, String), String>>,
     /// `tmdb:` content ids already asked of TMDB's `/external_ids`, by `(type, content id)`.
@@ -563,7 +749,11 @@ fn tmdb_id(id: &str, series: bool) -> Option<u64> {
         return (n > 0).then_some(n);
     }
     let client = TmdbClient::from_env()?;
-    if series { client.series_id(&id).ok().flatten() } else { client.movie_id(&id).ok().flatten() }
+    if series {
+        client.series_id(&id).ok().flatten()
+    } else {
+        client.movie_id(&id).ok().flatten()
+    }
 }
 
 /// The series an episode id belongs to: `tt0944947:1:2` → `tt0944947`. Falls back to the entry's
@@ -749,12 +939,6 @@ fn related_hub_json(kind: &str, rows: Vec<Value>) -> Value {
     })
 }
 
-fn tmdb_trailer_id(video: &TmdbVideo) -> Option<String> {
-    (video.site.eq_ignore_ascii_case("youtube") && video.type_.eq_ignore_ascii_case("trailer"))
-        .then(|| youtube_id(&Value::String(video.key.clone())))
-        .flatten()
-}
-
 fn youtube_id(value: &Value) -> Option<String> {
     let raw = value.as_str().or_else(|| {
         ["ytId", "youtubeId", "source", "url", "link"]
@@ -791,17 +975,127 @@ fn youtube_id(value: &Value) -> Option<String> {
     .then(|| id.to_string())
 }
 
-fn trailer_extras(rk: i64, youtube_id: &str, title: &str) -> Value {
-    json!({
-        "size": 1,
-        "Video": [{
-            "ratingKey": "trailer",
-            "key": format!("/library/metadata/{rk}/trailer"),
-            "type": "clip",
-            "title": title,
-            "thumb": format!("https://img.youtube.com/vi/{youtube_id}/hqdefault.jpg")
-        }]
-    })
+fn trailer_extras(rk: i64, candidates: &[TrailerCandidate]) -> Value {
+    let videos: Vec<Value> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let clip_rk = trailer_rk_at(rk, index);
+            json!({
+                "ratingKey": clip_rk.to_string(),
+                "key": format!("/library/metadata/{clip_rk}"),
+                "type": "clip",
+                "subtype": "trailer",
+                "extraType": 1,
+                "title": candidate.title,
+                "thumb": format!(
+                    "https://img.youtube.com/vi/{}/hqdefault.jpg",
+                    candidate.youtube_id
+                )
+            })
+        })
+        .collect();
+    json!({"size": videos.len(), "Video": videos})
+}
+
+/// Escape the five XML characters for `dash_manifest` BaseURLs.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Static SegmentBase MPD for a trailer DASH pair, in the exact shape
+/// `media/src/dash.rs` parses: two AdaptationSets (video then audio), each
+/// with one `SegmentBase` (init + index ranges) and one `Representation`
+/// whose `BaseURL` is the signed googlevideo URL itself (`video_url`/`audio_url`
+/// overrides exist for tests). The transport, not the manifest, handles what
+/// those URLs require: see `GOOGLEVIDEO_WINDOW` in `media/src/curlio.rs`.
+///
+/// Played by the Rust DASH engine (`media/src/dash.rs` + `ff.rs dash_demux`),
+/// which opens each track's BaseURL as a seekable progressive fMP4 source
+/// through the bundled `mov` demuxer — no FFmpeg `dash` demuxer (it is not
+/// in the build), no new C library.
+fn dash_manifest(
+    d: &crate::shim_trailer::DashInfo,
+    video_url: Option<&str>,
+    audio_url: Option<&str>,
+) -> String {
+    fn split_mime(mime: &str) -> (&str, Option<String>) {
+        let (m, rest) = match mime.split_once(';') {
+            Some((m, r)) => (m.trim(), Some(r.to_string())),
+            None => (mime.trim(), None),
+        };
+        let codecs = rest.and_then(|r| {
+            let r = r.trim();
+            let r = r.strip_prefix("codecs=")?.trim();
+            let quote = r.chars().next()?;
+            if quote != '"' && quote != '\'' {
+                return None;
+            }
+            r.strip_prefix(quote)?
+                .split_once(quote)
+                .map(|(c, _)| c.to_string())
+        });
+        (if m.is_empty() { "video/mp4" } else { m }, codecs)
+    }
+    let (video_mime, video_codecs) = split_mime(&d.video_mime);
+    let (audio_mime, audio_codecs) = split_mime(&d.audio_mime);
+    // Empty mimes fall back to the mp4 shape the parser accepts.
+    let (video_mime, audio_mime) = if video_mime.is_empty() && audio_mime.is_empty() {
+        ("video/mp4", "audio/mp4")
+    } else if video_mime.is_empty() {
+        ("video/mp4", audio_mime)
+    } else if audio_mime.is_empty() {
+        (video_mime, "audio/mp4")
+    } else {
+        (video_mime, audio_mime)
+    };
+    let duration = format!("PT{}S", ((d.duration_ms.max(0) + 999) / 1000).max(0));
+    let v_codecs_attr = video_codecs
+        .as_deref()
+        .map(|c| format!(" codecs=\"{}\"", xml_escape(c)))
+        .unwrap_or_default();
+    let a_codecs_attr = audio_codecs
+        .as_deref()
+        .map(|c| format!(" codecs=\"{}\"", xml_escape(c)))
+        .unwrap_or_default();
+    let frame_attr = if d.fps > 0 {
+        format!(" frameRate=\"{}\"", d.fps)
+    } else {
+        String::new()
+    };
+    let video_url = video_url.unwrap_or(&d.video_url);
+    let audio_url = audio_url.unwrap_or(&d.audio_url);
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"{duration}\" minBufferTime=\"PT1.5S\">\n<Period>\n<AdaptationSet mimeType=\"{video_mime}\"{v_codecs_attr} width=\"{}\" height=\"{}\"{} segmentAlignment=\"true\">\n<SegmentBase timescale=\"1000\" indexRange=\"{}-{}\"><Initialization range=\"{}-{}\"/></SegmentBase>\n<Representation id=\"{}\" bandwidth=\"{}\">\n<BaseURL>{}</BaseURL>\n</Representation>\n</AdaptationSet>\n<AdaptationSet mimeType=\"{audio_mime}\"{a_codecs_attr} segmentAlignment=\"true\">\n<SegmentBase timescale=\"1000\" indexRange=\"{}-{}\"><Initialization range=\"{}-{}\"/></SegmentBase>\n<Representation id=\"{}\" bandwidth=\"{}\">\n<BaseURL>{}</BaseURL>\n</Representation>\n</AdaptationSet>\n</Period>\n</MPD>\n",
+        d.width,
+        d.height,
+        frame_attr,
+        d.video_index.0,
+        d.video_index.1,
+        d.video_init.0,
+        d.video_init.1,
+        d.video_itag,
+        d.video_bitrate,
+        xml_escape(video_url),
+        d.audio_index.0,
+        d.audio_index.1,
+        d.audio_init.0,
+        d.audio_init.1,
+        d.audio_itag,
+        d.audio_bitrate,
+        xml_escape(audio_url)
+    )
 }
 
 fn preview_from_meta(meta: &Meta, id: &str) -> MetaPreview {
@@ -1013,14 +1307,23 @@ mod tmdb_metadata_tests {
             ..Default::default()
         };
         assert!(tmdb_role(&anonymous).unwrap().get("id").is_none());
+        let clip = trailer_rk(42);
         assert_eq!(
-            trailer_extras(42, "youtube123", "Official Trailer"),
+            trailer_extras(
+                42,
+                &[TrailerCandidate {
+                    youtube_id: "youtube123".into(),
+                    title: "Official Trailer".into(),
+                }]
+            ),
             json!({
                 "size": 1,
                 "Video": [{
-                    "ratingKey": "trailer",
-                    "key": "/library/metadata/42/trailer",
+                    "ratingKey": clip.to_string(),
+                    "key": format!("/library/metadata/{clip}"),
                     "type": "clip",
+                    "subtype": "trailer",
+                    "extraType": 1,
                     "title": "Official Trailer",
                     "thumb": "https://img.youtube.com/vi/youtube123/hqdefault.jpg"
                 }]
@@ -1074,16 +1377,41 @@ mod tmdb_metadata_tests {
     /// `shim_media::rank`/`playable_url` consult, so `None` is what drops every torrent stream.
     #[test]
     fn p2p_off_hides_the_streaming_server_and_clearing_the_url_takes_effect() {
-        let shim = Shim::new(Arc::new(TmdbMetaBackend), Config { torrent_server: Some("http://127.0.0.1:2710".into()), ..Config::default() });
-        assert_eq!(shim.torrent_server(), None, "P2P is off until Settings says otherwise");
+        let shim = Shim::new(
+            Arc::new(TmdbMetaBackend),
+            Config {
+                torrent_server: Some("http://127.0.0.1:2710".into()),
+                ..Config::default()
+            },
+        );
+        assert_eq!(
+            shim.torrent_server(),
+            None,
+            "P2P is off until Settings says otherwise"
+        );
         shim.set_p2p(true, None);
-        assert_eq!(shim.torrent_server(), None, "no URL configured: the app probes the default ports");
+        assert_eq!(
+            shim.torrent_server(),
+            None,
+            "no URL configured: the app probes the default ports"
+        );
         shim.set_p2p(true, Some("  http://192.168.1.9:2710  ".into()));
-        assert_eq!(shim.torrent_server().as_deref(), Some("http://192.168.1.9:2710"));
+        assert_eq!(
+            shim.torrent_server().as_deref(),
+            Some("http://192.168.1.9:2710")
+        );
         shim.set_p2p(true, None);
-        assert_eq!(shim.torrent_server(), None, "clearing the field is not ignored");
+        assert_eq!(
+            shim.torrent_server(),
+            None,
+            "clearing the field is not ignored"
+        );
         shim.set_p2p(false, Some("http://192.168.1.9:2710".into()));
-        assert_eq!(shim.torrent_server(), None, "the switch outranks a configured URL");
+        assert_eq!(
+            shim.torrent_server(),
+            None,
+            "the switch outranks a configured URL"
+        );
     }
 
     /// The P2P switch must run BEFORE the C-engine branch in `open_url`: a torrent marker with the
@@ -1091,10 +1419,27 @@ mod tmdb_metadata_tests {
     /// engine path used to be tried first and would have played with P2P disabled).
     #[test]
     fn p2p_off_does_not_resolve_a_torrent_through_the_engine() {
-        let shim = Shim::new(Arc::new(TmdbMetaBackend), Config { torrent_server: Some("http://127.0.0.1:2710".into()), ..Config::default() });
-        let stream = Stream { info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()), ..Default::default() };
-        let marker = format!("{}{}", shim_media::TORRENT_SCHEME, "0123456789abcdef0123456789abcdef01234567");
-        assert_eq!(shim.open_url(1, &stream, &marker), None, "P2P off must drop every torrent");
+        let shim = Shim::new(
+            Arc::new(TmdbMetaBackend),
+            Config {
+                torrent_server: Some("http://127.0.0.1:2710".into()),
+                ..Config::default()
+            },
+        );
+        let stream = Stream {
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            ..Default::default()
+        };
+        let marker = format!(
+            "{}{}",
+            shim_media::TORRENT_SCHEME,
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(
+            shim.open_url(1, &stream, &marker),
+            None,
+            "P2P off must drop every torrent"
+        );
     }
 
     #[test]
@@ -1223,9 +1568,21 @@ mod tmdb_metadata_tests {
             name: "The Dark Knight Collection".into(),
             overview: Some("A franchise.".into()),
             parts: vec![
-                TmdbMovie { id: 155, title: "The Dark Knight".into(), ..Default::default() },
-                TmdbMovie { id: 272, title: "Batman Begins".into(), ..Default::default() },
-                TmdbMovie { id: 49026, title: "The Dark Knight Rises".into(), ..Default::default() },
+                TmdbMovie {
+                    id: 155,
+                    title: "The Dark Knight".into(),
+                    ..Default::default()
+                },
+                TmdbMovie {
+                    id: 272,
+                    title: "Batman Begins".into(),
+                    ..Default::default()
+                },
+                TmdbMovie {
+                    id: 49026,
+                    title: "The Dark Knight Rises".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
@@ -1249,7 +1606,11 @@ mod tmdb_metadata_tests {
 
         // A film that is the franchise's only member has no shelf: one poster is not a shelf.
         let alone = plx_stremio::addons_tmdb::TmdbCollection {
-            parts: vec![TmdbMovie { id: 272, title: "Batman Begins".into(), ..Default::default() }],
+            parts: vec![TmdbMovie {
+                id: 272,
+                title: "Batman Begins".into(),
+                ..Default::default()
+            }],
             ..parts.clone()
         };
         assert!(shim.collection_hub_json(&alone, 272, "Solo").is_none());
@@ -1264,8 +1625,16 @@ mod tmdb_metadata_tests {
             id: 234,
             name: "The Dark Knight Collection".into(),
             parts: vec![
-                TmdbMovie { id: 155, title: "The Dark Knight".into(), ..Default::default() },
-                TmdbMovie { id: 272, title: "Batman Begins".into(), ..Default::default() },
+                TmdbMovie {
+                    id: 155,
+                    title: "The Dark Knight".into(),
+                    ..Default::default()
+                },
+                TmdbMovie {
+                    id: 272,
+                    title: "Batman Begins".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         });
@@ -1286,7 +1655,10 @@ mod tmdb_metadata_tests {
         };
         let listing = get("/library/sections/1/collections");
         assert_eq!(listing["Metadata"][0]["index"], 234);
-        assert_eq!(listing["Metadata"][0]["title"], "The Dark Knight Collection");
+        assert_eq!(
+            listing["Metadata"][0]["title"],
+            "The Dark Knight Collection"
+        );
 
         let header = get("/library/metadata/4000000234");
         assert_eq!(header["Metadata"][0]["title"], "The Dark Knight Collection");
@@ -1435,14 +1807,23 @@ mod tmdb_metadata_tests {
         assert_eq!(groups[0]["Credit"][0]["Metadata"]["ratingKey"], "tmdb:603");
         assert_eq!(groups[0]["Credit"][0]["Metadata"]["type"], "movie");
         assert_eq!(groups[0]["Credit"][0]["Metadata"]["year"], 1999);
-        let directing = groups.iter().find(|g| g["type"] == "director").expect("the directing tab");
+        let directing = groups
+            .iter()
+            .find(|g| g["type"] == "director")
+            .expect("the directing tab");
         assert_eq!(directing["title"], "Director");
         assert_eq!(directing["Credit"][0]["role"], "Director");
         // Renaming a department to Plex's name does not lose the item kind: a show stays a show.
-        let writing = groups.iter().find(|g| g["type"] == "writer").expect("the writing tab");
+        let writing = groups
+            .iter()
+            .find(|g| g["type"] == "writer")
+            .expect("the writing tab");
         assert_eq!(writing["Credit"][0]["Metadata"]["type"], "show");
         assert_eq!(writing["Credit"][0]["Metadata"]["title"], "Breaking Bad");
-        let other = groups.iter().find(|g| g["type"] == "other").expect("the Other tab");
+        let other = groups
+            .iter()
+            .find(|g| g["type"] == "other")
+            .expect("the Other tab");
         assert_eq!(other["title"], "Other");
         assert_eq!(other["Credit"][0]["role"], "Thanks");
     }
@@ -1495,9 +1876,19 @@ mod tmdb_metadata_tests {
         assert_eq!(row["birthPlace"], "Sydney, Australia");
         assert_eq!(row["knownFor"], "Acting");
         assert_eq!(row["thumb"], "https://image.tmdb.org/t/p/w300/portrait.jpg");
-        assert_eq!(row["CreditType"][0], json!({"type": "actor", "title": "Actor"}));
-        assert_eq!(row["CreditType"][1], json!({"type": "director", "title": "Director"}));
-        assert_eq!(row["CreditType"].as_array().unwrap().len(), 2, "Crew is a tab, not a role");
+        assert_eq!(
+            row["CreditType"][0],
+            json!({"type": "actor", "title": "Actor"})
+        );
+        assert_eq!(
+            row["CreditType"][1],
+            json!({"type": "director", "title": "Director"})
+        );
+        assert_eq!(
+            row["CreditType"].as_array().unwrap().len(),
+            2,
+            "Crew is a tab, not a role"
+        );
     }
 
     /// A guid this shim never handed out is an EMPTY container on both routes — the answer a real
@@ -1703,7 +2094,8 @@ mod tmdb_metadata_tests {
             Vec::new()
         }
         fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> {
-            self.meta_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.meta_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             None
         }
         fn streams(
@@ -1722,48 +2114,76 @@ mod tmdb_metadata_tests {
 
     #[test]
     fn recommended_rows_show_the_full_browse_list_not_only_home_catalogs() {
-        let shim = Arc::new(Shim::new(Arc::new(TwoCatalogBackend::new()), Config::default()));
+        let shim = Arc::new(Shim::new(
+            Arc::new(TwoCatalogBackend::new()),
+            Config::default(),
+        ));
         // /hubs (Home) must stay gated on showInHome: only 1 movie hub (plus Continue Watching).
-        let home = serde_json::from_slice::<Value>(&shim.handle(&Request {
-            method: "GET".into(),
-            path: "/hubs".into(),
-            query: HashMap::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-        }).body).unwrap();
+        let home = serde_json::from_slice::<Value>(
+            &shim
+                .handle(&Request {
+                    method: "GET".into(),
+                    path: "/hubs".into(),
+                    query: HashMap::new(),
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                })
+                .body,
+        )
+        .unwrap();
         let home_hubs = home["MediaContainer"]["Hub"].as_array().unwrap();
         let home_movie_hubs = home_hubs.iter().filter(|h| h["type"] == "movie").count();
-        assert_eq!(home_movie_hubs, 1, "Home stays gated on showInHome: {home_hubs:?}");
+        assert_eq!(
+            home_movie_hubs, 1,
+            "Home stays gated on showInHome: {home_hubs:?}"
+        );
 
         // /hubs/sections/1 (Movies Recommended) must show BOTH catalogs, including the hidden one.
-        let rec = serde_json::from_slice::<Value>(&shim.handle(&Request {
-            method: "GET".into(),
-            path: "/hubs/sections/1".into(),
-            query: HashMap::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-        }).body).unwrap();
+        let rec = serde_json::from_slice::<Value>(
+            &shim
+                .handle(&Request {
+                    method: "GET".into(),
+                    path: "/hubs/sections/1".into(),
+                    query: HashMap::new(),
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                })
+                .body,
+        )
+        .unwrap();
         let rec_hubs = rec["MediaContainer"]["Hub"].as_array().unwrap();
         let rec_movie_hubs = rec_hubs.iter().filter(|h| h["type"] == "movie").count();
-        assert_eq!(rec_movie_hubs, 2, "Recommended must show all browseable movie catalogs: {rec_hubs:?}");
-        let titles: Vec<&str> = rec_hubs.iter()
+        assert_eq!(
+            rec_movie_hubs, 2,
+            "Recommended must show all browseable movie catalogs: {rec_hubs:?}"
+        );
+        let titles: Vec<&str> = rec_hubs
+            .iter()
             .filter(|h| h["type"] == "movie")
             .filter_map(|h| h["title"].as_str())
             .collect();
         assert!(titles.contains(&"Top Movies"), "home catalog present");
-        assert!(titles.contains(&"Hidden Movies"), "hidden catalog must appear in Recommended");
+        assert!(
+            titles.contains(&"Hidden Movies"),
+            "hidden catalog must appear in Recommended"
+        );
 
         // A row's `key` is read back for its cards. It must page the SAME catalog the row previewed,
         // whatever list the section was built from (Home's list is shorter than the browse list).
         for hub in rec_hubs.iter().filter(|h| h["type"] == "movie") {
             let key = hub["key"].as_str().unwrap();
-            let body = serde_json::from_slice::<Value>(&shim.handle(&Request {
-                method: "GET".into(),
-                path: key.into(),
-                query: HashMap::new(),
-                headers: HashMap::new(),
-                body: Vec::new(),
-            }).body).unwrap();
+            let body = serde_json::from_slice::<Value>(
+                &shim
+                    .handle(&Request {
+                        method: "GET".into(),
+                        path: key.into(),
+                        query: HashMap::new(),
+                        headers: HashMap::new(),
+                        body: Vec::new(),
+                    })
+                    .body,
+            )
+            .unwrap();
             let rows = body["MediaContainer"]["Metadata"].as_array().unwrap();
             assert_eq!(rows.len(), 1, "{key} must page its catalog: {body:?}");
             assert_eq!(
@@ -1781,18 +2201,25 @@ mod tmdb_metadata_tests {
         let backend = Arc::new(TwoCatalogBackend::new());
         let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
         let get = |path: &str, query: HashMap<String, String>| -> Value {
-            serde_json::from_slice(&shim.handle(&Request {
-                method: "GET".into(),
-                path: path.into(),
-                query,
-                headers: HashMap::new(),
-                body: Vec::new(),
-            }).body).unwrap()
+            serde_json::from_slice(
+                &shim
+                    .handle(&Request {
+                        method: "GET".into(),
+                        path: path.into(),
+                        query,
+                        headers: HashMap::new(),
+                        body: Vec::new(),
+                    })
+                    .body,
+            )
+            .unwrap()
         };
-        let page = |start: usize, size: usize| HashMap::from([
-            ("X-Plex-Container-Start".to_string(), start.to_string()),
-            ("X-Plex-Container-Size".to_string(), size.to_string()),
-        ]);
+        let page = |start: usize, size: usize| {
+            HashMap::from([
+                ("X-Plex-Container-Start".to_string(), start.to_string()),
+                ("X-Plex-Container-Size".to_string(), size.to_string()),
+            ])
+        };
         // Row 0 is Continue Watching; the two movie catalogs follow it.
         let first = get("/hubs/sections/1", page(0, 2));
         let hubs = first["MediaContainer"]["Hub"].as_array().unwrap();
@@ -1802,9 +2229,16 @@ mod tmdb_metadata_tests {
 
         let second = get("/hubs/sections/1", page(2, 2));
         let hubs = second["MediaContainer"]["Hub"].as_array().unwrap();
-        assert_eq!(hubs.len(), 1, "the window is the tail of the list: {second:?}");
+        assert_eq!(
+            hubs.len(),
+            1,
+            "the window is the tail of the list: {second:?}"
+        );
         assert_eq!(hubs[0]["title"], "Hidden Movies");
-        assert_eq!(hubs[0]["key"], "/hubs/nuvio/1", "the index is the row's place in the list");
+        assert_eq!(
+            hubs[0]["key"], "/hubs/nuvio/1",
+            "the index is the row's place in the list"
+        );
         assert_eq!(second["MediaContainer"]["offset"], 2);
         assert_eq!(second["MediaContainer"]["totalSize"], 3);
     }
@@ -1818,25 +2252,41 @@ mod tmdb_metadata_tests {
         let backend = Arc::new(TwoCatalogBackend::new());
         let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
         let get = |path: &str| -> Value {
-            serde_json::from_slice(&shim.handle(&Request {
-                method: "GET".into(),
-                path: path.into(),
-                query: HashMap::new(),
-                headers: HashMap::new(),
-                body: Vec::new(),
-            }).body).unwrap()
+            serde_json::from_slice(
+                &shim
+                    .handle(&Request {
+                        method: "GET".into(),
+                        path: path.into(),
+                        query: HashMap::new(),
+                        headers: HashMap::new(),
+                        body: Vec::new(),
+                    })
+                    .body,
+            )
+            .unwrap()
         };
         // Build the row, which is what remembers its cards.
         let hub = get("/hubs/sections/1");
-        let rows = hub["MediaContainer"]["Hub"][1]["Metadata"].as_array().unwrap().clone();
+        let rows = hub["MediaContainer"]["Hub"][1]["Metadata"]
+            .as_array()
+            .unwrap()
+            .clone();
         let key = rows[0]["ratingKey"].as_str().unwrap().to_string();
-        assert_eq!(backend.meta_reads(), 0, "a preview row must not need the addon");
+        assert_eq!(
+            backend.meta_reads(),
+            0,
+            "a preview row must not need the addon"
+        );
 
         let csv = get(&format!("/library/metadata/{key},{key}"));
         let listed = csv["MediaContainer"]["Metadata"].as_array().unwrap();
         assert_eq!(listed.len(), 2, "{csv:?}");
         assert_eq!(listed[0]["title"], rows[0]["title"]);
-        assert_eq!(backend.meta_reads(), 0, "a listing must not resolve the addon again: {csv:?}");
+        assert_eq!(
+            backend.meta_reads(),
+            0,
+            "a listing must not resolve the addon again: {csv:?}"
+        );
     }
 
     #[test]
@@ -1854,7 +2304,9 @@ mod tmdb_metadata_tests {
         assert_eq!(shim.handle(&get()).status, 200);
         // The slot starts its stream and subtitle workers as threads: wait for them to report.
         for _ in 0..100 {
-            if !backend.streams.lock().unwrap().is_empty() && !backend.subtitles.lock().unwrap().is_empty() {
+            if !backend.streams.lock().unwrap().is_empty()
+                && !backend.subtitles.lock().unwrap().is_empty()
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1875,7 +2327,10 @@ mod tmdb_metadata_tests {
             asked[0].1
         );
         let subtitle_ids = backend.subtitles.lock().unwrap().clone();
-        assert_eq!(subtitle_ids, asked, "streams and subtitles ask for the same title id");
+        assert_eq!(
+            subtitle_ids, asked,
+            "streams and subtitles ask for the same title id"
+        );
         // A movie has no streams from this backend, but the list is finished: the picker must stop
         // asking rather than poll to its retry limit.
         assert_eq!(body(&shim.handle(&get()))["complete"], true);
@@ -1935,6 +2390,15 @@ impl Shim {
             next_sub: AtomicI64::new(900_000_000),
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
             probes: crate::shim_probe::ProbeCache::default(),
+            trailer_reach: Mutex::new(None),
+            trailer_parts: Mutex::new(HashMap::new()),
+            trailer_dash: Mutex::new(HashMap::new()),
+            trailer_cache: crate::shim_trailer::TrailerCache::new(),
+            trailer_flight: plx_base::flight::Flight::default(),
+            #[cfg(not(test))]
+            trailer_warm: Mutex::new(std::collections::HashSet::new()),
+            trailer_resolver: Box::new(crate::shim_trailer::NodeTrailerResolver::default_paths()),
+            trailer_proxy: crate::shim_trailer::TrailerProxy::default_paths(),
             resolved: Mutex::new(HashMap::new()),
             imdb_ids: Mutex::new(HashMap::new()),
             torrent_server: std::sync::RwLock::new(cfg_ts),
@@ -1965,9 +2429,11 @@ impl Shim {
                 let content_id = format!("tmdb:{}", tmdb_id(&id, false)?);
                 Some((content_id.clone(), "movie".into(), content_id))
             }
-            Ident::Episode { series, video } => {
-                Some((format!("tmdb:{}", tmdb_id(&series, true)?), "series".into(), video))
-            }
+            Ident::Episode { series, video } => Some((
+                format!("tmdb:{}", tmdb_id(&series, true)?),
+                "series".into(),
+                video,
+            )),
             Ident::Season { .. } => None,
         }
     }
@@ -1988,7 +2454,9 @@ impl Shim {
         }
         pushes.insert(rk, Instant::now());
         drop(pushes);
-        let Some((content_id, content_type, video_id)) = self.nuvio_watch_identity(rk) else { return };
+        let Some((content_id, content_type, video_id)) = self.nuvio_watch_identity(rk) else {
+            return;
+        };
         self.watch.bind_account_key(&content_id, &video_id, rk);
         let entry = plx_stremio::nuvio::WatchProgress {
             content_id,
@@ -2001,8 +2469,13 @@ impl Shim {
         match self.account.push_watch_progress(&[entry]) {
             Ok(()) => {}
             Err(error) => {
-                let status = match error { plx_stremio::model::Error::Status(s) => s, _ => 0 };
-                plx_stremio::nuvio::log_account_event(&format!("nuvio account: progress push failed status={status}"));
+                let status = match error {
+                    plx_stremio::model::Error::Status(s) => s,
+                    _ => 0,
+                };
+                plx_stremio::nuvio::log_account_event(&format!(
+                    "nuvio account: progress push failed status={status}"
+                ));
             }
         }
     }
@@ -2010,28 +2483,39 @@ impl Shim {
     /// Pull the account's resume points and merge them into the local watch state, so Continue
     /// Watching draws what another device played. Runs off the caller's thread.
     pub fn pull_account_watch(&self) {
-        let Some(me) = self.me.get().and_then(|w| w.upgrade()) else { return };
-        let _ = std::thread::Builder::new().name("pmsshim-watch".into()).spawn(move || {
-            let Ok(entries) = me.account.pull_watch_progress() else { return };
-            let mut merged = 0;
-            for e in entries {
-                // Cheap rejection first: the row snapshot is a meta fetch, so never pay for an
-                // entry the local state already beats.
-                if e.position <= 0 {
-                    continue;
+        let Some(me) = self.me.get().and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("pmsshim-watch".into())
+            .spawn(move || {
+                let Ok(entries) = me.account.pull_watch_progress() else {
+                    return;
+                };
+                let mut merged = 0;
+                for e in entries {
+                    // Cheap rejection first: the row snapshot is a meta fetch, so never pay for an
+                    // entry the local state already beats.
+                    if e.position <= 0 {
+                        continue;
+                    }
+                    let stamp = e.last_watched / 1000;
+                    let Some(rk) = me.account_watch_key(&e) else {
+                        continue;
+                    };
+                    if me.watch.get(rk).last_viewed_at > stamp {
+                        continue;
+                    }
+                    if me
+                        .watch
+                        .merge_remote(rk, e.position, e.duration, stamp, me.row(rk))
+                    {
+                        me.watch.bind_account_key(&e.content_id, &e.video_id, rk);
+                        merged += 1;
+                    }
                 }
-                let stamp = e.last_watched / 1000;
-                let Some(rk) = me.account_watch_key(&e) else { continue };
-                if me.watch.get(rk).last_viewed_at > stamp {
-                    continue;
-                }
-                if me.watch.merge_remote(rk, e.position, e.duration, stamp, me.row(rk)) {
-                    me.watch.bind_account_key(&e.content_id, &e.video_id, rk);
-                    merged += 1;
-                }
-            }
-            me.account_watch_merged(merged);
-        });
+                me.account_watch_merged(merged);
+            });
     }
 
     /// The end of an account pull: a real merge changes what Continue Watching should show, and
@@ -2042,7 +2526,9 @@ impl Shim {
             return;
         }
         self.bump_content();
-        plx_stremio::nuvio::log_account_event(&format!("nuvio account: merged {merged} resume point(s)"));
+        plx_stremio::nuvio::log_account_event(&format!(
+            "nuvio account: merged {merged} resume point(s)"
+        ));
     }
 
     /// The local ratingKey an account resume point belongs to: what this device pushed that item
@@ -2053,9 +2539,15 @@ impl Shim {
             return Some(key);
         }
         let ident = if e.content_type == "series" {
-            Ident::Episode { series: episode_series_id(&e.video_id, &e.content_id).to_string(), video: e.video_id.clone() }
+            Ident::Episode {
+                series: episode_series_id(&e.video_id, &e.content_id).to_string(),
+                video: e.video_id.clone(),
+            }
         } else {
-            Ident::Title { type_: "movie".into(), id: e.content_id.clone() }
+            Ident::Title {
+                type_: "movie".into(),
+                id: e.content_id.clone(),
+            }
         };
         Some(self.keys.key_of(&ident))
     }
@@ -2098,8 +2590,12 @@ impl Shim {
     /// Settings takes effect without a relaunch.
     pub fn set_p2p(&self, enabled: bool, server: Option<String>) {
         self.p2p_enabled.store(enabled, Ordering::Relaxed);
-        *self.torrent_server.write().unwrap_or_else(|e| e.into_inner()) =
-            server.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
+        *self
+            .torrent_server
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = server
+            .map(|u| u.trim().to_owned())
+            .filter(|u| !u.is_empty());
         // The lists that were ranked under the old policy no longer answer it.
         self.streams
             .lock()
@@ -2264,7 +2760,10 @@ impl Shim {
             && (sorted || match_genre.is_some() || c.rows.len() < start.saturating_add(size))
         {
             guard += 1;
-            match self.backend.catalog_page(key, c.rows.len() as u32, fetch_genre) {
+            match self
+                .backend
+                .catalog_page(key, c.rows.len() as u32, fetch_genre)
+            {
                 Ok(page) => {
                     let before = c.rows.len();
                     for p in page {
@@ -2309,7 +2808,12 @@ impl Shim {
                 ordered.reverse();
             }
         }
-        let rows = ordered.into_iter().skip(start).take(size).cloned().collect();
+        let rows = ordered
+            .into_iter()
+            .skip(start)
+            .take(size)
+            .cloned()
+            .collect();
         let total = c.rows.len() as i64 + if c.exhausted { 0 } else { MORE_HINT };
         (rows, total)
     }
@@ -2324,7 +2828,9 @@ impl Shim {
             // waits here for the first fetch and then finds it in the cache. A refused read
             // (`None` below) releases the key, so the waiter asks again rather than reading the
             // refusal as the title not existing.
-            let Some(_turn) = self.meta_flight.claim(&gate) else { continue };
+            let Some(_turn) = self.meta_flight.claim(&gate) else {
+                continue;
+            };
             let m = Arc::new(self.backend.meta(type_, id)?);
             self.metas.insert(type_, id, Arc::clone(&m));
             return Some(m);
@@ -2502,7 +3008,10 @@ impl Shim {
             if st.done && (!wait_for_subs || st.subs_done) {
                 break;
             }
-            if chosen && st.selected.is_some_and(|i| i < st.streams.len()) && (!wait_for_subs || st.subs_done) {
+            if chosen
+                && st.selected.is_some_and(|i| i < st.streams.len())
+                && (!wait_for_subs || st.subs_done)
+            {
                 break;
             }
             let elapsed = slot.started.elapsed();
@@ -2739,15 +3248,10 @@ impl Shim {
         let Some(meta) = self.meta(&type_, &id) else {
             return;
         };
-        let meta_trailer = || {
-            meta.trailer_streams
-                .iter()
-                .chain(&meta.trailers)
-                .find_map(youtube_id)
-        };
         let Some(client) = TmdbClient::from_env() else {
-            if let Some(youtube_id) = meta_trailer() {
-                row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
+            let candidates = self.trailer_candidates(rk, false);
+            if !candidates.is_empty() {
+                row["Extras"] = trailer_extras(rk, &candidates);
             }
             return;
         };
@@ -2760,83 +3264,832 @@ impl Shim {
             Err(_) => None,
         };
         let Some(tmdb_id) = tmdb_id else {
-            if let Some(youtube_id) = meta_trailer() {
-                row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
+            let candidates = self.trailer_candidates(rk, false);
+            if !candidates.is_empty() {
+                row["Extras"] = trailer_extras(rk, &candidates);
             }
             return;
         };
 
-        if series {
-            // A show's trailers come from Cinemeta; TMDB only supplies the cast and the related
-            // shelf here.
-            let mut learned = Enrichment { tmdb_id, ..Default::default() };
-            let mut complete = true;
+        let mut learned = Enrichment {
+            tmdb_id,
+            ..Default::default()
+        };
+        let mut complete = true;
+        // One request now carries the cast, the related shelf, the logo AND
+        // every trailer/teaser (`append_to_response=…,videos`). The old split
+        // spent a second call per movie on `/movie/{id}/videos` just to pick
+        // the first one; the shelf needs them all anyway.
+        let videos = if series {
             match client.tv_details(tmdb_id) {
                 Ok(details) => {
                     set_roles(row, &details.credits.cast);
                     learned.roles = row.get("Role").cloned();
                     learned.related = Some(RelatedSource::Shows(details.recommendations.results));
+                    details.videos
                 }
-                Err(_) => complete = false,
+                Err(_) => {
+                    complete = false;
+                    None
+                }
             }
-            if let Some(youtube_id) = meta_trailer() {
-                row["Extras"] = trailer_extras(rk, &youtube_id, "Official Trailer");
-                learned.extras = row.get("Extras").cloned();
+        } else {
+            match client.movie_details(tmdb_id) {
+                Ok(details) => {
+                    set_roles(row, &details.credits.cast);
+                    learned.roles = row.get("Role").cloned();
+                    learned.related = Some(RelatedSource::Movies(details.recommendations.results));
+                    learned.collection_ref = details.movie.belongs_to_collection;
+                    details.videos
+                }
+                Err(_) => {
+                    complete = false;
+                    None
+                }
             }
-            if complete {
-                self.enrich.insert(&type_, &id, learned);
-            }
-            return;
-        }
-
-        let (details, videos) = std::thread::scope(|scope| {
-            let details = scope.spawn(|| client.movie_details(tmdb_id));
-            let videos = scope.spawn(|| client.videos(tmdb_id));
-            (details.join(), videos.join())
-        });
-
-        let mut learned = Enrichment { tmdb_id, ..Default::default() };
-        let mut complete = true;
-        match details {
-            Ok(Ok(details)) => {
-                set_roles(row, &details.credits.cast);
-                learned.roles = row.get("Role").cloned();
-                learned.related = Some(RelatedSource::Movies(details.recommendations.results));
-                learned.collection_ref = details.movie.belongs_to_collection;
-            }
-            Ok(Err(_)) | Err(_) => complete = false,
-        }
-
-        let trailer = match videos {
-            Ok(Ok(videos)) => videos.iter().find_map(|video| {
-                tmdb_trailer_id(video).map(|youtube_id| {
-                    let title = if video.name.trim().is_empty() {
-                        "Official Trailer"
-                    } else {
-                        video.name.as_str()
-                    };
-                    (youtube_id, title.to_string())
-                })
-            }),
-            Ok(Err(_)) | Err(_) => {
-                complete = false;
-                None
-            }
-        }
-        .or_else(|| {
-            meta.trailer_streams
-                .iter()
-                .chain(&meta.trailers)
-                .find_map(youtube_id)
-                .map(|id| (id, "Official Trailer".into()))
-        });
-        if let Some((youtube_id, title)) = trailer {
-            row["Extras"] = trailer_extras(rk, &youtube_id, &title);
+        };
+        let candidates = self.trailer_candidates_from_videos(rk, videos.as_ref());
+        if !candidates.is_empty() {
+            row["Extras"] = trailer_extras(rk, &candidates);
             learned.extras = row.get("Extras").cloned();
         }
         if complete {
             self.enrich.insert(&type_, &id, learned);
         }
+    }
+
+    /// Every trailer this title could answer with, most-preferred first.
+    ///
+    /// The order is the shelf order: TMDB's trailers before its teasers, then
+    /// the ids Cinemeta already names. Deduped by YouTube id, so the same
+    /// video listed by both sources appears once.
+    ///
+    /// `with_alternates` is the shelf/play-time call. A detail open has just
+    /// fetched `movie_details`/`tv_details` (which now append `videos`), so
+    /// the TMDB half is a cache hit and costs nothing; the cheap pass exists
+    /// for the single-id callers.
+    fn trailer_candidates(&self, rk: i64, with_alternates: bool) -> Vec<TrailerCandidate> {
+        let real_ident = self.keys.ident(rk);
+        let Some(Ident::Title { type_, id }) =
+            real_ident.clone().or_else(|| synthetic_ident(rk))
+        else {
+            plx_base::eventlog::log(&format!("trailer: youtube id miss rk={rk} no title"));
+            return Vec::new();
+        };
+        let series = is_series(&type_);
+        let mut out = Vec::new();
+        let mut meta_loaded = false;
+        // Cheap pass first: the ids the title's cached meta already names.
+        if !with_alternates {
+            out = self.meta_candidates(&type_, &id);
+            meta_loaded = true;
+        }
+        // TMDB `videos` for movies AND shows. A show's Cinemeta meta often names
+        // no trailer at all, and a synthetic related-show key has no meta worth
+        // a live miss (its `tmdb:` id is TMDB's own) — this is the source that
+        // gives those a shelf. Host tests never reach YouTube/TMDB here; the
+        // in-hand `trailer_candidates_from_videos` is what they exercise.
+        if (with_alternates || out.is_empty()) && !cfg!(test) {
+            if let Some(client) = TmdbClient::from_env() {
+                let tmdb_id = self
+                    .enrich
+                    .get(&type_, &id)
+                    .map(|enrich| enrich.tmdb_id)
+                    .or_else(|| self.meta(&type_, &id).and_then(|m| m.moviedb_id))
+                    .or_else(|| synthetic_show_tmdb_id(rk))
+                    .or_else(|| synthetic_tmdb_id(rk))
+                    .or_else(|| tmdb_id(&id, series));
+                if let Some(tmdb_id) = tmdb_id {
+                    let videos = if series {
+                        client
+                            .tv_details(tmdb_id)
+                            .ok()
+                            .and_then(|details| details.videos)
+                    } else {
+                        client
+                            .movie_details(tmdb_id)
+                            .ok()
+                            .and_then(|details| details.videos)
+                    };
+                    if let Some(videos) = videos {
+                        let mut from_tmdb = video_candidates(Some(&videos));
+                        if !from_tmdb.is_empty() {
+                            plx_base::eventlog::log(&format!(
+                                "trailer: youtube ids from tmdb videos rk={rk} ({})",
+                                from_tmdb.len()
+                            ));
+                            for candidate in from_tmdb.drain(..) {
+                                push_candidate(&mut out, candidate.youtube_id, &candidate.title);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Meta: always for a real key (Cinemeta can list a trailer TMDB does
+        // not); for a synthetic key only when TMDB named none, so a related
+        // show does not pay a live `tmdb:` meta miss on every Part request.
+        if !meta_loaded && (real_ident.is_some() || out.is_empty()) {
+            for candidate in self.meta_candidates(&type_, &id) {
+                push_candidate(&mut out, candidate.youtube_id, &candidate.title);
+            }
+            if !out.is_empty() {
+                plx_base::eventlog::log(&format!("trailer: youtube id from meta rk={rk}"));
+            }
+        }
+        // Cinemeta IMDb fallback: `tmdb:` metas often carry no trailer while
+        // the same title under its `tt…` id does.
+        if out.is_empty() {
+            if let Some(m) = self.meta(&type_, &id) {
+                if let Some(imdb) = m
+                    .imdb_id
+                    .as_deref()
+                    .filter(|s| s.starts_with("tt") && *s != id)
+                {
+                    plx_base::eventlog::log(&format!(
+                        "trailer: youtube id imdb fallback rk={rk}"
+                    ));
+                    if let Some(imdb_meta) = self.meta(&type_, imdb) {
+                        for yid in imdb_meta
+                            .trailer_streams
+                            .iter()
+                            .chain(&imdb_meta.trailers)
+                            .filter_map(youtube_id)
+                        {
+                            push_candidate(&mut out, yid, "Official Trailer");
+                        }
+                    }
+                }
+            }
+        }
+        if out.is_empty() {
+            plx_base::eventlog::log(&format!(
+                "trailer: youtube id miss rk={rk} type={type_} id={id}"
+            ));
+        }
+        out
+    }
+
+    /// The ids one meta row names, with their labels.
+    fn meta_candidates(&self, type_: &str, id: &str) -> Vec<TrailerCandidate> {
+        let mut out = Vec::new();
+        if let Some(meta) = self.meta(type_, id) {
+            for value in meta.trailer_streams.iter().chain(&meta.trailers) {
+                let Some(yid) = youtube_id(value) else { continue };
+                let label = value
+                    .get("name")
+                    .or_else(|| value.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                push_candidate(&mut out, yid, label);
+            }
+        }
+        out
+    }
+
+    /// The same candidates, built from a `details.videos` answer already in
+    /// hand plus the title's Cinemeta meta. No TMDB round trip: the row builder
+    /// that has just parsed the details must not ask TMDB the same question
+    /// again (and a host test must stay offline).
+    fn trailer_candidates_from_videos(
+        &self,
+        rk: i64,
+        videos: Option<&plx_stremio::addons_tmdb::TmdbVideos>,
+    ) -> Vec<TrailerCandidate> {
+        let mut out = video_candidates(videos);
+        // A synthetic key is never in `metas`, so its `meta()` is a live addon
+        // miss. TMDB already named the trailers; do not pay that hop too.
+        if !out.is_empty() && self.keys.ident(rk).is_none() {
+            return out;
+        }
+        let Some(Ident::Title { type_, id }) = self.keys.ident(rk).or_else(|| synthetic_ident(rk))
+        else {
+            return out;
+        };
+        if let Some(meta) = self.meta(&type_, &id) {
+            for value in meta.trailer_streams.iter().chain(&meta.trailers) {
+                let Some(yid) = youtube_id(value) else { continue };
+                let label = value
+                    .get("name")
+                    .or_else(|| value.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                push_candidate(&mut out, yid, label);
+            }
+        }
+        out
+    }
+
+    /// The candidates the shelf may show: YouTube's anonymous age gate
+    /// (`LOGIN_REQUIRED`) is permanent for an id, so a blocked one is dropped
+    /// rather than offered as a tile that fails on OK.
+    fn playable_candidates(&self, parent: i64) -> Vec<TrailerCandidate> {
+        self.trailer_candidates(parent, true)
+            .into_iter()
+            .filter(|candidate| !self.trailer_resolver.blocked(&candidate.youtube_id))
+            .take(MAX_TRAILERS)
+            .collect()
+    }
+
+    /// Install the byte-offset reach used to gate DASH on its whole file (boot does this).
+    pub fn set_trailer_reacher(&self, r: crate::shim_probe::Reacher) {
+        *self.trailer_reach.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+    }
+
+    /// Start resolving the first trailer in the background as soon as the
+    /// detail shelf is served. The screen autoplays after `DWELL_S` (2 s), and
+    /// the resolve is the slow half (Node spawn, visitor fetch, player call,
+    /// tail checks); doing it here means the player's first Part request finds
+    /// the MPD already in `trailer_dash` instead of waiting for it.
+    ///
+    /// Only the first tile is warmed — the rest resolve on the click that asks
+    /// for them (`trailer_row_at`). A no-op under test so call counts stay
+    /// deterministic, and a cheap check of the published maps keeps a cached
+    /// page from spawning a thread per open.
+    fn prefetch_trailer(self: &Arc<Self>, parent: i64) {
+        #[cfg(test)]
+        {
+            let _ = parent;
+            return;
+        }
+        #[cfg(not(test))]
+        {
+            if self.playable_candidates(parent).is_empty() {
+                return;
+            }
+            let dash_pid = trailer_rk_at(parent, 0) * 1000 + 998;
+            let muxed_pid = trailer_rk_at(parent, 0) * 1000 + 999;
+            let already = self
+                .trailer_dash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&dash_pid)
+                || self
+                    .trailer_parts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&muxed_pid);
+            if already {
+                return;
+            }
+            {
+                let mut warm = self.trailer_warm.lock().unwrap_or_else(|e| e.into_inner());
+                if !warm.insert(parent) {
+                    return;
+                }
+                if warm.len() > 64 {
+                    warm.clear();
+                    warm.insert(parent);
+                }
+            }
+            let me = Arc::clone(self);
+            let spawned = std::thread::Builder::new()
+                .name("trailer-warm".into())
+                .spawn(move || {
+                    let _ = me.trailer_row_at(parent, 0);
+                    me.trailer_warm
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&parent);
+                });
+            if spawned.is_err() {
+                self.trailer_warm
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&parent);
+            }
+        }
+    }
+
+    /// Can the whole DASH pair be fetched? googlevideo grants most anonymous client identities
+    /// only the first 60 s of a trailer's adaptive track — the head answers and every later range
+    /// is `403`, so the track starts and never finishes. Ask for the last 64 KiB of each track and
+    /// publish the DASH row only when both answer. `true` when no reacher is installed (host bin,
+    /// tests), where the probe alone decides exactly as before.
+    ///
+    /// The two tracks are checked together: each is head→tail on its own, so serialising them
+    /// would spend four round trips where two are enough.
+    fn trailer_tracks_reachable(&self, video: &str, audio: &str) -> bool {
+        let reach = self
+            .trailer_reach
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(reach) = reach else { return true };
+        let deadline = std::time::Duration::from_secs(6);
+        let check = |label: &str, url: &str| -> bool {
+            let size = match reach(url, 0, deadline) {
+                Ok(size) => size,
+                Err(e) => {
+                    plx_base::eventlog::log(&format!("trailer: dash {label} open failed: {e}"));
+                    return false;
+                }
+            };
+            if size <= 0 {
+                return true;
+            }
+            let tail = (size - 65_536).max(0);
+            if let Err(e) = reach(url, tail, deadline) {
+                plx_base::eventlog::log(&format!(
+                    "trailer: dash {label} throttled — refuses {} of {size}: {e}",
+                    tail
+                ));
+                return false;
+            }
+            true
+        };
+        let ok = std::thread::scope(|scope| {
+            let v = scope.spawn(|| check("video", video));
+            let a = check("audio", audio);
+            (v.join().unwrap_or(false), a)
+        });
+        if ok.0 && ok.1 {
+            plx_base::eventlog::log("trailer: dash pair served to its end");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Muxed trailer probe: `mp4`/`mov` + `h264` + decodable `aac`. Hard-gated
+    /// (the muxed `Media` is only served when true); logs the verdict.
+    fn trailer_probe_ok_muxed_logged(&self, url: &str) -> bool {
+        let Some(res) = self.probes.probe(url) else {
+            plx_base::eventlog::log("trailer: muxed probe no prober");
+            return false;
+        };
+        match res {
+            Err(e) => {
+                plx_base::eventlog::log(&format!("trailer: muxed probe failed: {e}"));
+                false
+            }
+            Ok(p) => {
+                let ok = (p.container == "mp4" || p.container == "mov")
+                    && p.video.as_ref().is_some_and(|v| v.codec == "h264")
+                    && p.video_decodable
+                    && p.audio.iter().any(|a| a.codec == "aac" && a.decodable);
+                plx_base::eventlog::log(&format!(
+                    "trailer: muxed probe ok={ok} container={} vcodec={} aac={}",
+                    p.container,
+                    p.video.as_ref().map(|v| v.codec.as_str()).unwrap_or("-"),
+                    p.audio.iter().any(|a| a.codec == "aac")
+                ));
+                ok
+            }
+        }
+    }
+
+    /// DASH video-track probe: `mp4`/`mov`/`webm` + `h264`/`vp9` + decodable
+    /// video. Probes the address the player will actually open — the proxy
+    /// loopback URL when the proxy answered, else the raw video-track URL.
+    /// `None` = no prober (unverified: the caller publishes the DASH as
+    /// before); `Some(false)` = a known refusal (e.g. a 403 on the
+    /// video-only URL), which must not ship as a playable `Media`.
+    fn trailer_probe_dash_logged(&self, url: &str) -> Option<bool> {
+        let res = self.probes.probe(url)?;
+        match res {
+            Err(e) => {
+                plx_base::eventlog::log(&format!("trailer: dash probe failed: {e}"));
+                Some(false)
+            }
+            Ok(p) => {
+                let ok = matches!(p.container.as_str(), "mp4" | "mov" | "webm")
+                    && p.video
+                        .as_ref()
+                        .is_some_and(|v| v.codec == "h264" || v.codec == "vp9" || v.codec == "av1")
+                    && p.video_decodable;
+                plx_base::eventlog::log(&format!(
+                    "trailer: dash probe ok={ok} container={} vcodec={}",
+                    p.container,
+                    p.video.as_ref().map(|v| v.codec.as_str()).unwrap_or("-")
+                ));
+                Some(ok)
+            }
+        }
+    }
+
+    /// The trailer clip row for one shelf tile: own `ratingKey`
+    /// (`trailer_rk_at(parent, index)`), own `Media[]` (DASH idx0 when its
+    /// probe passed, muxed idx1) and a Part in each map. `None` = no candidate
+    /// or a muxed refusal. `dash_urls` carries the proxy BaseURLs for the DASH
+    /// manifest (`None` = raw googlevideo, proxy unavailable).
+    fn build_trailer_row(
+        &self,
+        parent: i64,
+        index: usize,
+        resolved: &crate::shim_trailer::TrailerResolved,
+        youtube_id: &str,
+        title: &str,
+        dash_urls: Option<(String, String)>,
+    ) -> Option<Value> {
+        let clip_rk = trailer_rk_at(parent, index);
+        let dash_part_id = clip_rk * 1000 + 998;
+        let muxed_part_id = clip_rk * 1000 + 999;
+        // i64 guard: ~5e9 * 1000 + 999 << i64::MAX, so the stranded part ids
+        // can never wrap into another title's range.
+        debug_assert!(dash_part_id < i64::MAX && muxed_part_id < i64::MAX);
+        let mut media: Vec<Value> = Vec::new();
+        if let Some(d) = &resolved.dash {
+            let vmime = d.video_mime.to_ascii_lowercase();
+            let is_vp9 = vmime.contains("vp9");
+            let is_av1 = vmime.contains("av01") || vmime.contains("av1");
+            let (container, vcodec) = if is_vp9 {
+                ("webm", "vp9")
+            } else if is_av1 {
+                ("mp4", "av1")
+            } else {
+                ("mp4", "h264")
+            };
+            let duration = d.duration_ms;
+            let bitrate_kbps = ((d.video_bitrate.max(0) + d.audio_bitrate.max(0)) / 1000) as i64;
+            let (video_url, audio_url) = match &dash_urls {
+                Some((v, a)) => (Some(v.as_str()), Some(a.as_str())),
+                None => (None, None),
+            };
+            let mpd = dash_manifest(d, video_url, audio_url);
+            self.trailer_dash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(dash_part_id, mpd);
+            let frame = if d.fps >= 49 {
+                "60p"
+            } else if d.fps >= 29 {
+                "NTSC"
+            } else {
+                "24p"
+            };
+            let res = if d.height >= 2000 || d.width >= 3800 {
+                "4k"
+            } else if d.height >= 1000 || d.width >= 1900 {
+                "1080"
+            } else if d.height >= 700 || d.width >= 1260 {
+                "720"
+            } else if d.height >= 560 {
+                "576"
+            } else {
+                "sd"
+            };
+            media.push(json!({
+                "id": dash_part_id,
+                "duration": duration,
+                "bitrate": bitrate_kbps,
+                "width": d.width,
+                "height": d.height,
+                "videoResolution": res,
+                "container": container,
+                "videoCodec": vcodec,
+                "audioCodec": "aac",
+                "audioChannels": 2,
+                "videoProfile": "",
+                "videoFrameRate": frame,
+                "title": format!("Trailer ({}p)", d.height),
+                "addon_name": "YouTube",
+                "Part": [{
+                    "id": dash_part_id,
+                    "key": format!("/library/parts/{dash_part_id}/0/file.mpd"),
+                    "duration": duration,
+                    "file": "",
+                    "size": 0,
+                    "container": container,
+                    "Stream": [
+                        {"id": dash_part_id * 10 + 1, "streamType": 1, "codec": vcodec, "index": 0,
+                         "width": d.width, "height": d.height, "frameRate": d.fps as f64,
+                         "bitDepth": 8, "displayTitle": format!("{} ({})", res.to_uppercase(), vcodec.to_uppercase()),
+                         "selected": true, "default": true},
+                        {"id": dash_part_id * 10 + 2, "streamType": 2, "codec": "aac", "index": 1,
+                         "channels": 2, "language": "en", "languageCode": "en",
+                         "title": "AAC", "displayTitle": "en (AAC 2ch)",
+                         "selected": true, "default": true},
+                    ],
+                }],
+            }));
+        }
+        if let Some(muxed_url) = &resolved.muxed_url {
+            let duration = resolved.dash.as_ref().map(|d| d.duration_ms).unwrap_or(0);
+            let height = resolved.muxed_height;
+            let width = match height {
+                0 => 0,
+                h if h >= 2000 => 3840,
+                h if h >= 1000 => 1920,
+                h if h >= 700 => 1280,
+                h => h * 16 / 9,
+            };
+            let res = if height >= 1000 || width >= 1900 {
+                "1080"
+            } else if height >= 700 || width >= 1260 {
+                "720"
+            } else if height >= 560 {
+                "576"
+            } else {
+                "sd"
+            };
+            self.trailer_parts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(muxed_part_id, muxed_url.clone());
+            media.push(json!({
+                "id": muxed_part_id,
+                "duration": duration,
+                "bitrate": 0,
+                "width": width,
+                "height": height,
+                "videoResolution": res,
+                "container": "mp4",
+                "videoCodec": "h264",
+                "audioCodec": "aac",
+                "audioChannels": 2,
+                "videoProfile": "",
+                "videoFrameRate": "24p",
+                "title": format!("Trailer ({}p)", height),
+                "addon_name": "YouTube",
+                "Part": [{
+                    "id": muxed_part_id,
+                    "key": format!("/library/parts/{muxed_part_id}/0/file.mp4"),
+                    "duration": duration,
+                    "file": "",
+                    "size": 0,
+                    "container": "mp4",
+                    "Stream": [
+                        {"id": muxed_part_id * 10 + 1, "streamType": 1, "codec": "h264", "index": 0,
+                         "width": width, "height": height, "frameRate": 24.0,
+                         "bitDepth": 8, "displayTitle": format!("{} (H264)", res.to_uppercase()),
+                         "selected": true, "default": true},
+                        {"id": muxed_part_id * 10 + 2, "streamType": 2, "codec": "aac", "index": 1,
+                         "channels": 2, "language": "en", "languageCode": "en",
+                         "title": "AAC", "displayTitle": "en (AAC 2ch)",
+                         "selected": true, "default": true},
+                    ],
+                }],
+            }));
+        }
+        if media.is_empty() {
+            return None;
+        }
+        let duration = media[0]["duration"].as_i64().unwrap_or(0);
+        let guid = if index == 0 {
+            format!("nuvio://trailer/{parent}")
+        } else {
+            format!("nuvio://trailer/{parent}/{index}")
+        };
+        Some(json!({
+            "ratingKey": clip_rk.to_string(),
+            "key": format!("/library/metadata/{clip_rk}"),
+            "guid": guid,
+            "type": "clip",
+            "subtype": "trailer",
+            "extraType": 1,
+            "title": title,
+            "summary": "",
+            "thumb": format!("https://img.youtube.com/vi/{youtube_id}/hqdefault.jpg"),
+            "librarySectionID": 1,
+            "librarySectionKey": "/library/sections/1",
+            "duration": duration,
+            "Media": Value::Array(media),
+        }))
+    }
+
+    /// Resolve the FIRST trailer for `parent`, walking the candidates the
+    /// shelf shows. A candidate whose DASH pair fails the probe/tail gate falls
+    /// through to the next; the first verified muxed row is kept only when no
+    /// DASH candidate survives. The result is published at index 0, so the
+    /// shelf's first tile and `GET /library/metadata/{rk}/trailer` agree.
+    ///
+    /// This never runs on a detail open: `/extras` answers the shelf rows from
+    /// `trailer_shelf_rows`, and the resolve happens on the player's first Part
+    /// request (`part`) or in the background warm that request then finds.
+    fn trailer_row(&self, parent: i64) -> Option<Value> {
+        let candidates = self.playable_candidates(parent);
+        let mut muxed_only: Option<(TrailerCandidate, crate::shim_trailer::TrailerResolved)> =
+            None;
+        for candidate in &candidates {
+            let Some(resolved) = crate::shim_trailer::resolve_cached(
+                self.trailer_resolver.as_ref(),
+                &self.trailer_cache,
+                &self.trailer_flight,
+                &candidate.youtube_id,
+            ) else {
+                continue;
+            };
+            if resolved.dash.is_some() {
+                if let Some(row) = self.publish_trailer(parent, 0, resolved, candidate) {
+                    return Some(row);
+                }
+                continue;
+            }
+            if muxed_only.is_none() {
+                muxed_only = Some((candidate.clone(), resolved));
+            }
+        }
+        let (candidate, resolved) = muxed_only?;
+        self.publish_trailer(parent, 0, resolved, &candidate)
+    }
+
+    /// Resolve the trailer at `index` exactly — the tile the viewer clicked,
+    /// not whichever candidate answers best. `None` leaves that Part 404 rather
+    /// than silently playing a different trailer.
+    fn trailer_row_at(&self, parent: i64, index: usize) -> Option<Value> {
+        let candidates = self.playable_candidates(parent);
+        if let Some(candidate) = candidates.get(index) {
+            let resolved = crate::shim_trailer::resolve_cached(
+                self.trailer_resolver.as_ref(),
+                &self.trailer_cache,
+                &self.trailer_flight,
+                &candidate.youtube_id,
+            );
+            if let Some(row) = resolved
+                .and_then(|resolved| self.publish_trailer(parent, index, resolved, candidate))
+            {
+                return Some(row);
+            }
+            if index != 0 {
+                // The viewer pressed THIS tile; do not silently play another.
+                return None;
+            }
+        }
+        // Tile 0 is the autoplay tile: if its grant is limited, keep the old
+        // walk so the screen still gets a playable trailer instead of a 404.
+        if index == 0 {
+            return self.trailer_row(parent);
+        }
+        None
+    }
+
+    /// Probe/tail-gate one resolved candidate and build its clip row, or
+    /// `None` when it must not be served. `index` names the shelf tile this
+    /// candidate belongs to, so its clip key and Part ids are that tile's.
+    fn publish_trailer(
+        &self,
+        parent: i64,
+        index: usize,
+        resolved: crate::shim_trailer::TrailerResolved,
+        candidate: &TrailerCandidate,
+    ) -> Option<Value> {
+        let youtube_id = candidate.youtube_id.as_str();
+        if let Some(dash) = &resolved.dash {
+            // Direct googlevideo bytes: the manifest carries the signed https
+            // BaseURLs, and `curlio` states the bounded window those URLs
+            // require (no UA override, no proxy hop — the proxy child stays in
+            // the tree unused for track bytes).
+            let dash_urls: Option<(String, String)> = None;
+            let probe_url = &dash.video_url;
+            // Probe picks the codec; reach proves the file's END. A throttled
+            // pair passes the probe and then fails mid-playback, which is worse
+            // than a consistent 360p row. Both asks are independent network
+            // reads — run them together so the gate costs one round trip, not
+            // two, on the autoplay path.
+            let (reachable, probed) = std::thread::scope(|scope| {
+                let reach =
+                    scope.spawn(|| self.trailer_tracks_reachable(&dash.video_url, &dash.audio_url));
+                let probe = self.trailer_probe_dash_logged(probe_url);
+                (reach.join().unwrap_or(false), probe)
+            });
+            match probed.map(|ok| ok && reachable) {
+                Some(false) => {
+                    // Known-bad DASH (e.g. a 403 on the video-only URL):
+                    // fall back to the verified muxed row so autoplay still
+                    // plays 360p instead of erroring on idx0.
+                    let muxed_url = resolved
+                        .muxed_url
+                        .clone()
+                        .unwrap_or_else(|| resolved.url.clone());
+                    if muxed_url.is_empty() {
+                        return None;
+                    }
+                    if !self.trailer_probe_ok_muxed_logged(&muxed_url) {
+                        plx_base::eventlog::log(&format!(
+                            "trailer: muxed probe refusal rk={parent} (dash fallback)"
+                        ));
+                        return None;
+                    }
+                    let mut muxed_only = resolved.clone();
+                    muxed_only.dash = None;
+                    return self.build_trailer_row(
+                        parent,
+                        index,
+                        &muxed_only,
+                        youtube_id,
+                        &candidate.title,
+                        None,
+                    );
+                }
+                Some(true) | None => {
+                    return self.build_trailer_row(
+                        parent,
+                        index,
+                        &resolved,
+                        youtube_id,
+                        &candidate.title,
+                        dash_urls,
+                    );
+                }
+            }
+        }
+        let muxed_url = resolved
+            .muxed_url
+            .clone()
+            .unwrap_or_else(|| resolved.url.clone());
+        if muxed_url.is_empty() {
+            return None;
+        }
+        if !self.trailer_probe_ok_muxed_logged(&muxed_url) {
+            plx_base::eventlog::log(&format!("trailer: muxed probe refusal rk={parent}"));
+            return None;
+        }
+        self.build_trailer_row(
+            parent,
+            index,
+            &resolved,
+            youtube_id,
+            &candidate.title,
+            None,
+        )
+    }
+
+    /// Every trailer's shelf row, built **without** a YouTube resolve.
+    ///
+    /// `/extras` is on the detail page's critical path, and resolving there
+    /// spawned a Node child for every title touched: measured as a 3–5 s detail
+    /// open against a 1 s baseline, serialized by the decipher gate. Each clip's
+    /// DASH Part key is deterministic, so the shelf advertises all of them
+    /// immediately and the player resolves the one it asked for.
+    fn trailer_shelf_rows(&self, parent: i64) -> Vec<Value> {
+        self.playable_candidates(parent)
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| self.trailer_shelf_row_at(parent, index, candidate))
+            .collect()
+    }
+
+    fn trailer_shelf_row_at(
+        &self,
+        parent: i64,
+        index: usize,
+        candidate: &TrailerCandidate,
+    ) -> Value {
+        let clip_rk = trailer_rk_at(parent, index);
+        let dash_part_id = clip_rk * 1000 + 998;
+        let guid = if index == 0 {
+            format!("nuvio://trailer/{parent}")
+        } else {
+            format!("nuvio://trailer/{parent}/{index}")
+        };
+        json!({
+            "ratingKey": clip_rk.to_string(),
+            "key": format!("/library/metadata/{clip_rk}"),
+            "guid": guid,
+            "type": "clip",
+            "subtype": "trailer",
+            "extraType": 1,
+            "title": candidate.title,
+            "summary": "",
+            "thumb": format!(
+                "https://img.youtube.com/vi/{}/hqdefault.jpg",
+                candidate.youtube_id
+            ),
+            "librarySectionID": 1,
+            "librarySectionKey": "/library/sections/1",
+            "duration": 0,
+            "Media": [{
+                "id": dash_part_id,
+                "duration": 0,
+                "bitrate": 0,
+                "width": 1920,
+                "height": 1080,
+                "videoResolution": "1080",
+                "container": "mp4",
+                "videoCodec": "h264",
+                "audioCodec": "aac",
+                "audioChannels": 2,
+                "videoProfile": "",
+                "videoFrameRate": "24p",
+                "title": "Trailer",
+                "addon_name": "YouTube",
+                "Part": [{
+                    "id": dash_part_id,
+                    "key": format!("/library/parts/{dash_part_id}/0/file.mpd"),
+                    "duration": 0,
+                    "file": "",
+                    "size": 0,
+                    "container": "mp4",
+                    "Stream": [],
+                }],
+            }],
+        })
+    }
+
+    /// `GET /library/metadata/{rk}/extras` (the shelf: every trailer, no
+    /// resolve) and `GET /library/metadata/{rk}/trailer` (the single resolved
+    /// clip row the bridge reads).
+    fn trailer_single_response(&self, rk: &str, shelf: bool) -> Response {
+        let Ok(parent) = rk.parse::<i64>() else {
+            return Response::json(&container(json!({"Metadata": []})));
+        };
+        let rows = if shelf {
+            self.trailer_shelf_rows(parent)
+        } else {
+            self.trailer_row(parent).into_iter().collect()
+        };
+        Response::json(&container(json!({"Metadata": rows})))
     }
 
     fn related_hub(&self, rk: i64) -> Response {
@@ -2872,7 +4125,8 @@ impl Shim {
                                 .iter()
                                 .filter(|movie| {
                                     movie.id > 0
-                                        && movie.id <= i64::MAX as u64 - TMDB_FALLBACK_KEY_BASE as u64
+                                        && movie.id
+                                            <= i64::MAX as u64 - TMDB_FALLBACK_KEY_BASE as u64
                                 })
                                 .take(10)
                                 .map(|movie| self.tmdb_recommendation_row(movie))
@@ -2901,9 +4155,11 @@ impl Shim {
                     } else if let Some(collection) = &cached.collection_ref {
                         if let Some(parts) = self.tmdb_collection(collection.id) {
                             self.remember_collection(&parts);
-                            hubs.extend(
-                                self.collection_hub_json(&parts, cached.tmdb_id, &collection.name),
-                            );
+                            hubs.extend(self.collection_hub_json(
+                                &parts,
+                                cached.tmdb_id,
+                                &collection.name,
+                            ));
                             self.enrich.remember_collection(&type_, &id, &parts);
                         }
                     }
@@ -3000,7 +4256,12 @@ impl Shim {
     /// app's collection store resolves; the franchise itself is kept in [`Shim::collections`] so
     /// the heading's page (`/library/sections/{s}/collections` → header → children) answers
     /// without a second TMDB round trip.
-    fn collection_hub(&self, rk: i64, details: &TmdbMovieDetails, client: &TmdbClient) -> Option<Value> {
+    fn collection_hub(
+        &self,
+        rk: i64,
+        details: &TmdbMovieDetails,
+        client: &TmdbClient,
+    ) -> Option<Value> {
         let collection = details
             .movie
             .belongs_to_collection
@@ -3288,6 +4549,13 @@ impl Shim {
         if let Some(logo) = tmdb_logo(details.images.as_ref()) {
             row["clearLogo"] = json!(logo);
         }
+        // Synthetic keys never reach `enrich_row` (no `Ident`), so their
+        // trailer `Extras` come from the details just parsed — TMDB `videos`
+        // is the only source a related show has.
+        let candidates = self.trailer_candidates_from_videos(rk, details.videos.as_ref());
+        if !candidates.is_empty() {
+            row["Extras"] = trailer_extras(rk, &candidates);
+        }
         row
     }
 
@@ -3339,6 +4607,10 @@ impl Shim {
         }
         if let Some(logo) = tmdb_logo(details.images.as_ref()) {
             row["clearLogo"] = json!(logo);
+        }
+        let candidates = self.trailer_candidates_from_videos(rk, details.videos.as_ref());
+        if !candidates.is_empty() {
+            row["Extras"] = trailer_extras(rk, &candidates);
         }
         row
     }
@@ -3412,7 +4684,12 @@ impl Shim {
 
     /// The header record of [`Self::person_profile_page`], from TMDB's person record and the
     /// department counts of the same career answer.
-    fn person_profile_row(&self, details: &TmdbPerson, cast: &[TmdbCredit], crew: &[TmdbCredit]) -> Value {
+    fn person_profile_row(
+        &self,
+        details: &TmdbPerson,
+        cast: &[TmdbCredit],
+        crew: &[TmdbCredit],
+    ) -> Value {
         let mut departments: Vec<(usize, String, String)> = Vec::new();
         let acted = cast
             .iter()
@@ -3423,13 +4700,17 @@ impl Shim {
         }
         let mut crew_departments: HashMap<String, (usize, String, String)> = HashMap::new();
         for credit in crew {
-            let Some((kind, title)) = person_department_group(&credit.department) else { continue };
+            let Some((kind, title)) = person_department_group(&credit.department) else {
+                continue;
+            };
             // The catch-all bucket is a tab, never a role: a header reading "Actor · Producer ·
             // Other" says less than the two departments the viewer came to know them by.
             if kind == "other" || person_credit_item(credit, &credit.job).is_none() {
                 continue;
             }
-            let entry = crew_departments.entry(kind.clone()).or_insert((0, kind, title));
+            let entry = crew_departments
+                .entry(kind.clone())
+                .or_insert((0, kind, title));
             entry.0 += 1;
         }
         departments.extend(crew_departments.into_values());
@@ -3464,9 +4745,16 @@ impl Shim {
         }
         let mut by_department: Vec<(String, String, Vec<Value>)> = Vec::new();
         for credit in crew {
-            let Some((kind, title)) = person_department_group(&credit.department) else { continue };
-            let Some(row) = person_credit_item(credit, &credit.job) else { continue };
-            match by_department.iter_mut().find(|(known, _, _)| *known == kind) {
+            let Some((kind, title)) = person_department_group(&credit.department) else {
+                continue;
+            };
+            let Some(row) = person_credit_item(credit, &credit.job) else {
+                continue;
+            };
+            match by_department
+                .iter_mut()
+                .find(|(known, _, _)| *known == kind)
+            {
                 Some((_, _, rows)) => rows.push(row),
                 None => by_department.push((kind, title, vec![row])),
             }
@@ -3499,11 +4787,17 @@ impl Shim {
                 let (year, mut row) = match credit.media_type.as_str() {
                     "movie" => (
                         year_of(credit.release_date.as_deref()).unwrap_or(0),
-                        self.tmdb_fallback_row(&credit.movie(), TMDB_FALLBACK_KEY_BASE + credit.id as i64),
+                        self.tmdb_fallback_row(
+                            &credit.movie(),
+                            TMDB_FALLBACK_KEY_BASE + credit.id as i64,
+                        ),
                     ),
                     "tv" => (
                         year_of(credit.first_air_date.as_deref()).unwrap_or(0),
-                        self.tmdb_show_fallback_row(&credit.show(), TMDB_SHOW_KEY_BASE + credit.id as i64),
+                        self.tmdb_show_fallback_row(
+                            &credit.show(),
+                            TMDB_SHOW_KEY_BASE + credit.id as i64,
+                        ),
                     ),
                     // Neither a film nor a show. The page has exactly two shelves, and filing an
                     // unknown kind under either would be a guess.
@@ -3540,7 +4834,12 @@ impl Shim {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .find(|row| row["ratingKey"].as_str().and_then(|v| v.parse::<i64>().ok()) == Some(rk))
+            .find(|row| {
+                row["ratingKey"]
+                    .as_str()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    == Some(rk)
+            })
             .cloned();
         cached.or_else(|| self.tmdb_synthetic_row(rk))
     }
@@ -3618,7 +4917,12 @@ impl Shim {
     /// (graded OK on every webOS release in fwcompat's inventory); where `available()`
     /// is false the Node server at `torrent_server()` remains the only path, so this is
     /// a preferred-engine, never engine-only.
-    fn resolve_with_sbengine(&self, stream: &Stream, season: Option<u32>, episode: Option<u32>) -> Option<String> {
+    fn resolve_with_sbengine(
+        &self,
+        stream: &Stream,
+        season: Option<u32>,
+        episode: Option<u32>,
+    ) -> Option<String> {
         use plx_stremio::torrent;
         if !plx_stremio::sbengine::available() {
             return None;
@@ -3641,12 +4945,18 @@ impl Shim {
                 }
                 let mut m = format!("magnet:?xt=urn:btih:{hash}");
                 for s in &sources {
-                    let bare = s.strip_prefix("tracker:").or_else(|| s.strip_prefix("dht:")).unwrap_or(s);
+                    let bare = s
+                        .strip_prefix("tracker:")
+                        .or_else(|| s.strip_prefix("dht:"))
+                        .unwrap_or(s);
                     // dht: entries are not trackers; skip them as `tr=` params.
                     if s.starts_with("dht:") {
                         continue;
                     }
-                    m.push_str(&format!("&tr={}", plx_stremio::addon_http::encode_component(bare)));
+                    m.push_str(&format!(
+                        "&tr={}",
+                        plx_stremio::addon_http::encode_component(bare)
+                    ));
                 }
                 Some(m)
             })?;
@@ -3788,6 +5098,51 @@ impl Shim {
         Option<Result<crate::shim_probe::ProbeInfo, String>>,
         Duration,
     )> {
+        // Trailer clip keys are their own row: own Media/Parts, probe-gated at
+        // resolve time. Returning the clip Media directly (with a synthetic
+        // `Ok` verdict) makes `/decision` direct-play the trailer Part;
+        // falling through to the film's ranked streams is the "clicking the
+        // trailer played the debrid movie" bug.
+        if let Some((parent, index)) = trailer_key_parts(rk) {
+            let _ = probe_index;
+            let row = self.trailer_row_at(parent, index)?;
+            let media0 = row["Media"][0].clone();
+            let container = media0["container"].as_str().unwrap_or("mp4").to_string();
+            let vcodec = media0["videoCodec"].as_str().unwrap_or("h264").to_string();
+            let width = media0["width"].as_i64().unwrap_or(0) as i32;
+            let height = media0["height"].as_i64().unwrap_or(0) as i32;
+            let duration_ms = media0["duration"].as_i64().unwrap_or(0);
+            let probe = crate::shim_probe::ProbeInfo {
+                container,
+                duration_ms,
+                size: 0,
+                video_decodable: true,
+                video: Some(crate::shim_probe::Video {
+                    codec: vcodec,
+                    width,
+                    height,
+                    fps: 24.0,
+                    bit_depth: 8,
+                    profile: 0,
+                    color_trc: 0,
+                    color_primaries: 0,
+                    color_space: 0,
+                    dovi: None,
+                }),
+                audio: vec![crate::shim_probe::Audio {
+                    codec: "aac".into(),
+                    profile: 0,
+                    channels: 2,
+                    sample_rate: 0,
+                    language: "en".into(),
+                    title: String::new(),
+                    default: true,
+                    decodable: true,
+                }],
+                subtitles: Vec::new(),
+            };
+            return Some((row, Some(Ok(probe)), Duration::ZERO));
+        }
         let ident = self.keys.ident(rk);
         let fallback = if ident.is_none() {
             self.tmdb_fallback_movie(rk)
@@ -3824,8 +5179,13 @@ impl Shim {
                 Duration::ZERO
             };
             let ranked_at = Instant::now();
-            let (ranked, subs, done) =
-                self.ranked(rk, &ident, u32::try_from(dur / 1000).ok(), wait, probe_index.is_some());
+            let (ranked, subs, done) = self.ranked(
+                rk,
+                &ident,
+                u32::try_from(dur / 1000).ok(),
+                wait,
+                probe_index.is_some(),
+            );
             streams_wait = ranked_at.elapsed();
             let mut media = Vec::with_capacity(ranked.len().max(1));
             // Pre-probe the leading stream once the list is complete, off this request: the play that
@@ -3912,7 +5272,9 @@ impl Shim {
                         .map(|item| if is_series(&item.type_) { TMDB_SHOW_KEY_BASE } else { TMDB_FALLBACK_KEY_BASE } + tmdb_id as i64)
                 })
                 .unwrap_or(-1)
-        } else { rk };
+        } else {
+            rk
+        };
         let index: usize = req
             .q("mediaIndex")
             .and_then(|v| v.parse().ok())
@@ -4013,8 +5375,7 @@ impl Shim {
                     row["thumb"] = json!(self.poster_url(&id, row["thumb"].as_str()));
                 }
                 if row.get("UltraBlurColors").is_none() {
-                    row["UltraBlurColors"] =
-                        blur_colors(row["thumb"].as_str().unwrap_or_default());
+                    row["UltraBlurColors"] = blur_colors(row["thumb"].as_str().unwrap_or_default());
                 }
                 Some(row)
             })
@@ -4054,7 +5415,10 @@ impl Shim {
         Ok(items
             .into_iter()
             .map(|p| MyListEntry {
-                rating_key: self.keys.key_of(&Ident::Title { type_: p.type_.clone(), id: p.id.clone() }),
+                rating_key: self.keys.key_of(&Ident::Title {
+                    type_: p.type_.clone(),
+                    id: p.id.clone(),
+                }),
                 type_: p.type_.to_string(),
                 id: p.id.clone(),
                 title: p.name.clone(),
@@ -4068,7 +5432,11 @@ impl Shim {
 
     /// Set one title's My List membership by the shim's numeric key (the Write half of
     /// [`my_list_entries`](Self::my_list_entries)).
-    pub fn set_my_list_saved(&self, rating_key: i64, saved: bool) -> plx_stremio::model::Result<()> {
+    pub fn set_my_list_saved(
+        &self,
+        rating_key: i64,
+        saved: bool,
+    ) -> plx_stremio::model::Result<()> {
         if !self.account.signed_in() {
             return Err(plx_stremio::model::Error::Status(401));
         }
@@ -4078,15 +5446,19 @@ impl Shim {
     /// The one save/remove path: resolve the key to the account's own id, resolve the metadata the
     /// addon needs, and let the account confirm the new list.
     fn save_my_list_title(&self, rk: i64, saved: bool) -> plx_stremio::model::Result<()> {
-        let Some(Ident::Title { type_, id }) =
-            self.keys.ident(rk).or_else(|| synthetic_ident(rk))
+        let Some(Ident::Title { type_, id }) = self.keys.ident(rk).or_else(|| synthetic_ident(rk))
         else {
             return Err(plx_stremio::model::Error::Status(404));
         };
         let (saved_type, saved_id) = translate_to_stremio_id(rk)
             .map(|id| {
                 (
-                    if synthetic_show_tmdb_id(rk).is_some() { "series" } else { "movie" }.to_owned(),
+                    if synthetic_show_tmdb_id(rk).is_some() {
+                        "series"
+                    } else {
+                        "movie"
+                    }
+                    .to_owned(),
                     id,
                 )
             })
@@ -4112,33 +5484,48 @@ impl Shim {
         // may be hours old. Requiring a full `Meta` here made a Remove fail with a 404 once the
         // cache had forgotten the title, while the Add (made from the page that had just loaded
         // it) still worked.
-        let meta = match Self::write_meta(self.meta(&saved_type, save_id), &saved_type, save_id, saved) {
-            Some(meta) => meta,
-            None => {
-                let (name, poster_path, description, release_info) = if saved_type == "series" {
-                    let tmdb_id = synthetic_show_tmdb_id(rk)
-                        .ok_or(plx_stremio::model::Error::Status(404))?;
-                    let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
-                    let details = client.tv_details(tmdb_id)?;
-                    (details.show.name, details.show.poster_path, details.show.overview, details.show.first_air_date)
-                } else {
-                    let tmdb_id = synthetic_tmdb_id(rk)
-                        .ok_or(plx_stremio::model::Error::Status(404))?;
-                    let client = client.as_ref().ok_or(plx_stremio::model::Error::Status(404))?;
-                    let details = client.movie_details(tmdb_id)?;
-                    (details.movie.title, details.movie.poster_path, details.movie.overview, details.movie.release_date)
-                };
-                Arc::new(Meta {
-                    id: save_id.to_owned(),
-                    type_: saved_type.clone(),
-                    name,
-                    poster: tmdb_image(poster_path.as_deref()),
-                    description,
-                    release_info: year_of(release_info.as_deref()).map(|year| year.to_string()),
-                    ..Meta::default()
-                })
-            }
-        };
+        let meta =
+            match Self::write_meta(self.meta(&saved_type, save_id), &saved_type, save_id, saved) {
+                Some(meta) => meta,
+                None => {
+                    let (name, poster_path, description, release_info) = if saved_type == "series" {
+                        let tmdb_id = synthetic_show_tmdb_id(rk)
+                            .ok_or(plx_stremio::model::Error::Status(404))?;
+                        let client = client
+                            .as_ref()
+                            .ok_or(plx_stremio::model::Error::Status(404))?;
+                        let details = client.tv_details(tmdb_id)?;
+                        (
+                            details.show.name,
+                            details.show.poster_path,
+                            details.show.overview,
+                            details.show.first_air_date,
+                        )
+                    } else {
+                        let tmdb_id =
+                            synthetic_tmdb_id(rk).ok_or(plx_stremio::model::Error::Status(404))?;
+                        let client = client
+                            .as_ref()
+                            .ok_or(plx_stremio::model::Error::Status(404))?;
+                        let details = client.movie_details(tmdb_id)?;
+                        (
+                            details.movie.title,
+                            details.movie.poster_path,
+                            details.movie.overview,
+                            details.movie.release_date,
+                        )
+                    };
+                    Arc::new(Meta {
+                        id: save_id.to_owned(),
+                        type_: saved_type.clone(),
+                        name,
+                        poster: tmdb_image(poster_path.as_deref()),
+                        description,
+                        release_info: year_of(release_info.as_deref()).map(|year| year.to_string()),
+                        ..Meta::default()
+                    })
+                }
+            };
         eprintln!("saving My List item: type={} id={}", meta.type_, meta.id);
         self.account.set_saved(&meta, saved)
     }
@@ -4147,10 +5534,19 @@ impl Shim {
     /// `(type, id)`; the name, poster and description exist to CREATE the row, not to delete it.
     /// An add therefore still requires the cache (or the TMDB fallback), while a removal may go
     /// ahead without it.
-    fn write_meta(cached: Option<Arc<Meta>>, saved_type: &str, save_id: &str, saved: bool) -> Option<Arc<Meta>> {
+    fn write_meta(
+        cached: Option<Arc<Meta>>,
+        saved_type: &str,
+        save_id: &str,
+        saved: bool,
+    ) -> Option<Arc<Meta>> {
         cached.or_else(|| {
             (!saved).then(|| {
-                Arc::new(Meta { id: save_id.to_owned(), type_: saved_type.to_owned(), ..Meta::default() })
+                Arc::new(Meta {
+                    id: save_id.to_owned(),
+                    type_: saved_type.to_owned(),
+                    ..Meta::default()
+                })
             })
         })
     }
@@ -4177,14 +5573,10 @@ impl Shim {
     }
 
     fn saved_item(&self, req: &Request) -> Response {
-        let Some(rk) = req
-            .q("ratingKey")
-            .and_then(|v| v.parse().ok())
-        else {
+        let Some(rk) = req.q("ratingKey").and_then(|v| v.parse().ok()) else {
             return Response::json_status(400, &json!({"error":"invalid title"}));
         };
-        let Some(Ident::Title { type_, id }) =
-            self.keys.ident(rk).or_else(|| synthetic_ident(rk))
+        let Some(Ident::Title { type_, id }) = self.keys.ident(rk).or_else(|| synthetic_ident(rk))
         else {
             return Response::json_status(400, &json!({"error":"invalid title"}));
         };
@@ -4335,10 +5727,13 @@ impl Shim {
         // A hub with no rows is a heading over nothing: drop it rather than draw the heading. The
         // failure that produced it is not cached (see `catalog_range`), so the row returns on the
         // next window read instead of blanking a shelf for the catalog's whole TTL.
-        (got.into_iter()
-            .flatten()
-            .filter(|h| h["size"].as_u64().unwrap_or(0) > 0)
-            .collect(), total)
+        (
+            got.into_iter()
+                .flatten()
+                .filter(|h| h["size"].as_u64().unwrap_or(0) > 0)
+                .collect(),
+            total,
+        )
     }
 
     /// Fill the catalog list and every catalog's first page in the background (boot, or after the
@@ -4384,9 +5779,20 @@ impl Shim {
         let tmdb_rating_key = |raw: &str| {
             let tmdb_id = raw.strip_prefix("tmdb:")?.parse::<u64>().ok()?;
             let saved_id = format!("tmdb:{tmdb_id}");
-            let type_ = self.account.saved_library(false).ok()?.into_iter()
-                .find(|item| item.id == saved_id)?.type_;
-            Some((if is_series(&type_) { TMDB_SHOW_KEY_BASE } else { TMDB_FALLBACK_KEY_BASE } + tmdb_id as i64))
+            let type_ = self
+                .account
+                .saved_library(false)
+                .ok()?
+                .into_iter()
+                .find(|item| item.id == saved_id)?
+                .type_;
+            Some(
+                (if is_series(&type_) {
+                    TMDB_SHOW_KEY_BASE
+                } else {
+                    TMDB_FALLBACK_KEY_BASE
+                } + tmdb_id as i64),
+            )
         };
         match (req.method.as_str(), segs.as_slice()) {
             (_, []) | (_, ["identity"]) => Response::json(&container(json!({
@@ -4481,7 +5887,13 @@ impl Shim {
                     .filter_map(|x| x.parse::<i64>().ok())
                     .filter_map(|k| {
                         if listing {
-                            if let Some(card) = self.cards.lock().unwrap_or_else(|e| e.into_inner()).get(&k).cloned() {
+                            if let Some(card) = self
+                                .cards
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .get(&k)
+                                .cloned()
+                            {
                                 return Some(card);
                             }
                         }
@@ -4535,8 +5947,22 @@ impl Shim {
                 json!({"Metadata": self.leaves(rk.parse().unwrap_or(0))}),
             )),
             (_, ["library", "metadata", rk, "related"]) => {
-                let key = rk.parse().ok().or_else(|| tmdb_rating_key(rk)).unwrap_or(-1);
+                let key = rk
+                    .parse()
+                    .ok()
+                    .or_else(|| tmdb_rating_key(rk))
+                    .unwrap_or(-1);
                 self.related_hub(key)
+            }
+            (_, ["library", "metadata", rk, "trailer"]) => self.trailer_single_response(rk, false),
+            (_, ["library", "metadata", rk, "extras"]) => {
+                let response = self.trailer_single_response(rk, true);
+                // The screen autoplays the first tile after its dwell; resolve
+                // it while the page paints instead of on the click.
+                if let Ok(parent) = rk.parse::<i64>() {
+                    self.prefetch_trailer(parent);
+                }
+                response
             }
             (_, ["library", "metadata", _, ..]) => ok_empty(),
             ("PUT", ["library", "parts", ..]) => ok_empty(),
@@ -4575,7 +6001,9 @@ impl Shim {
                 let Some(collection) = collection else {
                     return Response::json_status(
                         404,
-                        &container(json!({"Metadata": [], "error": "This collection is not available."})),
+                        &container(
+                            json!({"Metadata": [], "error": "This collection is not available."}),
+                        ),
                     );
                 };
                 let (start, size) = page_params(req);
@@ -4636,7 +6064,13 @@ impl Shim {
                     SECTION_MOVIES
                 };
                 let (start, size) = page_params(req);
-                self.catalog_listing(self.first_catalog(section), None, None, start, size.unwrap_or(12))
+                self.catalog_listing(
+                    self.first_catalog(section),
+                    None,
+                    None,
+                    start,
+                    size.unwrap_or(12),
+                )
             }
             (_, ["hubs", "sections", k]) => {
                 let section: i64 = k.parse().unwrap_or(0);
@@ -4846,7 +6280,9 @@ impl Shim {
         // declare is filtered in memory from the fetched rows, so a TMDB baseline genre works even
         // when the catalog has no `genre` extra at all.
         let all = merged_genres(&cat.genres, is_series(&cat.type_));
-        let wanted = genre.map(|g| resolve_genre(&all, g)).filter(|g| !g.is_empty());
+        let wanted = genre
+            .map(|g| resolve_genre(&all, g))
+            .filter(|g| !g.is_empty());
         // A declared genre is forwarded under the addon's OWN spelling; anything else (the TMDB
         // baseline included) is matched against the fetched rows here.
         let native = wanted.and_then(|g| cat.genres.iter().find(|have| genre_matches(have, g)));
@@ -4855,7 +6291,12 @@ impl Shim {
             None => (None, wanted),
         };
         let (rows, total) = self.catalog_range(
-            &cat.key, fetch_genre, match_genre, sort, start, size.min(200),
+            &cat.key,
+            fetch_genre,
+            match_genre,
+            sort,
+            start,
+            size.min(200),
         );
         let rows: Vec<Value> = rows.iter().map(|p| self.preview_row(p)).collect();
         Response::json(&container(
@@ -4915,7 +6356,8 @@ impl Shim {
                     (Some((k, _)), Some((_, desc))) => Some((k, desc)),
                     (other, _) => other,
                 };
-                let mut resp = self.catalog_listing(cat.clone(), genre, sort, start, size.unwrap_or(60));
+                let mut resp =
+                    self.catalog_listing(cat.clone(), genre, sort, start, size.unwrap_or(60));
                 if req.q("includeMeta") == Some("1") {
                     if let Ok(mut v) = serde_json::from_slice::<Value>(&resp.body) {
                         let catalogs = self.section_catalogs(k);
@@ -4929,7 +6371,10 @@ impl Shim {
                             catalogs
                                 .iter()
                                 .map(|c| {
-                                    let listing = format!("/library/sections/{k}/all?catalog={}", pct_encode(&c.key));
+                                    let listing = format!(
+                                        "/library/sections/{k}/all?catalog={}",
+                                        pct_encode(&c.key)
+                                    );
                                     json!({
                                         "key": listing,
                                         "type": if k == SECTION_SHOWS { "show" } else { "movie" },
@@ -4953,9 +6398,13 @@ impl Shim {
                 // genres come first; the TMDB baseline fills the rest so the Filter menu is never
                 // empty, even for a catalog that declares no `genre` extra.
                 let cat = self.section_catalog(req, k);
-                let series = cat.as_ref().map_or(k == SECTION_SHOWS, |c| is_series(&c.type_));
+                let series = cat
+                    .as_ref()
+                    .map_or(k == SECTION_SHOWS, |c| is_series(&c.type_));
                 let genres = merged_genres(
-                    cat.as_ref().map(|c| c.genres.as_slice()).unwrap_or_default(),
+                    cat.as_ref()
+                        .map(|c| c.genres.as_slice())
+                        .unwrap_or_default(),
                     series,
                 );
                 let dirs: Vec<Value> = genres
@@ -4965,17 +6414,19 @@ impl Shim {
                 Response::json(&container(json!({"Directory": dirs})))
             }
             ["sorts"] => {
-                let addon_id = self.section_catalog(req, k).and_then(|c| c.key.split('/').next().map(str::to_string));
-                Response::json(&container(json!({"Sort": sort_entries_for(addon_id.as_deref())})))
+                let addon_id = self
+                    .section_catalog(req, k)
+                    .and_then(|c| c.key.split('/').next().map(str::to_string));
+                Response::json(&container(
+                    json!({"Sort": sort_entries_for(addon_id.as_deref())}),
+                ))
             }
-            ["filters"] => {
-                Response::json(&container(json!({"Filter": [
-                    {"filter": "genre", "filterType": "string",
-                     "key": format!("/library/sections/{k}/genre"), "title": "Genre"},
-                    {"filter": "unwatched", "filterType": "boolean",
-                     "key": format!("/library/sections/{k}/all?unwatched=1"), "title": "Unwatched"}
-                ]})))
-            }
+            ["filters"] => Response::json(&container(json!({"Filter": [
+                {"filter": "genre", "filterType": "string",
+                 "key": format!("/library/sections/{k}/genre"), "title": "Genre"},
+                {"filter": "unwatched", "filterType": "boolean",
+                 "key": format!("/library/sections/{k}/all?unwatched=1"), "title": "Unwatched"}
+            ]}))),
             ["firstCharacter"] => {
                 Response::json(&container(json!({"Directory": [], "Metadata": []})))
             }
@@ -5155,6 +6606,45 @@ impl Shim {
     fn part(&self, pid: i64) -> Response {
         if pid < 0 {
             return Response::not_found();
+        }
+        // A trailer Part can be asked for before anything resolved it: the
+        // shelf rows (`trailer_shelf_rows`) state their keys without paying the
+        // YouTube round-trip that used to run on every detail open. Resolve
+        // here — on the player's own thread — then fall through to the tables.
+        if let Some((parent, index)) = trailer_part_at(pid) {
+            if !self
+                .trailer_dash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&pid)
+                && !self
+                    .trailer_parts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&pid)
+            {
+                let _ = self.trailer_row_at(parent, index);
+            }
+        }
+        // Trailer Parts answer before any stream ranking: DASH manifests
+        // 200, muxed trailers 302.
+        if let Some(mpd) = self
+            .trailer_dash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&pid)
+            .cloned()
+        {
+            return Response::bytes(200, "application/dash+xml", mpd.into_bytes());
+        }
+        if let Some(url) = self
+            .trailer_parts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&pid)
+            .cloned()
+        {
+            return Response::redirect(&url);
         }
         let (rk, idx) = (pid / PART_STRIDE, (pid % PART_STRIDE) as usize);
         let Some(ident) = self.keys.ident(rk).or_else(|| {
@@ -5404,7 +6894,6 @@ fn logo_path_key(source: &str) -> Option<&str> {
 }
 
 fn sniff_image(b: &[u8]) -> &'static str {
-
     if b.starts_with(&[0x89, b'P', b'N', b'G']) {
         "image/png"
     } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
@@ -5483,7 +6972,12 @@ mod meta_flight_tests {
         fn catalogs(&self) -> Vec<CatalogInfo> {
             Vec::new()
         }
-        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+        fn catalog_page(
+            &self,
+            _key: &str,
+            _skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
             Ok(Vec::new())
         }
         fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
@@ -5517,7 +7011,9 @@ mod meta_flight_tests {
     /// the addon must see one read, and both callers must get the answered meta.
     #[test]
     fn a_prefetch_and_a_detail_read_share_one_addon_meta_fetch() {
-        let backend = Arc::new(SlowMetaBackend { calls: AtomicUsize::new(0) });
+        let backend = Arc::new(SlowMetaBackend {
+            calls: AtomicUsize::new(0),
+        });
         let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
         let started = Barrier::new(2);
         std::thread::scope(|scope| {
@@ -5530,7 +7026,11 @@ mod meta_flight_tests {
                 });
             }
         });
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "the second caller reused the fetch in flight");
+        assert_eq!(
+            backend.calls.load(Ordering::SeqCst),
+            1,
+            "the second caller reused the fetch in flight"
+        );
     }
 }
 
@@ -5546,7 +7046,12 @@ mod enrich_cache_tests {
         fn catalogs(&self) -> Vec<CatalogInfo> {
             Vec::new()
         }
-        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+        fn catalog_page(
+            &self,
+            _key: &str,
+            _skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
             Ok(Vec::new())
         }
         fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
@@ -5575,11 +7080,19 @@ mod enrich_cache_tests {
     #[test]
     fn a_cached_enrichment_is_applied_without_asking_tmdb() {
         let shim = Arc::new(Shim::new(Arc::new(NoBackend), Config::default()));
-        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt1".into() });
+        let rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt1".into(),
+        });
         shim.metas.insert(
             "movie",
             "tt1",
-            Arc::new(Meta { id: "tt1".into(), type_: "movie".into(), name: "Title".into(), ..Default::default() }),
+            Arc::new(Meta {
+                id: "tt1".into(),
+                type_: "movie".into(),
+                name: "Title".into(),
+                ..Default::default()
+            }),
         );
         shim.enrich.insert(
             "movie",
@@ -5602,16 +7115,27 @@ mod enrich_cache_tests {
     #[test]
     fn an_enrichment_without_the_shelf_is_refreshed() {
         let shim = Arc::new(Shim::new(Arc::new(NoBackend), Config::default()));
-        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt3".into() });
+        let rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt3".into(),
+        });
         shim.metas.insert(
             "movie",
             "tt3",
-            Arc::new(Meta { id: "tt3".into(), type_: "movie".into(), name: "Title".into(), ..Default::default() }),
+            Arc::new(Meta {
+                id: "tt3".into(),
+                type_: "movie".into(),
+                name: "Title".into(),
+                ..Default::default()
+            }),
         );
         shim.enrich.insert("movie", "tt3", Enrichment::default());
         let mut row = json!({"ratingKey": rk});
         shim.enrich_row(rk, &mut row);
-        assert!(row.get("Role").is_none(), "the old-shape entry was not taken as the answer");
+        assert!(
+            row.get("Role").is_none(),
+            "the old-shape entry was not taken as the answer"
+        );
     }
 
     /// The `More Like This` shelf comes from the same persisted entry: a fresh fetch would need
@@ -5619,7 +7143,10 @@ mod enrich_cache_tests {
     #[test]
     fn a_cached_enrichment_answers_the_related_shelf_without_tmdb() {
         let shim = Arc::new(Shim::new(Arc::new(NoBackend), Config::default()));
-        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt2".into() });
+        let rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt2".into(),
+        });
         shim.enrich.insert(
             "movie",
             "tt2",
@@ -5895,11 +7422,20 @@ mod playback_regressions {
     #[test]
     fn a_title_logo_is_cropped_to_its_ink_and_the_crop_is_cached() {
         let url = format!("https://example.invalid/logo/{}.png", std::process::id());
-        let padded = encode_rgba(40, 20, |x, y| ((10..30).contains(&x) && (5..15).contains(&y)).then_some([255, 255, 255, 255]));
+        let padded = encode_rgba(40, 20, |x, y| {
+            ((10..30).contains(&x) && (5..15).contains(&y)).then_some([255, 255, 255, 255])
+        });
         let cropped = logo_png("424242", &url, (600, 240), padded.clone());
-        assert_ne!(cropped, padded, "the transparent border was served as it came");
+        assert_ne!(
+            cropped, padded,
+            "the transparent border was served as it came"
+        );
         let drawn = image::load_from_memory(&cropped).unwrap().to_rgba8();
-        assert_eq!(drawn.dimensions(), (20, 10), "the crop is not the ink's bounding box");
+        assert_eq!(
+            drawn.dimensions(),
+            (20, 10),
+            "the crop is not the ink's bounding box"
+        );
         assert_eq!(
             logo_png("424242", &url, (600, 240), b"not an image".to_vec()),
             cropped,
@@ -5912,9 +7448,15 @@ mod playback_regressions {
     #[test]
     fn only_a_padded_transparent_logo_is_re_encoded() {
         let opaque = encode_rgba(12, 12, |_, _| Some([9, 9, 9, 255]));
-        assert!(super::crop_ink(&opaque).is_none(), "an opaque image has no border");
+        assert!(
+            super::crop_ink(&opaque).is_none(),
+            "an opaque image has no border"
+        );
         let full = encode_rgba(12, 12, |_, _| Some([255, 0, 0, 255]));
-        assert!(super::crop_ink(&full).is_none(), "ink already filling the canvas was re-encoded");
+        assert!(
+            super::crop_ink(&full).is_none(),
+            "ink already filling the canvas was re-encoded"
+        );
         assert!(super::crop_ink(b"\x89PNG\r\n\x1a\nnot really").is_none());
     }
 
@@ -5937,14 +7479,18 @@ mod playback_regressions {
     fn the_photo_route_crops_a_clear_logo_but_not_a_poster() {
         use std::io::{Read, Write};
         plx_net::net::global_init();
-        let padded = encode_rgba(64, 32, |x, y| ((16..48).contains(&x) && (8..24).contains(&y)).then_some([255, 255, 255, 255]));
+        let padded = encode_rgba(64, 32, |x, y| {
+            ((16..48).contains(&x) && (8..24).contains(&y)).then_some([255, 255, 255, 255])
+        });
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let served = padded.clone();
         let worker = std::thread::spawn(move || {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut buffer = [0; 4096];
                 let _ = stream.read(&mut buffer).unwrap();
                 write!(
@@ -5961,7 +7507,10 @@ mod playback_regressions {
             method: "GET".into(),
             path: "/photo/:/transcode".into(),
             query: HashMap::from([
-                ("url".into(), format!("http://{addr}/library/metadata/4242/{kind}")),
+                (
+                    "url".into(),
+                    format!("http://{addr}/library/metadata/4242/{kind}"),
+                ),
                 ("width".into(), "600".into()),
                 ("height".into(), "240".into()),
             ]),
@@ -5972,9 +7521,18 @@ mod playback_regressions {
         let logo = shim.photo(&art("clearLogo"));
         assert_eq!(logo.status, 200);
         assert_eq!(logo.content_type, "image/png");
-        assert_eq!(image::load_from_memory(&logo.body).unwrap().to_rgba8().dimensions(), (32, 16));
+        assert_eq!(
+            image::load_from_memory(&logo.body)
+                .unwrap()
+                .to_rgba8()
+                .dimensions(),
+            (32, 16)
+        );
         let poster = shim.photo(&art("thumb"));
-        assert_eq!(poster.body, padded, "an ordinary poster must be served as it came");
+        assert_eq!(
+            poster.body, padded,
+            "an ordinary poster must be served as it came"
+        );
         worker.join().unwrap();
     }
 
@@ -6073,7 +7631,11 @@ mod account_progress_tests {
     fn a_playing_report_is_throttled_and_a_settled_one_is_not() {
         let now = Instant::now();
         assert!(watch_push_due(None, false, now));
-        assert!(!watch_push_due(Some(now), false, now + Duration::from_secs(59)));
+        assert!(!watch_push_due(
+            Some(now),
+            false,
+            now + Duration::from_secs(59)
+        ));
         assert!(watch_push_due(Some(now), false, now + WATCH_PUSH_INTERVAL));
         assert!(watch_push_due(Some(now), true, now));
     }
@@ -6132,9 +7694,8 @@ fn blur_colors(seed: &str) -> serde_json::Value {
     let h = fnv(if seed.is_empty() { "nuvio" } else { seed });
     let mut corners: Vec<String> = vec![String::new(); 4];
     for i in 0..4u64 {
-        let hue = (((h >> (i * 13)) as f32 / (1u64 << 13) as f32) * 360.0
-            + (i as f32 * 97.0))
-            % 360.0;
+        let hue =
+            (((h >> (i * 13)) as f32 / (1u64 << 13) as f32) * 360.0 + (i as f32 * 97.0)) % 360.0;
         let sat = 0.62 + (((h >> (i * 7 + 3)) & 0x7f) as f32 / 127.0) * 0.28;
         let light = 0.34 + (((h >> (i * 5 + 11)) & 0x3f) as f32 / 63.0) * 0.16;
         corners[i as usize] = hsl_to_hex(hue, sat, light);
@@ -6173,26 +7734,47 @@ mod catalog_selector_tests {
                 genres: Vec::new(),
             }]
         }
-        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
-            Ok(vec![meta("Alpha", Some("8.0"), Some("2020-01-02"), &["Science Fiction"])])
+        fn catalog_page(
+            &self,
+            _key: &str,
+            _skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
+            Ok(vec![meta(
+                "Alpha",
+                Some("8.0"),
+                Some("2020-01-02"),
+                &["Science Fiction"],
+            )])
         }
-        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> { Vec::new() }
-        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> { None }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> {
+            None
+        }
         fn streams(
             &self,
             _type_: &str,
             _id: &str,
             _deadline: Duration,
             _on_batch: &mut dyn FnMut(&[Stream]),
-        ) -> Vec<Stream> { Vec::new() }
-        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> { Vec::new() }
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
     }
 
     fn get(path: &str, query: &[(&str, &str)]) -> Request {
         Request {
             method: "GET".into(),
             path: path.into(),
-            query: query.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+            query: query
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
             headers: HashMap::new(),
             body: Vec::new(),
         }
@@ -6205,30 +7787,71 @@ mod catalog_selector_tests {
     impl Backend for TwoCatalogBackend {
         fn catalogs(&self) -> Vec<CatalogInfo> {
             vec![
-                CatalogInfo { key: "addon/movie/top".into(), title: "Popular Movies".into(),
-                    type_: "movie".into(), genres: Vec::new() },
-                CatalogInfo { key: "addon/movie/nfx".into(), title: "Netflix Movies".into(),
-                    type_: "movie".into(), genres: Vec::new() },
+                CatalogInfo {
+                    key: "addon/movie/top".into(),
+                    title: "Popular Movies".into(),
+                    type_: "movie".into(),
+                    genres: Vec::new(),
+                },
+                CatalogInfo {
+                    key: "addon/movie/nfx".into(),
+                    title: "Netflix Movies".into(),
+                    type_: "movie".into(),
+                    genres: Vec::new(),
+                },
             ]
         }
-        fn catalog_page(&self, key: &str, skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
-            if skip > 0 { return Ok(Vec::new()); }
+        fn catalog_page(
+            &self,
+            key: &str,
+            skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
+            if skip > 0 {
+                return Ok(Vec::new());
+            }
             match key {
-                "addon/movie/top" => Ok(vec![meta("Popular One", Some("8.0"), Some("2020-01-02"), &[])]),
-                "addon/movie/nfx" => Ok(vec![meta("Netflix One", Some("7.0"), Some("2021-01-02"), &[])]),
+                "addon/movie/top" => Ok(vec![meta(
+                    "Popular One",
+                    Some("8.0"),
+                    Some("2020-01-02"),
+                    &[],
+                )]),
+                "addon/movie/nfx" => Ok(vec![meta(
+                    "Netflix One",
+                    Some("7.0"),
+                    Some("2021-01-02"),
+                    &[],
+                )]),
                 _ => Err(()),
             }
         }
-        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> { Vec::new() }
-        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> { None }
-        fn streams(&self, _type_: &str, _id: &str, _deadline: Duration,
-            _on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream> { Vec::new() }
-        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> { Vec::new() }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> {
+            None
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
     }
 
     fn first_title(response: &Response) -> String {
         let body: Value = serde_json::from_slice(&response.body).unwrap();
-        body["MediaContainer"]["Metadata"][0]["title"].as_str().unwrap_or_default().to_owned()
+        body["MediaContainer"]["Metadata"][0]["title"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// The app fetches the first page without a sort, then sends `sort=popularity` on every page
@@ -6237,12 +7860,26 @@ mod catalog_selector_tests {
     #[test]
     fn a_named_catalog_survives_the_sort_the_client_sends_on_later_pages() {
         let shim = Arc::new(Shim::new(Arc::new(TwoCatalogBackend), Config::default()));
-        let first = shim.handle(&get("/library/sections/1/all", &[("catalog", "addon/movie/nfx")]));
+        let first = shim.handle(&get(
+            "/library/sections/1/all",
+            &[("catalog", "addon/movie/nfx")],
+        ));
         assert_eq!(first_title(&first), "Netflix One");
-        for sort in ["popularity:desc", "popularity:asc", "rating:desc", "titleSort"] {
-            let later = shim.handle(&get("/library/sections/1/all",
-                &[("catalog", "addon/movie/nfx"), ("sort", sort)]));
-            assert_eq!(first_title(&later), "Netflix One", "sort {sort:?} replaced the chosen catalog");
+        for sort in [
+            "popularity:desc",
+            "popularity:asc",
+            "rating:desc",
+            "titleSort",
+        ] {
+            let later = shim.handle(&get(
+                "/library/sections/1/all",
+                &[("catalog", "addon/movie/nfx"), ("sort", sort)],
+            ));
+            assert_eq!(
+                first_title(&later),
+                "Netflix One",
+                "sort {sort:?} replaced the chosen catalog"
+            );
         }
     }
 
@@ -6251,17 +7888,35 @@ mod catalog_selector_tests {
     #[test]
     fn without_a_named_catalog_a_popularity_sort_still_means_the_top_catalog() {
         let shim = Arc::new(Shim::new(Arc::new(TwoCatalogBackend), Config::default()));
-        let response = shim.handle(&get("/library/sections/1/all", &[("sort", "popularity:desc")]));
+        let response = shim.handle(&get(
+            "/library/sections/1/all",
+            &[("sort", "popularity:desc")],
+        ));
         assert_eq!(first_title(&response), "Popular One");
     }
 
     #[test]
     fn parses_only_the_sorts_the_shim_advertises() {
-        assert_eq!(parse_catalog_sort(Some("titleSort")), Some((CatalogSort::Title, false)));
-        assert_eq!(parse_catalog_sort(Some("rating:desc")), Some((CatalogSort::Rating, true)));
-        assert_eq!(parse_catalog_sort(Some("releaseDate:desc")), Some((CatalogSort::ReleaseDate, true)));
-        assert_eq!(parse_catalog_sort(Some("year:asc")), Some((CatalogSort::ReleaseDate, false)));
-        assert_eq!(parse_catalog_sort(Some("popularity:desc")), Some((CatalogSort::Popularity, true)));
+        assert_eq!(
+            parse_catalog_sort(Some("titleSort")),
+            Some((CatalogSort::Title, false))
+        );
+        assert_eq!(
+            parse_catalog_sort(Some("rating:desc")),
+            Some((CatalogSort::Rating, true))
+        );
+        assert_eq!(
+            parse_catalog_sort(Some("releaseDate:desc")),
+            Some((CatalogSort::ReleaseDate, true))
+        );
+        assert_eq!(
+            parse_catalog_sort(Some("year:asc")),
+            Some((CatalogSort::ReleaseDate, false))
+        );
+        assert_eq!(
+            parse_catalog_sort(Some("popularity:desc")),
+            Some((CatalogSort::Popularity, true))
+        );
         assert_eq!(parse_catalog_sort(Some("addedAt:desc")), None);
         assert_eq!(parse_catalog_sort(None), None);
     }
@@ -6270,16 +7925,37 @@ mod catalog_selector_tests {
     fn compares_catalogs_by_the_advertised_keys() {
         let a = meta("Alpha", Some("7.1"), Some("2001-01-01"), &["Action"]);
         let b = meta("beta", Some("8.4"), Some("2020-01-01"), &["Drama"]);
-        assert_eq!(compare_catalog(&a, &b, CatalogSort::Title), CmpOrdering::Less);
-        assert_eq!(compare_catalog(&a, &b, CatalogSort::Rating), CmpOrdering::Less);
-        assert_eq!(compare_catalog(&a, &b, CatalogSort::ReleaseDate), CmpOrdering::Less);
-        assert_eq!(compare_catalog(&b, &a, CatalogSort::Rating), CmpOrdering::Greater);
+        assert_eq!(
+            compare_catalog(&a, &b, CatalogSort::Title),
+            CmpOrdering::Less
+        );
+        assert_eq!(
+            compare_catalog(&a, &b, CatalogSort::Rating),
+            CmpOrdering::Less
+        );
+        assert_eq!(
+            compare_catalog(&a, &b, CatalogSort::ReleaseDate),
+            CmpOrdering::Less
+        );
+        assert_eq!(
+            compare_catalog(&b, &a, CatalogSort::Rating),
+            CmpOrdering::Greater
+        );
         // Popularity is the catalog's own order: never a re-sort.
-        assert_eq!(compare_catalog(&a, &b, CatalogSort::Popularity), CmpOrdering::Equal);
+        assert_eq!(
+            compare_catalog(&a, &b, CatalogSort::Popularity),
+            CmpOrdering::Equal
+        );
         // Missing scores/dates sort last rather than pretending to be zero.
         let missing = meta("Gamma", None, None, &[]);
-        assert_eq!(compare_catalog(&a, &missing, CatalogSort::Rating), CmpOrdering::Less);
-        assert_eq!(compare_catalog(&missing, &a, CatalogSort::ReleaseDate), CmpOrdering::Greater);
+        assert_eq!(
+            compare_catalog(&a, &missing, CatalogSort::Rating),
+            CmpOrdering::Less
+        );
+        assert_eq!(
+            compare_catalog(&missing, &a, CatalogSort::ReleaseDate),
+            CmpOrdering::Greater
+        );
     }
 
     #[test]
@@ -6296,7 +7972,13 @@ mod catalog_selector_tests {
     fn the_genre_menu_merges_the_tmdb_baseline_without_duplicates() {
         let merged = merged_genres(&["Sci-Fi".into(), "Action".into()], false);
         assert_eq!(merged[0], "Sci-Fi");
-        assert_eq!(merged.iter().filter(|g| genre_key(g) == genre_key("Science Fiction")).count(), 1);
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|g| genre_key(g) == genre_key("Science Fiction"))
+                .count(),
+            1
+        );
         assert!(merged.iter().any(|g| g == "Drama"));
         let series = merged_genres(&[], true);
         assert!(series.iter().any(|g| g == "Sci-Fi & Fantasy"));
@@ -6318,28 +8000,53 @@ mod catalog_selector_tests {
     #[test]
     fn a_genre_with_spaces_and_specials_answers_a_page() {
         let shim = Arc::new(Shim::new(Arc::new(GenreBackend), Config::default()));
-        for genre in ["Sci-Fi & Fantasy", "100%", "Café", &tag_id("Science Fiction").to_string(), "Science Fiction"] {
-            let response = shim.handle(&get("/library/sections/1/all", &[("genre", genre), ("catalog", "genre/movie/all")]));
+        for genre in [
+            "Sci-Fi & Fantasy",
+            "100%",
+            "Café",
+            &tag_id("Science Fiction").to_string(),
+            "Science Fiction",
+        ] {
+            let response = shim.handle(&get(
+                "/library/sections/1/all",
+                &[("genre", genre), ("catalog", "genre/movie/all")],
+            ));
             assert_eq!(response.status, 200, "genre {genre:?} crashed the shim");
             let body: Value = serde_json::from_slice(&response.body).unwrap();
-            assert!(body["MediaContainer"]["Metadata"].is_array(), "genre {genre:?} answered no listing");
+            assert!(
+                body["MediaContainer"]["Metadata"].is_array(),
+                "genre {genre:?} answered no listing"
+            );
         }
         // A TMDB baseline genre and its numeric tag id both reach the one matching row.
         for genre in ["Science Fiction", &tag_id("Science Fiction").to_string()] {
-            let response = shim.handle(&get("/library/sections/1/all", &[("genre", genre), ("catalog", "genre/movie/all")]));
+            let response = shim.handle(&get(
+                "/library/sections/1/all",
+                &[("genre", genre), ("catalog", "genre/movie/all")],
+            ));
             let body: Value = serde_json::from_slice(&response.body).unwrap();
-            assert_eq!(body["MediaContainer"]["Metadata"][0]["title"], "Alpha", "{genre:?}");
+            assert_eq!(
+                body["MediaContainer"]["Metadata"][0]["title"], "Alpha",
+                "{genre:?}"
+            );
         }
     }
 
     #[test]
     fn the_genre_directory_offers_the_tmdb_baseline() {
         let shim = Arc::new(Shim::new(Arc::new(GenreBackend), Config::default()));
-        let response = shim.handle(&get("/library/sections/1/genre", &[("catalog", "genre/movie/all")]));
+        let response = shim.handle(&get(
+            "/library/sections/1/genre",
+            &[("catalog", "genre/movie/all")],
+        ));
         assert_eq!(response.status, 200);
         let body: Value = serde_json::from_slice(&response.body).unwrap();
-        let names: Vec<&str> = body["MediaContainer"]["Directory"].as_array().unwrap()
-            .iter().filter_map(|row| row["title"].as_str()).collect();
+        let names: Vec<&str> = body["MediaContainer"]["Directory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["title"].as_str())
+            .collect();
         assert!(names.contains(&"Science Fiction"), "{names:?}");
         assert!(names.contains(&"Drama"), "{names:?}");
     }
@@ -6352,8 +8059,10 @@ mod catalog_selector_tests {
         assert_eq!(shim.addon_id_for("movie", "kitsu:42"), "kitsu:42");
         // With a TMDB key the same id becomes an IMDb id; the episode tail survives either way.
         let episode = shim.addon_id_for("series", "tmdb:1396:1:2");
-        assert!(episode == "tmdb:1396:1:2"
-            || (episode.starts_with("tt") && episode.ends_with(":1:2")), "{episode}");
+        assert!(
+            episode == "tmdb:1396:1:2" || (episode.starts_with("tt") && episode.ends_with(":1:2")),
+            "{episode}"
+        );
     }
 
     /// A poster asked for before its metadata row has landed is a WAIT: 5xx is the poster store's
@@ -6366,7 +8075,10 @@ mod catalog_selector_tests {
             "/photo/:/transcode",
             &[("url", "/library/metadata/999999/thumb")],
         ));
-        assert_eq!(response.status, 503, "an unlanded row must not latch as a missing poster");
+        assert_eq!(
+            response.status, 503,
+            "an unlanded row must not latch as a missing poster"
+        );
     }
 }
 
@@ -6378,11 +8090,28 @@ mod my_list_removal_tests {
     /// metadata cache, which is in memory with a six-hour TTL. An add still needs that metadata.
     #[test]
     fn a_remove_needs_no_cached_metadata_but_an_add_does() {
-        let removal = Shim::write_meta(None, "movie", "tt0133093", false).expect("a removal has its key");
-        assert_eq!((removal.id.as_str(), removal.type_.as_str()), ("tt0133093", "movie"));
-        assert!(Shim::write_meta(None, "movie", "tt0133093", true).is_none(), "an add still needs metadata");
-        let cached = Arc::new(Meta { id: "tt1".into(), type_: "movie".into(), name: "Matrix".into(), ..Default::default() });
-        assert_eq!(Shim::write_meta(Some(cached), "movie", "tt1", false).expect("cached").name, "Matrix");
+        let removal =
+            Shim::write_meta(None, "movie", "tt0133093", false).expect("a removal has its key");
+        assert_eq!(
+            (removal.id.as_str(), removal.type_.as_str()),
+            ("tt0133093", "movie")
+        );
+        assert!(
+            Shim::write_meta(None, "movie", "tt0133093", true).is_none(),
+            "an add still needs metadata"
+        );
+        let cached = Arc::new(Meta {
+            id: "tt1".into(),
+            type_: "movie".into(),
+            name: "Matrix".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            Shim::write_meta(Some(cached), "movie", "tt1", false)
+                .expect("cached")
+                .name,
+            "Matrix"
+        );
     }
 }
 
@@ -6394,7 +8123,10 @@ mod continue_watching_paging_tests {
         Request {
             method: "GET".into(),
             path: path.into(),
-            query: query.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+            query: query
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
             headers: HashMap::new(),
             body: Vec::new(),
         }
@@ -6435,12 +8167,18 @@ mod continue_watching_paging_tests {
     /// so every paged read fell through to the unhandled route and the deck never read past it.
     #[test]
     fn the_deck_listing_pages_contiguously_and_states_its_total() {
-        let shim = Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()));
+        let shim = Arc::new(Shim::new(
+            Arc::new(crate::shim_fake::FakeBackend),
+            Config::default(),
+        ));
         let mut want = seeded(&shim);
 
         let first = json_of(shim.handle(&request(
             "/hubs/continueWatching/items",
-            &[("X-Plex-Container-Start", "0"), ("X-Plex-Container-Size", "2")],
+            &[
+                ("X-Plex-Container-Start", "0"),
+                ("X-Plex-Container-Size", "2"),
+            ],
         )));
         assert_eq!(first["MediaContainer"]["offset"], 0);
         assert_eq!(first["MediaContainer"]["totalSize"], 5);
@@ -6448,16 +8186,28 @@ mod continue_watching_paging_tests {
 
         let second = json_of(shim.handle(&request(
             "/hubs/continueWatching/items",
-            &[("X-Plex-Container-Start", "2"), ("X-Plex-Container-Size", "2")],
+            &[
+                ("X-Plex-Container-Start", "2"),
+                ("X-Plex-Container-Size", "2"),
+            ],
         )));
-        assert_eq!(second["MediaContainer"]["offset"], 2, "the deck re-anchors on this echo");
+        assert_eq!(
+            second["MediaContainer"]["offset"], 2,
+            "the deck re-anchors on this echo"
+        );
         assert_eq!(second["MediaContainer"]["totalSize"], 5);
 
         let last = json_of(shim.handle(&request(
             "/hubs/continueWatching/items",
-            &[("X-Plex-Container-Start", "4"), ("X-Plex-Container-Size", "2")],
+            &[
+                ("X-Plex-Container-Start", "4"),
+                ("X-Plex-Container-Size", "2"),
+            ],
         )));
-        assert_eq!(last["MediaContainer"]["size"], 1, "the last page is what is left");
+        assert_eq!(
+            last["MediaContainer"]["size"], 1,
+            "the last page is what is left"
+        );
 
         let mut seen: Vec<i64> = [first, second, last]
             .iter()
@@ -6473,7 +8223,10 @@ mod continue_watching_paging_tests {
     /// `data`'s `project_deck` uses `more`/`totalSize` to decide whether the deck has more to read.
     #[test]
     fn the_preview_hub_states_the_whole_listing_and_its_more_flag() {
-        let shim = Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()));
+        let shim = Arc::new(Shim::new(
+            Arc::new(crate::shim_fake::FakeBackend),
+            Config::default(),
+        ));
         seeded(&shim);
         let body = json_of(shim.handle(&request("/hubs/continueWatching", &[("count", "2")])));
         let hub = &body["MediaContainer"]["Hub"][0];
@@ -6490,7 +8243,10 @@ mod content_generation_tests {
     use super::*;
 
     fn shim() -> Arc<Shim> {
-        Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()))
+        Arc::new(Shim::new(
+            Arc::new(crate::shim_fake::FakeBackend),
+            Config::default(),
+        ))
     }
 
     #[test]
@@ -6547,11 +8303,26 @@ mod image_sizing_tests {
     fn a_card_sized_metahub_poster_asks_for_the_small_ladder() {
         let base = "https://images.metahub.space/poster/medium/tt0111161/img";
         let at = |w| sized_image_url(base, w);
-        assert_eq!(at(250), "https://images.metahub.space/poster/small/tt0111161/img");
-        assert_eq!(at(300), "https://images.metahub.space/poster/small/tt0111161/img");
-        assert_eq!(at(375), "https://images.metahub.space/poster/medium/tt0111161/img");
-        assert_eq!(at(500), "https://images.metahub.space/poster/medium/tt0111161/img");
-        assert_eq!(at(700), "https://images.metahub.space/poster/large/tt0111161/img");
+        assert_eq!(
+            at(250),
+            "https://images.metahub.space/poster/small/tt0111161/img"
+        );
+        assert_eq!(
+            at(300),
+            "https://images.metahub.space/poster/small/tt0111161/img"
+        );
+        assert_eq!(
+            at(375),
+            "https://images.metahub.space/poster/medium/tt0111161/img"
+        );
+        assert_eq!(
+            at(500),
+            "https://images.metahub.space/poster/medium/tt0111161/img"
+        );
+        assert_eq!(
+            at(700),
+            "https://images.metahub.space/poster/large/tt0111161/img"
+        );
     }
 
     /// TMDB's ladder is unchanged: a 250-wide card box is still served `w342`, not the `w500` that
@@ -6559,9 +8330,18 @@ mod image_sizing_tests {
     #[test]
     fn tmdb_posters_keep_their_ladder() {
         let url = "https://image.tmdb.org/t/p/w500/abc.jpg";
-        assert_eq!(sized_image_url(url, 250), "https://image.tmdb.org/t/p/w342/abc.jpg");
-        assert_eq!(sized_image_url(url, 500), "https://image.tmdb.org/t/p/w500/abc.jpg");
-        assert_eq!(sized_image_url(url, 780), "https://image.tmdb.org/t/p/w780/abc.jpg");
+        assert_eq!(
+            sized_image_url(url, 250),
+            "https://image.tmdb.org/t/p/w342/abc.jpg"
+        );
+        assert_eq!(
+            sized_image_url(url, 500),
+            "https://image.tmdb.org/t/p/w500/abc.jpg"
+        );
+        assert_eq!(
+            sized_image_url(url, 780),
+            "https://image.tmdb.org/t/p/w780/abc.jpg"
+        );
     }
 }
 
@@ -6587,5 +8367,810 @@ mod resolved_url_cache_tests {
         assert!(!engine_url_is_current(&marker, None));
         // Nothing that is not a marker has an engine stream behind it.
         assert!(engine_url_is_current("https://example.invalid/a.mkv", None));
+    }
+}
+#[cfg(test)]
+mod trailer_tests {
+    use super::*;
+    use crate::shim_backend::Backend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TrailerMetaBackend {
+        calls: AtomicUsize,
+        trailer: String,
+    }
+
+    impl Backend for TrailerMetaBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
+        fn catalog_page(
+            &self,
+            _key: &str,
+            _skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
+            Ok(Vec::new())
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, type_: &str, id: &str) -> Option<Meta> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Some(Meta {
+                id: id.into(),
+                type_: type_.into(),
+                name: "Trailer Host".into(),
+                trailer_streams: vec![json!(format!(
+                    "https://www.youtube.com/watch?v={}",
+                    self.trailer
+                ))],
+                ..Default::default()
+            })
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
+    struct FixedResolver {
+        resolved: Option<crate::shim_trailer::TrailerResolved>,
+    }
+
+    impl crate::shim_trailer::TrailerResolver for FixedResolver {
+        fn resolve(&self, _youtube_id: &str) -> Option<crate::shim_trailer::TrailerResolved> {
+            self.resolved.clone()
+        }
+    }
+
+    fn muxed_resolved() -> crate::shim_trailer::TrailerResolved {
+        crate::shim_trailer::TrailerResolved {
+            url: "https://cdn.example/muxed.mp4?sig=x".into(),
+            itag: 18,
+            height: 360,
+            is_dash: false,
+            dash: None,
+            muxed_url: Some("https://cdn.example/muxed.mp4?sig=x".into()),
+            muxed_itag: 18,
+            muxed_height: 360,
+        }
+    }
+
+    fn dash_resolved() -> crate::shim_trailer::TrailerResolved {
+        crate::shim_trailer::TrailerResolved {
+            url: "https://cdn.example/video?sig=a&exp=1".into(),
+            itag: 137,
+            height: 1080,
+            is_dash: true,
+            dash: Some(crate::shim_trailer::DashInfo {
+                video_url: "https://cdn.example/video?sig=a&exp=1".into(),
+                audio_url: "https://cdn.example/audio?sig=c&exp=1".into(),
+                video_itag: 137,
+                audio_itag: 140,
+                width: 1920,
+                height: 1080,
+                fps: 24,
+                video_mime: "video/mp4; codecs=\"avc1.640028\"".into(),
+                audio_mime: "audio/mp4; codecs=\"mp4a.40.2\"".into(),
+                video_bitrate: 5_000_000,
+                audio_bitrate: 128_000,
+                video_init: (0, 999),
+                video_index: (1000, 2000),
+                audio_init: (2001, 2999),
+                audio_index: (3000, 4000),
+                duration_ms: 145_000,
+            }),
+            muxed_url: Some("https://cdn.example/muxed.mp4?sig=x".into()),
+            muxed_itag: 18,
+            muxed_height: 360,
+        }
+    }
+
+    fn ok_probe(container: &str, vcodec: &str) -> crate::shim_probe::ProbeInfo {
+        crate::shim_probe::ProbeInfo {
+            container: container.into(),
+            duration_ms: 145_000,
+            size: 1_000_000,
+            video_decodable: true,
+            video: Some(crate::shim_probe::Video {
+                codec: vcodec.into(),
+                width: 1920,
+                height: 1080,
+                fps: 24.0,
+                bit_depth: 8,
+                profile: 0,
+                color_trc: 0,
+                color_primaries: 0,
+                color_space: 0,
+                dovi: None,
+            }),
+            audio: vec![crate::shim_probe::Audio {
+                codec: "aac".into(),
+                profile: 0,
+                channels: 2,
+                sample_rate: 0,
+                language: "en".into(),
+                title: String::new(),
+                default: true,
+                decodable: true,
+            }],
+            subtitles: Vec::new(),
+        }
+    }
+
+    fn parent_with_trailer() -> (Arc<Shim>, i64) {
+        let backend = Arc::new(TrailerMetaBackend {
+            calls: AtomicUsize::new(0),
+            trailer: "dQw4w9WgXcQ".into(),
+        });
+        let shim = Arc::new(Shim::new(backend, Config::default()));
+        let parent = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt9990001".into(),
+        });
+        shim.metas.insert(
+            "movie",
+            "tt9990001",
+            Arc::new(Meta {
+                id: "tt9990001".into(),
+                type_: "movie".into(),
+                name: "Trailer Host".into(),
+                trailer_streams: vec![json!("https://www.youtube.com/watch?v=dQw4w9WgXcQ")],
+                ..Default::default()
+            }),
+        );
+        (shim, parent)
+    }
+
+    #[test]
+    fn trailer_key_never_decodes_as_collection() {
+        let parent = 10_137i64;
+        let clip = trailer_rk(parent);
+        assert_eq!(clip, 5_000_010_137);
+        assert_eq!(trailer_parent_rk(clip), Some(parent));
+        // A collection key still decodes, a trailer key never does.
+        assert_eq!(synthetic_collection_id(4_000_000_234), Some(234));
+        assert_eq!(synthetic_collection_id(clip), None);
+        assert_eq!(synthetic_collection_id(trailer_rk(1_000_000_603)), None);
+        // Part ids are numeric and bounded.
+        assert!(clip * 1000 + 999 < i64::MAX);
+    }
+
+    #[test]
+    fn trailer_clip_has_its_own_rating_key_and_decision() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        assert_ne!(clip, parent);
+        assert_eq!(trailer_parent_rk(clip), Some(parent));
+        // Replace the Node resolver with a muxed fake and install a good prober.
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(muxed_resolved()),
+        });
+        shim.probes.set_prober(Arc::new(|url: &str, _deadline| {
+            assert!(url.contains("muxed.mp4"));
+            Ok(ok_probe("mp4", "h264"))
+        }));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("a clip row");
+        assert_eq!(row["ratingKey"].as_str().unwrap(), clip.to_string());
+        assert_eq!(
+            row["key"].as_str().unwrap(),
+            format!("/library/metadata/{clip}")
+        );
+        assert_eq!(row["type"], "clip");
+        let media = row["Media"].as_array().unwrap();
+        assert_eq!(media.len(), 1, "muxed-only has one Media");
+        assert_eq!(media[0]["container"], "mp4");
+        assert_eq!(media[0]["videoCodec"], "h264");
+        // `/decision` direct-plays the clip Part, not the film's ranked streams.
+        let (drow, verdict, _) = shim.item_probed(clip, Some(0)).expect("clip item");
+        assert_eq!(drow["ratingKey"].as_str().unwrap(), clip.to_string());
+        assert!(matches!(verdict, Some(Ok(_))));
+        let resp = shim.handle(&Request {
+            method: "GET".into(),
+            path: "/video/:/transcode/universal/decision".into(),
+            query: HashMap::from([("path".into(), format!("/library/metadata/{clip}"))]),
+            headers: HashMap::new(),
+            body: vec![],
+        });
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["MediaContainer"]["generalDecisionCode"], 1000);
+    }
+
+    #[test]
+    fn trailer_dash_serves_mpd_and_decision_direct_plays() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let dash_part_id = clip * 1000 + 998;
+        let muxed_part_id = clip * 1000 + 999;
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_resolved()),
+        });
+        shim.probes.set_prober(Arc::new(|_url: &str, _deadline| {
+            Ok(ok_probe("mp4", "h264"))
+        }));
+        let shim = Arc::new(shim);
+        // MPD shape matches the dash.rs parser contract verbatim.
+        let mpd = super::dash_manifest(
+            shim.trailer_resolver
+                .resolve("x")
+                .as_ref()
+                .unwrap()
+                .dash
+                .as_ref()
+                .unwrap(),
+            None,
+            None,
+        );
+        assert!(mpd.contains("<MPD"));
+        assert!(mpd.contains("type=\"static\""));
+        assert!(mpd.contains("mediaPresentationDuration=\"PT145S\""));
+        assert!(mpd.contains("<SegmentBase"));
+        assert!(mpd.contains("<Initialization range=\"0-999\""));
+        assert!(mpd.contains("indexRange=\"1000-2000\""));
+        assert!(mpd.contains("&amp;"), "BaseURL must be xml-escaped");
+        assert!(
+            !mpd.contains("<SegmentTemplate"),
+            "parser rejects SegmentTemplate"
+        );
+        let row = shim.trailer_row(parent).expect("a dash clip row");
+        let media = row["Media"].as_array().unwrap();
+        assert_eq!(media.len(), 2, "DASH leads, muxed falls back");
+        assert_eq!(media[0]["Part"][0]["id"], dash_part_id);
+        assert_eq!(
+            media[0]["Part"][0]["key"].as_str().unwrap(),
+            format!("/library/parts/{dash_part_id}/0/file.mpd")
+        );
+        assert_eq!(media[0]["container"], "mp4");
+        assert_eq!(media[0]["videoCodec"], "h264");
+        assert_eq!(media[1]["Part"][0]["id"], muxed_part_id);
+        // `/library/parts` answers: MPD bytes for DASH, 302 for muxed.
+        let mpd_resp = shim.part(dash_part_id);
+        assert_eq!(mpd_resp.status, 200);
+        assert_eq!(mpd_resp.content_type, "application/dash+xml");
+        assert!(String::from_utf8(mpd_resp.body).unwrap().contains("<MPD"));
+        let muxed_resp = shim.part(muxed_part_id);
+        assert_eq!(muxed_resp.status, 302);
+        // `/decision` for clip idx0 direct-plays the DASH Part.
+        let resp = shim.handle(&Request {
+            method: "GET".into(),
+            path: "/video/:/transcode/universal/decision".into(),
+            query: HashMap::from([("path".into(), format!("/library/metadata/{clip}"))]),
+            headers: HashMap::new(),
+            body: vec![],
+        });
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["MediaContainer"]["generalDecisionCode"], 1000);
+        assert_eq!(
+            body["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["id"],
+            dash_part_id
+        );
+        // `/trailer` single route returns the same clip row.
+        let single = shim.trailer_single_response(&parent.to_string(), false);
+        assert_eq!(single.status, 200);
+        let sbody: Value = serde_json::from_slice(&single.body).unwrap();
+        assert_eq!(
+            sbody["MediaContainer"]["Metadata"][0]["ratingKey"]
+                .as_str()
+                .unwrap(),
+            clip.to_string()
+        );
+    }
+
+    #[test]
+    fn trailer_dash_probe_refusal_falls_back_to_muxed_only() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let dash_part_id = clip * 1000 + 998;
+        let muxed_part_id = clip * 1000 + 999;
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_resolved()),
+        });
+        // Video-track probe refuses (e.g. a 403 on the video-only URL): the
+        // DASH Media must not ship, the verified muxed row replaces it.
+        shim.probes.set_prober(Arc::new(|url: &str, _deadline| {
+            if url.contains("cdn.example/video") {
+                Err("Status(403)".to_string())
+            } else {
+                Ok(ok_probe("mp4", "h264"))
+            }
+        }));
+        let shim = Arc::new(shim);
+        let row = shim
+            .trailer_row(parent)
+            .expect("muxed fallback row after dash refusal");
+        let media = row["Media"].as_array().unwrap();
+        assert_eq!(media.len(), 1, "known-403 DASH must not publish");
+        assert_eq!(
+            media[0]["Part"][0]["key"].as_str().unwrap(),
+            format!("/library/parts/{muxed_part_id}/0/file.mp4")
+        );
+        // The refused DASH part never entered the map.
+        assert_eq!(shim.part(dash_part_id).status, 404);
+    }
+
+    #[test]
+    fn trailer_dash_probe_uses_direct_googlevideo_baseurls() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let dash_part_id = clip * 1000 + 998;
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_resolved()),
+        });
+        let probed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let probed_clone = probed.clone();
+        shim.probes
+            .set_prober(Arc::new(move |url: &str, _deadline| {
+                probed_clone.lock().unwrap().push(url.to_string());
+                Ok(ok_probe("mp4", "h264"))
+            }));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("a direct dash clip row");
+        let media = row["Media"].as_array().unwrap();
+        assert_eq!(media.len(), 2, "DASH leads, muxed falls back");
+        // The probe asked the player-visible address (raw googlevideo, fetched
+        // via curlio with the IOS UA override), not a loopback proxy.
+        let probed = probed.lock().unwrap();
+        assert!(
+            probed.iter().any(|u| u.contains("cdn.example/video")),
+            "probe must hit raw googlevideo, got {probed:?}"
+        );
+        assert!(
+            !probed.iter().any(|u| u.starts_with("http://127.0.0.1")),
+            "probe must not hit a loopback proxy, got {probed:?}"
+        );
+        drop(probed);
+        let mpd_resp = shim.part(dash_part_id);
+        assert_eq!(mpd_resp.status, 200);
+        let mpd = String::from_utf8(mpd_resp.body).unwrap();
+        assert!(
+            mpd.contains("cdn.example/video"),
+            "MPD BaseURLs carry the raw googlevideo URLs"
+        );
+    }
+
+    /// **The DASH gate's second question.** A googlevideo URL can answer its first window (the
+    /// probe passes) and then refuse every later range: the track starts and never finishes, and
+    /// the viewer sees "playback failed" instead of the 360p file that plays. The tail ask decides
+    /// it, and a refused tail publishes the muxed row only.
+    #[test]
+    fn a_throttled_dash_pair_publishes_the_muxed_row_only() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let dash_part_id = clip * 1000 + 998;
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_resolved()),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        shim.set_trailer_reacher(Arc::new(|_url: &str, at: i64, _deadline| {
+            if at == 0 {
+                Ok(42_000_000)
+            } else {
+                Err("Status(403)".to_string())
+            }
+        }));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("the muxed row still plays");
+        let media = row["Media"].as_array().unwrap();
+        assert_eq!(media.len(), 1, "a throttled DASH pair must not publish");
+        assert_eq!(
+            media[0]["Part"][0]["key"].as_str().unwrap(),
+            format!("/library/parts/{}/0/file.mp4", clip * 1000 + 999),
+            "the muxed fallback is the row"
+        );
+        assert_eq!(shim.part(dash_part_id).status, 404, "no MPD was registered");
+    }
+
+    /// The same pair when the server does serve its end: the DASH `Media` leads and the muxed
+    /// file stays as the fallback.
+    #[test]
+    fn a_fully_served_dash_pair_publishes_both_medias() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let dash_part_id = clip * 1000 + 998;
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_resolved()),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        shim.set_trailer_reacher(Arc::new(|_url: &str, _at: i64, _deadline| Ok(42_000_000)));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("the dash row");
+        assert_eq!(row["Media"].as_array().unwrap().len(), 2);
+        assert_eq!(shim.part(dash_part_id).status, 200, "the MPD is registered");
+    }
+
+    /// A 2160p VP9 pair (the level a 4K-capable codec table unlocks) must be
+    /// declared as what it actually is — `webm`/`vp9`/`4k` — not as h264. The
+    /// player picks its feed lane from those fields, and the probe gate now
+    /// admits VP9 and AV1.
+    #[test]
+    fn a_vp9_2160p_dash_pair_is_declared_as_webm_4k() {
+        let (shim, parent) = parent_with_trailer();
+        let mut resolved = dash_resolved();
+        {
+            let d = resolved.dash.as_mut().expect("dash fixture");
+            d.video_mime = "video/webm; codecs=\"vp9\"".into();
+            d.width = 3840;
+            d.height = 2160;
+        }
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(resolved),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("webm", "vp9"))));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("the vp9 row");
+        let media = row["Media"].as_array().expect("Media");
+        assert_eq!(media[0]["container"], "webm");
+        assert_eq!(media[0]["videoCodec"], "vp9");
+        assert_eq!(media[0]["videoResolution"], "4k");
+    }
+
+    struct CountingResolver {
+        resolved: Option<crate::shim_trailer::TrailerResolved>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::shim_trailer::TrailerResolver for CountingResolver {
+        fn resolve(&self, _youtube_id: &str) -> Option<crate::shim_trailer::TrailerResolved> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.resolved.clone()
+        }
+    }
+
+    /// A title's next trailer is what plays when the first id is age-gated.
+    struct FirstBlocked {
+        blocked: String,
+        resolved: crate::shim_trailer::TrailerResolved,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::shim_trailer::TrailerResolver for FirstBlocked {
+        fn resolve(&self, youtube_id: &str) -> Option<crate::shim_trailer::TrailerResolved> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            (youtube_id != self.blocked).then(|| self.resolved.clone())
+        }
+        fn blocked(&self, youtube_id: &str) -> bool {
+            youtube_id == self.blocked
+        }
+    }
+
+    /// The detail page's `/extras` GET is on its critical path and is asked
+    /// again by every focus prefetch. It must answer the shelf row without
+    /// spawning Node; the resolve belongs to the first Part request.
+    #[test]
+    fn the_detail_shelf_row_is_built_without_resolving_the_trailer() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        let calls = Arc::new(AtomicUsize::new(0));
+        shim.trailer_resolver = Box::new(CountingResolver {
+            resolved: Some(dash_resolved()),
+            calls: calls.clone(),
+        });
+        let shim = Arc::new(shim);
+        let resp = shim.handle(&Request {
+            method: "GET".into(),
+            path: format!("/library/metadata/{parent}/extras"),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: vec![],
+        });
+        assert_eq!(resp.status, 200);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let rows = body["MediaContainer"]["Metadata"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["ratingKey"].as_str().unwrap(), clip.to_string());
+        assert_eq!(
+            rows[0]["Media"][0]["Part"][0]["key"].as_str().unwrap(),
+            format!("/library/parts/{}/0/file.mpd", clip * 1000 + 998)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "the shelf must not resolve");
+
+        // The player's first byte request is where the Node child runs.
+        let mpd = shim.part(clip * 1000 + 998);
+        assert_eq!(mpd.status, 200, "the lazy resolve produced the MPD");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A red-band trailer answers `LOGIN_REQUIRED` to every anonymous client.
+    /// The clip row must fall through to the next trailer the title lists
+    /// instead of leaving the button dead.
+    #[test]
+    fn an_age_blocked_trailer_uses_the_next_candidate() {
+        let (shim, parent) = parent_with_trailer();
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.metas.insert(
+            "movie",
+            "tt9990001",
+            Arc::new(Meta {
+                id: "tt9990001".into(),
+                type_: "movie".into(),
+                name: "Trailer Host".into(),
+                trailer_streams: vec![
+                    json!("https://www.youtube.com/watch?v=BBBBBBBBBBB"),
+                    json!("https://www.youtube.com/watch?v=CCCCCCCCCCC"),
+                ],
+                ..Default::default()
+            }),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        shim.trailer_resolver = Box::new(FirstBlocked {
+            blocked: "BBBBBBBBBBB".into(),
+            resolved: dash_resolved(),
+            calls: calls.clone(),
+        });
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("the playable alternate");
+        assert!(
+            row["thumb"]
+                .as_str()
+                .unwrap()
+                .contains("CCCCCCCCCCC"),
+            "the row names the candidate that actually plays"
+        );
+        // The blocked id is filtered before the resolve, so no Node spawn is
+        // spent re-learning a permanent refusal: only the playable candidate
+        // is asked for.
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only the playable candidate");
+    }
+
+    /// Every trailer a title lists becomes its own shelf tile, each with its
+    /// own deterministic Part key; the shelf itself resolves nothing, and a
+    /// press resolves exactly the tile that was pressed.
+    /// A related show is addressed by a synthetic key and has no Cinemeta
+    /// meta to read; its TMDB `videos` answer is the only trailer source, and
+    /// it must reach the shelf in trailer-before-teaser order.
+    #[test]
+    fn a_shows_tmdb_videos_become_shelf_candidates() {
+        use plx_stremio::addons_tmdb::{TmdbVideo, TmdbVideos};
+        let backend = Arc::new(TrailerMetaBackend {
+            calls: AtomicUsize::new(0),
+            trailer: String::new(),
+        });
+        let shim = Arc::new(Shim::new(backend, Config::default()));
+        let videos = TmdbVideos {
+            results: vec![
+                TmdbVideo {
+                    key: "BBBBBBBBBBB".into(),
+                    name: "Teaser 2".into(),
+                    site: "YouTube".into(),
+                    type_: "Teaser".into(),
+                    ..Default::default()
+                },
+                TmdbVideo {
+                    key: "AAAAAAAAAAA".into(),
+                    name: "Official Trailer".into(),
+                    site: "YouTube".into(),
+                    type_: "Trailer".into(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let rk = TMDB_SHOW_KEY_BASE + 1396;
+        let candidates = shim.trailer_candidates_from_videos(rk, Some(&videos));
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].youtube_id, "AAAAAAAAAAA", "trailer before teaser");
+        assert_eq!(candidates[1].youtube_id, "BBBBBBBBBBB");
+        let rows = shim.trailer_shelf_rows(rk);
+        // `Shim::trailer_candidates` would ask TMDB here; this test exercises
+        // the details-in-hand path, so check the row shape directly.
+        assert_eq!(trailer_extras(rk, &candidates)["Video"][0]["title"], "Official Trailer");
+        assert_eq!(rows.len(), 0, "no TMDB key/meta in this test: nothing to resolve");
+    }
+
+    #[test]
+    fn the_shelf_lists_every_trailer_and_resolves_only_the_tile_asked_for() {
+        let (shim, parent) = parent_with_trailer();
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.metas.insert(
+            "movie",
+            "tt9990001",
+            Arc::new(Meta {
+                id: "tt9990001".into(),
+                type_: "movie".into(),
+                name: "Trailer Host".into(),
+                trailer_streams: vec![
+                    json!({"name": "Official Trailer", "ytId": "AAAAAAAAAAA"}),
+                    json!({"name": "Teaser 2", "ytId": "BBBBBBBBBBB"}),
+                ],
+                ..Default::default()
+            }),
+        );
+        struct Recorder {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        impl crate::shim_trailer::TrailerResolver for Recorder {
+            fn resolve(&self, youtube_id: &str) -> Option<crate::shim_trailer::TrailerResolved> {
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(youtube_id.to_string());
+                Some(dash_resolved())
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        shim.trailer_resolver = Box::new(Recorder { seen: seen.clone() });
+        shim.probes.set_prober(Arc::new(|_url: &str, _deadline| {
+            Ok(ok_probe("mp4", "h264"))
+        }));
+        let shim = Arc::new(shim);
+
+        let rows = shim.trailer_shelf_rows(parent);
+        assert_eq!(rows.len(), 2, "both trailers are tiles");
+        assert_eq!(rows[0]["title"].as_str().unwrap(), "Official Trailer");
+        assert_eq!(rows[1]["title"].as_str().unwrap(), "Teaser 2");
+        let clip1 = trailer_rk_at(parent, 1);
+        assert_eq!(rows[1]["ratingKey"].as_str().unwrap(), clip1.to_string());
+        assert_eq!(
+            rows[1]["Media"][0]["Part"][0]["key"].as_str().unwrap(),
+            format!("/library/parts/{}/0/file.mpd", clip1 * 1000 + 998)
+        );
+        assert_eq!(
+            rows[1]["thumb"].as_str().unwrap(),
+            "https://img.youtube.com/vi/BBBBBBBBBBB/hqdefault.jpg"
+        );
+        assert!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "the shelf must not resolve"
+        );
+
+        // Pressing the SECOND tile resolves the second id only.
+        let resp = shim.part(clip1 * 1000 + 998);
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            *seen.lock().unwrap_or_else(|e| e.into_inner()),
+            vec!["BBBBBBBBBBB".to_string()]
+        );
+
+        // The first tile is still untouched until it is asked for.
+        let first = shim.part(trailer_rk_at(parent, 0) * 1000 + 998);
+        assert_eq!(first.status, 200);
+        assert_eq!(
+            *seen.lock().unwrap_or_else(|e| e.into_inner()),
+            vec!["BBBBBBBBBBB".to_string(), "AAAAAAAAAAA".to_string()]
+        );
+    }
+
+    #[test]
+    fn trailer_extras_route_serves_playable_trailer_row() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_resolved()),
+        });
+        shim.probes.set_prober(Arc::new(|_url: &str, _deadline| {
+            Ok(ok_probe("mp4", "h264"))
+        }));
+        let shim = Arc::new(shim);
+        // `GET /library/metadata/{parent}/extras` is the detail shelf source
+        // (`fetch_extras_rows` -> `pick_trailer`); it must return the clip row
+        // with the trailer subtype contract plus a non-empty Part key.
+        let resp = shim.handle(&Request {
+            method: "GET".into(),
+            path: format!("/library/metadata/{parent}/extras"),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: vec![],
+        });
+        assert_eq!(resp.status, 200);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let rows = body["MediaContainer"]["Metadata"]
+            .as_array()
+            .expect("extras Metadata array");
+        assert_eq!(rows.len(), 1, "one playable trailer row");
+        let row = &rows[0];
+        assert_eq!(row["ratingKey"].as_str().unwrap(), clip.to_string());
+        assert_eq!(row["type"], "clip");
+        assert_eq!(row["subtype"], "trailer");
+        let extra_type = row["extraType"]
+            .as_i64()
+            .or_else(|| row["extraType"].as_str().and_then(|s| s.parse().ok()));
+        assert_eq!(extra_type, Some(1));
+        let part_key = row["Media"][0]["Part"][0]["key"]
+            .as_str()
+            .expect("first Part key");
+        assert!(
+            !part_key.is_empty(),
+            "playable_trailer_meta needs a Part key"
+        );
+        // `is_trailer_meta` / `playable_trailer_meta` equivalent.
+        let is_trailer = row["subtype"] == "trailer" || extra_type == Some(1);
+        assert!(
+            is_trailer && !part_key.is_empty(),
+            "pick_trailer must accept it"
+        );
+        // Non-numeric rk and a thumbnail-only title both answer empty, not 404.
+        let bad = shim.handle(&Request {
+            method: "GET".into(),
+            path: "/library/metadata/nope/extras".into(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: vec![],
+        });
+        let bbody: Value = serde_json::from_slice(&bad.body).unwrap();
+        assert!(bbody["MediaContainer"]["Metadata"]
+            .as_array()
+            .is_some_and(|a| a.is_empty()));
+        // A title whose trailer the resolver cannot serve still advertises the
+        // shelf row: the detail open must not wait for (or depend on) a Node
+        // round-trip. The Parts answer 404 only when the player asks for bytes.
+        let (shim2, parent2) = parent_with_trailer();
+        let mut shim2 = Arc::try_unwrap(shim2).ok().expect("single owner");
+        shim2.trailer_resolver = Box::new(FixedResolver { resolved: None });
+        let shim2 = Arc::new(shim2);
+        let shelf = shim2.handle(&Request {
+            method: "GET".into(),
+            path: format!("/library/metadata/{parent2}/extras"),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: vec![],
+        });
+        let ebody: Value = serde_json::from_slice(&shelf.body).unwrap();
+        let rows = ebody["MediaContainer"]["Metadata"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "the shelf row needs no resolve");
+        let part = rows[0]["Media"][0]["Part"][0]["key"].as_str().unwrap();
+        assert!(part.ends_with("/file.mpd"));
+        let pid = trailer_rk(parent2) * 1000 + 998;
+        assert_eq!(
+            shim2.part(pid).status,
+            404,
+            "with no resolver the first byte request is refused"
+        );
+    }
+
+    #[test]
+    fn synthetic_movie_show_extras_nonempty_from_live_fetch() {
+        // Synthetic keys have no `Ident` and never populate `metas`, so the
+        // live `meta()` fetch is the only way the trailer id is found.
+        let backend = Arc::new(TrailerMetaBackend {
+            calls: AtomicUsize::new(0),
+            trailer: "dQw4w9WgXcQ".into(),
+        });
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        // No Keys entry, no metas entry: the rug.
+        assert!(shim.keys.ident(TMDB_FALLBACK_KEY_BASE + 603).is_none());
+        assert!(shim.keys.ident(TMDB_SHOW_KEY_BASE + 1396).is_none());
+        for rk in [TMDB_FALLBACK_KEY_BASE + 603, TMDB_SHOW_KEY_BASE + 1396] {
+            let candidates = shim.trailer_candidates(rk, false);
+            assert_eq!(
+                candidates.first().map(|c| c.youtube_id.as_str()),
+                Some("dQw4w9WgXcQ"),
+                "live fetch finds the id"
+            );
+            let extras = trailer_extras(rk, &candidates);
+            assert_eq!(extras["Video"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                extras["Video"][0]["thumb"].as_str().unwrap(),
+                "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
+            );
+            assert_eq!(
+                extras["Video"][0]["key"].as_str().unwrap(),
+                format!("/library/metadata/{}", trailer_rk(rk))
+            );
+        }
+        assert!(
+            backend.calls.load(Ordering::SeqCst) >= 2,
+            "both kinds went to the backend live"
+        );
     }
 }

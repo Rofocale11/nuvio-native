@@ -817,6 +817,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "image",
+ "libc",
  "plx_base",
  "plx_net",
  "plx_platform",

@@ -269,6 +269,38 @@ const CONNECT_TIMEOUT_S: c_long = 15;
 /// `tools/netcond.py --mode stall` case.
 const LOW_SPEED_TIME_S: c_long = 30;
 
+/// The byte window a googlevideo media URL is asked for. Its signed, video-only URLs answer
+/// `403` to a GET with no `Range` header and to an open-ended `bytes=N-`, and `206` to a bounded
+/// window (measured 2026-11-06: `bytes=0-65535` -> 206, `bytes=0-` -> 302/403, no Range -> 403;
+/// the muxed 360p file accepts all three). One window is 8 MiB, so a trailer costs a handful of
+/// requests and a window boundary is continued by [`CurlSource::continue_window`].
+const GOOGLEVIDEO_WINDOW: i64 = 8 * 1024 * 1024;
+
+/// Whether `url` is a googlevideo media host, whose signed URLs need the bounded window above.
+fn is_googlevideo_media(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    host == "googlevideo.com" || host.ends_with(".googlevideo.com")
+}
+
+/// Test hook: the host suite crosses a window boundary with a few bytes rather than 8 MiB.
+#[cfg(test)]
+static GOOGLEVIDEO_WINDOW_OVERRIDE: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+fn googlevideo_window() -> i64 {
+    #[cfg(test)]
+    {
+        let w = GOOGLEVIDEO_WINDOW_OVERRIDE.load(Ordering::Relaxed);
+        if w > 0 {
+            return w;
+        }
+    }
+    GOOGLEVIDEO_WINDOW
+}
+
 /// The ordinary HTTPS media low-speed contract. ABR reserve snapshots may wake earlier, but
 /// retries carry this independent liveness balance instead of renewing it.
 pub fn media_stall_budget() -> std::time::Duration {
@@ -639,6 +671,10 @@ pub struct CurlSource {
     off: i64,
     /// Total size of the resource, or -1 when the server never said.
     size: i64,
+    /// The bounded window this source requests instead of an open-ended range, when the host
+    /// refuses the open-ended form (googlevideo); `None` for every other server. A finished
+    /// window that has not reached [`size`](Self::size) is continued, not reported as EOF.
+    window: Option<i64>,
     /// The transfer reached `CURLMSG_DONE`, or ended through a multi-interface failure.
     done: bool,
     /// The `CURLcode` that DONE carried, when there was one.
@@ -698,6 +734,35 @@ impl CurlSource {
         let published: std::cell::RefCell<Option<Arc<Abort>>> = std::cell::RefCell::new(None);
         let src = Self::open_private_with(url, at, &|a| *published.borrow_mut() = Some(Arc::clone(a)))?;
         let abort = published.into_inner().ok_or(OpenErr::Local)?;
+        Ok((src, abort))
+    }
+
+    /// [`open_private`](Self::open_private) bounded by a setup deadline: connect, request and
+    /// headers end at `deadline`. The DASH trailer gate's tail ask is the caller — it runs on the
+    /// detail page and must not inherit libcurl's 15 s connect ceiling.
+    pub fn open_private_until(
+        url: &str,
+        at: i64,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(Box<CurlSource>, Arc<Abort>), OpenErr> {
+        if !available() {
+            crate::player::log("curlio: refusing — libcurl multi is not available on this device");
+            return Err(OpenErr::Unavailable);
+        }
+        let reservation = OpenReservation::private().ok_or(OpenErr::Local)?;
+        let abort = reservation
+            .abort
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(OpenErr::Local)?;
+        let src = Self::open_with_reservation_range_until(
+            url,
+            at,
+            None,
+            reservation,
+            deadline,
+            &mut NoCheckpoint,
+        )?;
         Ok((src, abort))
     }
 
@@ -835,6 +900,7 @@ impl CurlSource {
             abort: Arc::clone(&abort),
             off: 0,
             size: -1,
+            window: None,
             done: false,
             rc: 0,
             failed: false,
@@ -1040,6 +1106,19 @@ impl CurlSource {
         // Ordinary seeks use `bytes=N-`; the throughput probe uses the finite `bytes=0-M` form.
         // Held in `self` rather than a local: libcurl copies string options (7.17+), but the whole
         // table here is bound at runtime and an owned copy costs nothing to be sure of.
+        // googlevideo's signed media URLs refuse a GET with NO `Range` header (`403`) and one
+        // with an open-ended range (`bytes=N-` -> `302`/`403`); a bounded window answers `206`.
+        // Our first open at offset 0 used to send no Range at all and every seek used `N-`, so
+        // an entire video-only track failed while the muxed file (which accepts both) played.
+        // State a window here, and continue it in `read_until` when it runs out.
+        let (range_end, window) = match self.hop_url.to_str() {
+            Ok(u) if is_googlevideo_media(u) && range_end.is_none() => (
+                Some(at.saturating_add(googlevideo_window() - 1)),
+                Some(googlevideo_window()),
+            ),
+            _ => (range_end, None),
+        };
+        self.window = window;
         self.range = match range_end {
             Some(end) if end >= at => CString::new(format!("{at}-{end}")).ok(),
             Some(_) => return Err(OpenErr::Local),
@@ -1623,7 +1702,18 @@ impl CurlSource {
                 return n as c_int;
             }
             if self.done {
-                return if self.failed { -1 } else { 0 };
+                if self.failed {
+                    return -1;
+                }
+                // A bounded window that ended before the resource did is a chunk boundary, not
+                // EOF: request the next window and keep delivering.
+                if self.window_pending() {
+                    match self.continue_window() {
+                        Ok(()) => continue,
+                        Err(()) => return -1,
+                    }
+                }
+                return 0;
             }
             if self.perform().is_err() {
                 return -1;
@@ -1846,7 +1936,30 @@ impl CurlSource {
 
     /// Body fully received and already copied out of the multi buffer.
     pub fn body_complete(&self) -> bool {
-        self.done && self.xfer.pending() == 0
+        self.done && self.xfer.pending() == 0 && !self.window_pending()
+    }
+
+    /// A windowed source has delivered its current window while the resource continues.
+    fn window_pending(&self) -> bool {
+        self.window.is_some() && self.size > self.off
+    }
+
+    /// Ask for the next window at the current offset. Err leaves the source unusable, so the
+    /// caller reports the failure instead of a clean EOF it would silently believe.
+    fn continue_window(&mut self) -> Result<(), ()> {
+        debug_assert!(self.window_pending());
+        match self.start_range_until(self.off, None, None, &mut NoCheckpoint) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.stop();
+                crate::player::log(&format!(
+                    "curlio: continuing the {}-byte window at {} failed: {e:?}",
+                    self.window.unwrap_or(0),
+                    self.off
+                ));
+                Err(())
+            }
+        }
     }
 
     /// Signal teardown on THIS source. `player::engine` uses [`abort_active`] instead, since it
@@ -2530,6 +2643,9 @@ mod tests {
         TruncateFirst,
         /// [`TruncateFirst`](Self::TruncateFirst), and then the reopen is refused with a 503.
         TruncateFirstThen503,
+        /// A googlevideo video-only URL: a GET with no `Range` header, or an open-ended
+        /// `bytes=N-`, is refused with `403`; a bounded `bytes=a-b` is answered `206`.
+        Googlevideo,
     }
 
     const BODY: &[u8] = b"ABCDEFGH";
@@ -2573,6 +2689,57 @@ mod tests {
             assert_eq!(accepts.load(Ordering::Acquire), 1);
             drop(src);
         });
+        plx_net::net::resolve::clear();
+    }
+
+    /// **The 1080p trailer's real failure, in one test.** googlevideo's signed video-only URLs
+    /// answer `403` to a GET with no `Range` header — which is exactly what an open at offset 0
+    /// used to send — and to the open-ended `bytes=N-` every seek used; a bounded window answers
+    /// `206`. So an adaptive track failed its probe while the muxed 360p file (which accepts all
+    /// three) played. The source must state a window, and a window that ends before the resource
+    /// does must be continued, not reported as EOF.
+    #[test]
+    fn a_googlevideo_media_url_is_read_through_bounded_windows() {
+        let Some(_g) = curl_gate() else { return };
+        plx_net::net::resolve::clear();
+        GOOGLEVIDEO_WINDOW_OVERRIDE.store(3, Ordering::Relaxed);
+        with_server(RangeMode::Googlevideo, |port, accepts, requests| {
+            let host = format!("media{port}.googlevideo.com");
+            let pin = plx_plex::plex::ResolvePin::for_test(
+                &host,
+                port as i32,
+                "127.0.0.1".parse().unwrap(),
+            );
+            assert!(plx_net::net::resolve::add(&pin));
+            let url = format!("http://{host}:{port}/videoplayback?itag=137");
+            let mut src =
+                CurlSource::open_gated(&url, 0, true).expect("a bounded window answers 206");
+            assert_eq!(src.size(), BODY.len() as i64);
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4];
+            loop {
+                let n = src.read(&mut buf);
+                assert!(n >= 0, "read failed");
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n as usize]);
+            }
+            assert_eq!(got, BODY, "every window arrives in order, none dropped or repeated");
+            assert!(
+                requests.load(Ordering::Acquire) >= 3,
+                "8 bytes in 3-byte windows is at least three requests, saw {}",
+                requests.load(Ordering::Acquire)
+            );
+            // A seek states a window too, rather than the open-ended form the host refuses.
+            assert!(src.seek(5));
+            let n = src.read(&mut buf);
+            assert!(n > 0, "read after seek returned {n}");
+            assert_eq!(&buf[..n as usize], &BODY[5..5 + n as usize]);
+            assert_eq!(accepts.load(Ordering::Acquire), 1, "windows reuse the connection");
+            drop(src);
+        });
+        GOOGLEVIDEO_WINDOW_OVERRIDE.store(0, Ordering::Relaxed);
         plx_net::net::resolve::clear();
     }
 
@@ -2655,6 +2822,10 @@ mod tests {
                 }
             };
             let request_no = requests.fetch_add(1, Ordering::AcqRel) + 1;
+            if mode == RangeMode::Googlevideo {
+                serve_googlevideo(&mut w, &head);
+                continue;
+            }
             let start = range_start_of(&head);
             if matches!(mode, RangeMode::WithholdFrom(n) if request_no >= n) {
                 while !stop.load(Ordering::Acquire) {
@@ -2800,6 +2971,49 @@ mod tests {
             }
             let _ = w.flush();
         }
+    }
+
+    /// The googlevideo refusal: no `Range` header or an open-ended range → `403`; a bounded
+    /// window → `206` with its `Content-Range`.
+    fn serve_googlevideo(w: &mut std::net::TcpStream, head: &[u8]) {
+        use std::io::Write;
+        let lower = String::from_utf8_lossy(head).to_ascii_lowercase();
+        let spec = lower
+            .split("\r\n")
+            .find_map(|l| l.strip_prefix("range: bytes="))
+            .map(|v| v.trim().to_owned());
+        let refused = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+        let Some(spec) = spec else {
+            let _ = w.write_all(refused);
+            let _ = w.flush();
+            return;
+        };
+        let (first, last) = match spec.split_once('-') {
+            Some((a, b)) if !b.is_empty() => (a.parse::<i64>().ok(), b.parse::<i64>().ok()),
+            _ => (None, None),
+        };
+        let (Some(first), Some(last)) = (first, last) else {
+            let _ = w.write_all(refused);
+            let _ = w.flush();
+            return;
+        };
+        let total = BODY.len() as i64;
+        if first < 0 || last < first || first >= total {
+            let _ = w.write_all(refused);
+            let _ = w.flush();
+            return;
+        }
+        let last = last.min(total - 1);
+        let slice = &BODY[first as usize..=last as usize];
+        let hdr = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{last}/{total}\r\n\
+             Content-Length: {}\r\n\r\n",
+            slice.len()
+        );
+        if w.write_all(hdr.as_bytes()).is_err() || w.write_all(slice).is_err() {
+            return;
+        }
+        let _ = w.flush();
     }
 
     /// `Range: bytes=4-` → 4. Zero when the request carries no usable range.
