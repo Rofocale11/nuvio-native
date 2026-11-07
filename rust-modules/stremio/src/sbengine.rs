@@ -336,20 +336,22 @@ fn remember(ih: &str) {
 /// caller), pick the file, then wait for the engine's stream URL. Split out so a re-resolve of an
 /// already-open torrent does not re-add it.
 ///
-/// The URL is returned only after a short prebuffer wait (see [`wait_for_prebuffer`]): the
-/// engine prepares a stream URL as soon as priorities are set, before any piece has landed, and
-/// handing the player a URL with zero bytes in it is what made the first play of a torrent
-/// stall until the app's own retry re-resolved it once peers had arrived.
+/// The URL is returned after a short prebuffer wait (see [`wait_for_prebuffer`]): the engine
+/// prepares a stream URL as soon as priorities are set, before any piece has landed, and a URL
+/// with zero bytes in it made the probe fail before data could arrive. The wait is only enough
+/// for the header now — the engine's reads block until pieces are verified, so the player's own
+/// buffering can start while the rest of the lookahead is still in flight.
 fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(timeout_ms);
     // Evict the previous torrent BEFORE taking the baseline. `EngineStats::downloaded`
     // is engine-wide, so while the old torrent is still live its bytes keep arriving
-    // during the prebuffer wait and fill the 8 MB delta with stale bytes: the gate
+    // during the prebuffer wait and fill the delta with stale bytes: the gate
     // passed instantly, the URL was served with zero fresh pieces of the new torrent,
     // the probe failed (fps=14/3/2) and `playback retry` saved it. Removing first
     // stops the old swarm competing and makes the delta count only this torrent.
     // A same-hash retry must not tear its own stream down (remember() is a no-op
-    // to itself) and must not wait for 8 MB *more* — it already has what it needs.
+    // to itself) and must not wait for the gate again — it already has what it needs.
     let retry_same = active_hash().as_deref() == Some(ih);
     remember(ih);
     let baseline = stats().map(|s| s.downloaded).unwrap_or(0);
@@ -365,6 +367,7 @@ fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
+    let metadata_wait = started.elapsed();
     let idx = match preferred_idx {
         Some(i) if (i as usize) < files.len() => i,
         _ => files
@@ -379,9 +382,24 @@ fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result
         match stream(ih, idx, &mut buf) {
             Some(1) => {
                 let url = url_trim(&buf);
-                if !retry_same {
-                    wait_for_prebuffer(baseline, deadline);
-                }
+                let url_wait = started.elapsed();
+                let prebuffer = if retry_same {
+                    PrebufferOutcome::Skipped
+                } else {
+                    wait_for_prebuffer(baseline, deadline)
+                };
+                // One line per opened stream: without the split, a slow start on the TV cannot be
+                // attributed to peer discovery, our prebuffer gate, or the caller's deadline.
+                plx_base::eventlog::log(&format!(
+                    "sbengine: {} metadata {}ms ({} files, index {}) -> url {}ms -> prebuffer {} -> resolve {}ms",
+                    &ih[..ih.len().min(12)],
+                    metadata_wait.as_millis(),
+                    files.len(),
+                    idx,
+                    url_wait.as_millis(),
+                    prebuffer.describe(),
+                    started.elapsed().as_millis(),
+                ));
                 return Ok(url);
             }
             Some(0) => {}
@@ -415,12 +433,15 @@ pub fn error(ih: &str) -> String {
 }
 
 /// How much the engine must have downloaded before a stream URL is handed to
-/// the player: enough for the probe (which reads the header and first units)
-/// and the first seconds of playback without outrunning the swarm. Sized at
-/// ~8 MB — about 3-5 s of a 4K stream at 20-30 Mbit/s — and at least one full
-/// 32 MiB window worth of headroom is *not* required: the probe only needs the
-/// file header, and the player starts its own buffering from the first granted
-/// byte. The exact byte count is driven by [`EngineStats::downloaded`], which
+/// the player: enough for the container header plus the first units the probe
+/// reads. It was 8 MiB — a 3-5 s head start at 20-30 Mbit/s, sized when the
+/// shim's decision was cut off at 15 s and a zero-byte URL made the probe fail
+/// before any data landed. Neither holds now: the decision waits 120 s, and the
+/// engine's HTTP reads block until the requested pieces are verified, so the
+/// player's own buffering can begin far earlier. 1 MiB covers the header and a
+/// keyframe; the engine's piece schedule (8 MiB critical, 32 MiB playback, up
+/// to 256 MiB readahead) keeps fetching ahead of the playhead while the player
+/// reads. The exact byte count is driven by [`EngineStats::downloaded`], which
 /// the engine already reports.
 ///
 /// The number is read as a DELTA from a baseline taken after the previous torrent
@@ -429,7 +450,7 @@ pub fn error(ih: &str) -> String {
 /// after the first already has dozens of MB counted, so gating on the absolute
 /// value returned immediately with zero fresh bytes for the new torrent (the
 /// `fb0cdf43dcf8` first-try failure). A same-hash retry skips the wait entirely.
-const PREBUFFER_BYTES: u64 = 8 * 1024 * 1024;
+const PREBUFFER_BYTES: u64 = 1024 * 1024;
 /// How long the prebuffer wait may hold the URL before serving anyway. A slow
 /// swarm must still play — the wait is advisory, never a gate on playback: if
 /// no bytes have arrived inside this window the URL is returned anyway (the
@@ -437,21 +458,55 @@ const PREBUFFER_BYTES: u64 = 8 * 1024 * 1024;
 /// before this change). 10 s, inside the caller's 30 s resolve deadline.
 const PREBUFFER_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// What [`wait_for_prebuffer`] observed, so the one startup line can say where
+/// a slow resolve spent its time.
+enum PrebufferOutcome {
+    Reached { bytes: u64, elapsed: std::time::Duration },
+    Capped { bytes: u64, elapsed: std::time::Duration },
+    Skipped,
+    Unavailable,
+}
+
+impl PrebufferOutcome {
+    fn describe(&self) -> String {
+        match self {
+            Self::Reached { bytes, elapsed } => {
+                format!("{}KiB in {}ms", bytes / 1024, elapsed.as_millis())
+            }
+            Self::Capped { bytes, elapsed } => {
+                format!("cap after {}ms, only {}KiB", elapsed.as_millis(), bytes / 1024)
+            }
+            Self::Skipped => "skipped (same torrent)".to_string(),
+            Self::Unavailable => "no stats".to_string(),
+        }
+    }
+}
+
 /// Wait until the engine has prebuffered [`PREBUFFER_BYTES`] MORE than it had
 /// at `baseline` (the `downloaded` counter at resolve start), or the bounded
 /// wait runs out. Runs on the shim's resolve thread, never the UI thread
 /// (assert_may_block at the call site), and polls `stats()` every 100 ms —
-/// the same cadence as the metadata/stream loops above. Falls through
-/// silently when `stats()` is unavailable.
-fn wait_for_prebuffer(baseline: u64, deadline: std::time::Instant) {
-    let cap = deadline.min(std::time::Instant::now() + PREBUFFER_MAX_WAIT);
+/// the same cadence as the metadata/stream loops above. Returns immediately
+/// when `stats()` is unavailable.
+fn wait_for_prebuffer(baseline: u64, deadline: std::time::Instant) -> PrebufferOutcome {
+    let started = std::time::Instant::now();
+    let cap = deadline.min(started + PREBUFFER_MAX_WAIT);
     loop {
-        let Some(s) = stats() else { return };
-        if s.downloaded.saturating_sub(baseline) >= PREBUFFER_BYTES {
-            return;
+        let Some(s) = stats() else {
+            return PrebufferOutcome::Unavailable;
+        };
+        let bytes = s.downloaded.saturating_sub(baseline);
+        if bytes >= PREBUFFER_BYTES {
+            return PrebufferOutcome::Reached {
+                bytes,
+                elapsed: started.elapsed(),
+            };
         }
         if std::time::Instant::now() >= cap {
-            return;
+            return PrebufferOutcome::Capped {
+                bytes,
+                elapsed: started.elapsed(),
+            };
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }

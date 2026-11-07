@@ -701,12 +701,23 @@ impl Client {
                 &if forced { forced_direct_profile() } else { profile_extra(TranscodeDelivery::ProgressiveMkv, super::params::AudioTarget::Unknown) },
             );
         if self.is_nuvio() {
-            // Addon discovery and a bounded FFmpeg probe precede the response. The ordinary
-            // bulk transport's 30-second silence limit is too short for a cold source.
-            match self.get_json_with_headers_until(&q.build(), &[],
+            // Addon discovery and a bounded FFmpeg probe precede the response, so this request may
+            // sit silent far longer than the media inactivity budget: the deadline is the only
+            // bound (capping it at that budget killed the first play of a cold P2P source while
+            // the warmed retry played).
+            match self.get_json_with_headers_until_deadline_only(&q.build(), &[],
                 std::time::Instant::now() + std::time::Duration::from_secs(120)) {
                 super::client::JsonDeadlineOutcome::Response { parsed, .. } => parsed,
-                _ => None,
+                outcome => {
+                    let why = match outcome {
+                        super::client::JsonDeadlineOutcome::Deadline => "the 120 s deadline expired",
+                        _ => "the connection failed",
+                    };
+                    plx_base::eventlog::log(&format!(
+                        "decision: the shim answered no decision — {why} -> the play is refused"
+                    ));
+                    None
+                }
             }
         } else { self.get_json(&q.build()) }
     }

@@ -119,7 +119,7 @@ command is right when this file disagrees.
 <!-- BEGIN docs-fresh:cost-stats -->
 | | |
 |---|---|
-| files this fork changed | 711 |
+| files this fork changed | 714 |
 | files the reference branch changed | 875 |
 | **contested** — changed on **both** sides | 302 |
 | of those, under `rust-modules/screens` or `rust-modules/media` | 61 |

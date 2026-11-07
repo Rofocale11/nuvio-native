@@ -230,8 +230,11 @@ inside one blocked read. A terminal-floor recovery remains unarmed because aband
 remaining actuator cannot restore a stronger rollback guarantee.
 
 The HLS GET legs also retain an independent wall-clock transport-inactivity deadline. Plaintext PMS
-control has the same rolling inactivity shape: complete headers and actual body bytes begin a fresh
-epoch. HTTPS PMS control instead retains its existing 25-second whole-request API cap, intersected
+control has the same rolling inactivity shape by default: complete headers and actual body bytes
+begin a fresh epoch. A control request whose answer legitimately outlives that budget states so at
+the call site and is bounded by its caller deadline alone
+(`request_until_outcome_deadline_only`; the shim's MDE decision, whose probe runs for tens of
+seconds). HTTPS PMS control instead retains its existing 25-second whole-request API cap, intersected
 with the current reserve projection; progress does not renew that total cap. In every case an
 obsolete reserve wake renews neither form of transport liveness. Classification reads the owning
 clocks: spent reserve is censored evidence, expired transport liveness is a circumstance, and

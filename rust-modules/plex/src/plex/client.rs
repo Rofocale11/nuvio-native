@@ -518,17 +518,53 @@ impl Client {
         headers: &[&str],
         deadline: std::time::Instant,
     ) -> http::RequestOutcome {
+        self.send_until_by(path_no_token, method, headers, deadline, false)
+    }
+
+    /// [`Self::send_until`] whose silence is bounded only by `deadline` — see
+    /// [`http::request_until_outcome_deadline_only`].
+    #[track_caller]
+    fn send_until_deadline_only(
+        &self,
+        path_no_token: &str,
+        method: Method,
+        headers: &[&str],
+        deadline: std::time::Instant,
+    ) -> http::RequestOutcome {
+        self.send_until_by(path_no_token, method, headers, deadline, true)
+    }
+
+    #[track_caller]
+    fn send_until_by(
+        &self,
+        path_no_token: &str,
+        method: Method,
+        headers: &[&str],
+        deadline: std::time::Instant,
+        deadline_only: bool,
+    ) -> http::RequestOutcome {
         if !self.may_send() { return http::RequestOutcome::Transport(None); }
         let owned = pms_headers(headers);
         let headers: Vec<&str> = owned.iter().map(String::as_str).collect();
-        http::request_until_outcome(
-            &self.origin,
-            &self.with_token(path_no_token),
-            method,
-            &headers,
-            deadline,
-            self.resolve_pin.as_ref(),
-        )
+        if deadline_only {
+            http::request_until_outcome_deadline_only(
+                &self.origin,
+                &self.with_token(path_no_token),
+                method,
+                &headers,
+                deadline,
+                self.resolve_pin.as_ref(),
+            )
+        } else {
+            http::request_until_outcome(
+                &self.origin,
+                &self.with_token(path_no_token),
+                method,
+                &headers,
+                deadline,
+                self.resolve_pin.as_ref(),
+            )
+        }
     }
 
     /// A 2xx response body, or `None` — the fold the raw socket used to apply for every caller,
@@ -647,10 +683,39 @@ impl Client {
         headers: &[&str],
         deadline: std::time::Instant,
     ) -> JsonDeadlineOutcome {
+        self.get_json_with_headers_until_by(path_no_token, headers, deadline, false)
+    }
+
+    /// [`Self::get_json_with_headers_until`] whose server may stay silent for the caller's whole
+    /// deadline. The loopback shim's MDE decision runs addon discovery and a full-file probe before
+    /// it answers, which is longer than the media inactivity budget the ordinary path applies.
+    #[track_caller]
+    pub(super) fn get_json_with_headers_until_deadline_only(
+        &self,
+        path_no_token: &str,
+        headers: &[&str],
+        deadline: std::time::Instant,
+    ) -> JsonDeadlineOutcome {
+        self.get_json_with_headers_until_by(path_no_token, headers, deadline, true)
+    }
+
+    #[track_caller]
+    fn get_json_with_headers_until_by(
+        &self,
+        path_no_token: &str,
+        headers: &[&str],
+        deadline: std::time::Instant,
+        deadline_only: bool,
+    ) -> JsonDeadlineOutcome {
         let mut request_headers = Vec::with_capacity(headers.len() + 1);
         request_headers.push(ACCEPT_JSON);
         request_headers.extend_from_slice(headers);
-        match self.send_until(path_no_token, Method::Get, &request_headers, deadline) {
+        let outcome = if deadline_only {
+            self.send_until_deadline_only(path_no_token, Method::Get, &request_headers, deadline)
+        } else {
+            self.send_until(path_no_token, Method::Get, &request_headers, deadline)
+        };
+        match outcome {
             http::RequestOutcome::Response(reply) => {
                 let parsed = if reply.ok() {
                     match serde_json::from_slice::<Envelope>(&reply.body) {

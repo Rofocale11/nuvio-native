@@ -153,7 +153,10 @@ enum BodyPolicy {
     Api,
     Bulk,
     Probe { max: usize, timeout_s: i32, learn_pin: bool },
-    Deadline { at: std::time::Instant },
+    /// A caller-owned absolute deadline. `stall` bounds uninterrupted silence beside it; `None`
+    /// leaves the caller's deadline the only bound, for a request whose answer legitimately waits
+    /// on work that takes longer than the media inactivity contract (the shim's MDE decision).
+    Deadline { at: std::time::Instant, stall: Option<std::time::Duration> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,12 +225,53 @@ pub fn request_until_outcome(
     deadline: std::time::Instant,
     pin: Option<&ResolvePin>,
 ) -> RequestOutcome {
+    request_until(
+        origin,
+        path,
+        method,
+        headers,
+        deadline,
+        Some(plx_net::stream::media_stall_budget()),
+        pin,
+    )
+}
+
+/// [`request_until_outcome`] whose server may stay silent for the caller's whole deadline.
+///
+/// The loopback shim answers `/decision` only after addon discovery and a full-file probe of the
+/// chosen torrent — work that legitimately outruns the media inactivity contract, and which the
+/// 120-second caller deadline beside it was chosen to cover. Capping the wait at the media stall
+/// budget turned that into a "Playback failed" whose retry, by then warm, played: the first play
+/// of a cold P2P source failed and the second worked. `None` for `stall` means the deadline the
+/// caller projected is the only bound; the TLS arm keeps its ordinary API cap regardless.
+#[track_caller]
+pub fn request_until_outcome_deadline_only(
+    origin: &Origin,
+    path: &str,
+    method: Method,
+    headers: &[&str],
+    deadline: std::time::Instant,
+    pin: Option<&ResolvePin>,
+) -> RequestOutcome {
+    request_until(origin, path, method, headers, deadline, None, pin)
+}
+
+#[track_caller]
+fn request_until(
+    origin: &Origin,
+    path: &str,
+    method: Method,
+    headers: &[&str],
+    deadline: std::time::Instant,
+    stall: Option<std::time::Duration>,
+    pin: Option<&ResolvePin>,
+) -> RequestOutcome {
     request_with(
         origin,
         path,
         method,
         headers,
-        BodyPolicy::Deadline { at: deadline },
+        BodyPolicy::Deadline { at: deadline, stall },
         pin,
     )
 }
@@ -529,9 +573,15 @@ fn plaintext(
     let extra_ptr = extra_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
 
     let mut hs = plx_net::stream::http_stream_boxed();
-    let mut deadline_liveness = matches!(body_policy, BodyPolicy::Deadline { .. }).then(|| {
+    // The rolling silence bound, when this request has one. `None` means the caller's absolute
+    // deadline is the only bound (see `BodyPolicy::Deadline`).
+    let stall = match body_policy {
+        BodyPolicy::Deadline { stall, .. } => stall,
+        _ => None,
+    };
+    let mut deadline_liveness = stall.map(|s| {
         std::time::Instant::now()
-            .checked_add(plx_net::stream::media_stall_budget())
+            .checked_add(s)
             .unwrap_or_else(std::time::Instant::now)
     });
     let mut response_status = None;
@@ -545,7 +595,7 @@ fn plaintext(
             method.as_str(),
             timeout_s.saturating_mul(1000),
         ),
-        BodyPolicy::Deadline { at } => {
+        BodyPolicy::Deadline { at, .. } => {
             if std::time::Instant::now() >= at {
                 return RequestOutcome::Deadline;
             }
@@ -597,11 +647,11 @@ fn plaintext(
         // A complete response head is transport progress. Preserve the caller's reserve instant,
         // but begin a fresh ordinary inactivity epoch for the body just as the HLS path and
         // SO_RCVTIMEO do; connect/header latency cannot silently consume the body's watchdog.
-        deadline_liveness = Some(
+        deadline_liveness = stall.map(|s| {
             std::time::Instant::now()
-                .checked_add(plx_net::stream::media_stall_budget())
-                .unwrap_or_else(std::time::Instant::now),
-        );
+                .checked_add(s)
+                .unwrap_or_else(std::time::Instant::now)
+        });
     }
     // Read the status BEFORE anything else: a non-2xx open has already closed the socket, and the
     // code survives on the struct (`http_open` says so where it closes). That is the whole reason
@@ -630,7 +680,7 @@ fn plaintext(
                 BodyPolicy::Api | BodyPolicy::Bulk | BodyPolicy::Deadline { .. } => chunk.len(),
             };
             let (n, read_deadline_owner) = match body_policy {
-                BodyPolicy::Deadline { at } => {
+                BodyPolicy::Deadline { at, .. } => {
                     let (effective, owner) = deadline_liveness
                         .map_or((at, DeadlineOwner::Caller), |liveness| {
                             effective_deadline(at, liveness)
@@ -674,11 +724,11 @@ fn plaintext(
             }
             body.extend_from_slice(&chunk[..n as usize]);
             if matches!(body_policy, BodyPolicy::Deadline { .. }) {
-                deadline_liveness = Some(
+                deadline_liveness = stall.map(|s| {
                     std::time::Instant::now()
-                        .checked_add(plx_net::stream::media_stall_budget())
-                        .unwrap_or_else(std::time::Instant::now),
-                );
+                        .checked_add(s)
+                        .unwrap_or_else(std::time::Instant::now)
+                });
             }
         }
         if !overflowed {
@@ -746,7 +796,7 @@ fn tls(
     let (timeouts, max_body, caller_owns_timeout) = match body_policy {
         BodyPolicy::Api => (plx_net::net::API, None, false),
         BodyPolicy::Bulk => (plx_net::net::BULK, None, false),
-        BodyPolicy::Deadline { at } => {
+        BodyPolicy::Deadline { at, .. } => {
             let now = std::time::Instant::now();
             if now >= at {
                 return RequestOutcome::Deadline;
@@ -1319,6 +1369,49 @@ mod tests {
         server.join().unwrap();
 
         assert!(matches!(outcome, RequestOutcome::Deadline));
+    }
+
+    /// **The caller's deadline is the only bound when it says so.** The shim's MDE decision waits
+    /// on addon discovery and a full-file probe — silence far past the media inactivity budget —
+    /// and capping that wait there failed the first play of a cold P2P source. The stall form
+    /// must still cut the same silence short, or this test proves nothing about which one the
+    /// decision uses.
+    #[test]
+    fn a_deadline_only_request_survives_silence_the_stall_budget_cuts_short() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().expect("accept");
+                let mut request = [0u8; 2048];
+                let _ = socket.read(&mut request).expect("request");
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        let origin = Origin::http("127.0.0.1", port as i32);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
+        let cut = request_until(
+            &origin,
+            "/decision",
+            Method::Get,
+            &[],
+            deadline,
+            Some(std::time::Duration::from_millis(100)),
+            None,
+        );
+        assert!(matches!(cut, RequestOutcome::Transport(None)), "{cut:?}");
+
+        let patient = request_until(&origin, "/decision", Method::Get, &[], deadline, None, None);
+        assert!(
+            matches!(&patient, RequestOutcome::Response(Reply { status: 200, body, .. }) if body == b"ok"),
+            "{patient:?}"
+        );
+        server.join().unwrap();
     }
 
     /// One beat of a scripted plaintext stream peer.

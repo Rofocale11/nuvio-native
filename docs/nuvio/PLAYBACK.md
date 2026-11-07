@@ -263,7 +263,11 @@ Until the probe answers, label guesses are acceptable for the **detail page** on
 not start on guessed fields. The Nuvio route fetches this decision BEFORE queueing or
 planning playback, replaces the detail item with the probed item, and uses Original
 quality because the shim has no transcoder. Discovery has a 60 s budget, probing 45 s,
-and the control-plane decision request has a 120 s deadline. A probe failure (`Err`) means "not playable here" (unsupported
+and the control-plane decision request has a 120 s deadline — the caller's deadline is the ONLY
+bound on that request (`request_until_outcome_deadline_only`): the media inactivity budget
+(`MEDIA_RECV_TIMEOUT_MS`, 15 s) must not cap it, because a cold torrent legitimately stays silent
+past that while discovery and the probe run (capping it there made the first play of a cold P2P
+source fail and the warmed retry play). A probe failure (`Err`) means "not playable here" (unsupported
 container — the bundled FFmpeg demuxes only Matroska/WebM, MP4/MOV, MPEG-TS and raw H.264/HEVC —
 or unreachable); say so instead of starting the player.
 

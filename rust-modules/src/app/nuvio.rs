@@ -385,17 +385,29 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
     use plx_pmsshim::shim_probe as p;
     Arc::new(|url: &str, deadline: std::time::Duration| {
         log("nuvio: probing selected stream");
-        let m = plx_media::ff::probe::probe_url(url, deadline)?;
+        let started = std::time::Instant::now();
+        let m = match plx_media::ff::probe::probe_url(url, deadline) {
+            Ok(m) => m,
+            Err(e) => {
+                log(&format!(
+                    "nuvio: probe failed after {}ms: {e}",
+                    started.elapsed().as_millis()
+                ));
+                return Err(e);
+            }
+        };
+        let probe_ms = started.elapsed().as_millis();
         if let Some(v) = &m.video {
             log(&format!(
-                "nuvio: probe {} {}x{} fps={:.3} dovi={} audio={} subs={}",
+                "nuvio: probe {} {}x{} fps={:.3} dovi={} audio={} subs={} in {}ms",
                 v.codec,
                 v.width,
                 v.height,
                 v.fps,
                 v.dovi.is_some(),
                 m.audio.len(),
-                m.subtitles.len()
+                m.subtitles.len(),
+                probe_ms
             ));
         }
         let caps = plx_platform::devcaps::caps();

@@ -247,9 +247,12 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   a stale entry is resolved again instead of 404ing forever.
   While the player is not on screen the engine is throttled to a background ceiling
   (`sbengine: background throttled`, 64 KiB/s down and up) so it does not saturate CPU or
-  bandwidth under Home; the wait for the 8 MB prebuffer in `resolve_stream` counts only the new
+  bandwidth under Home; the wait for the 1 MiB prebuffer in `resolve_stream` counts only the new
   torrent's bytes (baseline taken after the previous torrent is evicted, so a slow old swarm
-  cannot inflate the delta). The next `resolve_stream` restores foreground limits
+  cannot inflate the delta) and holds the URL for at most 10 s, after which the engine's blocking
+  reads let the probe and the player wait for pieces themselves. Each resolve logs its split
+  (`sbengine: <hash> metadata …ms -> url …ms -> prebuffer … -> resolve …ms`) so a slow first play
+  can be attributed to peer discovery, the gate, or the caller's deadline. The next `resolve_stream` restores foreground limits
   (`sbengine: foreground unlimited`) before opening, so playback always starts at full speed.
   `libsbengine.so` links libstdc++/libgcc and OpenSSL 1.1.1 statically — the NDK's libstdc++
   would otherwise want three symbols the TV's lacks, and the firmware's `libssl` SONAME differs

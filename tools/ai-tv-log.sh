@@ -17,12 +17,14 @@ STDERR="/tmp/plxnative-stderr.log /tmp/*/plxnative-stderr.log"
 CRASH="/tmp/plxnative-crash.log /tmp/*/plxnative-crash.log"
 
 if [ "$1" == "grep" ]; then
-    $SSH_CMD "grep -a -E '$2' $EVENTS $STDERR /tmp/serverp2p.log /tmp/*/serverp2p.log | tail -n 200" 2>/dev/null
+    $SSH_CMD "grep -a -E '$2' $EVENTS $STDERR | tail -n 200" 2>/dev/null
 elif [ "$1" == "perf" ]; then
     $SSH_CMD "grep -a -E 'loop=|posters:|imgcache:|coldopen|route=' $EVENTS | tail -n 200" 2>/dev/null
 elif [ "$1" == "p2p" ]; then
+    # The C engine logs to the event log (`sbengine:` / `decision:` / `stream:` lines);
+    # /tmp/serverp2p.log belonged to the Node child and is no longer written.
     LINES=${2:-100}
-    $SSH_CMD "tail -n $LINES /tmp/serverp2p.log /tmp/*/serverp2p.log 2>/dev/null" 2>/dev/null
+    $SSH_CMD "grep -a -E 'sbengine:|decision:|stream: GET|ff: open|peers=' $EVENTS | tail -n $LINES" 2>/dev/null
 elif [ "$1" == "panic" ]; then
     # Check stderr and crash logs for panics/backtraces
     $SSH_CMD "echo '--- CRASH LOG ---' && cat $CRASH && echo '--- STDERR (Last 100) ---' && tail -n 100 $STDERR" 2>/dev/null

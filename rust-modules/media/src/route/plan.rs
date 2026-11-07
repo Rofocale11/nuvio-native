@@ -1658,12 +1658,16 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         match client.mde_decision(rk, &session, env.audio_sid, env.sub_sid) {
             Some(mc) => {
                 if let Some(why) = refusal(&mc) {
+                    crate::player::log(&format!("decision: the shim refused the play — {why}"));
                     plan.verdict = Some(PlayVerdict::Server(why, DecisionCodes::of(&mc)));
                     return plan;
                 }
                 Some(mc)
             }
-            None => return plan,
+            None => {
+                crate::player::log("decision: the shim answered no usable decision; the play cannot be planned");
+                return plan;
+            }
         }
     } else { None };
     let nuvio_media = nuvio_decision.as_ref().and_then(|mc| mc.metadata.first()).and_then(|m| m.primary_media());

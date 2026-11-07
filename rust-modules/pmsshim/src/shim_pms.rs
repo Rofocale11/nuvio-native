@@ -10038,3 +10038,287 @@ mod subtitle_search_tests {
     }
 }
 
+
+/// The host twin of the device's C-engine path: the real shim, the real `libsbengine.so` and a
+/// real loopback socket. Run it with `tools/host-engine-check.sh`; it is ignored everywhere else
+/// because a host without the x86-64 engine has nothing to exercise.
+#[cfg(test)]
+mod host_c_engine {
+    use super::*;
+    use plx_stremio::model::Stream;
+    use std::io::{Read, Write};
+
+    const PEERLESS_ID: &str = "tt9900001";
+    const SEEDED_ID: &str = "tt9900002";
+    /// No tracker, no DHT entry, no peers: the engine accepts the magnet and never learns its
+    /// metadata, so `resolve_stream` sits out its whole 30 s budget before failing.
+    const PEERLESS_HASH: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567";
+
+    struct OneMagnetBackend {
+        magnet: String,
+        id: &'static str,
+    }
+
+    impl OneMagnetBackend {
+        fn peerless() -> OneMagnetBackend {
+            OneMagnetBackend {
+                magnet: format!("magnet:?xt=urn:btih:{PEERLESS_HASH}"),
+                id: PEERLESS_ID,
+            }
+        }
+        fn seeded(magnet: String) -> OneMagnetBackend {
+            OneMagnetBackend { magnet, id: SEEDED_ID }
+        }
+    }
+
+    impl Backend for OneMagnetBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            Vec::new()
+        }
+        fn catalog_page(&self, _key: &str, _skip: u32, _genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+            Ok(Vec::new())
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, type_: &str, id: &str) -> Option<Meta> {
+            (type_ == "movie" && id == self.id).then(|| Meta {
+                id: id.into(),
+                type_: type_.into(),
+                name: "Host Movie".into(),
+                runtime: Some("2 h".into()),
+                ..Default::default()
+            })
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            vec![Stream {
+                url: Some(self.magnet.clone()),
+                name: Some("Torrentio\n1080p".into()),
+                addon_name: "Torrentio".into(),
+                addon_id: "torrentio".into(),
+                ..Default::default()
+            }]
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
+    fn host_engine_enabled() -> bool {
+        std::env::var_os("PLX_HOST_ENGINE_CHECK").as_deref() == Some(std::ffi::OsStr::new("1"))
+    }
+
+    fn start_host_engine() {
+        assert!(
+            plx_stremio::sbengine::available(),
+            "libsbengine.so did not load; point PLXNATIVE_APP_DIR at build/sbengine-host"
+        );
+        let root = std::env::temp_dir().join(format!("nuvio-host-engine-{}", std::process::id()));
+        let (state, cache) = (root.join("state"), root.join("cache"));
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        assert!(
+            plx_stremio::sbengine::start_engine(
+                state.to_str().unwrap(),
+                cache.to_str().unwrap()
+            ),
+            "the host engine refused to start"
+        );
+    }
+
+    fn host_shim(backend: OneMagnetBackend, id: &str) -> (crate::Handle, i64) {
+        let cfg = Config {
+            p2p_enabled: true,
+            // Only the marker that torrents are on; the engine serves its own URL and this
+            // address is never dialled.
+            torrent_server: Some("http://127.0.0.1:1".into()),
+            ..Config::default()
+        };
+        let handle = crate::start(Arc::new(backend), cfg, 0).expect("bind loopback");
+        let rk = handle.shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: id.into(),
+        });
+        (handle, rk)
+    }
+
+    struct HttpReply {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    impl HttpReply {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    fn http_get(host: &str, port: u16, target: &str, range: Option<&str>, wait: Duration) -> HttpReply {
+        let mut sock = std::net::TcpStream::connect((host, port)).expect("connect");
+        sock.set_read_timeout(Some(wait)).unwrap();
+        let mut request = format!(
+            "GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n"
+        );
+        if let Some(r) = range {
+            request.push_str(&format!("Range: {r}\r\n"));
+        }
+        request.push_str("\r\n");
+        sock.write_all(request.as_bytes()).unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).unwrap();
+        let split = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("a complete HTTP response");
+        let head = std::str::from_utf8(&raw[..split]).unwrap();
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .expect("an HTTP status");
+        let headers = lines
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        HttpReply { status, headers, body: raw[split + 4..].to_vec() }
+    }
+
+    fn http_get_url(url: &str, range: Option<&str>, wait: Duration) -> HttpReply {
+        let rest = url.strip_prefix("http://").expect("a plaintext engine URL");
+        let (authority, target) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        let (host, port) = authority.rsplit_once(':').expect("host:port");
+        http_get(host, port.parse().expect("a port"), target, range, wait)
+    }
+
+    #[test]
+    #[ignore = "host-only: needs a host libsbengine.so (tools/host-engine-check.sh)"]
+    fn host_c_engine_keeps_the_decision_silent_past_the_media_budget() {
+        if !host_engine_enabled() {
+            return;
+        }
+        start_host_engine();
+        let (handle, rk) = host_shim(OneMagnetBackend::peerless(), PEERLESS_ID);
+
+        let started = Instant::now();
+        let reply = http_get(
+            "127.0.0.1",
+            handle.port,
+            &format!("/video/:/transcode/universal/decision?path=/library/metadata/{rk}"),
+            None,
+            Duration::from_secs(90),
+        );
+        let elapsed = started.elapsed();
+
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        let container = &body["MediaContainer"];
+        // The peerless magnet never resolves, so the answer is a refusal — but it ARRIVES, after
+        // the engine's 30 s metadata budget. The old client capped this at the 15 s media stall
+        // budget and gave up first, which is the first-play "playback failed" this test guards.
+        assert_eq!(container["generalDecisionCode"], 2000, "{body}");
+        assert!(
+            container["transcodeDecisionText"]
+                .as_str()
+                .is_some_and(|t| t.contains("could not be opened")),
+            "{body}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(20),
+            "the decision answered in {elapsed:?}; the engine was not the thing holding it"
+        );
+        assert_eq!(
+            plx_stremio::sbengine::active_hash().as_deref(),
+            Some(PEERLESS_HASH),
+            "the engine never adopted the magnet"
+        );
+        println!("host C engine held /decision for {elapsed:?} and then answered");
+    }
+
+    /// The first-try playback the release gate is about: one `/decision` request, no retry, a
+    /// directplay verdict, and the player's Part URL serving the seeded file's own bytes through
+    /// the engine. `tools/host-engine-check.sh` starts the loopback seeder and sets both env vars.
+    #[test]
+    #[ignore = "host-only: needs a host libsbengine.so and a loopback seeder (tools/host-engine-check.sh)"]
+    fn host_torrent_plays_on_first_try() {
+        if !host_engine_enabled() {
+            return;
+        }
+        let (Ok(magnet), Ok(payload_path)) = (
+            std::env::var("PLX_HOST_TORRENT_MAGNET"),
+            std::env::var("PLX_HOST_TORRENT_FILE"),
+        ) else {
+            return;
+        };
+        let payload = std::fs::read(payload_path).expect("the seeded payload");
+        assert!(!payload.is_empty(), "the seeded payload is empty");
+        start_host_engine();
+        let (handle, rk) = host_shim(OneMagnetBackend::seeded(magnet), SEEDED_ID);
+
+        // Exactly one decision request, by construction: no retry can hide a cold-start failure.
+        let started = Instant::now();
+        let reply = http_get(
+            "127.0.0.1",
+            handle.port,
+            &format!("/video/:/transcode/universal/decision?path=/library/metadata/{rk}&mediaIndex=0"),
+            None,
+            Duration::from_secs(90),
+        );
+        let decision_wait = started.elapsed();
+        assert_eq!(reply.status, 200, "the decision answered {}", reply.status);
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        let container = &body["MediaContainer"];
+        assert_eq!(
+            container["generalDecisionCode"],
+            1000,
+            "{body} engine stats {:?}",
+            plx_stremio::sbengine::stats()
+        );
+        let media = &container["Metadata"][0]["Media"][0];
+        assert_eq!(media["Part"][0]["decision"], "directplay", "{body}");
+        let part_key = media["Part"][0]["key"]
+            .as_str()
+            .expect("the Part key the player opens")
+            .to_string();
+
+        let part = http_get("127.0.0.1", handle.port, &part_key, None, Duration::from_secs(30));
+        assert_eq!(part.status, 302, "the Part must hand the player the engine URL");
+        let location = part.header("location").expect("a Location header").to_string();
+        assert!(location.starts_with("http://127.0.0.1:"), "{location}");
+
+        let served = http_get_url(&location, Some("bytes=0-262143"), Duration::from_secs(90));
+        assert!(
+            served.status == 200 || served.status == 206,
+            "the engine answered {} for the stream",
+            served.status
+        );
+        assert!(!served.body.is_empty(), "the engine served no bytes");
+        let n = served.body.len().min(payload.len());
+        assert_eq!(
+            &served.body[..n],
+            &payload[..n],
+            "the engine served bytes that are not the seeded file"
+        );
+        assert!(
+            served.body.len() >= 256 * 1024 || served.body.len() == payload.len(),
+            "only {} bytes were served",
+            served.body.len()
+        );
+        println!(
+            "first decision directplayed in {decision_wait:?}; {} bytes from the engine match the seeded file",
+            served.body.len()
+        );
+    }
+}

@@ -351,6 +351,25 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   `CARGO_TARGET_DIR` at a `/tmp` directory: those trees were not in any checkout, so no tool
   counted or reclaimed them (28 of them, 45.6 GiB, were found in `/tmp` on 2026-10-19). Refused
   under `RELEASE=1`; `ci/test_managed_targets.py` pins that the target dir is inside the checkout.
+- `tools/host-engine-check.sh [--build-only]` — the host twin of the ARM C engine, and the only
+  host path that exercises the real `libsbengine.so` end to end. It compiles
+  `vendor/engine-sources` (the pinned nuvio-engine + libtorrent + Boost) for x86-64 into the
+  gitignored `build/sbengine-host/`, reusing the FetchContent sources a previous
+  `ci/build-sbengine.sh` left under `build/sbengine/deps` (nothing is downloaded; if those are
+  missing the script says so and stops). The default run then executes three checks the normal
+  suite never runs because the tests are `#[ignore]`d: the REAL shim + REAL engine hold
+  `/decision` silent past the 15 s media budget and still answer (the cold-first-play shape);
+  a loopback seeder (`tools/host_engine_seed.cpp`, built from the same libtorrent) seeds
+  `site/media/feel-1080p60.h264.mp4`, and the FIRST `/decision` direct-plays it and serves
+  byte-identical ranges through the engine; and the transport half
+  (`plx_plex http::tests::a_deadline_only_request_survives_silence_the_stall_budget_cuts_short`).
+  `--build-only` stops after the `.so` and the seeder are built. It needs CMake 3.24+ and a C++20
+  host compiler, takes about a minute cold (seconds warm), and passes `--features plx_base/hostsim`
+  because that is what lets `PLXNATIVE_APP_DIR` steer the engine lookup. The seeder advertises a
+  ROUTABLE interface address for `x.pe` (`host_engine_seed.cpp` prints the chosen one): a
+  device-bound loopback listener is unreachable from an unbound socket under at least one
+  sandbox's policy routing, and the engine would then see refusals only. **It proves the engine,
+  shim and plex layers on x86-64 — never quote it as an ARM or TV result.**
 - `make check-nodef` — the shipping-feature-set type check, `cargo check --lib
   --no-default-features`, which is the configuration `RELEASE=1` ships and which `make check` does
   not cover. `CARGO_INCREMENTAL=0`, as every one-shot gate. It builds in the checkout's own
