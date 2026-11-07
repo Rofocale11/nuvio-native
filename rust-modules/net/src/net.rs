@@ -47,6 +47,9 @@ pub mod headers;
 
 type CURL = c_void;
 pub type curl_slist = c_void;
+/// `struct CURLSH` (libcurl's opaque share handle). Only the pointer is named; libcurl owns
+/// the layout.
+type CURLSH = c_void;
 
 /// The stable head of `curl_version_info_data`. Passing `CURLVERSION_FIRST` promises to inspect
 /// only these original fields; libcurl extends the struct at the tail for later ages, so this
@@ -94,6 +97,14 @@ plx_base::dynlib! {
     fn curl_easy_cleanup(handle: *mut CURL);
     fn curl_slist_append(list: *mut curl_slist, s: *const c_char) -> *mut curl_slist;
     fn curl_slist_free_all(list: *mut curl_slist);
+    // The CURLSH share trio: one process-wide `CURLSH` (DNS + connection + SSL session
+    // caches) that the control-plane easy handles attach to, so a second request to the same
+    // origin skips the DNS lookup and the TCP/TLS handshake. Shares are part of libcurl since
+    // 7.9, three years before the television's 7.53.1. Each is a plain (non-variadic) C
+    // symbol, so these are one wrapper each, same as the others.
+    fn curl_share_init() -> *mut CURLSH;
+    fn curl_share_cleanup(handle: *mut CURLSH);
+    fn curl_share_setopt_long = "curl_share_setopt"(handle: *mut CURLSH, option: c_int, ..., v: c_long) -> c_int;
     // The four VARIADIC ones, and the `...` marks exactly what `curl.h` marks: the handle and the
     // option id are the only named parameters, and the value arrives through `va_arg`. Spelling
     // that value's type after the ellipsis is what lets one C symbol be bound as more than one
@@ -196,6 +207,19 @@ const CURLE_UNKNOWN_OPTION: c_int = 48;
 /// costs libcurl a decode of the WHOLE chain, which is why only a request that wants the peer's
 /// key sets it ([`peer_pin_wanted`]).
 const CURLOPT_CERTINFO: c_int = 172;
+/// CURLSH: DNS + connection + SSL session caches shared across the control-plane easy
+/// handles. `CURLOPT_SHARE` (OBJECTPOINT + 237) attaches the one process-wide share (see
+/// [`share_handle`]); `CURLSHOPT_*` (long + 1, 2, 3) switch the caches on. libcurl 7.9, three
+/// years before the television's 7.53.1. New symbols, not new option ids — the `curl_share_*`
+/// trio joins the `dynlib!` table, so a libcurl that lacks them FAILS THE LOAD (`Incomplete`)
+/// rather than running a request with no share: the try-once fallback in [`share_handle`]
+/// cannot rescue a table that never bound. `CURL_GLOBAL_SSL` is not needed: the share is made
+/// after `global_init`, which already ran `CURL_GLOBAL_ALL`.
+const CURLOPT_SHARE: c_int = 10237;
+const CURLSHOPT_SHARE: c_int = 1;
+const CURLSHOPT_DNS: c_int = 2;
+const CURLSHOPT_CONNECT: c_int = 3;
+const CURLSHOPT_SSL_SESSION: c_int = 4;
 // curl.h info ids (CURLINFO_LONG = 0x200000).
 const CURLINFO_RESPONSE_CODE: c_int = 0x20_0002;
 /// `CURLINFO_SSL_VERIFYRESULT` (LONG + 13) — the X509 verify result of the peer certificate, as
@@ -404,6 +428,60 @@ fn setup_legacy_crypto_locks(soname: &'static str) -> LegacyCrypto {
 
 pub fn available() -> bool {
     CURL_OK.load(Ordering::Acquire)
+}
+
+/// The one process-wide `CURLSH` share (DNS + connection + SSL session caches), created once on
+/// the first strict/ca/roots request and attached to every easy handle such a request builds
+/// ([`request_tls_sink`]'s attempt closure). A share's caches are exactly what per-call handles
+/// throw away: a fresh easy handle starts knowing nothing about the host, so every request pays
+/// DNS + TCP + TLS, and nothing about the host — or about a token it authorised — survives to
+/// the next. The share is **the caches only**: headers, `CUSTOMREQUEST` and every other
+/// per-request option still live on the per-call handle and are re-set from scratch on each
+/// attempt, so nothing a caller sent can bleed into another caller's request. Key mode and the
+/// lab's `Tls::Pinned` never attach: [`keypin::apply`] needs its own handshake (`FORBID_REUSE`,
+/// `FRESH_CONNECT`, session cache off), and a pinned lab transfer checks a hash, not a chain.
+///
+/// **Thread-safety.** One share is shared by every worker that makes a control-plane request —
+/// the account worker, the shim, the account library, the addon workers. Concurrent easy
+/// handles attached to one share are the supported CURLSH pattern and the reason the share
+/// exists, so the modern path is fine. The legacy-OpenSSL fallback stays correct for the same
+/// reason it was before the share: [`request_tls_sink`] holds `CURL_FALLBACK_SERIAL` for the
+/// whole request when [`threaded_tls_ready`] is false, so no two easy requests are ever in
+/// flight together on that path either. What the share must never do is outlive the libcurl
+/// binding: it is created only after [`available()`]'s gate and after `global_init` published
+/// `CURL_OK`, and it is process-lifetime (`OnceLock`), never freed — `curl_share_cleanup` is
+/// bound and never called, because a share freed while a handle still references it is a
+/// use-after-free across the process.
+///
+/// **Refusal.** A libcurl that refuses the share (return code from `curl_share_setopt_long` or
+/// a null `curl_share_init`) leaves every handle on today's per-call behaviour: this returns
+/// `None`, and the attempt closure skips `CURLOPT_SHARE`. No request fails — reuse is a
+/// performance choice, not a correctness gate, so it never becomes one by symptom.
+fn share_handle() -> Option<*mut CURLSH> {
+    /// `*mut CURLSH` is not `Sync`, so the cell is `usize` (libcurl's handle is a pointer; the
+    /// share is process-lifetime and never freed) and the conversion back is the same one
+    /// `curl_easy_setopt_ptr(CURLOPT_SHARE, …)` performs.
+    static SHARE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let s = *SHARE.get_or_init(|| unsafe {
+        let s = curl_share_init();
+        if s.is_null() {
+            return 0;
+        }
+        // Switch the three caches on, one by one. A refusal on any of them is the same refusal:
+        // log nothing here (this runs inside the first request, whose own log line is the
+        // transport's), and leave the share unshared rather than half-shared.
+        for opt in [CURLSHOPT_SHARE, CURLSHOPT_DNS, CURLSHOPT_CONNECT, CURLSHOPT_SSL_SESSION] {
+            if curl_share_setopt_long(s, opt, 1) != 0 {
+                return 0;
+            }
+        }
+        s as usize
+    });
+    if s == 0 {
+        None
+    } else {
+        Some(s as *mut CURLSH)
+    }
 }
 
 pub fn threaded_tls_ready() -> bool {
@@ -927,9 +1005,13 @@ fn allowed_redirect_protocols(url: &[u8]) -> c_long {
 ///
 /// **The easy handle is per call, deliberately.** It is initialised and cleaned up here, so there
 /// is no cross-call state to remember to clear — no leftover `CUSTOMREQUEST` turning the next GET
-/// into a PUT, no stale header list, no connection reuse whose keep-alive outlives the token that
-/// authorised it. A reusable handle (or a share/multi) would buy connection reuse and cost a
-/// design: this app makes tens of control-plane requests per session, not thousands.
+/// into a PUT, no stale header list, no token authorising a request it did not start. What *is*
+/// shared is the process-wide `CURLSH` ([`share_handle`]): the DNS, connection and SSL session
+/// caches a fresh handle would otherwise start empty, so a second request to the same origin
+/// skips the handshake the first one paid for. A keep-alive connection outliving the token that
+/// authorised it is the exact shape of store-then-share that the per-call handle forbids; the
+/// share is the caches only, and key mode and the lab's pinned transfers never attach to it
+/// (see [`keypin::apply`]).
 #[allow(clippy::too_many_arguments)]
 #[track_caller]
 pub fn request(
@@ -2222,6 +2304,19 @@ fn request_tls_sink(
                 return Err(RequestError::Transport.into());
             }
             let easy = Easy(h);
+            // The shared caches, where this attempt is allowed to use them. Key mode is not:
+            // [`keypin::apply`] sets `FORBID_REUSE`/`FRESH_CONNECT` and session-cache off, and
+            // attaching the share would hand it the cached connection it exists to avoid. The
+            // lab's pinned transfers are not either: a pin checks a hash, not a chain, and a
+            // connection made under CA rules is not the one a pin should ride. A share that
+            // returns `None` ([`share_handle`]) leaves today's per-call behaviour in place.
+            let attach_share = !matches!(mode, keypin::Mode::Key { .. })
+                && !matches!(tls_c, TlsCfg::Pinned(_));
+            if attach_share {
+                if let Some(s) = share_handle() {
+                    curl_easy_setopt_ptr(easy.0, CURLOPT_SHARE, s as *const c_void);
+                }
+            }
             curl_easy_setopt_ptr(easy.0, CURLOPT_URL, url_c.as_ptr() as *const c_void);
             // In stream mode `sink` stays empty: the body goes through `stream`'s callbacks instead.
             let mut sink = BodySink::new(max_body);

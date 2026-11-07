@@ -302,11 +302,15 @@ focus (cold).
 
 ### Stage 3 — transport and shows (optional, ~2–3 days)
 
-- **3A. Connection reuse in `plx_net`.** Add a `CURLSH` share (DNS + connection) or a per-thread
-  easy handle with explicit `curl_easy_reset` between calls; the current per-call handle is a
-  deliberate anti-state design (`net.rs:928`) and can stay the fallback. Must verify the device
-  libcurl/OpenSSL is thread-safe first — the serial fallback only applies to legacy OpenSSL
-  (`net.rs:2171`). Benefit is app-wide (hub reads, posters, player), not just detail.
+- **3A. Connection reuse in `plx_net`.** ✅ Implemented as a process-wide `CURLSH` share (DNS +
+  connection + SSL session caches). The share's caches are the only thing shared: the easy
+  handle stays per call, so headers, `CUSTOMREQUEST` and the token a request carries never
+  bleed into another caller's. Key mode and the lab's `Tls::Pinned` never attach
+  (`FORBID_REUSE`/`FRESH_CONNECT`/session-cache-off per `keypin::apply`); a libcurl that
+  refuses the share gets today's per-call behaviour, not a failure. New `curl_share_*` symbols
+  joined the `dynlib!` table (libcurl 7.9, three years before the 7.53.1 floor). Benefit is
+  app-wide (hub reads, posters, player), not just detail. TV measurement still owed (re-measure
+  a cold `tmdb_ms` after a restart).
 - **3B. Collapse the show chain.** The shim already answers `/library/metadata/{rk}/allLeaves`
   (`shim_pms.rs:4312`) from the cached series meta. Teach the data layer to read all episodes in
   one hop instead of seasons → chosen season → episode metadata (`metadata.rs:3734` onwards),
