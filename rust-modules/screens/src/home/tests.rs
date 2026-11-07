@@ -929,31 +929,37 @@ fn env_at(sp: f32) -> Env {
     s.env(0.0)
 }
 
-/// **The ground is ONE flat colour only once the hero is culled** (`sp >= HERO_ART_CULL`); every
-/// earlier frame is the layered gradient. The tell is the corners the wash is handed
-/// (`draw_census::capture_grounds`): four equal codes are the flat colour, which the renderer
-/// clears; a lit wash's own four are the gradient. The ramp rects are the second tell, for the layered
-/// ramp that stays the only ramp drawer: on a host (no ink program: `gfx::wash_ink_ok`) the layered
-/// ground hands the ramp back and the two `rect`s `base_scrim_ramp` describes follow it, for as long
-/// as the hero is visible (`hero_a > 0.01`); the flat ground takes none, and has none to take. A
-/// hero SLIDE is the layered gradient up to the cull and flat from it, like any other frame.
+/// **The ground goes flat at the cull only once the wash IS one colour.** Home keys its grid ground
+/// to the focused card's own four corners, so the wash under the shelves is a gradient, and the cull
+/// must keep the layered gradient. Flattening a still-gradiented wash there snapped the whole page
+/// to its mean in one frame — the owner's "background blur flicker" leaving the hero — and threw
+/// away the gradient expected while moving between posters. The tell is the corners the wash is
+/// handed (`draw_census::capture_grounds`): four equal codes are the flat colour, which the renderer
+/// clears; a lit wash's own four are the gradient. The ramp rects are the second tell, for the
+/// layered ramp that stays the only ramp drawer: on a host (no ink program: `gfx::wash_ink_ok`) the
+/// layered ground hands the ramp back and the two `rect`s `base_scrim_ramp` describes follow it, for
+/// as long as the hero is visible (`hero_a > 0.01`); the flat ground takes none, and has none to
+/// take. A hero SLIDE is the layered gradient like any other frame, flat at the cull only when the
+/// wash it is carrying is already one colour.
 #[test]
-fn the_ground_goes_flat_only_once_the_hero_is_culled() {
+fn the_ground_goes_flat_at_the_cull_only_once_the_wash_is_one_colour() {
     use plx_ui::draw_census;
     let mut b = Backdrop::new();
-    b.wash.jump([
+    let lit = [
         [0.30, 0.10, 0.10, 1.0],
         [0.10, 0.30, 0.10, 1.0],
         [0.10, 0.10, 0.30, 1.0],
         [0.25, 0.25, 0.05, 1.0],
-    ]);
+    ];
+    b.wash.jump(lit);
     assert!(!b.wash.is_flat(theme::SURFACE_APP, AmbientWash::FLAT_EPS), "the premise: a lit wash");
+    assert!(!b.wash.is_uniform(AmbientWash::FLAT_EPS), "the premise: a four-corner gradient");
     // The premise: no host test links GL, so there is no ink program and the layered ground hands
     // the ramp back for the caller to draw as rects. (With one, a layered frame would carry the
     // ramp in the wash and the ramp rects would not be a tell.)
     assert!(!plx_gfx::gfx::wash_ink_ok(), "a host build has no wash ink program");
     // `(is the ground one colour, how many ramp rects follow it)` for one frame at `sp`.
-    let frame = |sp: f32, slide: Option<(f32, f32)>| {
+    let frame = |b: &Backdrop, sp: f32, slide: Option<(f32, f32)>| {
         let env = env_at(sp);
         let [y0, knee, ..] = base_scrim_ramp(env.hero_a);
         let ramp = [Rect::new(0.0, y0, SCR_W, knee - y0), Rect::new(0.0, knee, SCR_W, SCR_H - knee)];
@@ -969,16 +975,25 @@ fn the_ground_goes_flat_only_once_the_hero_is_culled() {
     // layered gradient. The ramp is laid over it as rects while the hero is visible (`hero_a` is
     // 0 from `sp = 0.55`, so the dive's last frames have none).
     for (sp, ramp_rects) in [(0.0, 2), (0.4, 2), (HERO_ART_CULL - 0.001, 0)] {
-        assert_eq!(frame(sp, None), (false, ramp_rects), "sp {sp}: the layered ground");
+        assert_eq!(frame(&b, sp, None), (false, ramp_rects), "sp {sp}: the layered ground");
     }
     // A hero slide before the cull is the layered gradient too, with no ramp in the ground, so the
     // ramp is drawn as its two rects.
-    assert_eq!(frame(0.0, Some((-SCR_W, 0.0))), (false, 2), "a slide stays layered");
-    assert_eq!(frame(HERO_ART_CULL - 0.001, Some((-SCR_W, 0.0))), (false, 0), "…to its last frame");
-    // Culled: ONE colour, no ramp to draw (a slide or held layer notwithstanding: no art is drawn).
+    assert_eq!(frame(&b, 0.0, Some((-SCR_W, 0.0))), (false, 2), "a slide stays layered");
+    assert_eq!(frame(&b, HERO_ART_CULL - 0.001, Some((-SCR_W, 0.0))), (false, 0), "…to its last frame");
+    // Culled, but the wash is still the gradient the dive left it on: the ground stays layered, a
+    // slide or held layer notwithstanding. This is the frame the old code flattened.
     for sp in [HERO_ART_CULL, 1.0] {
-        assert_eq!(frame(sp, None), (true, 0), "sp {sp}: the flat ground, and no ramp");
-        assert_eq!(frame(sp, Some((-SCR_W, 0.0))), (true, 0), "sp {sp}: a culled slide is flat too");
+        assert_eq!(frame(&b, sp, None), (false, 0), "sp {sp}: a settling wash stays layered");
+        assert_eq!(frame(&b, sp, Some((-SCR_W, 0.0))), (false, 0), "sp {sp}: …a culled slide too");
+    }
+    // Once the corners arrive on the one colour Home keys the grid to, the cull draws the flat
+    // ground (and no ramp to draw).
+    b.wash.jump([[0.2, 0.2, 0.2, 1.0]; 4]);
+    assert!(b.wash.is_uniform(AmbientWash::FLAT_EPS), "the premise: one colour");
+    for sp in [HERO_ART_CULL, 1.0] {
+        assert_eq!(frame(&b, sp, None), (true, 0), "sp {sp}: the flat ground, and no ramp");
+        assert_eq!(frame(&b, sp, Some((-SCR_W, 0.0))), (true, 0), "sp {sp}: a culled slide is flat too");
     }
 }
 
@@ -4762,7 +4777,8 @@ fn recorded_corners(s: &HomeScreen) -> [[u32; 3]; 4] {
     s.backdrop.wash.drawn_corners().map(|c| c.map(f32::to_bits))
 }
 
-/// The wash colours card `i`'s envelope keys the page to, as the 8-bit codes the GPU is sent.
+/// The wash colours card `i`'s envelope keys the page to, as the 8-bit codes the GPU is sent — the
+/// focused card's own four corners, so the grid's ground is the same gradient the detail page has.
 fn card_ground(i: usize) -> [[u32; 3]; 4] {
     AmbientWash::keyed(card_blur(i), PageGround::CARD_W).map(|c| [0, 1, 2].map(|k| (c[k] * 255.0).round() as u32))
 }
@@ -4876,6 +4892,36 @@ fn a_settled_wash_records_the_same_bits_frame_after_frame() {
         rig.frames(view, 1);
         assert_eq!(recorded_corners(&rig.s), settled, "the spring's tail leaked into the recorded bits");
     }
+}
+
+/// **A dive off the hero keys the ground to the poster, not to the hero.** The hero's wash is much
+/// stronger than a card's (`HERO_WASH_W` vs `PageGround::CARD_W`), so crossfading the two under the
+/// fading hero art showed a splash of the hero's colours before the poster's gradient arrived.
+/// With the engine's focus on the card the wash is the card's gradient from the first frame of the
+/// dive — even at `snap = 0`, where a snap mix still returns the hero's key.
+#[test]
+fn a_dive_off_the_hero_keys_the_ground_to_the_poster_not_the_hero() {
+    let codes = |b: &Backdrop| b.wash.drawn_corners().map(|c| c.map(|v| (v * 255.0).round() as u32));
+    let hero = blurred([[0.05, 0.62, 0.70]; 4]);
+    let card = blurred(card_blur(3));
+    let step = |b: &mut Backdrop, grid: Option<&PmsMovie>, n: u32| {
+        for i in 0..n {
+            b.update(Some(HeroRef { item: &hero, source: "" }), None, grid, None, 0.0, 1.0 / 60.0, i * 16);
+        }
+    };
+    // On the hero the wash is the hero's own (strong) envelope…
+    let mut b = Backdrop::new();
+    step(&mut b, None, 120);
+    assert_eq!(
+        codes(&b),
+        AmbientWash::keyed(hero.blur, HERO_WASH_W).map(|c| [0, 1, 2].map(|k| (c[k] * 255.0).round() as u32)),
+        "resting on the hero: the hero's envelope"
+    );
+    // …and diving to a poster the ground is that poster's, not a hero-tinted blend.
+    let mut b = Backdrop::new();
+    b.wash.jump(AmbientWash::keyed(hero.blur, HERO_WASH_W));
+    step(&mut b, Some(&card), 120);
+    assert_eq!(codes(&b), card_ground(3), "the dive is the poster's envelope, not the hero's");
 }
 
 // ---- the chrome glass keeps its blur source along a held row ------------------------------------

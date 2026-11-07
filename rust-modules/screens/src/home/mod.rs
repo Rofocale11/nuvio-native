@@ -414,13 +414,37 @@ impl Backdrop {
             self.held = None;
             self.outgoing_tex = (0, 0.0, 0.0);
         }
-        if let Some(item) = grid_item.filter(|m| m.has_blur).filter(|_| !self.held(ms)) {
+        let grid_item = grid_item.filter(|m| m.has_blur);
+        if let Some(item) = grid_item.filter(|_| !self.held(ms)) {
+            // The card's OWN four corners: the ground under the grid is the same gradient keyed to
+            // the same artwork as everywhere else, so moving between posters dissolves a gradient
+            // into a gradient. (Flattening the target to the mean would paint one colour for the
+            // whole dive.) The flat-clear path at the cull waits for this wash to actually be one
+            // colour before it takes over (see `draw`), so a gradient never snaps to its mean.
             self.grid_target = AmbientWash::keyed(item.blur, PageGround::CARD_W);
+        }
+        let on_grid = grid_item.is_some();
+        if on_grid && reveal(self.tex.0, &self.art) * (1.0 - snap) > 0.95 {
+            // The hero's art still covers the panel, and `wash_hidden` means this ground is not on
+            // screen: land it on the poster's colours NOW. The hero's wash is much stronger than a
+            // card's (`HERO_WASH_W` vs `PageGround::CARD_W`), so letting it dissolve under the
+            // fading art showed a splash of the hero's colours before the poster's gradient
+            // arrived. The jump cannot be seen; the dive then starts already on the poster's
+            // ground.
+            self.wash.jump(self.grid_target);
         }
         // decorative colour dissolve under the page — must not hold the page-freeze snapshot
         plx_machine::idle::decorative(|| {
             self.wash.step(
-                wash_corners(hero.map(|h| h.item), self.grid_target, snap),
+                // Leaving the hero the ground is the POSTER's from the first frame (the jump above
+                // and this target). Returning to it the wash follows the picture, so the hero's
+                // stronger wash arrives with the hero art instead of washing the grid before it
+                // goes.
+                if on_grid {
+                    self.grid_target
+                } else {
+                    wash_corners(hero.map(|h| h.item), self.grid_target, snap)
+                },
                 AmbientWash::K,
                 dt,
             )
@@ -446,16 +470,20 @@ impl Backdrop {
         let art_in_ground = wash && slide.is_none() && !held && env.sp < HERO_ART_CULL;
         let ramp = (env.hero_a > 0.01 && slide.is_none()).then(|| hero_ramp(env.hero_a));
         // Once the hero is culled NO art is drawn at all, a slide or held layer notwithstanding, and
-        // the shelves and grid stand on the wash alone: ONE colour, which the renderer clears
-        // rather than shades (`AmbientWash::draw_flat_ground`). Every earlier frame — a hero slide,
-        // art held beneath a replacement, a texture still pending, the dive itself — is the
-        // layered gradient exactly as it always was: those frames have a photograph, or are about
-        // to, and flattening them would jump the whole page between gradient and one colour. The
-        // flat ground carries no ramp, and there is none to carry: `hero_a` is 0 from `sp = 0.55`
-        // (`HomeScreen::env`), so `ramp` is `None` at the cull and the layered ramp rects below
-        // are skipped for the same reason.
+        // the shelves and grid stand on the wash alone. When that wash is ONE colour it is drawn as
+        // a clear rather than shaded (`AmbientWash::draw_flat_ground`) — but only when it really is
+        // one colour. The grid is keyed to the focused card's four corners, so the wash under the
+        // shelves is normally still a gradient; flattening it to its mean on the cull frame snapped
+        // the whole page from gradient to one colour in a single frame — the Home hero-to-grid blink
+        // — and also threw away the gradient the owner expects while moving between posters. A
+        // gradient wash therefore keeps the layered `draw_ground` here, exactly as every earlier
+        // frame does (a hero slide, art held beneath a replacement, a texture still pending, the
+        // dive itself). The flat ground carries no ramp, and there is none to carry: `hero_a` is 0
+        // from `sp = 0.55` (`HomeScreen::env`), so `ramp` is `None` at the cull and the layered ramp
+        // rects below are skipped for the same reason.
+        let flat = env.sp >= HERO_ART_CULL && self.wash.is_uniform(AmbientWash::FLAT_EPS);
         let ramp_in_ground = wash
-            && if env.sp >= HERO_ART_CULL {
+            && if flat {
                 self.wash.draw_flat_ground(p, Rect::FULL);
                 false
             } else {
@@ -479,7 +507,7 @@ impl Backdrop {
             plx_ui::widgets::hero_ground(
                 p,
                 self.tex.0,
-                art_rect(self.tex, env.sp, 0.0),
+                art_rect(self.tex, 0.0),
                 incoming_a * (1.0 - env.sp),
                 base_scrim_ramp(env.hero_a),
                 env.hero_a,
@@ -1793,8 +1821,11 @@ impl HomeScreen {
         };
         self.update_grid(view, &visible_cx, cx.focus.current, fx, t);
 
+        // The ENGINE's focus, not the visible one: the ground under the dive must key to the
+        // poster being dived TO from the press frame, not half-way through, when the visible
+        // focus flips (`visible_focus`) and the wash re-aims mid-transition.
         let grid_item = self
-            .focused_grid(visible_focus)
+            .focused_grid(cx.focus.current)
             .and_then(|(r, c)| self.item_at(view, r, c));
         let selected = self.selected_hero(view);
         let outgoing = self.outgoing_hero(view);
@@ -3756,8 +3787,13 @@ fn reveal(tex: u32, spring: &Spring) -> f32 {
         spring.pos
     }
 }
-fn art_rect(tex: (u32, f32, f32), snap: f32, dx: f32) -> Rect {
-    Rect::new(dx, -snap * (SCR_H - 120.0), SCR_W, SCR_H).cover(tex.1, tex.2)
+/// The hero art's rect: always the FULL panel, so the dive only ever dissolves it — it never
+/// translates. A lifted rect ends on a straight bottom edge, and with the art still half opaque
+/// mid-dive that edge swept up the page as a hard horizontal line across the hero and the shelves.
+/// Detail draws its still the same way (`Rect::FULL.cover`), which is the smooth transition this
+/// matches: no texture boundary ever crosses the screen, the picture just fades.
+fn art_rect(tex: (u32, f32, f32), dx: f32) -> Rect {
+    Rect::new(dx, 0.0, SCR_W, SCR_H).cover(tex.1, tex.2)
 }
 fn backdrop_art(p: Painter, tex: (u32, f32, f32), snap: f32, dx: f32, alpha: f32) {
     if tex.0 == 0 || alpha <= 0.01 || !on_axis(dx, SCR_W, SCR_W, 0.0) {
@@ -3765,7 +3801,7 @@ fn backdrop_art(p: Painter, tex: (u32, f32, f32), snap: f32, dx: f32, alpha: f32
     }
     p.tex(
         tex.0,
-        art_rect(tex, snap, dx),
+        art_rect(tex, dx),
         0.0,
         theme::with_a(theme::TINT_WHITE, alpha * (1.0 - snap)),
     );
@@ -3784,7 +3820,7 @@ fn hero_ramp(hero_a: f32) -> plx_ui::widgets::WashRamp {
 fn hero_art(tex: (u32, f32, f32), snap: f32, alpha: f32) -> plx_ui::widgets::WashArt {
     plx_ui::widgets::WashArt {
         tex: if alpha <= 0.01 { 0 } else { tex.0 },
-        rect: art_rect(tex, snap, 0.0),
+        rect: art_rect(tex, 0.0),
         uv: plx_gfx::gfx::UV_FULL,
         tint: theme::with_a(theme::TINT_WHITE, alpha * (1.0 - snap)),
     }

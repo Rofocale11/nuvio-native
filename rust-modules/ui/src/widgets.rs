@@ -3781,6 +3781,15 @@ impl AmbientWash {
     pub fn at_rest(&self) -> bool {
         self.corners.iter().flatten().all(|sp| sp.vel == 0.0)
     }
+    /// Are the four corners the SAME colour, within `eps`? This is the only state in which
+    /// [`draw_flat_ground`](Self::draw_flat_ground) is not a visible cut: the mean of four equal
+    /// corners is their shared colour, so the clear and the gradient it replaces are one picture.
+    /// A still-dissolving wash (a dive that has just been keyed to the grid) is not uniform yet, and
+    /// flattening it there snaps a corner gradient to its mean in a single frame.
+    pub fn is_uniform(&self, eps: f32) -> bool {
+        let c = self.drawn_corners();
+        c[1..].iter().all(|q| q.iter().zip(c[0]).all(|(a, b)| (a - b).abs() <= eps))
+    }
     /// Is this wash within `eps` of the flat colour `c` on every corner channel? A wash that has
     /// resolved to the app's own clear colour changes nothing, and a screen must be able to skip
     /// it: drawn, it is a full-screen clear once its four corners are one colour's codes (a wash at
@@ -3908,6 +3917,12 @@ impl AmbientWash {
     /// It draws no atmospheric ramp, and Home has none by then: the hero has faded out by
     /// `sp = 0.55`, long before the cull. A caller that did have one would draw it layered over this
     /// as usual.
+    ///
+    /// **Only call this when [`is_uniform`](Self::is_uniform) holds.** On a wash still carrying a
+    /// corner gradient, the mean is a second picture, and replacing the gradient with it in one
+    /// frame is a visible blink. A caller that keys its ground to artwork keeps that gradient, so
+    /// it must check `is_uniform` here and otherwise stay on [`draw_ground`](Self::draw_ground) —
+    /// which is what Home does under its shelves.
     pub fn draw_flat_ground(&self, p: Painter, r: Rect) {
         p.ambient(r, 1.0, [self.flat_ground(); 4], self.at_rest());
     }
@@ -4072,9 +4087,9 @@ impl PageGround {
     /// The corner arrangement every item-keyed page ground leans by: [`AmbientWash::GROUND_W`]
     /// across the top, nearly gone by the bottom. Strongest where the page's own subject is and
     /// faint under the content rows, which is what keeps it atmosphere rather than a tint.
-    /// (Home's culled shelves and grid are the one place this does not show: from
-    /// `sp >= HERO_ART_CULL` that wash is drawn flat, at the mean of its four corners
-    /// ([`AmbientWash::draw_flat_ground`]), so there the weights set a single colour.)
+    /// (Home's culled shelves and grid keep this arrangement: the grid is keyed to the focused
+    /// card's four corners, so the ground stays a gradient. Only a wash that arrives at the cull
+    /// already on one colour is drawn flat there ([`AmbientWash::draw_flat_ground`]).)
     ///
     /// One constant rather than one per screen: the STRENGTH is already shared
     /// ([`AmbientWash::GROUND_W`]), and two browsing screens leaning it in two different directions

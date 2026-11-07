@@ -14,10 +14,11 @@ fn rows(y: f32, h: f32) -> std::ops::Range<i32> {
     first..end.max(first)
 }
 
-/// The hero's art at a dive position, exactly as Home lays it out (`art_rect`: the panel lifted by
-/// `snap * (SCR_H - 120)`, covered by a 16:9 picture).
-fn hero_art_at(snap: f32) -> Rect {
-    Rect::new(0.0, -snap * (SCR_H - 120.0), SCR_W, SCR_H).cover(1280.0, 720.0)
+/// The hero's art, exactly as Home lays it out (`art_rect`: the full panel, covered by a 16:9
+/// picture). The dive ONLY dissolves it — the rect never moves, so its edges never cross the
+/// screen.
+fn hero_art_at() -> Rect {
+    Rect::FULL.cover(1280.0, 720.0)
 }
 
 /// **The split tiles the wash exactly** — the overlap plus the bands are every pixel of `r` once:
@@ -27,10 +28,7 @@ fn hero_art_at(snap: f32) -> Rect {
 #[test]
 fn the_one_pass_split_tiles_the_wash_and_covers_exactly_the_arts_pixels() {
     let r = Rect::FULL;
-    let mut arts: Vec<Rect> = [0.0f32, 0.013, 0.2, 0.4517, 0.73, 0.9, 0.995]
-        .iter()
-        .map(|&s| hero_art_at(s))
-        .collect();
+    let mut arts: Vec<Rect> = vec![hero_art_at()];
     // A picture narrower than the panel, and one wholly inside it: every band gets exercised.
     arts.push(Rect::new(300.3, 120.7, 900.2, 600.1));
     arts.push(Rect::new(-40.0, 500.49, 800.0, 2000.0));
@@ -62,11 +60,14 @@ fn the_one_pass_split_tiles_the_wash_and_covers_exactly_the_arts_pixels() {
     assert!(art_wash_split(r, Rect::new(0.0, -2000.0, SCR_W, 1000.0)).is_none(), "a miss is None");
 }
 
-/// The dive lifts the art off the bottom of the panel: from then on the wash below it is a band of
-/// its own, and the overlap is the art's visible part — the two the dive draws every frame.
+/// An art rect that ends partway down the panel: the wash below it is a band of its own, and the
+/// overlap is the art's visible part. Home's hero art no longer does this (it stays full-bleed —
+/// a lifted edge was the visible line mid-dive), but `draw_ground` takes any art rect and the
+/// split must tile it.
 #[test]
-fn mid_dive_the_art_keeps_the_top_and_the_wash_alone_has_the_foot() {
-    let (over, bands) = art_wash_split(Rect::FULL, hero_art_at(0.5)).unwrap();
+fn a_partial_art_keeps_the_top_and_the_wash_alone_has_the_foot() {
+    let art = Rect::new(0.0, 0.0, SCR_W, 600.0);
+    let (over, bands) = art_wash_split(Rect::FULL, art).unwrap();
     assert_eq!((over.y, over.h), (0.0, 600.0));
     let q = |b: Option<Rect>| b.map(|b| (b.x, b.y, b.w, b.h));
     assert_eq!(bands.map(q), [None, Some((0.0, 600.0, SCR_W, SCR_H - 600.0)), None, None]);
