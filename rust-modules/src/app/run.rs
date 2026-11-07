@@ -1672,11 +1672,18 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             content_gen,
             app.content_gen_seen,
         );
-        if due.playback || due.account {
+        // A Nuvio sign-in installs the addons and merges the resume points on workers started by
+        // the pin approval — before the app has registered the account's one server. A refetch
+        // now has no source to ask, and consuming the generation would leave Home stale until the
+        // next launch (the pull is already in the shim, but nothing re-read `/hubs`). Leave the
+        // change owed until the roster exists: the refetch below then runs on the first frame
+        // after the server is registered.
+        let account = due.account && plx_plex::plex::server_count() > 0;
+        if due.playback || account {
             if due.playback {
                 app.refresh_hubs_at = 0;
             }
-            if due.account {
+            if account {
                 if let Some(gen) = content_gen {
                     app.content_gen_seen = gen;
                 }

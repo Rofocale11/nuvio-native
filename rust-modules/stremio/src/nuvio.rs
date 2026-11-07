@@ -666,14 +666,34 @@ mod library_tests {
 
 /// One title's resume point, as Nuvio's `sync_push_watch_progress` takes it. Times are ms,
 /// `last_watched` is unix ms.
+///
+/// Nuvio names a title by its **IMDb** id (`tt0133093`); `tmdb:` is only its fallback for a title
+/// TMDB knows and IMDb does not. Its apps key an episode by `content_id_s{season}e{episode}`, so
+/// the season/episode pair is carried beside the episode's own id and must be sent: without it the
+/// backend's derived `progress_key` is just `content_id`, and every episode of a series would
+/// overwrite the same row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WatchProgress {
-    pub content_id: String,   // "tmdb:550" (a movie) or "tmdb:1396" (a series)
+    pub content_id: String,   // "tt0133093" (a movie) or "tt0944947" (a series)
     pub content_type: String, // "movie" | "series"
     pub video_id: String,     // the movie's own id, or the episode's id ("tt0944947:1:2")
+    pub season: Option<i64>,
+    pub episode: Option<i64>,
     pub position: i64,
     pub duration: i64,
     pub last_watched: i64,
+}
+
+impl WatchProgress {
+    /// The row key Nuvio's own clients use: the content id for a film, `content_id_sNe` for an
+    /// episode. Sending it makes this device's key identical to the account's instead of leaving
+    /// the backend to derive one.
+    pub fn progress_key(&self) -> String {
+        match (self.season, self.episode) {
+            (Some(s), Some(e)) => format!("{}_s{}e{}", self.content_id, s, e),
+            _ => self.content_id.clone(),
+        }
+    }
 }
 
 /// Account-backed watch progress. These rows are the household's viewing record; callers must
@@ -697,7 +717,9 @@ fn watch_push_body(profile: &str, entries: &[WatchProgress]) -> Result<(&'static
         }
         rows.push(json!({
             "content_id":e.content_id,"content_type":e.content_type,"video_id":e.video_id,
-            "position":e.position,"duration":e.duration,"last_watched":e.last_watched
+            "season":e.season,"episode":e.episode,
+            "position":e.position,"duration":e.duration,"last_watched":e.last_watched,
+            "progress_key":e.progress_key()
         }));
     }
     Ok(("/rest/v1/rpc/sync_push_watch_progress", json!({"p_profile_id":pid,"p_entries":rows})))
@@ -725,10 +747,22 @@ fn watch_progress_row(v: &Value) -> Option<WatchProgress> {
     }
     Some(WatchProgress {
         content_id, content_type, video_id,
+        season: opt_i64_field(v, &["season", "season_number"]),
+        episode: opt_i64_field(v, &["episode", "episode_number"]),
         position: i64_field(v, &["position"]),
         duration: i64_field(v, &["duration"]),
         last_watched: i64_field(v, &["last_watched", "lastWatched"]),
     })
+}
+
+/// An optional integer field; an absent or empty value stays `None` rather than becoming 0, which
+/// is what separates "this row names no episode" from season/episode zero.
+fn opt_i64_field(v: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|k| v.get(*k).and_then(|x| match x {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }))
 }
 
 fn watch_id_ok(s: &str) -> bool {
@@ -754,6 +788,7 @@ mod progress_tests {
     fn entry() -> WatchProgress {
         WatchProgress {
             content_id:"tmdb:550".into(), content_type:"movie".into(), video_id:"tmdb:550".into(),
+            season:None, episode:None,
             position:60_000, duration:7_200_000, last_watched:1_700_000_000_000,
         }
     }
@@ -767,8 +802,26 @@ mod progress_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], json!({
             "content_id":"tmdb:550","content_type":"movie","video_id":"tmdb:550",
-            "position":60_000,"duration":7_200_000,"last_watched":1_700_000_000_000i64
+            "season":null,"episode":null,
+            "position":60_000,"duration":7_200_000,"last_watched":1_700_000_000_000i64,
+            "progress_key":"tmdb:550"
         }));
+    }
+
+    /// An episode carries the series id as `content_id` and the `content_id_sNe` key Nuvio's own
+    /// clients use, so the backend stores it under the same row they would read.
+    #[test]
+    fn an_episode_row_names_its_series_and_its_own_progress_key() {
+        let e = WatchProgress {
+            content_id:"tt0944947".into(), content_type:"series".into(),
+            video_id:"tt0944947:1:2".into(), season:Some(1), episode:Some(2),
+            position:60_000, duration:3_600_000, last_watched:1_700_000_000_000,
+        };
+        assert_eq!(e.progress_key(), "tt0944947_s1e2");
+        let (_, body) = watch_push_body("1", &[e]).unwrap();
+        assert_eq!(body["p_entries"][0]["season"], 1);
+        assert_eq!(body["p_entries"][0]["episode"], 2);
+        assert_eq!(body["p_entries"][0]["progress_key"], "tt0944947_s1e2");
     }
 
     #[test]
@@ -806,7 +859,8 @@ mod progress_tests {
         let rows = watch_progress_rows(&json!([
             {"content_id":"tmdb:550","content_type":"movie","video_id":"tmdb:550",
              "position":1000,"duration":2000,"last_watched":3000},
-            {"contentId":"tmdb:1396","contentType":"series","videoId":"tt0944947:1:2",
+            {"contentId":"tt0944947","contentType":"series","videoId":"tt0944947:1:2",
+             "season":1,"episode":2,
              "position":"4000","duration":5000.0,"lastWatched":6000},
             {"content_id":"","content_type":"movie","video_id":"tmdb:1"},
             {"content_id":"tmdb:2","content_type":"clip","video_id":"tmdb:2"},
@@ -814,8 +868,10 @@ mod progress_tests {
         ]));
         assert_eq!(rows, vec![
             WatchProgress { content_id:"tmdb:550".into(), content_type:"movie".into(), video_id:"tmdb:550".into(),
+                season:None, episode:None,
                 position:1000, duration:2000, last_watched:3000 },
-            WatchProgress { content_id:"tmdb:1396".into(), content_type:"series".into(), video_id:"tt0944947:1:2".into(),
+            WatchProgress { content_id:"tt0944947".into(), content_type:"series".into(), video_id:"tt0944947:1:2".into(),
+                season:Some(1), episode:Some(2),
                 position:4000, duration:5000, last_watched:6000 },
         ]);
         assert!(watch_progress_rows(&Value::Null).is_empty());

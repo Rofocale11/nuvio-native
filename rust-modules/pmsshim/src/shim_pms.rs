@@ -25,6 +25,10 @@ use std::time::{Duration, Instant};
 /// would be a call per ten seconds for the length of a film.
 const WATCH_PUSH_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The `video_id` Nuvio's own clients write for an episode whose addon id they did not have.
+/// The real episode is identified by the row's season/episode, not by this string.
+const NUVIO_SYNTHETIC_EPISODE: &str = "__nuvio_episode__:";
+
 const CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 /// A failed catalog fill is not retried before this. A dead addon host must not be asked again on
 /// every page read that follows the failure.
@@ -439,6 +443,23 @@ fn split_content_id(id: &str) -> (&str, &str) {
 /// The TMDB number in `tmdb:603`, or `None` for an id an addon already understands (`tt…`, `kitsu…`).
 fn tmdb_content_number(id: &str) -> Option<u64> {
     id.strip_prefix("tmdb:")?.parse().ok().filter(|n| *n > 0)
+}
+
+/// `tt` followed by digits — the id form IMDb, Stremio addons and Nuvio's account share.
+fn is_imdb_id(id: &str) -> bool {
+    id.len() > 2 && id.starts_with("tt") && id[2..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The season and episode an episode id ends in (`tt0944947:1:2`). `None` when it carries no such
+/// tail (a bare series or film id).
+fn episode_numbers(video_id: &str) -> (Option<i64>, Option<i64>) {
+    let mut parts = video_id.rsplit(':');
+    let episode = parts.next().and_then(|s| s.parse::<i64>().ok());
+    let season = parts.next().and_then(|s| s.parse::<i64>().ok());
+    match (season, episode) {
+        (Some(s), Some(e)) if s >= 0 && e > 0 => (Some(s), Some(e)),
+        _ => (None, None),
+    }
 }
 
 /// The Stremio id addons know a synthetic related ratingKey by (`tmdb:603`), if it is synthetic.
@@ -2403,6 +2424,16 @@ fn trailing_key(s: &str) -> Option<i64> {
     s.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
+/// One local item's identity as Nuvio's account stores it. `content_type` is `"movie"` or
+/// `"series"`, and a series row names its episodes, not itself.
+struct AccountIdentity {
+    content_id: String,
+    content_type: &'static str,
+    video_id: String,
+    season: Option<i64>,
+    episode: Option<i64>,
+}
+
 impl Shim {
     pub fn new(backend: Arc<dyn Backend>, cfg: Config) -> Shim {
         let dir = cfg.data_dir.clone();
@@ -2460,24 +2491,67 @@ impl Shim {
 
     // ---- account watch progress ------------------------------------------------------------
 
-    /// The identity Nuvio keys a resume point by, for a local ratingKey: `content_id` is the TMDB
-    /// id the account's watch history uses (`tmdb:550`), `video_id` the film's own id or the
-    /// episode's addon id. `None` for an item that has no single position to report — a season, a
-    /// whole series, or a title whose TMDB id cannot be resolved.
-    fn nuvio_watch_identity(&self, rk: i64) -> Option<(String, String, String)> {
+    /// The identity Nuvio keys a resume point by, for a local ratingKey. **Nuvio names a title by
+    /// its IMDb id** (`tt0133093`), not by TMDB: its own apps match Continue Watching on that form,
+    /// and a `tmdb:` row they cannot match is as good as missing. `content_id` is the film's or the
+    /// series' IMDb id, `video_id` the film's own id or the episode's addon id, and an episode
+    /// carries the season/episode pair the account's `progress_key` is built from. `None` for an
+    /// item that has no single position to report — a season, a whole series, or a title neither
+    /// IMDb nor TMDB can name.
+    fn nuvio_watch_identity(&self, rk: i64) -> Option<AccountIdentity> {
         let ident = self.keys.ident(rk).or_else(|| synthetic_ident(rk))?;
         match ident {
             // A series row has no position of its own; its episodes do.
             Ident::Title { type_, .. } if is_series(&type_) => None,
-            Ident::Title { id, .. } => {
-                let content_id = format!("tmdb:{}", tmdb_id(&id, false)?);
-                Some((content_id.clone(), "movie".into(), content_id))
+            Ident::Title { type_, id } => {
+                let base = split_content_id(&id).0;
+                // A local catalog id is usually IMDb already; a Nuvio catalog's `tmdb:<n>` is
+                // resolved through TMDB. Falling back to `tmdb:` keeps the old behaviour for an
+                // id TMDB has no IMDb counterpart for.
+                let content_id = match self.imdb_base(&type_, base) {
+                    Some(imdb) => imdb,
+                    None => format!("tmdb:{}", tmdb_id(&id, false)?),
+                };
+                Some(AccountIdentity {
+                    video_id: content_id.clone(),
+                    content_id,
+                    content_type: "movie",
+                    season: None,
+                    episode: None,
+                })
             }
-            Ident::Episode { series, video } => Some((
-                format!("tmdb:{}", tmdb_id(&series, true)?),
-                "series".into(),
-                video,
-            )),
+            Ident::Episode { series, video } => {
+                // `series` is the addon's series id; the account wants that series' IMDb id.
+                let content_id = self
+                    .imdb_base("series", &series)
+                    .or_else(|| tmdb_id(&series, true).map(|n| format!("tmdb:{n}")))?;
+                let (video_base, _) = split_content_id(&video);
+                let video_id = self
+                    .imdb_base("series", video_base)
+                    .map(|base| format!("{base}{}", &video[video_base.len()..]))
+                    .unwrap_or_else(|| video.clone());
+                let mut numbers = episode_numbers(&video_id);
+                if numbers.0.is_none() {
+                    // An addon that ids an episode without a `:S:E` tail still has the numbers in
+                    // its meta. Without them the account would key every episode of the series to
+                    // one row.
+                    if let Some((_, meta)) = self.series_of(&series) {
+                        if let Some((s, e, _)) =
+                            episodes_of(&meta).into_iter().find(|(_, _, v)| v.id == video)
+                        {
+                            numbers = (Some(i64::from(s)), Some(i64::from(e)));
+                        }
+                    }
+                }
+                let (season, episode) = numbers;
+                Some(AccountIdentity {
+                    content_id,
+                    content_type: "series",
+                    video_id,
+                    season,
+                    episode,
+                })
+            }
             Ident::Season { .. } => None,
         }
     }
@@ -2498,14 +2572,17 @@ impl Shim {
         }
         pushes.insert(rk, Instant::now());
         drop(pushes);
-        let Some((content_id, content_type, video_id)) = self.nuvio_watch_identity(rk) else {
+        let Some(identity) = self.nuvio_watch_identity(rk) else {
             return;
         };
-        self.watch.bind_account_key(&content_id, &video_id, rk);
+        self.watch
+            .bind_account_key(&identity.content_id, &identity.video_id, rk);
         let entry = plx_stremio::nuvio::WatchProgress {
-            content_id,
-            content_type,
-            video_id,
+            content_id: identity.content_id,
+            content_type: identity.content_type.into(),
+            video_id: identity.video_id,
+            season: identity.season,
+            episode: identity.episode,
             position: offset_ms.max(0),
             duration: duration_ms,
             last_watched: now_secs() * 1000,
@@ -2582,18 +2659,47 @@ impl Shim {
         if let Some(key) = self.watch.account_key(&e.content_id, &e.video_id) {
             return Some(key);
         }
-        let ident = if e.content_type == "series" {
-            Ident::Episode {
-                series: episode_series_id(&e.video_id, &e.content_id).to_string(),
-                video: e.video_id.clone(),
-            }
-        } else {
-            Ident::Title {
+        // Nuvio names a title by its IMDb id; canonicalise a legacy `tmdb:` row the same way the
+        // push does, so a title written once as `tmdb:N` and once as `tt…` is ONE local item (one
+        // Continue Watching card) instead of two.
+        if e.content_type != "series" {
+            let id = self
+                .imdb_base("movie", &e.content_id)
+                .unwrap_or_else(|| e.content_id.clone());
+            return Some(self.keys.key_of(&Ident::Title {
                 type_: "movie".into(),
-                id: e.content_id.clone(),
-            }
+                id,
+            }));
+        }
+        let content_id = self
+            .imdb_base("series", &e.content_id)
+            .unwrap_or_else(|| e.content_id.clone());
+        // Nuvio's own clients name an episode synthetically (`__nuvio_episode__:S:E`) when the
+        // playback did not carry the addon's episode id, and a row may even come back with no
+        // video id. Both are placed through the series meta's season/episode instead: interning
+        // the synthetic string would name an episode no addon can answer, and the merge would
+        // store a resume point whose row never exists.
+        let synthetic = e.video_id.is_empty()
+            || e.video_id.starts_with(NUVIO_SYNTHETIC_EPISODE)
+            || e.video_id == e.content_id;
+        if synthetic {
+            let (season, episode) = e.season.zip(e.episode)?;
+            let (_, meta) = self.series_of(&content_id)?;
+            let (_, _, video) = episodes_of(&meta)
+                .into_iter()
+                .find(|(s, n, _)| i64::from(*s) == season && i64::from(*n) == episode)?;
+            return Some(self.episode_key(&content_id, &video.id));
+        }
+        let raw_series = episode_series_id(&e.video_id, &e.content_id);
+        let series = self
+            .imdb_base("series", raw_series)
+            .unwrap_or_else(|| raw_series.to_string());
+        let (video_base, _) = split_content_id(&e.video_id);
+        let video = match self.imdb_base("series", video_base) {
+            Some(base) => format!("{base}{}", &e.video_id[video_base.len()..]),
+            None => e.video_id.clone(),
         };
-        Some(self.keys.key_of(&ident))
+        Some(self.keys.key_of(&Ident::Episode { series, video }))
     }
 
     /// The Stremio-compatible streaming server torrents play through, if any. `None` whenever P2P
@@ -3035,40 +3141,46 @@ impl Shim {
     /// addon may still resolve.
     fn addon_id_for(&self, type_: &str, id: &str) -> String {
         let (base, suffix) = split_content_id(id);
-        let Some(tmdb_id) = tmdb_content_number(base) else {
-            return id.to_string();
-        };
+        match self.imdb_base(type_, base) {
+            Some(imdb) => format!("{imdb}{suffix}"),
+            None => id.to_string(),
+        }
+    }
+
+    /// The IMDb id behind a content id, resolved through TMDB when it is a `tmdb:<id>` (`type_`
+    /// decides movie vs. series). An `tt…` id is already the answer; anything else (kitsu, …) has
+    /// none. Cached with [`Shim::imdb_ids`], whose negative answers are cached too: a title TMDB
+    /// has no IMDb id for is not retried on every request.
+    fn imdb_base(&self, type_: &str, base: &str) -> Option<String> {
+        if is_imdb_id(base) {
+            return Some(base.to_string());
+        }
+        let tmdb_id = tmdb_content_number(base)?;
         let key = (type_.to_string(), base.to_string());
-        let cached = self
+        if let Some(hit) = self
             .imdb_ids
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
-            .cloned();
-        let resolved = match cached {
-            Some(hit) => hit,
-            None => {
-                let imdb = TmdbClient::from_env()
-                    .and_then(|client| {
-                        if is_series(type_) {
-                            client.tv_external_ids(tmdb_id).ok().flatten()
-                        } else {
-                            client.movie_external_ids(tmdb_id).ok().flatten()
-                        }
-                    })
-                    .filter(|imdb| imdb.starts_with("tt"));
-                let mut g = self.imdb_ids.lock().unwrap_or_else(|e| e.into_inner());
-                if g.len() > 512 {
-                    g.clear();
-                }
-                g.insert(key, imdb.clone());
-                imdb
-            }
-        };
-        match resolved {
-            Some(imdb) => format!("{imdb}{suffix}"),
-            None => id.to_string(),
+            .cloned()
+        {
+            return hit;
         }
+        let imdb = TmdbClient::from_env()
+            .and_then(|client| {
+                if is_series(type_) {
+                    client.tv_external_ids(tmdb_id).ok().flatten()
+                } else {
+                    client.movie_external_ids(tmdb_id).ok().flatten()
+                }
+            })
+            .filter(|imdb| is_imdb_id(imdb));
+        let mut g = self.imdb_ids.lock().unwrap_or_else(|e| e.into_inner());
+        if g.len() > 512 {
+            g.clear();
+        }
+        g.insert(key, imdb.clone());
+        imdb
     }
 
     fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
@@ -8001,6 +8113,88 @@ mod account_progress_tests {
         assert_eq!(tmdb_id("tmdb:1396:3:7", true), Some(1396));
         assert_eq!(tmdb_id("tmdb:0", false), None);
         assert_eq!(tmdb_id("", false), None);
+    }
+
+    /// Nuvio's account names a title by its IMDb id, so an item that already has one must be
+    /// pushed as it is — never rewritten to `tmdb:` — and an episode must carry its season and
+    /// episode beside the series id.
+    #[test]
+    fn a_movie_and_an_episode_are_named_by_imdb() {
+        let shim = Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default());
+        let movie = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt0133093".into(),
+        });
+        let i = shim.nuvio_watch_identity(movie).expect("a movie is a resume point");
+        assert_eq!(i.content_id, "tt0133093");
+        assert_eq!(i.content_type, "movie");
+        assert_eq!(i.video_id, "tt0133093");
+        assert_eq!((i.season, i.episode), (None, None));
+
+        let episode = shim.keys.key_of(&Ident::Episode {
+            series: "tt0944947".into(),
+            video: "tt0944947:1:2".into(),
+        });
+        let i = shim.nuvio_watch_identity(episode).expect("an episode is a resume point");
+        assert_eq!(i.content_id, "tt0944947");
+        assert_eq!(i.content_type, "series");
+        assert_eq!(i.video_id, "tt0944947:1:2");
+        assert_eq!((i.season, i.episode), (Some(1), Some(2)));
+
+        // A season names no single position; neither does a whole series.
+        let season = shim
+            .keys
+            .key_of(&Ident::Season { series: "tt0944947".into(), n: 1 });
+        assert!(shim.nuvio_watch_identity(season).is_none());
+    }
+
+    #[test]
+    fn episode_numbers_reads_only_a_season_episode_tail() {
+        assert_eq!(episode_numbers("tt0944947:1:2"), (Some(1), Some(2)));
+        assert_eq!(episode_numbers("tmdb:1396:0:5"), (Some(0), Some(5)));
+        assert_eq!(episode_numbers("tt0944947"), (None, None));
+        assert_eq!(episode_numbers("tmdb:1396"), (None, None));
+        assert_eq!(episode_numbers("tt0944947:1"), (None, None));
+    }
+
+    /// A row Nuvio's own app pushed with a synthetic episode video id is placed through the
+    /// series meta's season/episode, so it lands on the addon's real episode (and has a row
+    /// snapshot Continue Watching can draw); an episode the series does not have is skipped.
+    #[test]
+    fn a_synthetic_episode_row_is_placed_through_season_and_episode() {
+        let shim = Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default());
+        let series = crate::shim_fake::FAKE_SERIES_ID;
+        let found = shim
+            .account_watch_key(&plx_stremio::nuvio::WatchProgress {
+                content_id: series.into(),
+                content_type: "series".into(),
+                video_id: format!("{NUVIO_SYNTHETIC_EPISODE}1:2"),
+                season: Some(1),
+                episode: Some(2),
+                position: 1000,
+                duration: 2000,
+                last_watched: 3000,
+            })
+            .expect("season 1 episode 2 exists");
+        assert_eq!(
+            shim.keys.ident(found),
+            Some(Ident::Episode {
+                series: series.into(),
+                video: format!("{series}:1:2"),
+            })
+        );
+        assert!(shim
+            .account_watch_key(&plx_stremio::nuvio::WatchProgress {
+                content_id: series.into(),
+                content_type: "series".into(),
+                video_id: format!("{NUVIO_SYNTHETIC_EPISODE}9:9"),
+                season: Some(9),
+                episode: Some(9),
+                position: 1000,
+                duration: 2000,
+                last_watched: 3000,
+            })
+            .is_none());
     }
 }
 

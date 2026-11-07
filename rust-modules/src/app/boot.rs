@@ -603,6 +603,8 @@ pub(crate) unsafe fn boot(
     mt: plx_base::task::MainThread,
     preflight: super::bootstrap::Preflight,
 ) -> Result<App, c_int> {
+    // Note: the content baseline for Home's re-read is captured inside `construct`, before
+    // `activate_session` issues the first `/hubs` — see the comment there.
     // The Up Next still prefetch `route::pump_play` asks for is `ui`'s, which `route` may not name,
     // so it is handed over here, before any playback can land. Replay boots take it too.
     plx_media::route::install_up_next_still_warm(super::playback::warm_up_next_still);
@@ -813,6 +815,15 @@ pub(crate) unsafe fn construct(
     deferred: Option<plx_plex::plex::session::DeferredLoad>,
 ) -> Result<App, c_int> {
     let controlled = preflight.controlled();
+    // **The content baseline must predate the FIRST hub fetch, not the `App` literal.** The server
+    // install below (`activate_session` → `install_pms_owned`) issues Home's first `/hubs` while
+    // the shim's boot-time account pull (spawned in `plx_pmsshim::start`) is racing that answer on
+    // another thread. Reading the generation into the literal afterwards treats a merge that landed
+    // in between as baseline — the in-flight answer predates it, so nothing ever re-reads Home and
+    // Continue Watching stays empty until the next launch, when the pull's persisted rows are
+    // already in the first answer. Read it here, before this function can issue any fetch.
+    let content_gen_baseline = super::nuvio::content_generation().unwrap_or(0);
+    let catalog_gen_baseline = super::nuvio::catalog_generation().unwrap_or(0);
     if let Some(initial) = &initial {
         plx_data::stores::tape::init(initial.person_credits(), preflight.replay());
         initial.home.restore(&mt).map_err(|_| 1)?;
@@ -1733,10 +1744,10 @@ pub(crate) unsafe fn construct(
         menu_play_await: None,
         prev,
         refresh_hubs_at,
-        // The shim is already up and may already have bumped for boot-time addon overrides and
-        // the first `warm()`. Everything before this line is baseline, not news for Home.
-        content_gen_seen: super::nuvio::content_generation().unwrap_or(0),
-        catalog_gen_seen: super::nuvio::catalog_generation().unwrap_or(0),
+        // Captured at the top of `construct`, before `activate_session` issued the first `/hubs` —
+        // see the comment there. Everything before that point is baseline, not news for Home.
+        content_gen_seen: content_gen_baseline,
+        catalog_gen_seen: catalog_gen_baseline,
         plaintext_upgrade: Default::default(),
         ev,
         remote,
