@@ -82,6 +82,18 @@ server" below.
   `Science Fiction` are the same filter. `/library/sections/{k}/genre?catalog=<key>` scopes the
   list to the selected catalog; standalone `/sorts` and `/filters` return the same menus for
   clients that ask directly.
+  **A listing answers from the catalog cache under a bounded wait, never on the addon's own
+  clock.** `catalog_range` serves the rows this process already holds (Home's `warm()` fills the
+  first twelve of every home catalog) and, when the requested window is not covered, starts ONE
+  background fill and waits at most `Config::catalog_wait` (3 s) for it. The addon's page budget is
+  30 s and the app's plaintext loopback read deadline is 15 s, so a slow catalog used to hold the
+  HTTP response past that deadline and be reported as "Can't reach your Plex server". Now the
+  response is bounded: the cached page comes back at once, and a cold or slow catalog answers a
+  short page (or an empty one) instead. The fill keeps fetching after the answer and bumps
+  `Shim::catalog_generation()`; the app compares that counter once a frame and queues
+  `BrowseCmd::RelistShortCurrent`, which re-reads the current section only when page 0 still has
+  holes. A complete page, and a short catalog whose full size the server has already stated, is
+  left alone. A failed fill is not cached as an empty catalog and is not retried for 30 s.
   **The Library tab is grid-only.** It never requests `/hubs/sections/{k}` and never emits
   `PublishShelves`, so Movies/TV Shows open with Type/Sort/Filter immediately above the grid
   instead of below a run of horizontal hub rows. Home's shelves are a different store and are

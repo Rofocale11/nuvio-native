@@ -1736,6 +1736,7 @@ pub(crate) unsafe fn construct(
         // The shim is already up and may already have bumped for boot-time addon overrides and
         // the first `warm()`. Everything before this line is baseline, not news for Home.
         content_gen_seen: super::nuvio::content_generation().unwrap_or(0),
+        catalog_gen_seen: super::nuvio::catalog_generation().unwrap_or(0),
         plaintext_upgrade: Default::default(),
         ev,
         remote,

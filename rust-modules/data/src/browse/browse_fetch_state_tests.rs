@@ -88,6 +88,47 @@ fn a_requery_clears_a_previous_failure() {
     assert_eq!(browse.fetch_state(), SecFetch::Loading);
     assert!(browse.loading_initial());
 }
+/// The shim answers a section listing from its catalog cache under a short budget, so page 0 can
+/// land with holes while the rest is still being fetched. When the fill reports that it landed
+/// rows, a holed page 0 is re-read.
+#[test]
+fn a_holed_first_page_re_lists_when_the_catalog_fill_lands() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, _, _) = registered_page_source();
+    land_page(&mut browse, 62, 12); // 12 rows of the 62 the server claims
+    assert_eq!(browse.fetch_state(), SecFetch::Ready);
+    assert!(
+        browse.state.cur_state().unwrap().items.page_missing(0),
+        "12 of 62 leaves page 0 holed"
+    );
+    let changed = browse.state.run_owned(
+        &browse.adapter,
+        crate::stores::browse::BrowseCmd::RelistShortCurrent,
+    );
+    assert!(changed, "the fill landed rows the grid does not hold yet");
+    assert_eq!(
+        browse.fetch_state(),
+        SecFetch::Loading,
+        "the section must be re-read, not left short"
+    );
+}
+
+/// A complete first page — and a genuinely short catalog whose full size the server has already
+/// stated — has no hole, so a catalog fill elsewhere must not cost it a re-read.
+#[test]
+fn a_complete_first_page_is_not_re_listed_by_a_fill() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, _, _) = registered_page_source();
+    land_page(&mut browse, 12, 12);
+    assert_eq!(browse.fetch_state(), SecFetch::Ready);
+    let changed = browse.state.run_owned(
+        &browse.adapter,
+        crate::stores::browse::BrowseCmd::RelistShortCurrent,
+    );
+    assert!(!changed, "a complete page must not be fetched again");
+    assert_eq!(browse.fetch_state(), SecFetch::Ready);
+}
+
 /// THE bug, one layer up: `ensure_sections` folded every failure into an empty table, so the
 /// screen saw exactly what it sees before the first request — no section, no state, and
 /// `fetch_state()` answering `Loading` out of its `unwrap_or` — and spun forever with no way

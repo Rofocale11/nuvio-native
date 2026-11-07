@@ -25,6 +25,11 @@ pub struct Config {
     pub stream_grace: Duration,
     /// The token the app sends; checked on nothing (loopback only), carried for the boot wiring.
     pub token: String,
+    /// How long a section listing waits for a catalog window the cache does not cover before it
+    /// answers with the rows it already holds. The addon's own page budget is 30 s and the app's
+    /// loopback read deadline is 15 s, so this wait is what keeps a slow catalog from being
+    /// reported as a dead server; the rest arrives in the background and the library re-reads.
+    pub catalog_wait: Duration,
 }
 
 impl Default for Config {
@@ -36,6 +41,7 @@ impl Default for Config {
             stream_deadline: Duration::from_secs(60),
             stream_grace: Duration::from_millis(2500),
             token: "nuvionative-local".into(),
+            catalog_wait: Duration::from_secs(3),
         }
     }
 }

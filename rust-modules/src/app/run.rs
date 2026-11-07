@@ -1696,6 +1696,19 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 "home: hubs refresh queued after account content changed"
             });
         }
+        // A catalog fill landed rows after a library listing answered from cache under its read
+        // budget. The command re-reads only a section whose first page still has holes, so a
+        // complete grid is never re-fetched and a genuinely short catalog is left alone. Skipped
+        // on the player route for the same reason as the account refresh above.
+        if !matches!(app.route(), AppArg::Player) {
+            let catalog_gen = super::nuvio::catalog_generation();
+            if catalog_gen.is_some_and(|gen| gen != app.catalog_gen_seen) {
+                if let Some(gen) = catalog_gen {
+                    app.catalog_gen_seen = gen;
+                }
+                app.bridge.browse_run(plx_data::stores::browse::BrowseCmd::RelistShortCurrent);
+            }
+        }
         // (The lost-keyup safety net and the CLIENT-SIDE LONG-PRESS REPEAT stood here — the one
         // hold-to-move path for every discrete focus list, driven by `App::held_key` at 110 ms so
         // the feel was identical everywhere and independent of the remote's hardware repeat delay.
@@ -3224,6 +3237,7 @@ mod lifecycle_regression_tests {
             prev: Default::default(),
             refresh_hubs_at: Default::default(),
             content_gen_seen: Default::default(),
+            catalog_gen_seen: Default::default(),
             plaintext_upgrade: Default::default(),
             ev: [0; 128],
             remote: Default::default(),

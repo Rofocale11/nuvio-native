@@ -1629,6 +1629,23 @@ impl BrowseState {
             }
         }
     }
+    /// The shim's catalog fill landed rows while the grid may be holding a partial first page.
+    /// Re-read only a listing whose page 0 still has a hole: a complete page is left alone, and so
+    /// is a short catalog whose server has already declared its full size (`page_missing` is false
+    /// once every slot the listing claims is filled). A read already in flight will land by itself.
+    fn relist_short_current(&mut self, adapter: &Arc<BrowseAdapter>) -> bool {
+        if adapter.fetching.load(Ordering::SeqCst) {
+            return false;
+        }
+        let current = self.cur();
+        let Some(state) = self.states.get_mut(current) else { return false };
+        if state.fetch != SecFetch::Ready || !state.items.page_missing(0) {
+            return false;
+        }
+        state.reset_listing();
+        plx_machine::idle::invalidate();
+        true
+    }
     fn retry_source(&mut self, epoch: u32, sid: ServerId) -> bool {
         if self.table_epoch() != epoch {
             return false;
@@ -2590,6 +2607,7 @@ impl BrowseState {
                 self.hubs_invalidate_all(adapter);
                 true
             }
+            BrowseCmd::RelistShortCurrent => self.relist_short_current(adapter),
             BrowseCmd::HubsInvalidateServer { sid } => {
                 self.hubs_invalidate_server(sid, adapter);
                 true

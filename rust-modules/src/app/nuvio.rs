@@ -40,6 +40,12 @@ pub(crate) fn content_generation() -> Option<u64> {
     handle().map(|h| h.shim.content_generation())
 }
 
+/// The shim's count of catalog fills that landed rows after a library listing answered short.
+/// `None` on a controlled/replay boot, where there is no shim to ask.
+pub(crate) fn catalog_generation() -> Option<u64> {
+    handle().map(|h| h.shim.catalog_generation())
+}
+
 fn data_dir() -> PathBuf {
     // The first candidate this process can really WRITE: a Developer Mode jail answers `is_dir`
     // and even `create_dir_all` on paths it then refuses files in. The runtime dir is the last

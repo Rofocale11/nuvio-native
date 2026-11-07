@@ -82,6 +82,10 @@ pub enum BrowseCmd {
     /// The profile/account switch: wipe everything and supersede everything in flight.
     Reset,
     HubsInvalidateAll,
+    /// The shim's catalog fill landed rows. Re-read the current section's first page when that
+    /// page still has holes — a listing the shim answered from cache under its read budget. A
+    /// complete page, and a listing whose server has already stated its full size, is left alone.
+    RelistShortCurrent,
     /// One server's section shelves may have moved (a notification, never a press): only its
     /// sections are re-read, behind its failure ladder and spaced like the quiet Home refetch.
     HubsInvalidateServer { sid: ServerId },

@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 const WATCH_PUSH_INTERVAL: Duration = Duration::from_secs(60);
 
 const CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
+/// A failed catalog fill is not retried before this. A dead addon host must not be asked again on
+/// every page read that follows the failure.
+const CATALOG_RETRY: Duration = Duration::from_secs(30);
 /// How long `/hubs` waits for catalogs that are not cached yet; late ones land in the cache for the
 /// next fetch rather than holding Home up.
 const HUBS_BUDGET: Duration = Duration::from_secs(4);
@@ -468,10 +471,20 @@ fn synthetic_ident(rk: i64) -> Option<Ident> {
     })
 }
 
+/// One catalog window's cache. Readers answer from `rows` under a bounded wait; the network work
+/// is done by one [`Shim::fill_catalog`] worker at a time (`filling`), which never holds this lock
+/// across a fetch, so a request can always take the rows that have already landed.
 struct CatalogCache {
     at: Instant,
     rows: Vec<MetaPreview>,
     exhausted: bool,
+    /// One fill at a time; waiters sleep on `cv` and are woken when it ends.
+    filling: bool,
+    /// A failed fill is not retried before this instant.
+    retry_at: Option<Instant>,
+    /// Wakes the readers waiting for this fill. Behind an `Arc` so a waiter can hold it while it
+    /// hands its guard to `wait_timeout` (the same guard cannot also carry the borrow).
+    cv: Arc<Condvar>,
 }
 
 /// Rows a subtitle search may return. The page's language filter usually leaves far fewer; the
@@ -622,6 +635,11 @@ pub struct Shim {
     /// this once a frame (a worker may not touch the dispatcher) and refetches Home when it moves.
     /// Unlike a boolean it cannot lose a change that lands between two frames.
     content_gen: AtomicU64,
+    /// A monotonic count of catalog fills that landed rows after a section listing answered with a
+    /// partial window. Separate from [`Shim::content_gen`]: Home re-reads on that one, and a fill
+    /// for the library must not repaint every Home shelf. The app re-lists a holed section when
+    /// this moves ([`Shim::catalog_generation`]).
+    catalog_gen: AtomicU64,
     /// Set by [`Shim::bind_self`]: background work started from a `&self` method.
     me: std::sync::OnceLock<std::sync::Weak<Shim>>,
     /// plex.tv's account surface, answered by the Nuvio account (`account.rs`).
@@ -2430,6 +2448,7 @@ impl Shim {
             p2p_enabled: AtomicBool::new(cfg_p2p),
             audio_codecs: std::sync::RwLock::new(Vec::new()),
             content_gen: AtomicU64::new(0),
+            catalog_gen: AtomicU64::new(0),
             me: std::sync::OnceLock::new(),
             account: crate::shim_account::Account::new(dir.as_deref(), &cfg_token),
         }
@@ -2658,6 +2677,14 @@ impl Shim {
         self.content_gen.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// **The count a library page polls to learn that a catalog it answered short has filled.**
+    /// A section listing answers within [`Config::catalog_wait`] even when the addon is still
+    /// fetching, so the grid can hold a partial first page; the fill bumps this when it lands and
+    /// the app re-lists a section whose first page still has holes.
+    pub fn catalog_generation(&self) -> u64 {
+        self.catalog_gen.load(Ordering::Relaxed)
+    }
+
     /// Drop every cache that depends on the addon set (after Settings changed it).
     pub fn addons_changed(&self) {
         self.metas.clear();
@@ -2745,18 +2772,27 @@ impl Shim {
     /// Rows `[start, start+size)` of a catalog and the total to report. `fetch_genre` is what the
     /// addon is asked for (only when it declares the genre); `match_genre` is applied in memory
     /// to the fetched rows when it does not.
+    ///
+    /// **The network is never on this path longer than `wait`.** The rows the cache already holds
+    /// are the answer; a window it does not cover starts (or joins) one background fill, and the
+    /// caller takes what has landed by the deadline. So the copy Home already warmed is served
+    /// immediately, and a slow addon costs a partial first page rather than holding the HTTP
+    /// response for its own 30 s budget — which is what made the app's 15 s loopback read report
+    /// "Can't reach your Plex server". The fill continues after the answer and bumps
+    /// [`Shim::catalog_generation`]; the library re-lists a page that still has holes.
     fn catalog_range(
-        &self,
+        self: &Arc<Self>,
         key: &str,
         fetch_genre: Option<&str>,
         match_genre: Option<&str>,
         sort: Option<(CatalogSort, bool)>,
         start: usize,
         size: usize,
+        wait: Duration,
     ) -> (Vec<MetaPreview>, i64) {
+        let k = (key.to_string(), match_genre.or(fetch_genre).map(genre_key));
         let entry = {
             let mut g = self.catalogs.lock().unwrap_or_else(|e| e.into_inner());
-            let k = (key.to_string(), match_genre.or(fetch_genre).map(genre_key));
             let fresh = g.get(&k).is_some_and(|c| {
                 c.lock().unwrap_or_else(|e| e.into_inner()).at.elapsed() < CATALOG_TTL
             });
@@ -2767,57 +2803,37 @@ impl Shim {
                         at: Instant::now(),
                         rows: Vec::new(),
                         exhausted: false,
+                        filling: false,
+                        retry_at: None,
+                        cv: Arc::new(Condvar::new()),
                     })),
                 );
             }
             g[&k].clone()
         };
-        // One fetcher per catalog at a time: the lock is held across the page fetch on purpose.
-        let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
         // Popularity IS the catalog's own order, so it needs no full read; the other keys do.
         let sorted = sort.is_some_and(|(kind, _)| kind != CatalogSort::Popularity);
-        let mut guard = 0;
-        let mut failed = false;
-        // A sorted listing needs the WHOLE catalog before it can answer a page correctly; an
-        // unsorted one stops as soon as the requested window is covered.
-        while !c.exhausted
-            && guard < 20
-            && (sorted || match_genre.is_some() || c.rows.len() < start.saturating_add(size))
-        {
-            guard += 1;
-            match self
-                .backend
-                .catalog_page(key, c.rows.len() as u32, fetch_genre)
-            {
-                Ok(page) => {
-                    let before = c.rows.len();
-                    for p in page {
-                        if match_genre
-                            .is_some_and(|g| !p.genres.iter().any(|x| genre_matches(x, g)))
-                        {
-                            continue;
-                        }
-                        if !c.rows.iter().any(|r| r.id == p.id) {
-                            c.rows.push(p);
-                        }
-                    }
-                    if c.rows.len() == before {
-                        c.exhausted = true;
-                    }
-                }
-                Err(()) => {
-                    failed = true;
-                    break;
-                }
+        // A sorted or genre-filtered listing needs the WHOLE catalog before it can answer a page
+        // correctly; an unsorted one needs only the requested window.
+        let want = if sorted || match_genre.is_some() {
+            usize::MAX
+        } else {
+            start.saturating_add(size)
+        };
+        self.ensure_catalog_fill(&k, &entry, fetch_genre, match_genre, want);
+        let deadline = Instant::now() + wait;
+        let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+        while c.filling && !c.exhausted && c.rows.len() < want {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
             }
-        }
-        // A failure is NOT an empty catalog. The cache entry was created before this fetch, so
-        // leaving it fresh would answer zero rows for `CATALOG_TTL` (15 min) — an addon that
-        // blipped once (the Streaming Catalogs host answers 403 intermittently) left its shelf a
-        // bare heading for a quarter of an hour. Expire the entry instead: the next read retries,
-        // and a partial read keeps what it already holds.
-        if failed && c.rows.is_empty() {
-            c.at = Instant::now() - CATALOG_TTL;
+            let cv = Arc::clone(&c.cv);
+            let (guard, timed) = cv.wait_timeout(c, left).unwrap_or_else(|e| e.into_inner());
+            c = guard;
+            if timed.timed_out() {
+                break;
+            }
         }
         let mut ordered: Vec<&MetaPreview> = c.rows.iter().collect();
         if let Some((sort, desc)) = sort.filter(|(kind, _)| *kind != CatalogSort::Popularity) {
@@ -2841,6 +2857,148 @@ impl Shim {
             .collect();
         let total = c.rows.len() as i64 + if c.exhausted { 0 } else { MORE_HINT };
         (rows, total)
+    }
+
+    /// Start the one fill for `entry` that would cover `want`, unless it is covered, exhausted, in
+    /// flight, or backing off after a failure. Never blocks on the network.
+    fn ensure_catalog_fill(
+        self: &Arc<Self>,
+        k: &(String, Option<String>),
+        entry: &Arc<Mutex<CatalogCache>>,
+        fetch_genre: Option<&str>,
+        match_genre: Option<&str>,
+        want: usize,
+    ) {
+        {
+            let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            if c.filling
+                || c.exhausted
+                || c.rows.len() >= want
+                || c.retry_at.is_some_and(|at| now < at)
+            {
+                return;
+            }
+            c.filling = true;
+        }
+        let (me, filling, clear, claim, k) = (
+            Arc::clone(self),
+            Arc::clone(entry),
+            Arc::clone(entry),
+            Arc::clone(entry),
+            k.clone(),
+        );
+        let (fetch_genre, match_genre) =
+            (fetch_genre.map(str::to_string), match_genre.map(str::to_string));
+        let spawned = std::thread::Builder::new()
+            .name("pmsshim-catalog-fill".into())
+            .spawn(move || {
+                // A backend that panics must not leave the catalog claimed: the waiter would then
+                // sit out every budget, and no later read could ever fill it.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    me.fill_catalog(filling, k, fetch_genre, match_genre, want);
+                }));
+                let mut c = clear.lock().unwrap_or_else(|e| e.into_inner());
+                if c.filling {
+                    c.filling = false;
+                    c.cv.notify_all();
+                }
+            });
+        if spawned.is_err() {
+            let mut c = claim.lock().unwrap_or_else(|e| e.into_inner());
+            c.filling = false;
+            c.cv.notify_all();
+        }
+    }
+
+    /// Is `entry` still the map's cache for `k`? `addons_changed` clears the map and a TTL expiry
+    /// replaces the entry, and a fill must not keep fetching into an orphan (nor report it to the
+    /// client as news).
+    fn catalog_entry_is_current(
+        &self,
+        k: &(String, Option<String>),
+        entry: &Arc<Mutex<CatalogCache>>,
+    ) -> bool {
+        self.catalogs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(k)
+            .is_some_and(|current| Arc::ptr_eq(current, entry))
+    }
+
+    /// Fetch pages into the cache until `want` rows are held (or the catalog is exhausted, or the
+    /// page cap is reached). The lock is taken per page, never across a fetch, so readers answer
+    /// from what has landed. On success the generation moves: a listing that answered short is
+    /// re-read by the library.
+    fn fill_catalog(
+        self: &Arc<Self>,
+        entry: Arc<Mutex<CatalogCache>>,
+        k: (String, Option<String>),
+        fetch_genre: Option<String>,
+        match_genre: Option<String>,
+        want: usize,
+    ) {
+        self.acquire();
+        let mut failed = false;
+        let mut added = false;
+        let mut stale = false;
+        let mut pages = 0;
+        while pages < 20 {
+            if !self.catalog_entry_is_current(&k, &entry) {
+                stale = true;
+                break;
+            }
+            let (skip, done) = {
+                let c = entry.lock().unwrap_or_else(|e| e.into_inner());
+                (c.rows.len() as u32, c.exhausted || c.rows.len() >= want)
+            };
+            if done {
+                break;
+            }
+            pages += 1;
+            match self.backend.catalog_page(&k.0, skip, fetch_genre.as_deref()) {
+                Ok(page) => {
+                    let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+                    let before = c.rows.len();
+                    for p in page {
+                        if match_genre
+                            .as_deref()
+                            .is_some_and(|g| !p.genres.iter().any(|x| genre_matches(x, g)))
+                        {
+                            continue;
+                        }
+                        if !c.rows.iter().any(|r| r.id == p.id) {
+                            c.rows.push(p);
+                        }
+                    }
+                    if c.rows.len() == before {
+                        c.exhausted = true;
+                    }
+                    added |= c.rows.len() > before;
+                }
+                Err(()) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        {
+            let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+            // A failure is NOT an empty catalog. Expire the entry so a later read retries, and
+            // back the retry off: a dead addon must not be asked on every page read that follows.
+            if failed && c.rows.is_empty() {
+                c.at = Instant::now() - CATALOG_TTL;
+            }
+            if failed {
+                c.retry_at = Some(Instant::now() + CATALOG_RETRY);
+            }
+            c.filling = false;
+            c.cv.notify_all();
+        }
+        self.release();
+        if !stale && (!failed || added) {
+            self.catalog_gen.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn meta(&self, type_: &str, id: &str) -> Option<Arc<Meta>> {
@@ -5682,8 +5840,15 @@ impl Shim {
     /// one `plx_data::pms` pages past the first window, with an empty `librarySectionTitle` on the
     /// rows so the app keeps the catalog's own title (`hub_title::localized_hub_title` falls back to
     /// it). A section's own hubs must not: there that family is retitled "Recently Added".
-    fn catalog_hub(&self, i: usize, c: &CatalogInfo, count: usize, pageable: bool) -> Value {
-        let (rows, total) = self.catalog_range(&c.key, None, None, None, 0, count);
+    fn catalog_hub(
+        self: &Arc<Self>,
+        i: usize,
+        c: &CatalogInfo,
+        count: usize,
+        pageable: bool,
+        wait: Duration,
+    ) -> Value {
+        let (rows, total) = self.catalog_range(&c.key, None, None, None, 0, count, wait);
         let series = is_series(&c.type_);
         let rows: Vec<Value> = rows
             .iter()
@@ -5759,9 +5924,11 @@ impl Shim {
             let _ = std::thread::Builder::new()
                 .name("pmsshim-catalog".into())
                 .spawn(move || {
-                    me.acquire();
-                    let hub = me.catalog_hub(i, &c, count, pageable);
-                    me.release();
+                    // The fill worker takes the parallelism permit; holding one here while the
+                    // hub waits on the cache would only starve the fill that has to answer it.
+                    // A hair under the receiver's deadline, which still has to build and send.
+                    let wait = budget.saturating_sub(Duration::from_millis(100));
+                    let hub = me.catalog_hub(i, &c, count, pageable, wait);
                     let _ = tx.send((pos, hub));
                 });
         }
@@ -6323,7 +6490,7 @@ impl Shim {
     }
 
     fn catalog_listing(
-        &self,
+        self: &Arc<Self>,
         cat: Option<CatalogInfo>,
         genre: Option<&str>,
         sort: Option<(CatalogSort, bool)>,
@@ -6356,6 +6523,7 @@ impl Shim {
             sort,
             start,
             size.min(200),
+            self.cfg.catalog_wait,
         );
         let rows: Vec<Value> = rows.iter().map(|p| self.preview_row(p)).collect();
         Response::json(&container(
@@ -6363,7 +6531,7 @@ impl Shim {
         ))
     }
 
-    fn section(&self, req: &Request, k: i64, rest: &[&str]) -> Response {
+    fn section(self: &Arc<Self>, req: &Request, k: i64, rest: &[&str]) -> Response {
         if k != SECTION_MOVIES && k != SECTION_SHOWS {
             return Response::json_status(404, &container(json!({})));
         }
@@ -8239,6 +8407,138 @@ mod catalog_selector_tests {
         assert!(
             episode == "tmdb:1396:1:2" || (episode.starts_with("tt") && episode.ends_with(":1:2")),
             "{episode}"
+        );
+    }
+
+    /// The failure this fix is about: a catalog whose first page is cached (Home warmed it) and
+    /// whose next page hangs. The section listing must answer with the cached page inside its
+    /// budget — never hold the HTTP response for the addon's 30 s — and the background fill must
+    /// land the rest, move `catalog_generation`, and make a re-read complete.
+    struct SlowPageBackend {
+        released: Mutex<bool>,
+        cv: Condvar,
+        second_page_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SlowPageBackend {
+        fn new() -> Self {
+            Self {
+                released: Mutex::new(false),
+                cv: Condvar::new(),
+                second_page_reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn release(&self) {
+            *self.released.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            self.cv.notify_all();
+        }
+    }
+
+    impl Backend for SlowPageBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            vec![CatalogInfo {
+                key: "slow/movie/all".into(),
+                title: "Slow Movies".into(),
+                type_: "movie".into(),
+                genres: Vec::new(),
+            }]
+        }
+        fn catalog_page(
+            &self,
+            key: &str,
+            skip: u32,
+            _genre: Option<&str>,
+        ) -> Result<Vec<MetaPreview>, ()> {
+            if key != "slow/movie/all" {
+                return Err(());
+            }
+            if skip == 0 {
+                return Ok((0..12).map(|i| meta(&format!("Warm {i}"), Some("7.0"), Some("2020-01-01"), &[])).collect());
+            }
+            self.second_page_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut released = self.released.lock().unwrap_or_else(|e| e.into_inner());
+            // Bounded so a shim that blocks on this page fails the timing assertion instead of
+            // hanging the suite.
+            let (guard, _) = self
+                .cv
+                .wait_timeout(released, Duration::from_secs(2))
+                .unwrap_or_else(|e| e.into_inner());
+            released = guard;
+            if !*released {
+                return Err(());
+            }
+            drop(released);
+            Ok((12..112).map(|i| meta(&format!("Late {i}"), Some("7.0"), Some("2020-01-01"), &[])).collect())
+        }
+        fn search(&self, _query: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> {
+            Vec::new()
+        }
+        fn meta(&self, _type_: &str, _id: &str) -> Option<Meta> {
+            None
+        }
+        fn streams(
+            &self,
+            _type_: &str,
+            _id: &str,
+            _deadline: Duration,
+            _on_batch: &mut dyn FnMut(&[Stream]),
+        ) -> Vec<Stream> {
+            Vec::new()
+        }
+        fn subtitles(&self, _type_: &str, _id: &str) -> Vec<plx_stremio::model::Subtitle> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_hanging_catalog_page_answers_from_cache_and_the_fill_lands_later() {
+        let backend = Arc::new(SlowPageBackend::new());
+        let cfg = Config {
+            catalog_wait: Duration::from_millis(50),
+            ..Config::default()
+        };
+        let shim = Arc::new(Shim::new(backend.clone(), cfg));
+        let before = shim.catalog_generation();
+        let listing = || {
+            get(
+                "/library/sections/1/all",
+                &[("catalog", "slow/movie/all"), ("X-Plex-Container-Size", "60")],
+            )
+        };
+
+        let began = Instant::now();
+        let first: Value = serde_json::from_slice(&shim.handle(&listing()).body).unwrap();
+        let elapsed = began.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "a section listing waited {elapsed:?} on the addon's own page budget"
+        );
+        assert_eq!(
+            first["MediaContainer"]["Metadata"].as_array().unwrap().len(),
+            12,
+            "the cached first page must be served as-is: {first:?}"
+        );
+
+        backend.release();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while shim.catalog_generation() == before && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            shim.catalog_generation() > before,
+            "the background fill never reported that it landed rows"
+        );
+        assert!(
+            backend.second_page_reads.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the fill never asked for the second page"
+        );
+
+        let second: Value = serde_json::from_slice(&shim.handle(&listing()).body).unwrap();
+        assert_eq!(
+            second["MediaContainer"]["Metadata"].as_array().unwrap().len(),
+            60,
+            "the re-read must be answered from the filled cache: {second:?}"
         );
     }
 

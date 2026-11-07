@@ -294,6 +294,10 @@ pub(crate) struct App {
     /// fetched `/hubs`; the loop compares this against `nuvio::content_generation()` and queues
     /// one refetch per change. Initialised to the boot value, so boot's own bumps do not count.
     pub(crate) content_gen_seen: u64,
+    /// The shim's catalog generation this app has already re-listed a section for. The shim
+    /// answers a listing from cache under a short budget, so a slow addon can leave page 0 with
+    /// holes; one re-list per change fills them without the user pressing anything.
+    pub(crate) catalog_gen_seen: u64,
     /// The Detail page a playback returned to, waiting for the stop report to land so it can
     /// re-read the item (`content::refresh_after_playback`).
     /// The HTTPS retry for servers on a plaintext grant (`plex::grant::UpgradeRetry`), stepped
