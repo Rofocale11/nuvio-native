@@ -274,7 +274,11 @@ pub(crate) unsafe fn run(app: &mut App) {
         // the wash's own dissolve is in it, and the function itself is gone now — every gradient
         // wash dithers on every frame.)
         fr.underlay_moving |= tree_report.underlay_moving;
-        if was_player && super::bridge::player(&app.pages).is_none() { restore_played_entry(app); plx_stremio::sbengine::suspend_background(); }
+        let playing = super::bridge::player(&app.pages).is_some();
+        // A replay reuses the shim's cached engine URL (no `resolve_stream`), so leaving the
+        // 64 KiB/s background cap on made every far seek refetch outside the window at that cap.
+        if was_player && !playing { restore_played_entry(app); plx_stremio::sbengine::suspend_background(); }
+        else if !was_player && playing { plx_stremio::sbengine::resume_foreground(); }
 
         content_requests(app, fr);
         crate::dev::scenarios::advance_content_boot(app, fr);

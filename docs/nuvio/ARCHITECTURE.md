@@ -252,8 +252,12 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   cannot inflate the delta) and holds the URL for at most 10 s, after which the engine's blocking
   reads let the probe and the player wait for pieces themselves. Each resolve logs its split
   (`sbengine: <hash> metadata …ms -> url …ms -> prebuffer … -> resolve …ms`) so a slow first play
-  can be attributed to peer discovery, the gate, or the caller's deadline. The next `resolve_stream` restores foreground limits
-  (`sbengine: foreground unlimited`) before opening, so playback always starts at full speed.
+  can be attributed to peer discovery, the gate, or the caller's deadline. Foreground limits
+  (`sbengine: foreground unlimited`) are restored both at the head of `resolve_stream` and when
+  the player page appears: replaying the same source reuses the shim's cached engine URL, so no
+  resolve runs, and restoring only on resolve left the 64 KiB/s cap on — every far seek then
+  refetched pieces outside the 32 MiB window at that cap and tripped the player's 3 s
+  seek-stuck watchdog into a reload.
   `libsbengine.so` links libstdc++/libgcc and OpenSSL 1.1.1 statically — the NDK's libstdc++
   would otherwise want three symbols the TV's lacks, and the firmware's `libssl` SONAME differs
   across releases (1.0.x, 1.1, 3) — so `tools/fwcompat.py` grades it OK on every release in its

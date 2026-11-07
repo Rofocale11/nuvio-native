@@ -550,7 +550,8 @@ pub const BACKGROUND_DOWN_BPS: u64 = 64 * 1024;
 pub const BACKGROUND_UP_BPS: u64 = 64 * 1024;
 
 /// Put the engine into background mode (player left). No-op when the engine is
-/// not bound; the cap is restored by [`resume_foreground`] on the next resolve.
+/// not bound; the cap is restored by [`resume_foreground`] on player entry and
+/// at the head of [`resolve_stream`].
 pub fn suspend_background() {
     if available() {
         limits(BACKGROUND_DOWN_BPS, BACKGROUND_UP_BPS);
@@ -558,13 +559,16 @@ pub fn suspend_background() {
     }
 }
 
-/// Restore foreground (unlimited down, default up) before a resolve. Called at
-/// the head of [`resolve_stream`] so a torrent opened from Home always starts
-/// at full speed even if the previous session left it throttled.
+/// Restore foreground (unlimited down, default up): at the head of
+/// [`resolve_stream`] so a torrent opened from Home starts at full speed, and
+/// from the app loop when the player page appears. The second site matters
+/// because replaying the same source reuses the shim's cached engine URL, so no
+/// resolve runs and the background cap would otherwise stay on — a far seek
+/// then refetches outside the 32 MiB window at 64 KiB/s.
 pub fn resume_foreground() {
     if available() {
         limits(0, DEFAULT_UPLOAD_BPS);
-        plx_base::eventlog::log("sbengine: foreground unlimited (resolving)");
+        plx_base::eventlog::log("sbengine: foreground unlimited (playback)");
     }
 }
 
