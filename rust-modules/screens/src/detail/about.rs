@@ -1,7 +1,7 @@
 //! The Detail page's About footer.
 //!
-//! Only the synopsis card and Languages column are controls. Information and Accessibility remain
-//! readable content, not dead focus stops.
+//! Two columns on one heading line: the synopsis card on the left, the Information column on the
+//! right. Only the card is a control; Information remains readable content, not a dead focus stop.
 
 use std::ffi::CString;
 
@@ -10,42 +10,29 @@ use plx_machine::machine::{GroupId, Measure};
 use plx_ui::text_lift::{draw_focused, TextLift, CENTRE};
 use plx_ui::hstack::Item;
 use plx_ui::text_view::TextView;
-use plx_ui::vstack::{Anchor, VFlow, VStack};
+use plx_ui::vstack::VFlow;
 use plx_ui::{theme, Painter, Rect};
 
 pub const ABOUT_ELEM_RANGE_START: u32 = 4 * super::SECTION_BLOCK;
 pub const ABOUT_ELEM_RANGE_END: u32 = 5 * super::SECTION_BLOCK;
 pub const ABOUT_GROUP: GroupId = GroupId(5);
 pub const CARD_ELEM: u32 = ABOUT_ELEM_RANGE_START;
-pub const LANGUAGES_ELEM: u32 = ABOUT_ELEM_RANGE_START + 1;
-
-/// How many audio tracks the Languages column names. A summary, not the whole list: the column is
-/// a control (see [`locate`]) whose MORE opens the tracks panel, which lists EVERY audio track in
-/// the server's order (`tracks_panel::audio_rows`), so a track past the summary is one press away.
-const AUDIO_SUMMARY: usize = 8;
 
 const CARD_W: f32 = 640.0;
 const CARD_Y: f32 = 50.0;
 const CARD_PAD: f32 = 30.0;
-/// The `ui::text_lift` corner radius of the About card and the Languages column (the mockup's 14).
+/// The `ui::text_lift` corner radius of the About card (the mockup's 14).
 const LIFT_RADIUS: f32 = 14.0;
-const COL_Y: f32 = 430.0;
-/// A column's heading is drawn at the column's top; Information, Languages and Accessibility (its
-/// badge rows and its "no flags" dash alike) start their first row this far below it.
-const HEAD_TO_ROWS: f32 = 68.0;
-/// The air under a label/value pair, and under an accessibility badge row.
+/// The Information column's left edge: clear of the card's own right edge (`MARGIN_X + CARD_W` =
+/// 736) by enough air that the two columns read as separate halves of the footer, and its rows
+/// stand at the card's top edge, so the two columns share one heading line and one body line.
+const INFO_X: f32 = 1000.0;
+/// The Information column's text measure — from [`INFO_X`] to the right safe-area margin.
+const INFO_W: f32 = 720.0;
+/// The air under a label/value pair.
 const PAIR_AIR: f32 = 22.0;
-const BADGE_AIR: f32 = 26.0;
 /// A pair's value sits this far under its label.
 const PAIR_VALUE_DY: f32 = 34.0;
-/// An accessibility row: the badge line, then the description this far under its top.
-const BADGE_DESC_DY: f32 = 52.0;
-const LANG_X: f32 = 760.0;
-/// The Languages column's text measure — the width the audio list wraps to, and what the focus
-/// plate is [`CARD_PAD`] wider than on each side.
-const LANG_W: f32 = 500.0;
-/// Air between the block's last line and the MORE mark, matching the About card's own.
-const LANG_MORE_LEAD: f32 = 30.0;
 /// Air between the synopsis' last line and the MORE pinned on it — the same air the Person bio
 /// and the Collection summary keep before theirs.
 const MORE_GAP: f32 = theme::space::LG;
@@ -63,38 +50,14 @@ fn synopsis<'a>(summary: &'a str, measure: &'a dyn Measure) -> TextView<'a> {
         .mark_always()
 }
 
-/// The Languages column's audio list: ONE builder for the height `languages_rect` reserves and
-/// the block `draw_languages` paints. Its MORE is NOT pinned on the last line — it sits on its own
-/// row [`LANG_MORE_LEAD`] below the block — so the fade here only marks a TRUNCATED list and the
-/// view deliberately does not declare `mark_always`: a complete last line has nothing to run under.
-fn audio_view<'a>(list: &'a str, measure: &'a dyn Measure) -> TextView<'a> {
-    TextView::new(list, theme::size::LABEL, theme::TEXT_HEADING)
-        .with_measure(measure)
-        .leading(32.0)
-        .max_lines(6)
-        .fade_for_more(MORE_GAP)
-}
-
-/// Where the Languages plate's MORE is drawn (`Painter::text`'s `y`) for the plate `plate`.
-fn languages_more_y(plate: Rect) -> f32 {
-    plate.y + plate.h - CARD_PAD - theme::size::CAPTION as f32
-}
-
-pub fn locate(key: u32, tracks_available: bool) -> Option<usize> {
-    match key {
-        CARD_ELEM => Some(0),
-        LANGUAGES_ELEM if tracks_available => Some(1),
-        _ => None,
-    }
+pub fn locate(key: u32) -> Option<usize> {
+    (key == CARD_ELEM).then_some(0)
 }
 
 pub struct Rows {
     dirty: bool,
     identity: Option<(plx_plex::plex::ServerId, String)>,
     info: Vec<(&'static str, String)>,
-    orig_audio: Option<String>,
-    audio_list: String,
-    access: Vec<(&'static str, &'static str)>,
 }
 
 impl Rows {
@@ -103,9 +66,6 @@ impl Rows {
             dirty: true,
             identity: None,
             info: Vec::new(),
-            orig_audio: None,
-            audio_list: String::new(),
-            access: Vec::new(),
         }
     }
 
@@ -145,43 +105,6 @@ impl Rows {
             self.info
                 .push((plx_platform::i18n::msg::browse_detail_origins(), d.countries.join(", ")));
         }
-        self.orig_audio = d.audio.first().map(|a| {
-            if a.lang.is_empty() {
-                plx_platform::i18n::msg::browse_detail_unknown().into()
-            } else {
-                a.lang.clone()
-            }
-        });
-        self.audio_list = d
-            .audio
-            .iter()
-            .take(AUDIO_SUMMARY)
-            .map(|a| {
-                let lang = if a.lang.is_empty() {
-                    plx_platform::i18n::msg::browse_detail_unknown()
-                } else {
-                    &a.lang
-                };
-                format!("{} ({})", lang, a.codec.to_uppercase())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        self.access.clear();
-        if !d.subs.is_empty() {
-            self.access.push((
-                plx_platform::i18n::msg::widgets_badge_cc(),
-                plx_platform::i18n::msg::browse_detail_closed_captions(),
-            ));
-        }
-        if d.subs.iter().any(|s| s.sdh) {
-            self.access.push((plx_platform::i18n::msg::widgets_badge_sdh(), plx_platform::i18n::msg::browse_detail_sdh()));
-        }
-        if d.audio.iter().any(|a| a.ad) {
-            self.access.push((
-                plx_platform::i18n::msg::widgets_badge_ad(),
-                plx_platform::i18n::msg::browse_detail_audio_description(),
-            ));
-        }
     }
 
     pub fn invalidate(&mut self) {
@@ -198,55 +121,26 @@ impl Rows {
         )
     }
 
-    pub fn languages_rect(&self, top: f32, measure: &dyn Measure) -> Rect {
-        let items = self.languages_items(measure);
-        let h = VStack::new(&items, 0.0, Anchor::Top(0.0)).height();
-        // The plate wears the ABOUT CARD's padding — `CARD_PAD` on all four sides — because the
-        // owner named that card as the reference for what these insets should look like
-        // (2026-09-18). Its height therefore has to carry the MORE mark too: MORE is INK, the
-        // block's measured `h` ends at the last audio line, and pinning the mark to the plate's
-        // own bottom edge is what used to leave it all but touching it while the heading sat under
-        // 48px of air.
-        Rect::new(
-            LANG_X - CARD_PAD,
-            top + COL_Y - CARD_PAD,
-            LANG_W + 2.0 * CARD_PAD,
-            CARD_PAD + h + LANG_MORE_LEAD + theme::size::CAPTION as f32 + CARD_PAD,
-        )
+    /// Where the footer's last ink stands for the page `top` — the card or the Information column,
+    /// whichever runs lower. The page's scroll clamp reads this so the footer can come to rest at
+    /// the bottom of the screen instead of being pinned under the compact title with the rest of
+    /// the viewport left empty.
+    pub fn footer_bottom(&self, d: &Detail, top: f32, measure: &dyn Measure) -> f32 {
+        let card = self.card_rect(d, top, measure);
+        let card_bottom = card.y + card.h;
+        let mut flow = VFlow::new(top + CARD_Y, 0.0);
+        for (_, value) in &self.info {
+            flow.place(|_| Item::new(pair_h(value, measure)).after(PAIR_AIR));
+        }
+        card_bottom.max(flow.end())
     }
 
-    /// The Languages column's run, ONE list that `languages_rect` (its height) and `draw_languages`
-    /// (where each row stands) both read: the heading (a zero-high item whose `after` is the
-    /// distance to the first row), the original-audio pair, the audio list, and a zero-high end item
-    /// so the air under the last pair stays inside the plate's height as it always did.
-    fn languages_items(&self, measure: &dyn Measure) -> [Item; 4] {
-        [
-            Item::new(0.0).after(HEAD_TO_ROWS),
-            self.orig_audio
-                .as_deref()
-                .map_or(Item::absent(), |orig| Item::new(pair_body_h(orig, measure)).after(PAIR_AIR)),
-            if self.audio_list.is_empty() {
-                Item::absent()
-            } else {
-                Item::new(PAIR_VALUE_DY + audio_view(&self.audio_list, measure).measure_h(LANG_W))
-            },
-            Item::new(0.0),
-        ]
-    }
-
-    /// `tracks` is the PAGE's answer to "is there a file for the track sheet to describe"
-    /// (`DetailScreen::tracks_available`), passed in rather than asked of the sheet: it decides
-    /// whether the Languages column carries a MORE affordance, and it has to be the same bit
-    /// `about::locate` gates the element on or the column reads as pressable and is not.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         p: Painter,
         d: &Detail,
         top: f32,
-        tracks: bool,
         card_lift: &TextLift,
-        lang_lift: &TextLift,
         measure: &dyn plx_machine::machine::Measure,
     ) {
         let x = plx_ui::consts::MARGIN_X;
@@ -259,9 +153,20 @@ impl Rows {
             0,
             1,
         );
+        // The Information heading shares the About heading's line; its rows then stand on the
+        // card's top edge, so the two columns open on one line and read as one block.
+        text_at(
+            p,
+            INFO_X,
+            top,
+            theme::size::HEADLINE,
+            theme::TEXT_PRIMARY,
+            1,
+            plx_platform::i18n::msg::browse_detail_information(),
+        );
         let card = self.card_rect(d, top, measure);
         // The card's content grows with its plate inside `draw_focused`'s closure only; the
-        // columns drawn after it use the caller's own `p` and cannot inherit the lift.
+        // Information column drawn after it uses the caller's own `p` and cannot inherit the lift.
         draw_focused(p, card, LIFT_RADIUS, card_lift, CENTRE, |p| {
             let ix = card.x + CARD_PAD;
             text_at(
@@ -301,144 +206,31 @@ impl Rows {
             );
         });
 
-        self.draw_information(p, x, top + COL_Y, measure);
-        self.draw_languages(p, top + COL_Y, tracks, lang_lift, measure);
-        self.draw_accessibility(p, 1360.0, top + COL_Y, measure);
+        self.draw_information(p, INFO_X, top + CARD_Y, measure);
     }
 
+    /// The column's pairs, standing from `y` — the card's top edge — with each pair's air under it.
     fn draw_information(&self, p: Painter, x: f32, y: f32, measure: &dyn Measure) {
-        text_at(
-            p,
-            x,
-            y,
-            theme::size::HEADLINE,
-            theme::TEXT_PRIMARY,
-            1,
-            plx_platform::i18n::msg::browse_detail_information(),
-        );
         let mut flow = VFlow::new(y, 0.0);
-        flow.push(Item::new(0.0).after(HEAD_TO_ROWS));
         for (label, value) in &self.info {
             flow.place(|yy| Item::new(draw_pair(p, x, yy, label, value, measure)).after(PAIR_AIR));
         }
     }
-
-    fn draw_languages(
-        &self,
-        p: Painter,
-        y: f32,
-        tracks: bool,
-        lift: &TextLift,
-        measure: &dyn Measure,
-    ) {
-        let plate = self.languages_rect(y - COL_Y, measure);
-        draw_focused(p, plate, LIFT_RADIUS, lift, CENTRE, |p| {
-            text_at(
-                p,
-                LANG_X,
-                y,
-                theme::size::HEADLINE,
-                theme::TEXT_PRIMARY,
-                1,
-                plx_platform::i18n::msg::browse_detail_languages(),
-            );
-            let items = self.languages_items(measure);
-            let stack = VStack::new(&items, 0.0, Anchor::Top(y));
-            if let (Some(orig), Some((yy, _))) = (&self.orig_audio, stack.span(1)) {
-                draw_pair(p, LANG_X, yy, plx_platform::i18n::msg::browse_detail_original_audio(), orig, measure);
-            }
-            if let Some((yy, _)) = stack.span(2) {
-                text_at(
-                    p,
-                    LANG_X,
-                    yy,
-                    theme::size::CAPTION,
-                    theme::TEXT_TERTIARY,
-                    0,
-                    plx_platform::i18n::msg::browse_detail_audio(),
-                );
-                audio_view(&self.audio_list, measure)
-                    .draw(p, Rect::new(LANG_X, yy + PAIR_VALUE_DY, LANG_W, 0.0));
-            }
-            if tracks {
-                p.text(
-                    plx_ui::text_view::more_mark().as_ptr(),
-                    plate.x + plate.w - CARD_PAD,
-                    languages_more_y(plate),
-                    theme::size::CAPTION,
-                    theme::TEXT_TERTIARY,
-                    2,
-                    1,
-                );
-            }
-        });
-    }
-
-    fn draw_accessibility(
-        &self,
-        p: Painter,
-        x: f32,
-        y: f32,
-        measure: &dyn plx_machine::machine::Measure,
-    ) {
-        text_at(
-            p,
-            x,
-            y,
-            theme::size::HEADLINE,
-            theme::TEXT_PRIMARY,
-            1,
-            plx_platform::i18n::msg::browse_detail_accessibility(),
-        );
-        if self.access.is_empty() {
-            text_at(
-                p,
-                x,
-                y + HEAD_TO_ROWS,
-                theme::size::CAPTION,
-                theme::TEXT_TERTIARY,
-                0,
-                "\u{2014}",
-            );
-            return;
-        }
-        let mut flow = VFlow::new(y, 0.0);
-        flow.push(Item::new(0.0).after(HEAD_TO_ROWS));
-        for (label, desc) in &self.access {
-            flow.place(|yy| {
-                plx_ui::widgets::badge(
-                    p,
-                    x,
-                    yy + plx_ui::widgets::BADGE_H * 0.5,
-                    label,
-                    None,
-                    plx_ui::widgets::BadgeStyle::Filled,
-                    measure,
-                );
-                let h = TextView::new(desc, theme::size::CAPTION, theme::TEXT_HEADING)
-                    .with_measure(measure)
-                    .leading(30.0)
-                    .max_lines(4)
-                    .draw(p, Rect::new(x, yy + BADGE_DESC_DY, 500.0, 0.0));
-                Item::new(BADGE_DESC_DY + h).after(BADGE_AIR)
-            });
-        }
-    }
 }
 
-/// A pair's height without the air under it: the label line, then the value (two lines at most).
-fn pair_body_h(value: &str, measure: &dyn Measure) -> f32 {
+/// The height of a pair's label and value, the air under it excluded.
+fn pair_h(value: &str, measure: &dyn Measure) -> f32 {
     PAIR_VALUE_DY
         + TextView::new(value, theme::size::LABEL, theme::TEXT_HEADING)
             .bold()
             .with_measure(measure)
             .leading(30.0)
             .max_lines(2)
-            .measure_h(520.0)
+            .measure_h(INFO_W)
             .max(30.0)
 }
 
-/// Draws a label/value pair at `y` and returns its height ([`pair_body_h`]), the air excluded.
+/// Draws a label/value pair at `y` and returns its height (the air excluded).
 fn draw_pair(p: Painter, x: f32, y: f32, label: &str, value: &str, measure: &dyn Measure) -> f32 {
     text_at(
         p,
@@ -454,7 +246,7 @@ fn draw_pair(p: Painter, x: f32, y: f32, label: &str, value: &str, measure: &dyn
         .with_measure(measure)
         .leading(30.0)
         .max_lines(2)
-        .draw(p, Rect::new(x, y + PAIR_VALUE_DY, 520.0, 0.0));
+        .draw(p, Rect::new(x, y + PAIR_VALUE_DY, INFO_W, 0.0));
     PAIR_VALUE_DY + h.max(30.0)
 }
 
@@ -468,25 +260,6 @@ fn text_at(p: Painter, x: f32, y: f32, size: i32, color: [f32; 4], bold: i32, te
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A file with twelve audio tracks: the column names the first eight and is a control, and the
-    /// tracks panel it opens has a row for each of the twelve, the last one last.
-    #[test]
-    fn the_audio_summary_stops_at_eight_and_the_tracks_panel_lists_all_twelve() {
-        use plx_data::metadata::Stream;
-        let audio: Vec<Stream> = (0..12)
-            .map(|i| Stream { lang: format!("Lang{i}"), codec: "ac3".into(), ..Default::default() })
-            .collect();
-        let d = Detail { part: "/library/parts/1/file.mkv".into(), audio, ..Default::default() };
-        let mut rows = Rows::new();
-        rows.update(&d);
-        assert_eq!(rows.audio_list.split(", ").count(), AUDIO_SUMMARY);
-        assert!(rows.audio_list.contains("Lang7") && !rows.audio_list.contains("Lang8"));
-        assert_eq!(locate(LANGUAGES_ELEM, d.has_own_file()), Some(1), "the column opens the tracks panel");
-        let panel = crate::registry::tracks_panel_audio_rows(&d.audio);
-        assert_eq!(panel.len(), 12, "the panel lists every track");
-        assert_eq!(panel[11].name, "Lang11");
-    }
 
     /// Issue 15: the About card's MORE is pinned on the synopsis' last line whether or not the
     /// text was truncated, so a synopsis that fits in exactly its five lines with a long last
@@ -509,47 +282,14 @@ mod tests {
         assert!(!short.last_line_fades(SYNOPSIS_W), "a line clear of MORE stays plain");
     }
 
-    /// The Languages column's MORE is not the About card's shape: it sits on its own row below the
-    /// audio list, so even a complete list whose last line runs the full measure never reaches
-    /// under it — and that line must NOT fade.
     #[test]
-    fn the_languages_more_sits_below_the_audio_list_so_a_complete_last_line_stays_plain() {
-        let measure = plx_ui::fixture::FixtureMeasure;
-        let fits = |n: usize| {
-            let text = "English (AAC), ".repeat(n);
-            (!audio_view(&text, &measure).truncates(LANG_W)).then_some(text)
-        };
-        let longest = (1..200).map_while(fits).last().expect("some list fits");
-        let mut rows = Rows::new();
-        rows.audio_list = longest.clone();
-        let plate = rows.languages_rect(0.0, &measure);
-        let view = audio_view(&longest, &measure);
-        let list_top = COL_Y + 68.0 + 34.0;
-        let list_h = view.measure_h(LANG_W);
-        let last_line_bottom = view.last_line_cap_y(list_top, list_h) + view.line_h();
-        assert!(languages_more_y(plate) >= last_line_bottom,
-            "MORE ({}) is below the last audio line ({last_line_bottom})", languages_more_y(plate));
-        assert!(!view.last_line_fades(LANG_W), "a complete list never fades");
-    }
-
-    #[test]
-    fn only_the_card_and_available_languages_are_focusable() {
-        assert_eq!(locate(CARD_ELEM, false), Some(0));
-        assert_eq!(locate(LANGUAGES_ELEM, false), None);
-        assert_eq!(locate(LANGUAGES_ELEM, true), Some(1));
-        assert_eq!(locate(ABOUT_ELEM_RANGE_START + 2, true), None);
-    }
-
-    #[test]
-    fn about_focus_only_ever_lands_on_the_card_and_a_clickable_languages_column() {
-        let without_tracks: Vec<_> = (ABOUT_ELEM_RANGE_START..ABOUT_ELEM_RANGE_END)
-            .filter_map(|key| locate(key, false).map(|_| key))
-            .collect();
-        let with_tracks: Vec<_> = (ABOUT_ELEM_RANGE_START..ABOUT_ELEM_RANGE_END)
-            .filter_map(|key| locate(key, true).map(|_| key))
-            .collect();
-        assert_eq!(without_tracks, vec![CARD_ELEM]);
-        assert_eq!(with_tracks, vec![CARD_ELEM, LANGUAGES_ELEM]);
+    fn only_the_card_is_focusable() {
+        assert_eq!(locate(CARD_ELEM), Some(0));
+        for key in ABOUT_ELEM_RANGE_START..ABOUT_ELEM_RANGE_END {
+            if key != CARD_ELEM {
+                assert_eq!(locate(key), None, "elem {key} has no stop in this footer");
+            }
+        }
     }
 
     #[test]
@@ -592,79 +332,69 @@ mod tests {
             .any(|(label, value)| *label == "Run Time" && value == "2m"));
     }
 
-    fn movie_with_audio() -> Detail {
+    fn movie() -> Detail {
         Detail {
             sid: plx_plex::plex::ServerId::UNSET,
             rk: "movie".into(),
             rating: "PG".into(),
             summary: "word ".repeat(40),
-            audio: vec![plx_data::metadata::Stream {
-                lang: "en".into(),
-                codec: "ac3".into(),
-                ..Default::default()
-            }],
             ..Default::default()
         }
     }
 
-    fn focused(elem_card: bool) -> (TextLift, TextLift) {
-        let (mut card, mut lang) = (TextLift::new(), TextLift::new());
+    fn settled(lifted: bool) -> TextLift {
+        let mut lift = TextLift::new();
         for _ in 0..240 {
-            card.step(elem_card, 1.0 / 60.0);
-            lang.step(!elem_card, 1.0 / 60.0);
+            lift.step(lifted, 1.0 / 60.0);
         }
-        (card, lang)
+        lift
     }
 
-    fn census(rows: &Rows, d: &Detail, card: &TextLift, lang: &TextLift) -> Vec<(u64, Rect)> {
+    fn census(rows: &Rows, d: &Detail, card: &TextLift) -> Vec<(u64, Rect)> {
         let measure = plx_ui::fixture::FixtureMeasure;
-        plx_ui::draw_census::capture(|| rows.draw(Painter::recording(), d, 0.0, true, card, lang, &measure))
+        plx_ui::draw_census::capture(|| rows.draw(Painter::recording(), d, 0.0, card, &measure))
+    }
+
+    /// The Information heading at rest and under a lifted card: the two-column footer's right
+    /// half is drawn after the card's `draw_focused` closure, so it must not inherit the scale.
+    fn info_heading(rows: &Rows, d: &Detail, card: &TextLift) -> Option<Rect> {
+        census(rows, d, card)
+            .into_iter()
+            .find(|(tag, r)| *tag == 100 && (r.x - INFO_X).abs() < 0.5 && r.y.abs() < 0.5)
+            .map(|(_, r)| r)
     }
 
     /// A focused About card grows its own content and nothing else: the Information column, drawn
     /// after it, stays exactly where it does at rest.
     #[test]
-    fn a_focused_about_card_does_not_scale_its_siblings() {
+    fn a_focused_about_card_does_not_scale_its_sibling() {
         let _g = plx_base::testlock::serial();
         let mut rows = Rows::new();
-        let d = movie_with_audio();
+        let d = movie();
         rows.update(&d);
-        let at_rest = census(&rows, &d, &TextLift::new(), &TextLift::new());
-        let (card, lang) = focused(true);
-        assert!(card.scale() > 1.0, "precondition: the card is lifted");
-        let lifted = census(&rows, &d, &card, &lang);
-
-        let info_y = COL_Y; // `draw_information`'s heading
-        let at = |c: &[(u64, Rect)]| {
-            c.iter()
-                .find(|(tag, r)| *tag == 100 && r.x == plx_ui::consts::MARGIN_X && r.y == info_y)
-                .map(|(_, r)| *r)
-        };
-        assert!(at(&at_rest).is_some(), "precondition: the Information heading is in the census");
-        assert_eq!(at(&lifted), at(&at_rest), "a sibling must not inherit the card's scale");
-        // And the card's own content did move, so the test above is not vacuous.
-        assert_ne!(lifted, at_rest);
+        let at_rest = info_heading(&rows, &d, &TextLift::new());
+        assert!(at_rest.is_some(), "precondition: the Information heading is in the census");
+        let lifted_card = settled(true);
+        assert!(lifted_card.scale() > 1.0, "precondition: the card is lifted");
+        assert_eq!(info_heading(&rows, &d, &lifted_card), at_rest,
+            "the sibling column must not inherit the card's scale");
+        assert_ne!(census(&rows, &d, &lifted_card), census(&rows, &d, &TextLift::new()),
+            "…and the card's own content did move, so the assertion above is not vacuous");
     }
 
-    /// Focus moving off a lifted block leaves nothing behind once it settles: the draw is exactly
-    /// the never-focused draw, for either block.
+    /// Focus leaving the card leaves nothing behind once it settles: the draw is exactly the
+    /// never-focused draw.
     #[test]
-    fn leaving_a_lifted_block_leaves_no_plate_or_shadow_once_settled() {
+    fn leaving_a_lifted_card_leaves_no_plate_or_shadow_once_settled() {
         let _g = plx_base::testlock::serial();
         let mut rows = Rows::new();
-        let d = movie_with_audio();
+        let d = movie();
         rows.update(&d);
-        let at_rest = census(&rows, &d, &TextLift::new(), &TextLift::new());
-
-        for on_card in [true, false] {
-            let (mut card, mut lang) = focused(on_card);
-            assert_ne!(census(&rows, &d, &card, &lang), at_rest, "precondition: focus draws something");
-            for _ in 0..240 {
-                card.step(false, 1.0 / 60.0);
-                lang.step(false, 1.0 / 60.0);
-            }
-            assert_eq!(census(&rows, &d, &card, &lang), at_rest);
-        }
+        let at_rest = census(&rows, &d, &TextLift::new());
+        let mut card = settled(true);
+        assert_ne!(census(&rows, &d, &card), at_rest, "precondition: focus draws something");
+        card = settled(false);
+        assert_eq!(census(&rows, &d, &card), at_rest);
     }
 
     /// #814: a show's `duration` is the metadata agent's nominal per-episode figure, so About
@@ -693,75 +423,64 @@ mod tests {
         }
     }
 
-    /// The painted gaps of the three columns, read off the runs: the Languages column's audio label
-    /// stands a pair's body and [`PAIR_AIR`] under the original-audio label (and straight under the
-    /// heading's [`HEAD_TO_ROWS`] when there is no original), and the Information pairs are the same
-    /// body and air apart. The same list sizes the plate.
+    /// The two headings share one line; the pairs then stand on the card's top edge, at the
+    /// Information column's own `x`, each pair a body and [`PAIR_AIR`] under the last.
     #[test]
-    fn the_columns_paint_the_named_gaps() {
+    fn the_two_columns_share_the_heading_line_and_the_pairs_keep_their_air() {
         let _g = plx_base::testlock::serial();
         let measure = plx_ui::fixture::FixtureMeasure;
         let d = Detail::default();
-        let draw = |rows: &Rows| {
-            plx_ui::draw_census::capture_runs(|| {
-                rows.draw(Painter::recording(), &d, 0.0, false, &TextLift::new(), &TextLift::new(), &measure)
-            })
-        };
-        let y_of = |runs: &[plx_ui::draw_census::Run], text: &str| {
-            runs.iter().find(|r| r.text == text).map(|r| r.at.y).unwrap_or_else(|| panic!("{text} not drawn"))
-        };
         let mut rows = Rows::new();
         rows.info = vec![("Rated", "PG".into()), ("Origins", "France".into())];
-        rows.orig_audio = Some("English".into());
-        rows.audio_list = "English (AC3)".into();
-        let runs = draw(&rows);
-        let tol = 0.5;
-        assert!((y_of(&runs, "Rated") - (COL_Y + HEAD_TO_ROWS)).abs() < tol);
-        let body = pair_body_h("PG", &measure);
-        assert!((y_of(&runs, "Origins") - y_of(&runs, "Rated") - (body + PAIR_AIR)).abs() < tol);
-        let orig = y_of(&runs, plx_platform::i18n::msg::browse_detail_original_audio());
-        let audio = y_of(&runs, plx_platform::i18n::msg::browse_detail_audio());
-        assert!((orig - (COL_Y + HEAD_TO_ROWS)).abs() < tol);
-        assert!((audio - orig - (pair_body_h("English", &measure) + PAIR_AIR)).abs() < tol);
-        // The plate is the same list's height: heading distance, the pair and its air, the audio block.
-        let plate = rows.languages_rect(0.0, &measure);
-        let audio_h = PAIR_VALUE_DY + audio_view(&rows.audio_list, &measure).measure_h(LANG_W);
-        let h = HEAD_TO_ROWS + pair_body_h("English", &measure) + PAIR_AIR + audio_h;
-        assert!((plate.h - (CARD_PAD + h + LANG_MORE_LEAD + theme::size::CAPTION as f32 + CARD_PAD)).abs() < tol);
-        // Absent original audio: the audio label stands right under the heading's distance.
-        rows.orig_audio = None;
-        let runs = draw(&rows);
-        let audio = y_of(&runs, plx_platform::i18n::msg::browse_detail_audio());
-        assert!((audio - (COL_Y + HEAD_TO_ROWS)).abs() < tol);
-    }
-
-    /// Q3: Accessibility's first badge row stands [`HEAD_TO_ROWS`] under its heading, the very
-    /// distance Information's and Languages' first rows keep (it was four px nearer): the heading
-    /// is at the column top, the first description [`BADGE_DESC_DY`] under the badge row.
-    #[test]
-    fn the_accessibility_rows_stand_the_same_distance_under_their_heading_as_the_others() {
-        let _g = plx_base::testlock::serial();
-        let measure = plx_ui::fixture::FixtureMeasure;
-        let d = Detail::default();
-        let mut rows = Rows::new();
-        rows.access = vec![(plx_platform::i18n::msg::widgets_badge_cc(), plx_platform::i18n::msg::browse_detail_closed_captions())];
         let runs = plx_ui::draw_census::capture_runs(|| {
-            rows.draw(Painter::recording(), &d, 0.0, false, &TextLift::new(), &TextLift::new(), &measure)
+            rows.draw(Painter::recording(), &d, 0.0, &TextLift::new(), &measure)
         });
-        let y_of = |text: &str| runs.iter().find(|r| r.text == text).map(|r| r.at.y).unwrap_or_else(|| panic!("{text} not drawn"));
-        let head = y_of(plx_platform::i18n::msg::browse_detail_accessibility());
-        let desc = runs.iter().filter(|r| r.at.x == 1360.0 && r.at.y > head).map(|r| r.at.y).fold(f32::MAX, f32::min);
-        assert!((head - COL_Y).abs() < 0.5, "the heading stands at the column top");
-        // The same description drawn where Information's first row would stand its own body.
-        let want = plx_ui::draw_census::capture_runs(|| {
-            TextView::new(plx_platform::i18n::msg::browse_detail_closed_captions(), theme::size::CAPTION, theme::TEXT_HEADING)
+        let run = |text: &str| {
+            runs.iter()
+                .find(|r| r.text == text)
+                .unwrap_or_else(|| panic!("{text} not drawn"))
+        };
+        let tol = 0.5;
+        let about = run(plx_platform::i18n::msg::browse_detail_about_c()
+            .to_str()
+            .expect("the About heading is UTF-8"));
+        let info = run(plx_platform::i18n::msg::browse_detail_information());
+        assert!((info.at.y - about.at.y).abs() < tol, "the headings share one line");
+        assert_eq!(
+            (info.size, info.ink, info.bold),
+            (about.size, about.ink, about.bold),
+            "Information wears the About heading's own type — same size, ink and weight"
+        );
+        assert!((info.at.x - INFO_X).abs() < tol, "Information owns the right column");
+        assert!((about.at.x - plx_ui::consts::MARGIN_X).abs() < tol);
+
+        let rated = run("Rated");
+        assert!((rated.at.y - CARD_Y).abs() < tol, "the first pair stands on the card's top edge");
+        assert!((rated.at.x - INFO_X).abs() < tol);
+        let body = PAIR_VALUE_DY
+            + TextView::new("PG", theme::size::LABEL, theme::TEXT_HEADING)
+                .bold()
                 .with_measure(&measure)
                 .leading(30.0)
-                .max_lines(4)
-                .draw(Painter::recording(), Rect::new(1360.0, COL_Y + HEAD_TO_ROWS + BADGE_DESC_DY, 500.0, 0.0));
-        })[0]
-            .at
-            .y;
-        assert!((desc - want).abs() < 0.5, "the first description is at {desc}, want {want}: a row stands {HEAD_TO_ROWS} under the heading");
+                .max_lines(2)
+                .measure_h(INFO_W)
+                .max(30.0);
+        assert!((run("Origins").at.y - rated.at.y - (body + PAIR_AIR)).abs() < tol);
+    }
+
+    /// The page's scroll clamp reads [`Rows::footer_bottom`]: it covers the card's plate and the
+    /// pairs' last line, whichever runs lower, so neither column can be cut off.
+    #[test]
+    fn the_footer_bottom_is_the_lower_of_the_card_and_the_pairs() {
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let mut rows = Rows::new();
+        let d = Detail { summary: "word ".repeat(6), ..Default::default() };
+        let card_bottom = CARD_Y + rows.card_rect(&d, 0.0, &measure).h;
+        assert!(rows.footer_bottom(&d, 0.0, &measure) >= card_bottom - 0.5);
+
+        rows.info = (0..8).map(|i| ("Label", format!("Value {i}"))).collect();
+        assert!(rows.footer_bottom(&d, 0.0, &measure) > card_bottom,
+            "eight pairs run lower than a six-word card, and the clamp must follow them");
     }
 }
+

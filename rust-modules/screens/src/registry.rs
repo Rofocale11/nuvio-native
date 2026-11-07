@@ -141,7 +141,7 @@ pub use crate::family::NoInit;
 /// admits only `crate::registry`): the Detail page's tests drive the real About panel and compare
 /// the audio summary against the tracks panel's full list.
 #[cfg(test)]
-pub(crate) use crate::{about_panel::AboutPanelScreen, tracks_panel::audio_rows as tracks_panel_audio_rows};
+pub(crate) use crate::about_panel::AboutPanelScreen;
 
 /// **What the item context menu asks of the loop**, once its own `step` has resolved the pressed
 /// row to an [`crate::item_menu::Action`].

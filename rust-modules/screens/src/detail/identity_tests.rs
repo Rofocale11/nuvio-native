@@ -83,7 +83,6 @@ fn body(entry: EntryId, rk: &str) -> DetailScreen {
             ep_want: Default::default(),
             strip_seat: Default::default(),
         about_card_lift: plx_ui::text_lift::TextLift::new(),
-        about_lang_lift: plx_ui::text_lift::TextLift::new(),
         related: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::HOME), collection: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::HOME),
         extras: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::EPISODE),
         cast: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::CAST), tabs: TabStrip::new(), season_pop: CtlPop::new(),

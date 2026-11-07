@@ -302,9 +302,8 @@ pub struct DetailScreen {
     /// plate also shows for the still's pop — see `episodes::draw_cell`), keyed by episode so the
     /// state does not grow with the season.
     episode_cells: episodes::Cells,
-    /// The About card's and the Languages column's focus lifts (`Located::About(0)` / `(1)`).
+    /// The About card's focus lift (`Located::About(0)`).
     about_card_lift: TextLift,
-    about_lang_lift: TextLift,
     related: Shelf,
     collection: Shelf,
     extras: Shelf,
@@ -378,7 +377,6 @@ pub struct DetailScreen {
 #[derive(Clone, Default, PartialEq)]
 pub struct SpotFacts {
     detail: bool,
-    tracks: bool,
     hero: hero::HeroSet,
     season: Option<i64>,
     /// The Related row's head length and the tail position of each card after it: a card of the
@@ -399,7 +397,6 @@ impl SpotFacts {
     fn refresh(&mut self, screen: &DetailScreen, meta: plx_data::metadata::MetadataView<'_>) {
         let d = screen.detail(meta);
         self.detail = d.is_some();
-        self.tracks = screen.tracks_available(meta);
         self.hero = screen.hero_set(meta);
         self.season = d.and_then(|d| d.seasons.get(d.cur_season)).map(|s| s.index);
         self.related_head = d.map_or(0, |d| d.related_tail.head);
@@ -593,7 +590,6 @@ impl DetailScreen {
             ep_want: EpWant::default(),
             strip_seat: StripSeat::default(),
             about_card_lift: TextLift::new(),
-            about_lang_lift: TextLift::new(),
             related: Shelf::new(entry, cards::Which::Related.style()),
             collection: Shelf::new(entry, cards::Which::Collection.style()),
             extras: Shelf::new(entry, cards::Which::Extras.style()),
@@ -778,7 +774,7 @@ impl DetailScreen {
     /// Whether `local` is a card on one of the four card shelves (Related, Collection, Extras, Cast).
     fn card_shelf_of(local: u32) -> bool {
         matches!(
-            Self::locate_local(local, false),
+            Self::locate_local(local),
             Some(Located::Related(_) | Located::Collection(_) | Located::Extras(_) | Located::Cast(_))
         )
     }
@@ -788,7 +784,7 @@ impl DetailScreen {
     /// is now empty or gone, which fall to the page's own fallback.
     fn shelf_recovery(&self, elem: u32, meta: plx_data::metadata::MetadataView<'_>) -> Option<u32> {
         let d = self.detail(meta)?;
-        let local = match Self::locate_local(*self.gone.get(&elem)?, false)? {
+        let local = match Self::locate_local(*self.gone.get(&elem)?)? {
             Located::Related(i) => related::elem(ui_cards::clamp_slot(i, d.related.len().min(512))?),
             Located::Collection(i) => collection::elem(ui_cards::clamp_slot(i, collection::len(d))?),
             Located::Extras(i) => extras::elem(ui_cards::clamp_slot(i, extras::len(d))?),
@@ -817,7 +813,7 @@ impl DetailScreen {
     pub fn spot(&self, focus: Option<FocusKey<u32>>, facts: SpotFacts) -> Spot {
         let (section, col, ep_text) = focus
             .filter(|k| k.entry == self.entry)
-            .and_then(|k| self.locate_with(k.elem, facts.detail, facts.tracks))
+            .and_then(|k| self.locate_with(k.elem, facts.detail))
             .map(|l| {
                 let col = match l {
                     Located::Hero(control) => hero::index_of(facts.hero, control).unwrap_or(0) as i32,
@@ -1256,10 +1252,10 @@ impl DetailScreen {
     }
 
     fn locate(&self, elem: u32, meta: plx_data::metadata::MetadataView<'_>) -> Option<Located> {
-        self.locate_with(elem, self.detail(meta).is_some(), self.tracks_available(meta))
+        self.locate_with(elem, self.detail(meta).is_some())
     }
 
-    fn locate_with(&self, elem: u32, detail: bool, tracks: bool) -> Option<Located> {
+    fn locate_with(&self, elem: u32, detail: bool) -> Option<Located> {
         let local = if elem >= FIRST_ITEM_ELEM {
             // The projections describe only our currently published item.
             if !detail {
@@ -1271,12 +1267,10 @@ impl DetailScreen {
         } else {
             return None;
         };
-        Self::locate_local(local, tracks)
+        Self::locate_local(local)
     }
 
-    /// `tracks` is [`Self::tracks_available`] — the page's own answer, threaded in because this is
-    /// an associated fn and because the About footer's element range is exactly what it decides.
-    fn locate_local(elem: u32, tracks: bool) -> Option<Located> {
+    fn locate_local(elem: u32) -> Option<Located> {
         if let Some(c) = hero::HeroCtl::of_elem(elem) {
             return Some(Located::Hero(c));
         }
@@ -1301,7 +1295,7 @@ impl DetailScreen {
         if let Some(i) = cast::locate(elem) {
             return Some(Located::Cast(i));
         }
-        about::locate(elem, tracks).map(Located::About)
+        about::locate(elem).map(Located::About)
     }
 
     fn focused_index(&self, focus: Option<FocusKey<u32>>, group: GroupId, meta: plx_data::metadata::MetadataView<'_>) -> Option<usize> {
@@ -1426,13 +1420,7 @@ impl DetailScreen {
                 }
             }
             4 if d.credits_len() > 0 => cast::elem(clamp(intent.spot.col, d.credits_len())),
-            5 => Some(
-                if intent.spot.col > 0 && self.tracks_available(meta) {
-                    about::LANGUAGES_ELEM
-                } else {
-                    about::CARD_ELEM
-                },
-            ),
+            5 => Some(about::CARD_ELEM),
             _ => Some(hero::ELEM_PLAY),
         }?;
         self.engine_key(local)
@@ -1585,7 +1573,6 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
                     elem: ElemKind::Card,
                 }),
                 5 => {
-                    let tracks = self.tracks_available(meta);
                     out.push(GroupSpec {
                         id: about::ABOUT_GROUP,
                         kind: GroupKind::Column,
@@ -1603,7 +1590,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
                             plx_ui::consts::SCR_W - 2.0 * plx_ui::consts::MARGIN_X,
                             plx_ui::consts::SCR_H - plx_ui::detail_layout::TOP_MARGIN,
                         ),
-                        len: 1 + usize::from(tracks),
+                        len: 1,
                         elem: ElemKind::Control,
                     });
                 }
@@ -1667,11 +1654,8 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
             Located::Cast(_) => return self.detail(meta).map_or(Step::Edge, |d| {
                 self.cast.neighbour::<H, _>(&self.cards(cards::Which::Cast, d), key, dir)
             }),
-            Located::About(i) => match (i, dir, self.tracks_available(meta)) {
-                (0, Dir::Down, true) => Some(about::LANGUAGES_ELEM),
-                (1, Dir::Up, _) => Some(about::CARD_ELEM),
-                _ => None,
-            },
+            // A lone stop: both directions leave by the group's own edge.
+            Located::About(_) => None,
         };
         moved
             .and_then(|local| self.engine_key(local))
@@ -1785,11 +1769,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
             Located::About(i) => {
                 let d = d?;
                 let top = self.section_top_at(5, d, measure, at) - vertical;
-                let base = if i == 0 {
-                    self.about_rows.card_rect(d, top, measure)
-                } else {
-                    self.about_rows.languages_rect(top, measure)
-                };
+                let base = self.about_rows.card_rect(d, top, measure);
                 (base, base, Some(i as u32))
             }
         };
@@ -1955,7 +1935,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Focusable<H> for DetailScre
         };
         FocusKey {
             entry: self.entry,
-            elem: Self::locate_local(elem, self.tracks_available(meta))
+            elem: Self::locate_local(elem)
                 .and_then(|located| self.key_of(located))
                 .unwrap_or(hero::ELEM_PLAY),
         }
@@ -1980,7 +1960,6 @@ impl DetailScreen {
             Located::CollectionHeading => d.is_some_and(|d| collection::len(d) > 0),
             Located::Cast(i) => d.is_some_and(|d| i < d.credits_len()),
             Located::About(0) => d.is_some(),
-            Located::About(1) => d.is_some() && self.tracks_available(meta),
             Located::About(_) => false,
         }
     }
@@ -2629,9 +2608,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Screen<H> for DetailScreen 
                         below_hero,
                         d,
                         top,
-                        self.tracks_available(meta),
                         &self.about_card_lift,
-                        &self.about_lang_lift,
                         f.measure,
                     ),
                     _ => {}
@@ -3202,9 +3179,6 @@ impl DetailScreen {
                 elems.push((collection::HEADING_ELEM, Activate::Direct));
             }
             elems.push((about::CARD_ELEM, Activate::Press));
-            if self.tracks_available(meta) {
-                elems.push((about::LANGUAGES_ELEM, Activate::Press));
-            }
         }
         for (elem, activate) in elems {
             let Some(elem) = self.engine_key(elem) else { continue };
@@ -3409,8 +3383,7 @@ impl Located {
             Self::Collection(index) => collection::elem(index),
             Self::CollectionHeading => Some(collection::HEADING_ELEM),
             Self::Cast(index) => cast::elem(index),
-            Self::About(0) => Some(about::CARD_ELEM),
-            Self::About(_) => Some(about::LANGUAGES_ELEM),
+            Self::About(_) => Some(about::CARD_ELEM),
         }
     }
     fn section(self) -> i32 {
@@ -3446,10 +3419,7 @@ impl Located {
             Self::Season(i) | Self::Episode(i, _) | Self::Related(i) | Self::Extras(i) | Self::Cast(i)
             | Self::Collection(i) => i,
             Self::CollectionHeading => 0,
-            Self::About(0) => 0,
-            // Legacy Spot/focusprobe vocabulary keeps the four visual About columns numbered
-            // Card=0, Information=1, Languages=2, Accessibility=3 even though only two are stops.
-            Self::About(_) => 2,
+            Self::About(_) => 0,
         }
     }
 }
@@ -3560,7 +3530,19 @@ impl DetailScreen {
                 && at > 0 && sections[at - 1] == section::SectionId::Season.raw() => sections[at - 1],
             _ => section,
         };
-        (self.section_top_settled(anchor, d, measure) - plx_ui::detail_layout::TOP_MARGIN).max(0.0)
+        let target =
+            (self.section_top_settled(anchor, d, measure) - plx_ui::detail_layout::TOP_MARGIN).max(0.0);
+        if section != section::SectionId::About.raw() {
+            return target;
+        }
+        // The About footer is the document's LAST ink, and it is shorter than the viewport: pinning
+        // its heading at `TOP_MARGIN` would scroll the page past its own end and leave the rest of
+        // the screen empty. Stop where the footer's bottom is a comfortable margin off the screen
+        // edge instead, so the page ends on content. A footer taller than that still gets the
+        // ordinary reveal.
+        let top = self.section_top_settled(section, d, measure);
+        let bottom = self.about_rows.footer_bottom(d, top, measure) + theme::space::XL;
+        target.min((bottom - plx_ui::consts::SCR_H).max(0.0))
     }
 
     fn return_waiting(&self, meta: plx_data::metadata::MetadataView<'_>) -> bool {
@@ -3804,7 +3786,6 @@ impl DetailScreen {
             dt,
         );
         self.about_card_lift.step(focused == Some(Located::About(0)), dt);
-        self.about_lang_lift.step(focused == Some(Located::About(1)), dt);
 
         if let Some(d) = d {
             self.seat_strips(d, focused, meta.season_loading(), t.ms);
@@ -4430,9 +4411,6 @@ impl DetailScreen {
                 }
             }
             Some(Located::About(0)) => self.content(fx, ContentReq::Panel(ContentPanel::About)),
-            Some(Located::About(1)) => {
-                self.content(fx, ContentReq::Panel(ContentPanel::Tracks { page: 1 }))
-            }
             _ => {}
         }
         fx.invalidate(Provenance::Input);

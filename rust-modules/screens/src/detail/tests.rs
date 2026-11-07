@@ -148,7 +148,6 @@ pub(super) fn bare_held(sid: ServerId, rk: &str) -> DetailScreen {
             ep_want: Default::default(),
             strip_seat: Default::default(),
         about_card_lift: plx_ui::text_lift::TextLift::new(),
-        about_lang_lift: plx_ui::text_lift::TextLift::new(),
         related: plx_ui::cards::Shelf::new(EntryId(7), &plx_ui::cards::RowStyle::HOME),
         collection: plx_ui::cards::Shelf::new(EntryId(7), &plx_ui::cards::RowStyle::HOME),
         extras: plx_ui::cards::Shelf::new(EntryId(7), &plx_ui::cards::RowStyle::EPISODE),
@@ -636,19 +635,6 @@ fn a_spot_round_trips_through_the_page_it_describes() {
         assert_eq!(restored.elem, elem);
         screen.restore_intent = None;
     }
-    plx_data::metadata::set_current_for_test(test_store().state_mut(), Some(Detail {
-        sid,
-        rk: "movie".into(),
-        kind: "movie".into(),
-        part: "/library/parts/1".into(),
-        ..Default::default()
-    }));
-    let movie = bare(&_guard, sid, "movie");
-    let languages = movie.spot(Some(FocusKey {
-        entry: EntryId(7),
-        elem: about::LANGUAGES_ELEM,
-    }), SpotFacts::of(&movie, test_store().view()));
-    assert_eq!((languages.section, languages.col), (5, 2));
     clear();
 }
 
@@ -726,6 +712,35 @@ fn a_movie_spot_does_not_wait_for_a_season_that_will_never_land() {
         .restore_intent
         .as_ref()
         .is_some_and(|r| !r.season_requested));
+    clear();
+}
+
+/// The About footer is the page's last ink and it is shorter than the screen, so its reveal must
+/// stop where the footer ends — not pin its heading at `TOP_MARGIN` and leave the rest of the
+/// viewport empty. A footer taller than the viewport would still get the ordinary reveal.
+#[test]
+fn the_about_reveal_stops_at_the_footer_bottom() {
+    let sid = ServerId::UNSET;
+    let _guard = install(Detail {
+        sid,
+        rk: "movie".into(),
+        kind: "movie".into(),
+        rating: "PG".into(),
+        summary: "word ".repeat(20),
+        ..Default::default()
+    });
+    let screen = bare(&_guard, sid, "movie");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let d = screen.detail(test_store().view()).expect("installed");
+    let about = section::SectionId::About.raw();
+    let top = screen.section_top_settled(about, d, &measure);
+    let footer = screen.about_rows.footer_bottom(d, top, &measure) + theme::space::XL;
+    let pinned = (top - plx_ui::detail_layout::TOP_MARGIN).max(0.0);
+    let clamped = (footer - plx_ui::consts::SCR_H).max(0.0);
+    assert!(clamped < pinned, "precondition: this footer is shorter than the screen");
+    let reveal = screen.reveal_target(about, d, &measure);
+    assert!((reveal - clamped).abs() < 0.5,
+        "the reveal ({reveal}) must end the page on its footer ({clamped}), not at the heading");
     clear();
 }
 
@@ -841,15 +856,15 @@ fn the_episode_text_highlight_fits_the_block_the_flow_already_reserves() {
     }
 }
 
-/// **The Languages column is the PAGE's answer about the PAGE's item, and no surface is involved.**
+/// **Track availability is the PAGE's answer about the PAGE's item, and no surface is involved.**
 ///
 /// Red-first, and SIMULATED rather than historical: the old spelling was
 /// `ui::tracks_panel::is_available()`, a function of a module this commit deletes. Narrow
 /// `DetailScreen::tracks_available` to `test_store().view().current().is_some_and(describes)` — which
 /// is exactly what that function did — and this fails on the first leg: a Detail page mounted on an
 /// item whose own fetch has not landed answers from whatever landed LAST, which after a step
-/// through a Person page is another film. The About footer would then draw a MORE affordance and
-/// publish a fourth pressable element for a column describing a file this page has never seen.
+/// through a Person page is another film. The dev track-sheet trigger would then open a panel
+/// describing a file this page has never seen.
 ///
 /// The panel is never presented in either leg, which is the other half of the claim: the
 /// availability question is settled entirely on the page's own state.
@@ -871,17 +886,12 @@ fn tracks_availability_is_detail_state_not_surface_state() {
         !screen.tracks_available(test_store().view()),
         "the page has no item of its own yet, so there is no file it can describe"
     );
-    assert!(
-        screen.locate(about::LANGUAGES_ELEM, test_store().view()).is_none(),
-        "…and the About footer publishes no Languages element to press"
-    );
 
     // The page's OWN item lands, and it is a show: its streams are episode 1's, so still no file.
     plx_data::metadata::set_current_for_test(test_store().state_mut(), Some(detail(ServerId::UNSET, "here")));
     assert!(!screen.tracks_available(test_store().view()), "a show has no file of its own");
-    assert!(screen.locate(about::LANGUAGES_ELEM, test_store().view()).is_none());
 
-    // A leaf with a part, on this page's own key: now the column is pressable.
+    // A leaf with a part, on this page's own key: now the page can describe its file.
     plx_data::metadata::set_current_for_test(test_store().state_mut(), Some(Detail {
         sid: ServerId::UNSET,
         rk: "here".into(),
@@ -889,10 +899,6 @@ fn tracks_availability_is_detail_state_not_surface_state() {
         ..Default::default()
     }));
     assert!(screen.tracks_available(test_store().view()));
-    assert!(
-        matches!(screen.locate(about::LANGUAGES_ELEM, test_store().view()), Some(Located::About(1))),
-        "the page's own leaf has a file, so the column is the About footer's second element"
-    );
     clear();
     test_store().run(MetadataCmd::Clear);
 }
