@@ -370,6 +370,19 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   device-bound loopback listener is unreachable from an unbound socket under at least one
   sandbox's policy routing, and the engine would then see refusals only. **It proves the engine,
   shim and plex layers on x86-64 — never quote it as an ARM or TV result.**
+- `tools/engine-reject-piece-check.sh` — reproduces in about two seconds the crash that killed the
+  app mid-playback: `libtorrent::peer_connection::reject_piece` cached `m_requests.end()`, and
+  `i = erase(i)` plus the loop's own `++i` stepped past the shrunk end, so the next `erase`
+  computed a negative length. The script extracts that function VERBATIM from
+  `build/sbengine/deps/nuvio_libtorrent-src/src/peer_connection.cpp` and compiles it into a
+  stand-in class declaring only the members it uses, so it grades the loop that ships and cannot
+  drift — fixing the pinned tree (a patch in `vendor/engine-sources/nuvio-engine/cmake/patches/`)
+  turns it green without touching the harness. It needs that deps tree and says so, exiting 0, when
+  it is missing, so it is deliberately not a `make check` step. It does not fault on a
+  desktop: GCC 16's libstdc++ copies only a positive distance, while the NDK's 12.2.0
+  (`bits/stl_algobase.h:429-431`, `if (_Num) __builtin_memmove(..., sizeof(_Tp) * _Num)`) turns a
+  negative one into the ~4 GB `memmove` that died. So the check grades the queue invariant — a
+  dropped piece removes exactly the requests for it and no others — rather than the symptom.
 - `make check-nodef` — the shipping-feature-set type check, `cargo check --lib
   --no-default-features`, which is the configuration `RELEASE=1` ships and which `make check` does
   not cover. `CARGO_INCREMENTAL=0`, as every one-shot gate. It builds in the checkout's own

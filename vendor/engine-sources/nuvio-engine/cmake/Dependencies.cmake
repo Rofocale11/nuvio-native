@@ -75,6 +75,7 @@ function(nuvio_engine_add_libtorrent)
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-urgent-hedge.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-drop-piece.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-forget-all.patch"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-reject-piece-end.patch"
     )
     set(
         nuvio_libtorrent_patch_files
@@ -92,6 +93,7 @@ function(nuvio_engine_add_libtorrent)
         "src/torrent.cpp"
         "src/torrent_handle.cpp"
         "src/torrent_handle.cpp"
+        "src/peer_connection.cpp"
     )
     set(
         nuvio_libtorrent_patch_sentinels
@@ -109,6 +111,7 @@ function(nuvio_engine_add_libtorrent)
         "nuvio_hedge_blocks"
         "nuvio_drop_piece"
         "nuvio_forget_all"
+        "nuvio: do not cache `end` here"
     )
     list(LENGTH nuvio_libtorrent_patches nuvio_libtorrent_patch_count)
     math(EXPR nuvio_libtorrent_last_patch "${nuvio_libtorrent_patch_count} - 1")

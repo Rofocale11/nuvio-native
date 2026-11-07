@@ -1,0 +1,24 @@
+diff --git a/src/peer_connection.cpp b/src/peer_connection.cpp
+index 628fc8b63..b193f4a09 100644
+--- a/src/peer_connection.cpp
++++ b/src/peer_connection.cpp
+@@ -2644,10 +2644,17 @@ namespace libtorrent {
+ 	void peer_connection::reject_piece(piece_index_t const index)
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
+-		for (auto i = m_requests.begin(), end(m_requests.end()); i != end; ++i)
++		// nuvio: do not cache `end` here. `erase` shrinks the vector and returns the next
++		// element, and the loop then steps one further; a cached end goes stale, the iterator can
++		// pass it, and `end - i` underflows. The NDK's libstdc++ turns that into a ~4 GB memmove
++		// (bits/stl_algobase.h: `if (_Num) __builtin_memmove(..., sizeof(_Tp) * _Num)` with a
++		// negative _Num), which is the SIGSEGV measured in the field ~25 min into a 4K remux:
++		// `nuvio_drop_piece` rejects a piece on every peer, and the streaming window drops pieces
++		// continuously. Re-reading `end()` each turn is the whole fix.
++		for (auto i = m_requests.begin(); i != m_requests.end();)
+ 		{
+ 			peer_request const& r = *i;
+-			if (r.piece != index) continue;
++			if (r.piece != index) { ++i; continue; }
+ 			write_reject_request(r);
+ 			i = m_requests.erase(i);
+ 
