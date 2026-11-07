@@ -570,7 +570,7 @@ fn pointer_hit_column_matches_the_drawn_card_at_every_scroll() {
 }
 
 #[test]
-fn drawn_hero_geometry_follows_slide_and_the_captured_press_scale() {
+fn drawn_hero_geometry_follows_the_flip_drift_and_the_captured_press_scale() {
     let _guard = plx_base::testlock::serial();
     let mut state = plx_data::pms::PmsState::default();
     let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
@@ -585,25 +585,30 @@ fn drawn_hero_geometry_follows_slide_and_the_captured_press_scale() {
         s.hero_dir = dir;
         for slide in [0.3, 0.8, 1.0] {
             s.hero_slide.jump(slide);
+            // The incoming copy's drift: `HERO_FLIP_DRIFT` px, fading out as the dissolve finishes.
+            let p = (slide / HERO_FLIP_SPAN).min(1.0);
+            let drift = dir * HERO_FLIP_DRIFT * (1.0 - p);
             for press in [0.93, 1.0, 1.025] {
                 let mut context = cx(snapshot.view(), Some(key));
                 context.press.scale = press;
                 let base = s.hero_button_rect(snapshot.view(), 0, context.measure).unwrap();
                 let drawn = Focusable::<TestHost>::place(&s, &key.elem, &context, At::Drawn).unwrap();
                 let target = Focusable::<TestHost>::place(&s, &key.elem, &context, At::SpringTarget).unwrap();
-                assert!((drawn.rect.cx() - base.cx() - dir * (1.0 - slide) * SCR_W).abs() < 0.01);
+                assert!((drawn.rect.cx() - base.cx() - drift).abs() < 0.01);
                 assert!((drawn.rect.w - base.w * plx_ui::widgets::CTRL_FOCUS_SCALE * press).abs() < 0.01);
                 assert!((target.rect.cx() - base.cx()).abs() < 0.01);
-                if dir == 1.0 && slide == 0.8 {
+                if dir == 1.0 && slide == 0.3 {
                     let mut frame = DrawFrame::new(&context, Painter::root());
                     s.record_stops(&mut frame, snapshot.view());
                     let mut map = HitMap::new();
                     map.fill(frame.into_stops());
                     map.swap();
+                    // The hit rect is the DRAWN one: a few px of drift stay inside the pill, and
+                    // the point just past its drawn edge misses.
                     assert_eq!(map.resolve(Some(s.entry), PointerKind::Click,
                         drawn.rect.cx(), drawn.rect.cy(), Some(key)).hit, Some(key));
                     assert_eq!(map.resolve(Some(s.entry), PointerKind::Click,
-                        base.cx(), base.cy(), Some(key)).hit, None);
+                        drawn.rect.x - 2.0, drawn.rect.cy(), Some(key)).hit, None);
                 }
             }
         }
@@ -939,7 +944,7 @@ fn env_at(sp: f32) -> Env {
 /// layered ramp that stays the only ramp drawer: on a host (no ink program: `gfx::wash_ink_ok`) the
 /// layered ground hands the ramp back and the two `rect`s `base_scrim_ramp` describes follow it, for
 /// as long as the hero is visible (`hero_a > 0.01`); the flat ground takes none, and has none to
-/// take. A hero SLIDE is the layered gradient like any other frame, flat at the cull only when the
+/// take. A hero FLIP is the layered gradient like any other frame, flat at the cull only when the
 /// wash it is carrying is already one colour.
 #[test]
 fn the_ground_goes_flat_at_the_cull_only_once_the_wash_is_one_colour() {
@@ -959,13 +964,13 @@ fn the_ground_goes_flat_at_the_cull_only_once_the_wash_is_one_colour() {
     // ramp in the wash and the ramp rects would not be a tell.)
     assert!(!plx_gfx::gfx::wash_ink_ok(), "a host build has no wash ink program");
     // `(is the ground one colour, how many ramp rects follow it)` for one frame at `sp`.
-    let frame = |b: &Backdrop, sp: f32, slide: Option<(f32, f32)>| {
+    let frame = |b: &Backdrop, sp: f32, flip: Option<f32>| {
         let env = env_at(sp);
         let [y0, knee, ..] = base_scrim_ramp(env.hero_a);
         let ramp = [Rect::new(0.0, y0, SCR_W, knee - y0), Rect::new(0.0, knee, SCR_W, SCR_H - knee)];
         let mut drawn = Vec::new();
         let grounds = draw_census::capture_grounds(|| {
-            drawn = draw_census::capture(|| b.draw(Painter::recording(), &env, slide));
+            drawn = draw_census::capture(|| b.draw(Painter::recording(), &env, flip));
         });
         let [ground] = grounds[..] else { panic!("sp {sp}: {} grounds, want one", grounds.len()) };
         let flat = ground[1..].iter().all(|c| *c == ground[0]);
@@ -977,15 +982,15 @@ fn the_ground_goes_flat_at_the_cull_only_once_the_wash_is_one_colour() {
     for (sp, ramp_rects) in [(0.0, 2), (0.4, 2), (HERO_ART_CULL - 0.001, 0)] {
         assert_eq!(frame(&b, sp, None), (false, ramp_rects), "sp {sp}: the layered ground");
     }
-    // A hero slide before the cull is the layered gradient too, with no ramp in the ground, so the
+    // A hero flip before the cull is the layered gradient too, with no ramp in the ground, so the
     // ramp is drawn as its two rects.
-    assert_eq!(frame(&b, 0.0, Some((-SCR_W, 0.0))), (false, 2), "a slide stays layered");
-    assert_eq!(frame(&b, HERO_ART_CULL - 0.001, Some((-SCR_W, 0.0))), (false, 0), "…to its last frame");
+    assert_eq!(frame(&b, 0.0, Some(0.5)), (false, 2), "a flip stays layered");
+    assert_eq!(frame(&b, HERO_ART_CULL - 0.001, Some(0.5)), (false, 0), "…to its last frame");
     // Culled, but the wash is still the gradient the dive left it on: the ground stays layered, a
     // slide or held layer notwithstanding. This is the frame the old code flattened.
     for sp in [HERO_ART_CULL, 1.0] {
         assert_eq!(frame(&b, sp, None), (false, 0), "sp {sp}: a settling wash stays layered");
-        assert_eq!(frame(&b, sp, Some((-SCR_W, 0.0))), (false, 0), "sp {sp}: …a culled slide too");
+        assert_eq!(frame(&b, sp, Some(0.5)), (false, 0), "sp {sp}: …a culled flip too");
     }
     // Once the corners arrive on the one colour Home keys the grid to, the cull draws the flat
     // ground (and no ramp to draw).
@@ -993,7 +998,7 @@ fn the_ground_goes_flat_at_the_cull_only_once_the_wash_is_one_colour() {
     assert!(b.wash.is_uniform(AmbientWash::FLAT_EPS), "the premise: one colour");
     for sp in [HERO_ART_CULL, 1.0] {
         assert_eq!(frame(&b, sp, None), (true, 0), "sp {sp}: the flat ground, and no ramp");
-        assert_eq!(frame(&b, sp, Some((-SCR_W, 0.0))), (true, 0), "sp {sp}: a culled slide is flat too");
+        assert_eq!(frame(&b, sp, Some(0.5)), (true, 0), "sp {sp}: a culled flip is flat too");
     }
 }
 
@@ -3218,19 +3223,33 @@ fn a_manual_hero_flip_lands_on_a_preloaded_backdrop_with_no_ground_frame() {
     HERO_ART.with(|a| a.borrow_mut().probed.clear());
     let _ = step(&mut s, view, Some(play), &tick(126 * 16));
 
-    assert!(s.outgoing.is_some(), "the slide is running");
+    assert!(s.outgoing.is_some(), "the flip is running");
     assert_eq!(s.carousel_index(view), 1);
-    let incoming_a = reveal(s.backdrop.tex.0, &s.backdrop.art);
-    let outgoing_a = reveal(s.backdrop.outgoing_tex.0, &s.backdrop.outgoing_art);
+    // The flip DISSOLVES: the outgoing picture stays fully opaque and the incoming one fades in
+    // over it, so the first frame is still (almost) all outgoing and the ground never shows.
+    let flip_alpha = |s: &HomeScreen| {
+        reveal(s.backdrop.tex.0, &s.backdrop.art) * s.flip_art().unwrap_or(1.0)
+    };
+    let outgoing_alpha = |s: &HomeScreen| reveal(s.backdrop.outgoing_tex.0, &s.backdrop.outgoing_art);
     assert!(
-        s.backdrop.tex.0 != 0 && incoming_a > 0.999,
-        "the incoming backdrop must slide in fully revealed (tex {}, alpha {incoming_a}), not \
-         fade in over the ground after the slide",
-        s.backdrop.tex.0
+        s.backdrop.tex.0 != 0 && flip_alpha(&s) < 0.02,
+        "the incoming backdrop starts fully dissolved (alpha {}), not swapped in",
+        flip_alpha(&s)
     );
     assert!(
-        wash_hidden(s.snap.pos, incoming_a, Some(outgoing_a)),
-        "no frame of the flip may show the flat ground (incoming {incoming_a}, outgoing {outgoing_a})"
+        outgoing_alpha(&s) > 0.999,
+        "…over the outgoing picture at full strength (alpha {}), so no frame shows the ground",
+        outgoing_alpha(&s)
+    );
+    // Half a second on, the pictures are exchanged while the flip is still held by the spring.
+    for frame in 127..=158u32 {
+        let _ = step(&mut s, view, Some(play), &tick(frame * 16));
+    }
+    assert!(s.outgoing.is_some(), "the flip is still running");
+    assert!(
+        flip_alpha(&s) > 0.99,
+        "…and the incoming backdrop is up (alpha {})",
+        flip_alpha(&s)
     );
 
     // …and the new neighbours are asked for on the flip itself, not after the slide settles.

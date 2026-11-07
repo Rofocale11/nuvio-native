@@ -116,6 +116,14 @@ const HERO_AUTO_S: f32 = 8.0;
 const HINT_REST_PX: f32 = 0.5;
 const K_SLIDE: f32 = 130.0;
 const HERO_SLIDE_REST_PX: f32 = 0.5;
+/// How far each copy of the billboard's text drifts (px) as the hero dissolves. Small on purpose:
+/// the flip is a dissolve, and a copy that carried its picture across the panel was the hard-edged
+/// wipe this replaced (owner, 2026-11-07). The drift only keeps the press's DIRECTION readable.
+const HERO_FLIP_DRIFT: f32 = 32.0;
+/// Where the sprung flip position (`hero_slide.pos`) is read as a FINISHED dissolve. The spring is
+/// asymptotic and needs ~1 s to reach `HERO_SLIDE_REST_PX`, but the pictures are 99% exchanged long
+/// before that; the tail is motion nobody can see, so the dissolve does not wait for it.
+const HERO_FLIP_SPAN: f32 = 0.92;
 /// How near its target the snap dive has to be, in snap units (0 = hero, 1 = grid), before this
 /// page calls the dive over — **together with [`SNAP_REST_VEL`], never alone.** `K_SNAP` is
 /// critically damped, so the dive spends its last dozen frames inside any position threshold worth
@@ -451,25 +459,26 @@ impl Backdrop {
         });
     }
 
-    fn draw(&self, p: Painter, env: &Env, slide: Option<(f32, f32)>) {
+    fn draw(&self, p: Painter, env: &Env, flip: Option<f32>) {
         if !self.pending_art.is_empty() && env.hero_a > 0.01 && env.sp < HERO_ART_CULL {
             plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::HomeBackdrop, &self.pending_art);
         }
-        let incoming_a = reveal(self.tex.0, &self.art);
+        let flipping = flip.is_some();
+        let incoming_a = reveal(self.tex.0, &self.art) * flip.unwrap_or(1.0);
         let outgoing_a = reveal(self.outgoing_tex.0, &self.outgoing_art);
         // THE GROUND: the wash, the one art layer dissolving over it (the snap dive, or the art
         // fading in) and the atmospheric ramp over both, as ONE pass per pixel
-        // (`AmbientWash::draw_ground`). A hero FLIP slides two art layers, which one pass cannot
+        // (`AmbientWash::draw_ground`). A hero FLIP dissolves two art layers, which one pass cannot
         // carry, so there the art and the ramp stay layers of their own.
-        // Art held beneath a replaced hero (`held`) is the un-sliding outgoing layer: the new art
+        // Art held beneath a replaced hero (`held`) is the un-faded outgoing layer: the new art
         // dissolves in over it, so the two cannot ride the ground's single art layer.
-        let held = slide.is_none() && self.outgoing_tex.0 != 0;
+        let held = !flipping && self.outgoing_tex.0 != 0;
         let art_a = if held { incoming_a.max(outgoing_a) } else { incoming_a };
-        let wash = !wash_hidden(env.sp, art_a, slide.map(|_| outgoing_a))
+        let wash = !wash_hidden(env.sp, art_a, flipping.then_some(outgoing_a))
             && !self.wash.is_flat(theme::SURFACE_APP, AmbientWash::FLAT_EPS);
-        let art_in_ground = wash && slide.is_none() && !held && env.sp < HERO_ART_CULL;
-        let ramp = (env.hero_a > 0.01 && slide.is_none()).then(|| hero_ramp(env.hero_a));
-        // Once the hero is culled NO art is drawn at all, a slide or held layer notwithstanding, and
+        let art_in_ground = wash && !flipping && !held && env.sp < HERO_ART_CULL;
+        let ramp = (env.hero_a > 0.01 && !flipping).then(|| hero_ramp(env.hero_a));
+        // Once the hero is culled NO art is drawn at all, a flip or held layer notwithstanding, and
         // the shelves and grid stand on the wash alone. When that wash is ONE colour it is drawn as
         // a clear rather than shaded (`AmbientWash::draw_flat_ground`) — but only when it really is
         // one colour. The grid is keyed to the focused card's four corners, so the wash under the
@@ -477,7 +486,7 @@ impl Backdrop {
         // the whole page from gradient to one colour in a single frame — the Home hero-to-grid blink
         // — and also threw away the gradient the owner expects while moving between posters. A
         // gradient wash therefore keeps the layered `draw_ground` here, exactly as every earlier
-        // frame does (a hero slide, art held beneath a replacement, a texture still pending, the
+        // frame does (a hero flip, art held beneath a replacement, a texture still pending, the
         // dive itself). The flat ground carries no ramp, and there is none to carry: `hero_a` is 0
         // from `sp = 0.55` (`HomeScreen::env`), so `ramp` is `None` at the cull and the layered ramp
         // rects below are skipped for the same reason.
@@ -498,7 +507,7 @@ impl Backdrop {
         let folded = !wash
             && env.hero_a > 0.01
             && env.sp < 0.001
-            && slide.is_none()
+            && !flipping
             && !held
             && self.tex.0 != 0
             && incoming_a > 0.01
@@ -514,9 +523,9 @@ impl Backdrop {
             );
         }
         if !folded && !art_in_ground && env.sp < HERO_ART_CULL {
-            if let Some((out_x, in_x)) = slide {
-                backdrop_art(p, self.outgoing_tex, env.sp, out_x, outgoing_a);
-                backdrop_art(p, self.tex, env.sp, in_x, incoming_a);
+            if flipping {
+                backdrop_art(p, self.outgoing_tex, env.sp, 0.0, outgoing_a);
+                backdrop_art(p, self.tex, env.sp, 0.0, incoming_a);
             } else {
                 if held {
                     backdrop_art(p, self.outgoing_tex, env.sp, 0.0, outgoing_a);
@@ -1449,11 +1458,30 @@ impl HomeScreen {
         true
     }
 
-    fn slide_offsets(&self) -> Option<(f32, f32)> {
+    /// A flip in flight, as the DISSOLVE reads it: 0 at the press, 1 once the picture is exchanged
+    /// (`None` with no flip running).
+    fn flip_progress(&self) -> Option<f32> {
         self.outgoing.as_ref()?;
+        Some((self.hero_slide.pos / HERO_FLIP_SPAN).clamp(0.0, 1.0))
+    }
+
+    /// The background's half of the flip: the incoming picture's alpha over the outgoing one. The
+    /// outgoing picture stays fully opaque and the incoming fades in over it, so the blend is the
+    /// true lerp of the two artworks — fading BOTH out over the wash let a quarter of the ground's
+    /// colour through at the midpoint.
+    fn flip_art(&self) -> Option<f32> {
+        self.flip_progress().map(flip_ease)
+    }
+
+    /// The hero copy's half of the flip: `(outgoing, incoming)`, each `(dx, alpha)`. The copies
+    /// exchange on the dissolve's two halves rather than at once, so the outgoing title is nearly
+    /// away before the incoming one arrives in the same place (two full-strength titles crossed in
+    /// the middle read as a smear, not a dissolve).
+    fn flip_faces(&self) -> Option<((f32, f32), (f32, f32))> {
+        let p = self.flip_progress()?;
         Some((
-            -self.hero_dir * self.hero_slide.pos * SCR_W,
-            self.hero_dir * (1.0 - self.hero_slide.pos) * SCR_W,
+            (-self.hero_dir * HERO_FLIP_DRIFT * p, 1.0 - flip_ease(2.0 * p)),
+            (self.hero_dir * HERO_FLIP_DRIFT * (1.0 - p), flip_ease(2.0 * p - 0.9)),
         ))
     }
 
@@ -2155,8 +2183,8 @@ impl HomeScreen {
         let env = self.env(0.0);
         let focus = self.focused_loc(visible_focus);
         let p = f.painter.alpha(f.page_alpha);
-        let slide = self.slide_offsets();
-        // Re-bind the art to the heroes `slide` is about: an event delivered after this frame's
+        let flip = self.flip_art();
+        // Re-bind the art to the heroes `flip` is about: an event delivered after this frame's
         // `Tick` (a manual flip) has changed them since `update` ran (`Backdrop::bind`).
         self.backdrop.bind(
             self.selected_hero(view),
@@ -2164,7 +2192,7 @@ impl HomeScreen {
             self.carousel.as_ref(),
             self.snap.pos,
         );
-        plx_ui::profile::phase("hm.backdrop", || self.backdrop.draw(p, &env, slide));
+        plx_ui::profile::phase("hm.backdrop", || self.backdrop.draw(p, &env, flip));
         if env.hero_a > 0.01 {
             plx_ui::profile::phase("hm.hero", || {
                 self.draw_hero(
@@ -2207,13 +2235,13 @@ impl HomeScreen {
         let Some(hero) = self.selected_hero(view) else {
             return;
         };
-        if let Some((out_x, in_x)) = self.slide_offsets() {
+        if let Some(((out_x, out_a), (in_x, in_a))) = self.flip_faces() {
             if let Some(old) = self.outgoing_hero(view) {
-                let po = p.translate(out_x, 0.0);
+                let po = p.translate(out_x, 0.0).alpha(out_a);
                 hero_content(old.item, display_source(old.source), po, out_x, measure);
                 self.draw_hero_actions(old.item, env, po, out_x, false, page_alpha, focus, measure, press_scale);
             }
-            let pi = p.translate(in_x, 0.0);
+            let pi = p.translate(in_x, 0.0).alpha(in_a);
             hero_content(hero.item, display_source(hero.source), pi, in_x, measure);
             self.draw_hero_actions(hero.item, env, pi, in_x, true, page_alpha, focus, measure, press_scale);
         } else {
@@ -2841,7 +2869,7 @@ impl<H: HomeLike> Focusable<H> for HomeScreen {
                         index: Some(index as u32) });
                 }
                 if matches!(at, At::Drawn) {
-                    base.x += self.slide_offsets().map_or(0.0, |(_, incoming)| incoming);
+                    base.x += self.flip_faces().map_or(0.0, |(_, (dx, _))| dx);
                 }
                 let scale = match at {
                     At::Drawn => self.hero_pop.scale_with(index, cx.press.scale),
@@ -3786,6 +3814,12 @@ fn reveal(tex: u32, spring: &Spring) -> f32 {
     } else {
         spring.pos
     }
+}
+/// The flip's ramps, smoothstepped: eased at both ends and exactly 0/1 outside `0..1`, so a
+/// half-dissolved picture is at the middle of the blend and nothing holds a faint residue.
+fn flip_ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 /// The hero art's rect: always the FULL panel, so the dive only ever dissolves it — it never
 /// translates. A lifted rect ends on a straight bottom edge, and with the art still half opaque
