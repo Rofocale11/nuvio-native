@@ -274,7 +274,7 @@ pub(crate) unsafe fn run(app: &mut App) {
         // the wash's own dissolve is in it, and the function itself is gone now — every gradient
         // wash dithers on every frame.)
         fr.underlay_moving |= tree_report.underlay_moving;
-        if was_player && super::bridge::player(&app.pages).is_none() { restore_played_entry(app); }
+        if was_player && super::bridge::player(&app.pages).is_none() { restore_played_entry(app); plx_stremio::sbengine::suspend_background(); }
 
         content_requests(app, fr);
         crate::dev::scenarios::advance_content_boot(app, fr);

@@ -286,13 +286,16 @@ pub fn url_trim(buf: &[u8]) -> String {
 }
 
 /// Poll for a ready stream URL: `open` once, then `files` until metadata, then
-/// pick the file, then `stream` until `1`. Bounded (default 30 s); empty-polling
-/// sleeps 100 ms. Returns the engine-served loopback URL, or an error string.
+/// pick the file, then `stream` until `1`, then a short prebuffer wait until the
+/// engine has data to serve (so the probe does not outrun the torrent).
+/// Bounded (default 30 s); empty-polling sleeps 100 ms. Returns the engine-served
+/// loopback URL, or an error string.
 ///
 /// File pick: `stream.file_idx` wins; else the largest file (the usual season-pack
 /// heuristic — callers with `(season, episode)` should pre-pick via `torrent.rs`);
 /// else the first file.
 pub fn resolve_stream(magnet: &str, ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result<String, String> {
+    resume_foreground();
     if !open(magnet, ih) {
         return Err(error(ih));
     }
@@ -332,8 +335,24 @@ fn remember(ih: &str) {
 /// [`resolve_stream`] once the magnet is already open: wait for metadata (30 s bound by the
 /// caller), pick the file, then wait for the engine's stream URL. Split out so a re-resolve of an
 /// already-open torrent does not re-add it.
+///
+/// The URL is returned only after a short prebuffer wait (see [`wait_for_prebuffer`]): the
+/// engine prepares a stream URL as soon as priorities are set, before any piece has landed, and
+/// handing the player a URL with zero bytes in it is what made the first play of a torrent
+/// stall until the app's own retry re-resolved it once peers had arrived.
 fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result<String, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    // Evict the previous torrent BEFORE taking the baseline. `EngineStats::downloaded`
+    // is engine-wide, so while the old torrent is still live its bytes keep arriving
+    // during the prebuffer wait and fill the 8 MB delta with stale bytes: the gate
+    // passed instantly, the URL was served with zero fresh pieces of the new torrent,
+    // the probe failed (fps=14/3/2) and `playback retry` saved it. Removing first
+    // stops the old swarm competing and makes the delta count only this torrent.
+    // A same-hash retry must not tear its own stream down (remember() is a no-op
+    // to itself) and must not wait for 8 MB *more* — it already has what it needs.
+    let retry_same = active_hash().as_deref() == Some(ih);
+    remember(ih);
+    let baseline = stats().map(|s| s.downloaded).unwrap_or(0);
     let files = loop {
         match files(ih) {
             Some(Ok(f)) if !f.is_empty() => break f,
@@ -360,7 +379,9 @@ fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result
         match stream(ih, idx, &mut buf) {
             Some(1) => {
                 let url = url_trim(&buf);
-                remember(ih);
+                if !retry_same {
+                    wait_for_prebuffer(baseline, deadline);
+                }
                 return Ok(url);
             }
             Some(0) => {}
@@ -393,6 +414,49 @@ pub fn error(ih: &str) -> String {
     }
 }
 
+/// How much the engine must have downloaded before a stream URL is handed to
+/// the player: enough for the probe (which reads the header and first units)
+/// and the first seconds of playback without outrunning the swarm. Sized at
+/// ~8 MB — about 3-5 s of a 4K stream at 20-30 Mbit/s — and at least one full
+/// 32 MiB window worth of headroom is *not* required: the probe only needs the
+/// file header, and the player starts its own buffering from the first granted
+/// byte. The exact byte count is driven by [`EngineStats::downloaded`], which
+/// the engine already reports.
+///
+/// The number is read as a DELTA from a baseline taken after the previous torrent
+/// has been evicted (`remember`) — see [`wait_for_prebuffer`] — because
+/// `EngineStats.downloaded` is engine-wide, not per-torrent. A second title opened
+/// after the first already has dozens of MB counted, so gating on the absolute
+/// value returned immediately with zero fresh bytes for the new torrent (the
+/// `fb0cdf43dcf8` first-try failure). A same-hash retry skips the wait entirely.
+const PREBUFFER_BYTES: u64 = 8 * 1024 * 1024;
+/// How long the prebuffer wait may hold the URL before serving anyway. A slow
+/// swarm must still play — the wait is advisory, never a gate on playback: if
+/// no bytes have arrived inside this window the URL is returned anyway (the
+/// player's own buffering and the `playback retry` path take over, exactly as
+/// before this change). 10 s, inside the caller's 30 s resolve deadline.
+const PREBUFFER_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait until the engine has prebuffered [`PREBUFFER_BYTES`] MORE than it had
+/// at `baseline` (the `downloaded` counter at resolve start), or the bounded
+/// wait runs out. Runs on the shim's resolve thread, never the UI thread
+/// (assert_may_block at the call site), and polls `stats()` every 100 ms —
+/// the same cadence as the metadata/stream loops above. Falls through
+/// silently when `stats()` is unavailable.
+fn wait_for_prebuffer(baseline: u64, deadline: std::time::Instant) {
+    let cap = deadline.min(std::time::Instant::now() + PREBUFFER_MAX_WAIT);
+    loop {
+        let Some(s) = stats() else { return };
+        if s.downloaded.saturating_sub(baseline) >= PREBUFFER_BYTES {
+            return;
+        }
+        if std::time::Instant::now() >= cap {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Copy the current transfer numbers out, or `None` when the engine is not bound.
 pub fn stats() -> Option<EngineStats> {
     let a = api()?;
@@ -420,6 +484,32 @@ pub fn remove_all() {
 pub fn limits(down_bps: u64, up_bps: u64) {
     if let Some(a) = api() {
         unsafe { (a.limits)(down_bps, up_bps) };
+    }
+}
+
+/// Background ceiling while the player is not on screen: keep peers warm but
+/// stop the torrent saturating CPU and bandwidth under Home. 64 KiB/s down and
+/// up is enough to keep the swarm alive; the window already fetched stays
+/// resident, so a resume is instant once foreground limits are restored.
+pub const BACKGROUND_DOWN_BPS: u64 = 64 * 1024;
+pub const BACKGROUND_UP_BPS: u64 = 64 * 1024;
+
+/// Put the engine into background mode (player left). No-op when the engine is
+/// not bound; the cap is restored by [`resume_foreground`] on the next resolve.
+pub fn suspend_background() {
+    if available() {
+        limits(BACKGROUND_DOWN_BPS, BACKGROUND_UP_BPS);
+        plx_base::eventlog::log("sbengine: background throttled to 64KiB/s (player left)");
+    }
+}
+
+/// Restore foreground (unlimited down, default up) before a resolve. Called at
+/// the head of [`resolve_stream`] so a torrent opened from Home always starts
+/// at full speed even if the previous session left it throttled.
+pub fn resume_foreground() {
+    if available() {
+        limits(0, DEFAULT_UPLOAD_BPS);
+        plx_base::eventlog::log("sbengine: foreground unlimited (resolving)");
     }
 }
 
