@@ -3121,6 +3121,20 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
             }
             ScreenEvent::Enter(_) => {
                 self.sync_catalog(cx);
+                // Back from Detail / Player: re-probe the current hero's backdrop so a
+                // texture the residency churn took while we were away is requested
+                // (and, via `next_upload()`, queued as the frame's solo take) before
+                // the fade-in reads it, not after. Without this the first frame
+                // after a return resolves a miss and paints flat ground for one
+                // solo-upload cycle (≈450–600 ms of fetch+decode+upload).
+                let view = H::hubs(cx);
+                if let Some(hero) = self.selected_hero(view) {
+                    if !hero.item.art.is_empty() {
+                        plx_ui::widgets::resolve_tex_wh_on(
+                            hero.item.sid.raw(), &hero.item.art, 1280, 720, 0,
+                        );
+                    }
+                }
                 fx.invalidate(Provenance::Nav);
                 Handled::Yes
             }

@@ -186,20 +186,18 @@ const CACHE_CAP: usize = 96;
 /// reason: a number that is wrong should be wrong SMALL, on the side that asserts early rather
 /// than the side that ships a breach.
 ///
-/// **FORK (RichiL10): 32 MiB.** The derivation above sizes the pool against a 160 MB declaration;
-/// this fork declares 280 MB and ran out of memory mid-playback on the dev set when the AU queues
-/// stood at 96/8 MiB (see `engine::AQ_VIDEO_BYTES`), and the poster pool is the one large term that
-/// is pure cache. The 96/8 queues are what died, and they are back at the fork's first sizing
-/// (50/4) — that is the headroom this pool spends. The sizes were measured on the simulator rather
-/// than guessed, on the same 60 s Home session: `refused=0, rearmed=17` at 32 MiB,
-/// `refused=37, rearmed=51` at 24, and `refused=183, rearmed=199` at 16. A longer session that
-/// hovered the rows and let new hubs land refused 171 arrivals at 24 MiB — every one a tile that
-/// renders blank until its cooldown clears, and while that screen is up it cannot land at all,
-/// because a refusal is decided against art drawn this frame. 24 is therefore a pool that no
-/// longer holds one Home: the hero plus its two prefetched neighbours (≈11 MB) and the visible
-/// grid leave nothing for the arrival. Every tile the pool does not keep is recoverable from the
-/// on-disk image cache; the memory would not be.
-pub const TEX_RESIDENT_BYTES_MAX: usize = 32 << 20;
+/// **FORK (RichiL10): 44 MiB.** The derivation above sizes the pool against a 160 MB declaration;
+/// this fork declares 280 MB, and the 32 MiB cut it shipped with was measured on the simulator
+/// against an OOM that was the audio queues (96/8 MiB, now back at the fork's first sizing of
+/// 50/4) — not the poster pool, which is pure cache and the one large term that is recoverable
+/// from the on-disk image cache. On the TV at 32 MiB the residency churn (`lost` climbing
+/// continuously, `refused=0`) evicted the hero backdrop mid-scroll, so scrolling back paid a
+/// full solo re-upload; 44 MiB holds the hero plus its two prefetched neighbours (≈11 MB)
+/// plus the visible grid with room for the arrivals, at the same ≈8.7% margin the derivation
+/// already uses against the subtitle bound. A longer session that hovered the rows and let new
+/// hubs land refused 171 arrivals at 24 MiB — every one a tile that renders blank until its
+/// cooldown clears — so 24 was never viable; 44 is the derivation's own rounding, restored.
+pub const TEX_RESIDENT_BYTES_MAX: usize = 44 << 20;
 
 /// How many texels one authored pixel costs: 1 on a television, `n²` under the simulator's
 /// supersampled rendering (`surface::render_scale`), whose images are requested at `n`x per axis.
@@ -674,12 +672,56 @@ impl<K: Copy + Eq + Hash> TexCache<K> {
         self.bytes = 0;
     }
 
+    /// A Residency entry this recently `resolve`d is still the page's own art —
+    /// keep it resident even if it is the largest single victim. The constant is
+    /// in resolve-ticks, not frames: one scroll step touches a dozen keys, so the
+    /// hero's own tick is only a few slots behind the newest row any time it is
+    /// still the screen beneath the scroll.
+    ///
+    /// Sized for a detail-page scroll (not a home flick): a long detail page can walk
+    /// 80+ poster arrivals, each resolving on every frame it is visible, so the hero's
+    /// tick falls several hundred resolve-ticks behind before the user scrolls back.
+    /// 2_000 ticks keeps one full detail scroll + a second home flick inside the
+    /// grace; the MRU pin below covers the case that ages past it anyway.
+    const RECENT_RESIDENCY_GRACE: u64 = 2_000;
+
+    /// The most-recently-resolved Residency entry is pinned unconditionally — the
+    /// backdrop of the page the user is about to return to. Heavy-first eviction
+    /// without this evicts the hero first (it is the largest single victim) and
+    /// buys a full solo re-upload on the way back; pinning the MRU costs one
+    /// 3.7 MB slot (≈8% of the 44 MiB pool) and removes the churn entirely.
+    /// `None` when no Residency entry is resident.
+    fn mru_residency(&self) -> Option<K> {
+        self.resident
+            .iter()
+            .filter(|(_, e)| class_for(e.bytes).is_solo())
+            .max_by_key(|(_, e)| e.last_used)
+            .map(|(k, _)| *k)
+    }
+
     /// The only place victim eligibility is decided: `k` (currently `e`) may be evicted unless it
     /// is `protect` (the key about to be re-uploaded in place) or was drawn in the current or the
     /// last completed [`TexCache::frame`] (`drawn_frame == 0`, "never drawn since upload", is
     /// deliberately NOT protected — an entry nothing has ever resolved is not what is on screen).
+    /// A Residency entry inside [`RECENT_RESIDENCY_GRACE`] resolve-ticks additionally survives:
+    /// it is the backdrop of the page the user is about to scroll back to, and evicting it first
+    /// (the heavy-first rule below) only buys a full solo re-upload on the way back.
     fn victim_ok(&self, k: K, e: &Entry, protect: Option<K>) -> bool {
-        Some(k) != protect && !(e.drawn_frame != 0 && e.drawn_frame + 1 >= self.frame)
+        if Some(k) == protect { return false; }
+        if e.drawn_frame != 0 && e.drawn_frame + 1 >= self.frame { return false; }
+        if class_for(e.bytes).is_solo() {
+            // Grace: recently-resolved backdrop survives.
+            if self.clock.saturating_sub(e.last_used) < Self::RECENT_RESIDENCY_GRACE {
+                return false;
+            }
+            // MRU pin: the newest backdrop never goes, however long ago it landed.
+            // This is what makes a Detail scroll-away-and-back and a Detail→Home
+            // return cost zero solo re-uploads.
+            if self.mru_residency() == Some(k) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Make `room` more slots fit under `cap` and `incoming` more bytes fit under `bytes_max` by
@@ -1066,13 +1108,43 @@ mod tests {
         assert!(!c.has_pending());
     }
 
-    /// A heavy entry no longer on screen (a backdrop of a page that was left) is the first
-    /// victim, even when a light one is older: it frees the most per refetch it costs.
+    /// A heavy entry no longer on screen (a backdrop of a page that was left) is evicted
+    /// before a lighter one once it is neither in [`RECENT_RESIDENCY_GRACE`] nor the
+    /// MRU Residency entry: it frees the most per refetch it costs, and the MRU pin
+    /// keeps the one the user is about to return to. A heavy entry inside the grace
+    /// (or that is the MRU) is the page's own art still beneath the scroll, so the
+    /// older light entry goes first.
     #[test]
     fn a_heavy_entry_is_evicted_before_an_older_light_one() {
         const LIGHT: usize = 900_000; // under RESIDENCY_BYTES
         const HEAVY: usize = 2_000_000; // over it: a Residency take
-        let mut c: TexCache<u32> = TexCache::with_budget(8, 3_500_000);
+        // Age the heavy entry past the grace and make it NOT the MRU: add a second
+        // heavy entry that resolves later, so key 2 is a stale non-MRU heavy.
+        let mut c: TexCache<u32> = TexCache::with_budget(64, 6_000_000);
+        let mut up = StubUp { next: 0, freed: vec![], warmed: vec![] };
+        let mut present = Present::new();
+        let mut b = Budget::new();
+        for (at, key, bytes) in [(0, 1, LIGHT), (20_000, 2, HEAVY), (40_000, 3, LIGHT), (50_000, 5, HEAVY)] {
+            c.accept(sized(key, bytes));
+            b.begin_frame(at);
+            let mut ph = PresentHandle(&mut present);
+            assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || at), 1, "key {key} lands");
+        }
+        // Push 2_100 resolves past the grace without touching key 2 — key 2 is now
+        // neither in grace nor the MRU (key 5 is), so it is the first victim.
+        for _ in 0..2_100 { assert!(c.resolve(3).is_some()); }
+        // A fourth light arrival needs room; the stale non-MRU heavy must be the victim.
+        c.accept(sized(4, LIGHT));
+        b.begin_frame(60_000);
+        let mut ph = PresentHandle(&mut present);
+        assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || 60_000), 1, "key 4 lands");
+        assert!(c.resolve(3).is_some(), "the arrival is resident");
+        let evicted = c.take_unresident().collect::<Vec<_>>();
+        assert!(evicted.contains(&(2, false)), "the stale non-MRU heavy entry went first: {evicted:?}");
+
+        // The companion case: a heavy entry inside the grace (just resolved) survives the
+        // same pressure — the light entry is evicted instead.
+        let mut c: TexCache<u32> = TexCache::with_budget(64, 3_500_000);
         let mut up = StubUp { next: 0, freed: vec![], warmed: vec![] };
         let mut present = Present::new();
         let mut b = Budget::new();
@@ -1082,10 +1154,15 @@ mod tests {
             let mut ph = PresentHandle(&mut present);
             assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || at), 1, "key {key} lands");
         }
-        assert!(c.resolve(1).is_some(), "the older light entry stays");
-        assert!(c.resolve(3).is_some(), "the arrival is resident");
-        assert!(c.resolve(2).is_none(), "the heavy entry went first");
-        assert_eq!(c.take_unresident().collect::<Vec<_>>(), vec![(2, false)]);
+        // Resolve the heavy entry right now (tick 0 of the grace), then apply pressure.
+        assert!(c.resolve(2).is_some());
+        c.accept(sized(4, LIGHT));
+        b.begin_frame(60_000);
+        let mut ph = PresentHandle(&mut present);
+        assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || 60_000), 1, "key 4 lands");
+        assert!(c.resolve(2).is_some(), "a recently-resolved heavy entry is protected");
+        // Key 3 was evicted to make room now that the heavy entry is protected.
+        assert!(c.resolve(3).is_none(), "the light entry went instead");
     }
 
     /// F2: an image bigger than the whole byte budget, with nothing on screen blocking it, is
