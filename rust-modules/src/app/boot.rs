@@ -626,20 +626,21 @@ pub(crate) unsafe fn boot(
 /// The spawned `node server.js` child, killed on app exit. A `Mutex` because boot owns the handle
 /// at startup and teardown takes it from a different call site.
 #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
-static P2P_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
 static P2P_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
 static SBENGINE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Start the in-process C torrent engine (`libsbengine.so`) when its library loads. Falls back
-/// to the Node server below when `sbengine::available()` is false — the normal case when the
-/// package was built without the engine, or on a firmware fwcompat has not graded.
+/// Start the in-process C torrent engine (`libsbengine.so`) when its library loads. This is
+/// the only streaming engine: there is no Node fallback. When `sbengine::available()` is false
+/// (package built without the engine, or firmware fwcompat has not graded it), torrents are
+/// unavailable on that install — deliberately, rather than serving them through the legacy
+/// `js-service/server.js` child.
 pub(crate) fn start_sbengine() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
         if !plx_stremio::sbengine::available() {
-            plx_base::eventlog::log("sbengine: libsbengine.so not available; Node server is the fallback");
+            plx_base::eventlog::log("sbengine: libsbengine.so not available; torrents unavailable (no Node fallback)");
             return;
         }
         let p2p_root = plx_base::paths::runtime_dir().join("serverp2p");
@@ -694,7 +695,7 @@ pub(crate) fn start_sbengine() {
                 }
             });
         } else {
-            plx_base::eventlog::log("sbengine: start_engine failed; Node server is the fallback");
+            plx_base::eventlog::log("sbengine: start_engine failed; torrents unavailable (no Node fallback)");
         }
     }
 }
@@ -710,30 +711,20 @@ pub(crate) fn stop_sbengine() {
     }
 }
 
-/// Start the headless P2P server as a DIRECT CHILD of this process: `node server.js` from
-/// `paths::app_dir()/js-service`. Its settings, cache and certificate live under
-/// `<runtime_dir>/serverp2p`, and its stdout/stderr append to `<runtime_dir>/serverp2p.log`.
-/// This firmware's Node has no `palmbus`/`pmloglib`, so there is no LS2 service and no
-/// `luna-send` here.
+/// Start the C torrent engine on a parked thread, behind the UI (a worker with its own
+/// settle delay), never on the boot thread and never on a controlled/replay boot.
 ///
-/// The runtime root is PER INSTALL (`/tmp` for the app users get, `/tmp/<app id>` for a
-/// developer install beside it), and that is load-bearing here rather than cosmetic: the debug
-/// and stable packages run under different uids and cannot write each other's directories. A
-/// literal `/tmp/nuvio-serverp2p` shared by both made whichever install booted second refuse to
-/// start P2P with an ownership error.
-///
-/// Television-only: the host and test builds must not spawn a server. A controlled or replay boot
-/// never reaches this call either (see `construct`).
+/// There is no Node streaming fallback: `js-service/server.js` is not spawned. `libsbengine.so`
+/// is the only streaming engine; when it cannot load, torrents are unavailable on that install.
+/// The trailer decipher (`js-service/trailer-decipher.js`) is a separate Node child owned by
+/// the trailer resolver and is untouched by this.
 pub(crate) fn start_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
-        // Spawn on a thread that lives for the whole app lifetime: PR_SET_PDEATHSIG
-        // is tied to the *creating thread*, so if the spawning thread exits the
-        // kernel sends SIGTERM to node. This thread stays parked until shutdown.
         std::thread::spawn(|| {
             start_sbengine();
-            start_p2p_service_inner();
-            // Keep this thread alive so node's parent doesn't die prematurely.
+            // Park until shutdown: the engine's lifetime is the app's, and this keeps the
+            // startup path identical for a future engine-owned worker.
             loop {
                 if P2P_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -744,267 +735,32 @@ pub(crate) fn start_p2p_service() {
     }
 }
 
+/// Legacy cleanup: remove P2P state directories from the pre-C-engine era. No server is
+/// started here — `server.js` is retired.
 #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
 fn start_p2p_service_inner() {
-    use std::os::unix::fs::MetadataExt;
-
-        let app_dir = plx_base::paths::app_dir();
-        let cleanup = |path: &std::path::Path, what: &str| match std::fs::remove_dir_all(path) {
-            Ok(()) => {
-                plx_base::eventlog::log(&format!("nuvio: removed {what} at {}", path.display()))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => plx_base::eventlog::log(&format!(
-                "nuvio: could not remove {what} at {}: {e}",
-                path.display()
-            )),
-        };
-        cleanup(&app_dir.join(".stremio-server"), "legacy P2P data");
-        cleanup(&app_dir.join("nuvio-serverp2p"), "unused app-local P2P data");
-
-        let js_dir = app_dir.join("js-service");
-        let server = js_dir.join("server.js");
-        if !server.is_file() {
-            plx_base::eventlog::log("nuvio: js-service/server.js is missing; P2P server not started");
-            return;
+    let app_dir = plx_base::paths::app_dir();
+    let cleanup = |path: &std::path::Path, what: &str| match std::fs::remove_dir_all(path) {
+        Ok(()) => {
+            plx_base::eventlog::log(&format!("nuvio: removed {what} at {}", path.display()))
         }
-
-        // `/tmp` (or the per-install root) is writable on read-only production installs, and with
-        // `cacheSize: 0` nothing here needs to survive a reboot. The app directory is not used for
-        // state.
-        let runtime_dir = plx_base::paths::runtime_dir();
-        let p2p_dir = runtime_dir.join("serverp2p");
-        let p2p_log = runtime_dir.join("serverp2p.log");
-        if let Err(e) = std::fs::create_dir_all(&p2p_dir) {
-            plx_base::eventlog::log(&format!(
-                "nuvio: could not create {}: {e}",
-                p2p_dir.display()
-            ));
-            return;
-        }
-        match std::fs::metadata(&p2p_dir) {
-            Ok(meta) => {
-                let euid = unsafe { libc::geteuid() };
-                if meta.uid() != euid {
-                    plx_base::eventlog::log(&format!(
-                        "nuvio: {} is owned by uid {}, not uid {}; run `rm -rf {}` and relaunch",
-                        p2p_dir.display(),
-                        meta.uid(),
-                        euid,
-                        p2p_dir.display()
-                    ));
-                    return;
-                }
-            }
-            Err(e) => {
-                plx_base::eventlog::log(&format!(
-                    "nuvio: could not stat {}: {e}",
-                    p2p_dir.display()
-                ));
-                return;
-            }
-        }
-
-        let mut slot = P2P_CHILD.lock().unwrap_or_else(|e| e.into_inner());
-        // Already running (Ok(None) is the live case); a reaped or failed child is replaced.
-        if slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) {
-            return;
-        }
-
-        // A previous launch may have left a stale `node server.js` holding port 11470
-        // (EADDRINUSE): the P2P child is only tracked in-process, so a crash or a
-        // relaunch without a clean stop leaves an orphan that makes the new server
-        // fall back to 11471, which the Rust side never reads (it is hardcoded to
-        // 11470). Reap any such orphan before spawning, and wait for the port to
-        // actually free up, so the new server binds 11470 on the first try.
-        {
-            if let Ok(entries) = std::fs::read_dir("/proc") {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if !name.bytes().all(|b| b.is_ascii_digit()) { continue; }
-                    let pid: i32 = match name.parse() { Ok(p) => p, Err(_) => continue };
-                    if pid == std::process::id() as i32 { continue; }
-                    let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
-                        .unwrap_or_default()
-                        .replace('\0', " ");
-                    if cmdline.contains("server.js") {
-                        plx_base::eventlog::log(&format!(
-                            "nuvio: reaping stale P2P process {} ({})",
-                            pid, cmdline.trim()
-                        ));
-                        unsafe { libc::kill(pid, libc::SIGTERM); }
-                    }
-                }
-            }
-            // Wait for the port to be actually BINDABLE (not just closed to
-            // connects): a killed process can leave the socket in TIME_WAIT,
-            // where connect() still succeeds but bind() fails with EADDRINUSE.
-            // Probe with a short-lived listener so node can bind on first try.
-            for _ in 0..40 {
-                let addr: std::net::SocketAddr = "127.0.0.1:11470".parse().unwrap();
-                match std::net::TcpListener::bind(addr) {
-                    Ok(l) => {
-                        // Port is free; drop the probe listener and proceed.
-                        drop(l);
-                        break;
-                    }
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                }
-            }
-        }
-        // The C engine owns torrents once it starts: it serves its own loopback Range URLs and
-        // the shim tries it before any Node call, so spawning `node` here would only add an idle
-        // child to the TV's RAM (the thing this engine exists to remove). Node stays the whole
-        // path on firmware where the engine cannot load — that is the `available()` false case,
-        // where `SBENGINE_STARTED` was never set.
-        if SBENGINE_STARTED.load(std::sync::atomic::Ordering::Relaxed) {
-            plx_base::eventlog::log("nuvio: C engine owns P2P; Node server not spawned");
-            return;
-        }
-
-        // The absolute path first: the jail's PATH is not root's PATH, and `node` may be absent
-        // from it even though /usr/bin/node exists and is world-executable. A firmware that keeps
-        // the interpreter elsewhere still gets the PATH lookup as the fallback.
-        let node: &std::path::Path = if std::path::Path::new("/usr/bin/node").is_file() {
-            std::path::Path::new("/usr/bin/node")
-        } else {
-            std::path::Path::new("node")
-        };
-        let mut command = std::process::Command::new(node);
-        command.arg(&server).current_dir(&js_dir);
-        // server.js resolves its settings, cache and certificate through `APP_PATH`, falling back
-        // to a desktop-oriented literal. Hand it THIS install's directory so both halves agree.
-        command.env("APP_PATH", &p2p_dir);
-        // Strip a broken LD_PRELOAD (webOS quirk) so node's dynamic linker
-        // doesn't choke on a literal "$LD_PRELOAD" entry.
-        command.env_remove("LD_PRELOAD");
-        // Bind the child's lifetime to ours: if this process dies (including a hard
-        // crash), the kernel delivers SIGTERM to node so it cannot orphan and hold
-        // the TV's RAM. The getppid() check closes the fork/exec race where the
-        // parent dies before prctl is installed -- in that case spawn() fails
-        // instead of arming the wrong (reaper) parent.
-        let expected_ppid: libc::pid_t = std::process::id() as libc::pid_t;
-        use std::os::unix::process::CommandExt;
-        // The hook is a named closure rather than a temporary inside the `unsafe` block: a
-        // closure written lexically inside one inherits its unsafe context, which makes the
-        // `unsafe` blocks around the two libc calls redundant (`unused_unsafe`).
-        let arm_pdeathsig = move || -> std::io::Result<()> {
-            // SAFETY: getppid is safe here
-            if unsafe { libc::getppid() } != expected_ppid {
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, "parent died"));
-            }
-            // SAFETY: prctl is safe here
-            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        };
-        // SAFETY: pre_exec is unsafe
-        unsafe {
-            command.pre_exec(arm_pdeathsig);
-        }
-        // Pipe node's stdio instead of handing it the file directly: node
-        // block-buffers stdout when it is not a TTY, and the pdeathsig SIGTERM
-        // that fires on a Rust crash never lets libuv flush, so a direct file
-        // redirect stays empty. A Rust-side reader flushes per line.
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-
-        let log_ok = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&p2p_log)
-            .is_ok();
-        if !log_ok {
-            plx_base::eventlog::log(&format!(
-                "nuvio: could not open {}; node output discarded",
-                p2p_log.display()
-            ));
-        }
-
-        match command.spawn() {
-            Ok(mut child) => {
-                // Drain each pipe into the log file, flushing per line, so output
-                // survives node buffering and abrupt (SIGTERM) termination.
-                // stdout (ChildStdout) and stderr (ChildStderr) are distinct
-                // types, so handle them as two readers sharing one helper.
-                let spawn_reader = |pipe: Box<dyn std::io::Read + Send>| {
-                    let lf = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&p2p_log);
-                    if let Ok(mut f) = lf {
-                        std::thread::spawn(move || {
-                            use std::io::{BufRead, Write};
-                            let r = std::io::BufReader::new(pipe);
-                            for line in r.lines() {
-                                if let Ok(l) = line {
-                                    let _ = writeln!(f, "{}", l);
-                                    let _ = f.flush();
-                                }
-                            }
-                        });
-                    }
-                };
-                if let Some(out) = child.stdout.take() {
-                    spawn_reader(Box::new(out));
-                }
-                if let Some(err) = child.stderr.take() {
-                    spawn_reader(Box::new(err));
-                }
-                // Readiness gate: wait for node to actually bind 127.0.0.1:11470
-                // before declaring success, so the player never races ahead and hits
-                // "could not connect". Bounded to ~3 s; if node never binds we log a
-                // timeout but keep the child (its output is still being captured).
-                let addr: std::net::SocketAddr = "127.0.0.1:11470".parse().unwrap();
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-                let mut ready = false;
-                while std::time::Instant::now() < deadline {
-                    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100)).is_ok() {
-                        ready = true;
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                if ready {
-                    plx_base::eventlog::log(&format!(
-                        "nuvio: P2P server ready on 127.0.0.1:11470 (pid {})",
-                        child.id()
-                    ));
-                } else {
-                    plx_base::eventlog::log(&format!(
-                        "nuvio: P2P server did not bind 127.0.0.1:11470 within 3s (pid {})",
-                        child.id()
-                    ));
-                }
-                plx_base::eventlog::log(&format!(
-                    "nuvio: P2P server started with {} (pid {})",
-                    node.display(),
-                    child.id()
-                ));
-                *slot = Some(child);
-            }
-            Err(e) => plx_base::eventlog::log(&format!(
-                "nuvio: could not start the P2P server with {}: {e}",
-                node.display()
-            )),
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => plx_base::eventlog::log(&format!(
+            "nuvio: could not remove {what} at {}: {e}",
+            path.display()
+        )),
+    };
+    cleanup(&app_dir.join(".stremio-server"), "legacy P2P data");
+    cleanup(&app_dir.join("nuvio-serverp2p"), "unused app-local P2P data");
+    plx_base::eventlog::log("nuvio: Node streaming server (js-service/server.js) retired; C engine is the only P2P path");
 }
-
-/// Kill the spawned P2P server and reap it, so closing the app does not leave `node` holding the
-/// television's RAM. A no-op when nothing was started.
+/// Stop the C torrent engine and signal the parked start thread to exit. Idempotent; a
+/// no-op when nothing was started. No Node child exists to reap — `server.js` is retired.
 pub(crate) fn stop_p2p_service() {
     #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     {
         stop_sbengine();
         P2P_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
-        let mut slot = P2P_CHILD.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(mut child) = slot.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-            plx_base::eventlog::log("nuvio: P2P server stopped");
-        }
     }
 }
 

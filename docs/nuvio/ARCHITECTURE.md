@@ -176,10 +176,8 @@ server" below.
   a republication of the same seat, so a pick in flight is not clobbered. A pick never writes the
   install-wide top-level key; that key is only the frozen fallback for a seat with no value of its own.
 - Torrents (`infoHash`): played through the in-process C engine's own loopback Range URL when
-  `libsbengine.so` loads, or through the headless Node server the app spawns from its own
-  `js-service/` directory as `<server>/<infoHash>/<fileIdx>` when it does not, with
-  `http://127.0.0.1:11470` as the Node fallback's default address. See "The P2P streaming server"
-  below.
+  `libsbengine.so` loads; when it does not, torrents are unavailable on that install — there is
+  no Node streaming fallback. See "The P2P streaming server" below.
   Debrid-resolved HTTP links from Torrentio/AIOStreams play directly. Local server scanning is off
   by default and requires `enableTorrents`; a configured `torrentServer` can be used directly.
 - Release discovery permits plaintext credentials for the registered in-process shim
@@ -214,8 +212,9 @@ server" below.
 
 ## The P2P streaming server
 
-Torrent (`infoHash`) streams need a streaming engine. The app has two, with the C engine
-preferred when available and the Node server kept as fallback:
+Torrent (`infoHash`) streams need a streaming engine. The app has one: the in-process C engine
+(`libsbengine.so`). The legacy Node streaming server (`js-service/server.js`) is retired and is
+no longer spawned; when the C engine cannot load, torrents are unavailable.
 
 - **C engine (`libsbengine.so`)** — primary when `sbengine::available()` is true. `boot.rs`
   starts it via `sbengine::start_engine` with pre-created `state`/`cache` dirs under
@@ -227,7 +226,7 @@ preferred when available and the Node server kept as fallback:
   `127.0.0.1` Range URL, so nothing goes through the Node HTTP dialect on the engine path.
   The Settings server URL is therefore optional: `Shim::torrent_server` falls back to the
   default loopback address when the field is empty and the engine is loaded, so torrents stay
-  offered; the address is only dialled on the Node fallback.
+  offered.
   The engine keeps every opened torrent downloading until it is removed, so resolving a
   different hash removes the previous one (`sbengine: released previous torrent <hash>`), which
   also deletes its payload. That invalidates every URL the engine handed out for it, so
@@ -238,19 +237,18 @@ preferred when available and the Node server kept as fallback:
   would otherwise want three symbols the TV's lacks, and the firmware's `libssl` SONAME differs
   across releases (1.0.x, 1.1, 3) — so `tools/fwcompat.py` grades it OK on every release in its
   inventory, 1.2 to 11.2. Where `dlopen` still fails (an unknown firmware, a missing file)
-  `available()` is false and the Node path is used unchanged. A missing `libsbengine.so` is a normal state, not an error:
+  `available()` is false and torrents are unavailable on that install. A missing `libsbengine.so` is a normal state, not an error:
   `make deploy` carries it to a device when built, and neither deploy nor `make ipk` fails for
   its absence. `make ipk` ships it when built, and `build-ipk.yml` builds it before packaging
   (`ci/build-sbengine.sh`) and then fails if the staged package has no `libsbengine.so`, so a
   release cannot ship a Node-only package by accident; because the engine is a CMake artifact with
   no Rust link receipt, the packaging gate pins its exact SHA-256 instead of a `.link.json`.
-- **Node fallback (`js-service/server.js`)** — Stremio's desktop `server.js` as a direct child
-  process on `127.0.0.1:11470`, spawned only when the C engine is unavailable or failed to
-  start. It is not a mid-session fallback: if the engine started, there is no Node process to
-  take over.
+- **Node streaming fallback — retired.** `js-service/server.js` is no longer spawned. The
+  trailer decipher (`js-service/trailer-decipher.js`) is a separate Node child and is
+  unaffected.
 
 - **Data directory.** `appPath` is `<runtime_dir>/serverp2p` (the Rust half passes it as
-  `APP_PATH`; `server.js`'s desktop default is never used on the television), and `cacheRoot`
+  `APP_PATH`), and `cacheRoot`
   follows `appPath`; the C engine uses `<runtime_dir>/serverp2p/state` and `…/cache` under the
   same root. The runtime root is per install — `/tmp` for the stable app, `/tmp/<app id>`
   for a developer install beside it (`paths::resolve_runtime_dir`) — which is required here, not
@@ -284,8 +282,7 @@ preferred when available and the Node server kept as fallback:
   described in `PLAYBACK.md`.
 - **Start.** On a live boot — `app::boot::construct`, never a controlled/replay boot, a host run or
   a test — `app::boot::start_p2p_service` creates `<runtime_dir>/serverp2p` and spawns
-  `/usr/bin/node server.js` with its working directory set to `<app_dir>/js-service`. If
-  `/usr/bin/node` is absent, it falls back to `node` on `PATH`. The child's stdout and stderr
+  `libsbengine.so` (dlopen, never linked; see above). The child's stdout and stderr
   append to `<runtime_dir>/serverp2p.log` (both are discarded if the file cannot be opened); the
   root is per install, so the stable and debug installs never share it. The child
   handle lives in a process-global slot; the event log records the interpreter and pid
@@ -300,7 +297,7 @@ preferred when available and the Node server kept as fallback:
   overrides it. The shim is told the address and the switch at boot and after every save. The
   server is spawned whatever the switch says — `p2p_enabled` only controls whether the Source
   Picker offers torrent streams.
-- **Failure is local.** A missing `server.js`, a missing interpreter or a bind failure is logged
+- **Failure is local.** A missing `libsbengine.so`, a failed `dlopen` or a failed `start_engine` is logged
   and leaves the app fully usable; torrent picks simply cannot play. Debrid-resolved HTTP links do
   not use this server.
 

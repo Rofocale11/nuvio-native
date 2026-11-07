@@ -41,8 +41,8 @@ const DEFAULT_EPISODE_MS: i64 = 45 * 60_000;
 const DEFAULT_MOVIE_MS: i64 = 110 * 60_000;
 const SECTION_MOVIES: i64 = 1;
 const SECTION_SHOWS: i64 = 2;
-/// Where the in-process Node P2P fallback listens, and the last-resort "torrents are available"
-/// marker when no URL is configured: with the C engine loaded the URL is never dialled, but the
+/// Where the C torrent engine's loopback serves, and the last-resort "torrents are available"
+/// marker when no URL is configured: with the engine loaded the URL is never dialled, but the
 /// stream list and the resolve gate both ask `torrent_server()` whether torrents may be offered.
 const DEFAULT_P2P_SERVER: &str = "http://127.0.0.1:11470";
 const TMDB_FALLBACK_KEY_BASE: i64 = 1_000_000_000;
@@ -2597,8 +2597,8 @@ impl Shim {
             return configured;
         }
         // The URL field is optional now: the engine needs no server, and an absent URL must not
-        // silently remove torrents from every list. This is also where a Node fallback would
-        // listen if the engine later fails.
+        // silently remove torrents from every list. There is no Node streaming fallback;
+        // when the engine is unavailable the URL stays absent and torrents are not offered.
         if plx_stremio::sbengine::available() {
             return Some(DEFAULT_P2P_SERVER.to_string());
         }
@@ -4903,7 +4903,7 @@ impl Shim {
 
     /// The URL to open for a ranked stream: itself, or — for a torrent marker — a URL the streaming
     /// engine serves (season/episode let it pick the file in a season pack). The in-process C engine
-    /// is tried first when it loaded; the Node server answers `/create` otherwise.
+    /// (`libsbengine.so`) is the only streaming engine; there is no Node `server.js` fallback.
     fn open_url(&self, rk: i64, stream: &Stream, url: &str) -> Option<String> {
         if !url.starts_with(shim_media::TORRENT_SCHEME) {
             return Some(url.to_string());
@@ -4924,9 +4924,8 @@ impl Shim {
         // that gate must run BEFORE the C-engine branch or a disabled switch would still play.
         let server = self.torrent_server()?;
         let server = server.as_str();
-        // C engine first (when it loaded); the engine serves its own 127.0.0.1 Range URLs so no
-        // server prefix is required. Node is the fallback on firmwares that cannot load
-        // `libsbengine.so` (missing from the package, or a firmware fwcompat has not graded).
+        // The C engine serves its own 127.0.0.1 Range URLs so no server prefix is required;
+        // there is no Node fallback to dial when it cannot load.
         if let Some(u) = self.resolve_with_sbengine(stream, season, episode) {
             self.resolved
                 .lock()
@@ -4969,11 +4968,10 @@ impl Shim {
         Some(cached)
     }
 
-    /// Try the in-process C engine (`libsbengine.so`) first and fall back to the
-    /// Node EngineFS HTTP path on failure. `libsbengine.so` links OpenSSL statically
-    /// (graded OK on every webOS release in fwcompat's inventory); where `available()`
-    /// is false the Node server at `torrent_server()` remains the only path, so this is
-    /// a preferred-engine, never engine-only.
+    /// Try the in-process C engine (`libsbengine.so`). `libsbengine.so` links OpenSSL statically
+    /// (graded OK on every webOS release in fwcompat's inventory). Where `available()`
+    /// is false torrents are unavailable on that install — deliberately; there is no Node
+    /// fallback path.
     fn resolve_with_sbengine(
         &self,
         stream: &Stream,
@@ -5036,7 +5034,7 @@ impl Shim {
                 Some(u)
             }
             Err(e) => {
-                plx_base::eventlog::log(&format!("sbengine: resolve failed, Node fallback ({e})"));
+                plx_base::eventlog::log(&format!("sbengine: resolve failed, torrents unavailable ({e})"));
                 None
             }
         }
