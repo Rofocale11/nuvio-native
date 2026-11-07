@@ -6598,7 +6598,7 @@ impl PersonOwnerGateFixture {
         "store-seams.txt": 0,
         "threads.txt": 0,
         "ticks.txt": 2,
-        "wall.txt": 4,  # the fork's P2P `node` readiness gate reads the wall clock; the child's startup is not logical app state
+        "wall.txt": 5,  # the fork's P2P `node` readiness gate reads the wall clock; the child's startup is not logical app state. +1 nuvio.rs: the prober's own spend and the trailer reacher's caller-budget deadline
     }
 
     def test_allowlist_counts_match_the_pinned_table(self):
