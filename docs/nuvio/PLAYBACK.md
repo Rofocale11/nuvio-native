@@ -247,7 +247,9 @@ duration, size, the video track (codec, WxH, fps, bit depth, profile, `color_trc
 `dovi {profile, level, bl_compat, rpu, el, bl}`), and every audio/subtitle track in **file order**
 (codec, profile, channels, language, title, default, forced). Callable from any thread after
 `ff::boot()`. The shim runs it when the player asks `/video/:/transcode/universal/decision`
-for an item (or when a stream is picked), caches it per stream URL, and emits the PMS fields from it:
+for an item (or when a stream is picked), caches the answer **per content** — a torrent's info
+hash + file index, every other stream its host+path (`shim_probe::content_key`) — and emits the
+PMS fields from it:
 
 | PMS field | from |
 |---|---|
@@ -258,6 +260,20 @@ for an item (or when a stream is picked), caches it per stream URL, and emits th
 | `Stream(type 2)` per audio track, in order: `codec`, `channels`, `samplingRate`, `languageCode`, `title`, `default`/`selected` | `p.audio` (`profile` 60 → `DTS-HD MA`, 30 on eac3/truehd → Atmos `title`/`displayTitle`) |
 | `Stream(type 3)` per embedded sub, in order: `codec`, `languageCode`, `title`, `forced`, `default` | `p.subtitles` |
 | `Part.size`, `Part.duration`, `Media.duration` | `p.size`, `p.duration_ms` |
+
+The cache is split by what the key means (`ProbeCache`):
+
+- **Content keys** (`torrent:<hash>/<fileIdx>`) cannot go stale — an infohash fixes the bytes — so
+  they never expire, and they persist to `probe-cache.json` in the P2P state directory
+  (`p2p_state_candidates()[0]`, beside the engine's resume files). Probing a 4K remux costs 10 s
+  because the container header **and the tail cues** have to come back from the swarm, and the
+  payload is tmpfs, so before this a relaunch re-paid it. Relaunching the app now reuses the
+  verdict.
+- **URL keys** keep `PROBE_TTL` (30 min): a signed debrid link can be re-pointed and a 403 is
+  transient, so those verdicts are trusted only briefly and are never written to disk.
+- Either way the map holds at most `MAX_ENTRIES` (512, oldest dropped first, ~2 MB), and a failure
+  is never cached under a content key: the same file becomes readable the moment the swarm
+  delivers its header.
 
 Until the probe answers, label guesses are acceptable for the **detail page** only; a play must
 not start on guessed fields. The Nuvio route fetches this decision BEFORE queueing or

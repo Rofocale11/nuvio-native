@@ -220,6 +220,16 @@ pub(crate) fn boot() {
         }
     };
     handle.shim.probes.set_prober(prober());
+    // A torrent's probe is the 10 s on a 4K remux (container header + tail cues, fetched from the
+    // swarm), and it is re-paid on every relaunch because the payload is tmpfs. The verdict itself
+    // is a few KB and cannot go stale (an infohash fixes the bytes), so it persists beside the
+    // swarm state — the same ladder the engine uses, first writable rung.
+    if let Some(dir) = plx_base::paths::p2p_state_candidates()
+        .into_iter()
+        .find(|d| std::fs::create_dir_all(d).is_ok())
+    {
+        handle.shim.probes.attach(dir.join(plx_pmsshim::shim_probe::PROBE_CACHE_FILE));
+    }
     // The DASH gate's second question: can each trailer track be read at its END? googlevideo
     // serves some signed URLs only up to a prefix, and such a pair passes the probe and then
     // fails mid-playback (see `Shim::trailer_tracks_reachable`).

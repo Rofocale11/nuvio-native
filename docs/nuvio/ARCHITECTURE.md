@@ -248,7 +248,10 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   (`state/resume/<hash>.resume`, a few KB of metadata + peer list) survives the removal, so a
   replayed torrent restores its metadata and peer list instead of doing a cold DHT/tracker
   rediscovery; the directory is LRU-bounded to 10 MiB (`enforce_resume_state_budget`), which
-  never frees the OOM-guarded payload — payload deletion on switch is unchanged.
+  never frees the OOM-guarded payload — payload deletion on switch is unchanged. The same
+  directory holds `probe-cache.json`, the shim's durable probe verdicts (see `PLAYBACK.md`), so a
+  replayed torrent's codec/duration/track table is read from disk instead of re-fetched from the
+  swarm.
   While the player is not on screen the engine is throttled to a background ceiling
   (`sbengine: background throttled`, 64 KiB/s down and up) so it does not saturate CPU or
   bandwidth under Home; the wait for the 1 MiB prebuffer in `resolve_stream` counts only the new

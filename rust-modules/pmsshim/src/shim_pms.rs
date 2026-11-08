@@ -5676,13 +5676,15 @@ impl Shim {
                         .cached_open_url(rk, &c.url)
                         .unwrap_or_else(|| c.url.clone());
                     if !url.starts_with(shim_media::TORRENT_SCHEME)
-                        && self.probes.cached(&url).is_none()
+                        && self.probes.cached_for(&c.url, c.stream.file_idx, &url).is_none()
                     {
+                        let marker = c.url.clone();
+                        let idx = c.stream.file_idx;
                         if let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) {
                             let _ = std::thread::Builder::new()
                                 .name("pmsshim-preprobe".into())
                                 .spawn(move || {
-                                    let _ = me.probes.probe(&url);
+                                    let _ = me.probes.probe_for(&marker, idx, &url);
                                 });
                         }
                     }
@@ -5692,7 +5694,7 @@ impl Shim {
                 let mut m = shim_media::media_json(rk, *i, c, dur, &subs);
                 let probed = if probe_index == Some(n) {
                     let r = match self.open_url(rk, &c.stream, &c.url) {
-                        Some(u) => self.probes.probe(&u),
+                        Some(u) => self.probes.probe_for(&c.url, c.stream.file_idx, &u),
                         None => Some(Err(
                             "the streaming server could not open this torrent".into()
                         )),
@@ -5707,7 +5709,7 @@ impl Shim {
                 } else {
                     self.cached_open_url(rk, &c.url)
                         .or_else(|| Some(c.url.clone()))
-                        .and_then(|u| self.probes.cached(&u))
+                        .and_then(|u| self.probes.cached_for(&c.url, c.stream.file_idx, &u))
                 };
                 if let Some(Ok(p)) = &probed {
                     crate::shim_probe::apply(&mut m, p);

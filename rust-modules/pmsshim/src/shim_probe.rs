@@ -3,16 +3,19 @@
 //! mirror `plx_media::ff_probe::MediaProbe` one for one; the app's adapter is a copy plus the two
 //! `*_decodable` verdicts it takes from the TV's codec table (`devcaps`).
 //!
-//! `docs/nuvio/PLAYBACK.md` is the contract: probe at decision time, cache per host+path
-//! (signed query params such as debrid expiry are stripped from the key), emit the real
-//! fields, and refuse (never "transcode") a stream the TV cannot decode.
+//! `docs/nuvio/PLAYBACK.md` is the contract: probe at decision time, cache per content (a torrent's
+//! info hash + file index — the C engine mints a random `/stream/<token>` per resolve, so a URL key
+//! never survives a replay — and per host+path for everything else, with signed query params such as
+//! debrid expiry stripped), emit the real fields, and refuse (never "transcode") a stream the TV
+//! cannot decode.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Dovi {
     pub profile: u8,
     pub level: u8,
@@ -22,7 +25,7 @@ pub struct Dovi {
     pub bl: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Video {
     pub codec: String,
     pub width: i32,
@@ -36,7 +39,7 @@ pub struct Video {
     pub dovi: Option<Dovi>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Audio {
     pub codec: String,
     pub profile: i32,
@@ -53,7 +56,7 @@ pub struct Audio {
     pub decodable: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Sub {
     pub codec: String,
     pub language: String,
@@ -62,7 +65,7 @@ pub struct Sub {
     pub forced: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProbeInfo {
     /// `mkv` / `mp4` / `mpegts` (`MediaProbe::container()`).
     pub container: String,
@@ -87,7 +90,17 @@ pub type Prober = Arc<dyn Fn(&str, Duration) -> Result<ProbeInfo, String> + Send
 pub type Reacher = Arc<dyn Fn(&str, i64, Duration) -> Result<i64, String> + Send + Sync>;
 
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(45);
+/// How long a **URL-keyed** answer is trusted. A signed debrid link can be re-pointed and a 403 is
+/// transient, so those verdicts expire. A content key cannot go stale at all (see
+/// [`content_key`]) and is kept for the life of the process, then across a relaunch on disk.
 const PROBE_TTL: Duration = Duration::from_secs(30 * 60);
+/// The real ceiling on the whole cache, oldest dropped first. `PROBE_TTL` alone never bounded it: a
+/// session playing many titles keeps every entry fresh. ~4 KB per entry at worst (a 4K remux with
+/// 45 subtitle tracks), so this is about 2 MB of RAM, and the same on disk.
+const MAX_ENTRIES: usize = 512;
+/// The durable side of the cache, beside the swarm state in
+/// `p2p_state_candidates()` — `probe-cache.json` (see `ProbeCache::attach`).
+pub const PROBE_CACHE_FILE: &str = "probe-cache.json";
 
 /// Cache key for a URL: scheme + host + path, without query or fragment.
 ///
@@ -151,12 +164,41 @@ fn cache_key(url: &str) -> String {
     key
 }
 
+/// The probe-cache key for a stream ranked from `marker`, or `None` when the URL's own key is the
+/// right one.
+///
+/// A `torrent:<hash>` marker names the **content**, so it is the key — with the file, because a
+/// season pack holds one probe per episode. The C engine mints a random `/stream/<32 hex>` on
+/// every resolve (`libtorrent_stream_bridge.cpp` `register_stream`), so a URL-keyed entry can
+/// never be reused: every replay re-probed, and since `remove()` on a source switch leaves no
+/// payload, each probe re-read the container header **and the tail cues** from the swarm. On a
+/// 4K remux that was 5.7 s and then 10.7 s for the same part, spent before DIRECT PLAY.
+///
+/// `file_idx` is the stream's own hint, which is also what the engine resolves (`None` = it picks
+/// the largest file, deterministically, so `largest` names that choice).
+pub fn content_key(marker: &str, file_idx: Option<u32>) -> Option<String> {
+    marker.strip_prefix(crate::shim_media::TORRENT_SCHEME)?;
+    Some(match file_idx {
+        Some(i) => format!("{marker}/{i}"),
+        None => format!("{marker}/largest"),
+    })
+}
+
+/// Whether `key` names content rather than a URL — the one property that decides both the expiry
+/// rule and whether the entry is worth writing to disk.
+fn content_key_of(key: &str) -> Option<&str> {
+    key.strip_prefix(crate::shim_media::TORRENT_SCHEME)
+}
+
 #[derive(Default)]
 pub struct ProbeCache {
     prober: Mutex<Option<Prober>>,
     done: Mutex<HashMap<String, (Instant, Result<ProbeInfo, String>)>>,
     /// One probe per URL at a time: a second asker waits on the first.
     inflight: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Where content-keyed entries persist. `None` (tests, the host bin, an unwritable device)
+    /// keeps the cache in RAM only — persistence is an optimisation, never a requirement.
+    disk: Mutex<Option<PathBuf>>,
 }
 
 impl ProbeCache {
@@ -168,45 +210,158 @@ impl ProbeCache {
         self.prober.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
+    /// Make the content-keyed half of the cache durable at `path`, loading what a previous run
+    /// wrote. Called once at boot with `p2p_state_candidates()[0]/probe-cache.json`, beside the
+    /// swarm state. A torrent's probe is what costs 10 s on a 4K remux (the container header and the
+    /// tail cues come back from the swarm), so paying it once per file rather than once per relaunch
+    /// is the point. A missing, unreadable or stale-format file just means an empty cache.
+    pub fn attach(&self, path: PathBuf) {
+        let loaded = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<HashMap<String, ProbeInfo>>(&b).ok())
+            .unwrap_or_default();
+        if !loaded.is_empty() {
+            let mut g = self.done.lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            for (k, v) in loaded.into_iter().take(MAX_ENTRIES) {
+                if content_key_of(&k).is_some() {
+                    g.insert(k, (now, Ok(v)));
+                }
+            }
+            trim(&mut g, now);
+        }
+        *self.disk.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    }
+
     /// A cached answer, without probing.
     pub fn cached(&self, url: &str) -> Option<Result<ProbeInfo, String>> {
-        let key = cache_key(url);
+        self.cached_keyed(&cache_key(url))
+    }
+
+    /// A cached answer under an explicit key, without probing. A content key never expires (the
+    /// infohash fixes the bytes); a URL key lasts [`PROBE_TTL`].
+    pub fn cached_keyed(&self, key: &str) -> Option<Result<ProbeInfo, String>> {
         let g = self.done.lock().unwrap_or_else(|e| e.into_inner());
-        g.get(&key).filter(|(at, _)| at.elapsed() < PROBE_TTL).map(|(_, r)| r.clone())
+        g.get(key)
+            .filter(|(at, _)| content_key_of(key).is_some() || at.elapsed() < PROBE_TTL)
+            .map(|(_, r)| r.clone())
+    }
+
+    /// [`probe`](Self::probe) for a stream ranked from `marker`: a torrent is keyed by its
+    /// content (`hash` + file), everything else by its URL. `url` is always what the prober opens.
+    pub fn probe_for(
+        &self,
+        marker: &str,
+        file_idx: Option<u32>,
+        url: &str,
+    ) -> Option<Result<ProbeInfo, String>> {
+        match content_key(marker, file_idx) {
+            Some(key) => self.probe_keyed(&key, url),
+            None => self.probe(url),
+        }
+    }
+
+    /// [`cached`](Self::cached) for a stream ranked from `marker`.
+    pub fn cached_for(
+        &self,
+        marker: &str,
+        file_idx: Option<u32>,
+        url: &str,
+    ) -> Option<Result<ProbeInfo, String>> {
+        match content_key(marker, file_idx) {
+            Some(key) => self.cached_keyed(&key),
+            None => self.cached(url),
+        }
     }
 
     /// Probe (or wait for the probe already running). `None` when no prober is installed (host
     /// runs of the bin, tests): the caller keeps the label guesses.
     ///
-    /// The `cached`/`done`/`inflight` maps are keyed by [`cache_key`] (host+path,
-    /// no query), but the prober is invoked with the caller's original `url`
-    /// byte-identical \u2014 the first URL to ask determines the probe URL, and
-    /// later re-signed URLs for the same file reuse its result.
+    /// The `done`/`inflight` maps are keyed by [`cache_key`] (host+path, no query), but the prober
+    /// is invoked with the caller's original `url` byte-identical \u2014 the first URL to ask
+    /// determines the probe URL, and later re-signed URLs for the same file reuse its result.
     pub fn probe(&self, url: &str) -> Option<Result<ProbeInfo, String>> {
-        let key = cache_key(url);
-        if let Some(r) = self.cached(url) {
+        self.probe_keyed(&cache_key(url), url)
+    }
+
+    /// [`probe`](Self::probe) under an explicit key. The prober still opens the caller's `url`
+    /// byte-identical; only the entry it fills is named by `key`.
+    pub fn probe_keyed(&self, key: &str, url: &str) -> Option<Result<ProbeInfo, String>> {
+        if let Some(r) = self.cached_keyed(key) {
             return Some(r);
         }
         let prober = self.prober.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
-        let gate = self.inflight.lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone();
+        let gate = self.inflight.lock().unwrap_or_else(|e| e.into_inner()).entry(key.to_string()).or_default().clone();
         let _held = gate.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = self.cached(url) {
+        if let Some(r) = self.cached_keyed(key) {
             return Some(r);
         }
         let r = prober(url, PROBE_DEADLINE);
-        // YouTube 403s are transient (IP throttling / edge variance): caching
-        // a googlevideo failure for 30 min would freeze the shelf as empty.
-        // Successes cache normally; failures only keep the in-flight gate.
-        let cacheable = !(url.contains("googlevideo.com") && r.is_err());
+        let content = content_key_of(key).is_some();
+        // YouTube 403s are transient (IP throttling / edge variance): caching a googlevideo failure
+        // would freeze the shelf as empty. A content key never caches a failure either: the same
+        // file becomes readable the moment the swarm delivers its header, and freezing that refusal
+        // would turn a slow start into a permanent one.
+        let cacheable = r.is_ok() || (!content && !url.contains("googlevideo.com"));
         if cacheable {
             let mut g = self.done.lock().unwrap_or_else(|e| e.into_inner());
-            if g.len() > 300 {
-                g.retain(|_, (at, _)| at.elapsed() < PROBE_TTL);
+            let now = Instant::now();
+            g.insert(key.to_string(), (now, r.clone()));
+            trim(&mut g, now);
+            drop(g);
+            if content {
+                self.save();
             }
-            g.insert(key.clone(), (Instant::now(), r.clone()));
         }
-        self.inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        self.inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
         Some(r)
+    }
+
+    /// Push every entry's age back by `d`, so a test can observe both the expiry rules without
+    /// waiting 30 minutes.
+    #[cfg(test)]
+    fn age(&self, d: Duration) {
+        let mut g = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        for (at, _) in g.values_mut() {
+            *at = at.checked_sub(d).unwrap_or(*at);
+        }
+    }
+
+    /// Write the content-keyed entries out atomically (temp + rename), so a half-written file is
+    /// never loaded. Called once per newly probed file, not per request.
+    fn save(&self) {
+        let Some(path) = self.disk.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        let keep: HashMap<String, ProbeInfo> = {
+            let g = self.done.lock().unwrap_or_else(|e| e.into_inner());
+            g.iter()
+                .filter(|(k, (_, r))| content_key_of(k).is_some() && r.is_ok())
+                .filter_map(|(k, (_, r))| r.as_ref().ok().map(|p| (k.clone(), p.clone())))
+                .collect()
+        };
+        let Ok(bytes) = serde_json::to_vec(&keep) else { return };
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                plx_base::eventlog::log(&format!("probe cache: could not save {}: {e}", path.display()));
+            }
+        }
+    }
+}
+
+/// Hold at most [`MAX_ENTRIES`], dropping the oldest first. Expiry alone never bounded the map: a
+/// session that plays many titles keeps every entry fresh, and a longer TTL would only make that
+/// worse.
+fn trim(g: &mut HashMap<String, (Instant, Result<ProbeInfo, String>)>, now: Instant) {
+    g.retain(|k, (at, _)| content_key_of(k).is_some() || now.duration_since(*at) < PROBE_TTL);
+    if g.len() <= MAX_ENTRIES {
+        return;
+    }
+    let mut ages: Vec<(Instant, String)> = g.iter().map(|(k, (at, _))| (*at, k.clone())).collect();
+    ages.sort_unstable();
+    for (_, k) in ages.into_iter().take(g.len() - MAX_ENTRIES) {
+        g.remove(&k);
     }
 }
 
@@ -418,6 +573,124 @@ mod tests {
         assert!(cache.cached("https://cdn.debrid.example/videos/other.mkv?Signature=BBB").is_none());
         let _ = cache.probe("https://cdn.debrid.example/videos/other.mkv?Signature=BBB");
         assert_eq!(calls.load(Ordering::SeqCst), 2, "a different path probes separately");
+    }
+
+    /// The C engine mints a random `/stream/<32 hex>` on every resolve, so the same
+    /// torrent file arrives under a NEW URL each replay. Keyed by content it probes
+    /// once; without that the TV re-read the container header and the tail cues from
+    /// the swarm on every replay (5.7 s, then 10.7 s, on one part).
+    #[test]
+    fn a_new_engine_url_for_the_same_file_reuses_the_probe() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe_calls = calls.clone();
+        let cache = ProbeCache::default();
+        cache.set_prober(Arc::new(move |_url: &str, _deadline| {
+            probe_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProbeInfo { container: "mkv".into(), ..Default::default() })
+        }));
+        let marker = "torrent:9bb5a1b259c6abf5451366b9c0ffee0123456789";
+        let first = "http://127.0.0.1:43289/stream/aaaa";
+        let second = "http://127.0.0.1:43289/stream/bbbb";
+
+        assert!(cache.probe_for(marker, Some(0), first).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(cache.probe_for(marker, Some(0), second).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "same torrent file must probe once");
+        assert!(cache.cached_for(marker, Some(0), second).is_some());
+
+        // Another file of the same torrent is its own entry: a season pack has one
+        // probe per episode, not one per torrent.
+        assert!(cache.probe_for(marker, Some(1), first).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "each file probes separately");
+        // A non-torrent URL keeps the host+path key.
+        let h = "https://cdn.debrid.example/videos/m.mkv?Signature=A";
+        assert!(cache.probe_for(h, None, h).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// A content key must not freeze a refusal for the TTL: the same file becomes
+    /// readable the moment the swarm delivers its header, and the next resolve has
+    /// to reach the prober again. URL keys keep today's behaviour (a refused debrid
+    /// link stays refused).
+    #[test]
+    fn a_content_key_does_not_cache_a_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe_calls = calls.clone();
+        let cache = ProbeCache::default();
+        cache.set_prober(Arc::new(move |_url: &str, _deadline| {
+            match probe_calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Err("not openable yet".into()),
+                _ => Ok(ProbeInfo { container: "mkv".into(), ..Default::default() }),
+            }
+        }));
+        let marker = "torrent:1111111111111111111111111111111111111111";
+        let url = "http://127.0.0.1:43289/stream/aaaa";
+        assert!(cache.probe_for(marker, Some(0), url).expect("prober").is_err());
+        assert!(cache.cached_for(marker, Some(0), url).is_none(), "a refusal is not a cached answer");
+        assert!(cache.probe_for(marker, Some(0), url).expect("prober").is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the retry reaches the prober");
+    }
+
+    /// A content key cannot go stale, so it must outlive the URL TTL; a URL key must not.
+    #[test]
+    fn a_content_verdict_never_expires_but_a_url_one_does() {
+        let cache = ProbeCache::default();
+        cache.set_prober(Arc::new(|_url: &str, _deadline| {
+            Ok(ProbeInfo { container: "mkv".into(), ..Default::default() })
+        }));
+        let marker = "torrent:2222222222222222222222222222222222222222";
+        assert!(cache.probe_for(marker, Some(0), "http://127.0.0.1:1/stream/aa").is_some());
+        assert!(cache.probe("https://cdn.example/v/m.mkv?Signature=A").is_some());
+        cache.age(PROBE_TTL * 3);
+        assert!(cache.cached_for(marker, Some(0), "http://127.0.0.1:1/stream/bb").is_some(), "content outlives the TTL");
+        assert!(cache.cached("https://cdn.example/v/m.mkv?Signature=B").is_none(), "a URL verdict expires");
+    }
+
+    /// The point of `attach`: a reboot used to re-pay the probe (10 s on a 4K remux, because the
+    /// payload is tmpfs and the header and tail cues come back from the swarm).
+    #[test]
+    fn a_content_verdict_survives_a_relaunch() {
+        let path = plx_base::testscratch::process_dir("probe-cache-reload").join(PROBE_CACHE_FILE);
+        let marker = "torrent:3333333333333333333333333333333333333333";
+        let url = "http://127.0.0.1:1/stream/aa";
+        {
+            let cache = ProbeCache::default();
+            cache.attach(path.clone());
+            cache.set_prober(Arc::new(|_u: &str, _d| {
+                Ok(ProbeInfo { container: "mkv".into(), duration_ms: 7200000, ..Default::default() })
+            }));
+            assert!(cache.probe_for(marker, Some(0), url).is_some());
+            // A URL verdict is not durable state: it is a signed link's answer.
+            assert!(cache.probe("https://cdn.example/v/m.mkv?Signature=A").is_some());
+        }
+        let again = ProbeCache::default();
+        again.attach(path.clone());
+        let hit = again.cached_for(marker, Some(0), url).expect("restored from disk");
+        assert_eq!(hit.expect("ok").duration_ms, 7200000);
+        assert!(again.cached("https://cdn.example/v/m.mkv?Signature=B").is_none(), "URL answers stay in RAM");
+        // And a prober that must not run proves the hit above came from the file.
+        again.set_prober(Arc::new(|_u: &str, _d| panic!("restored entry must not re-probe")));
+        assert!(again.probe_for(marker, Some(0), url).is_some());
+    }
+
+    /// `PROBE_TTL` alone never bounded the map: a long session keeps every entry fresh, so the
+    /// ceiling has to evict by age.
+    #[test]
+    fn the_cache_drops_the_oldest_past_its_ceiling() {
+        let cache = ProbeCache::default();
+        cache.set_prober(Arc::new(|_u: &str, _d| {
+            Ok(ProbeInfo { container: "mkv".into(), ..Default::default() })
+        }));
+        for i in 0..(MAX_ENTRIES + 8) {
+            let marker = format!("torrent:{i:040x}");
+            let _ = cache.probe_for(&marker, Some(0), "http://127.0.0.1:1/stream/aa");
+        }
+        let len = cache.done.lock().unwrap().len();
+        assert_eq!(len, MAX_ENTRIES, "the ceiling holds");
+        let oldest = "torrent:0000000000000000000000000000000000000000";
+        assert!(cache.cached_for(oldest, Some(0), "http://127.0.0.1:1/stream/aa").is_none(), "oldest evicted");
+        let newest = format!("torrent:{:040x}", MAX_ENTRIES + 7);
+        assert!(cache.cached_for(&newest, Some(0), "http://127.0.0.1:1/stream/aa").is_some());
     }
 
     #[test]
