@@ -244,7 +244,11 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   also deletes its payload. That invalidates every URL the engine handed out for it, so
   `sbengine::active_hash()` names the live torrent and `open_url`'s resolved-URL cache reuses an
   engine URL only while its `torrent:<hash>` marker still matches — after a source change back,
-  a stale entry is resolved again instead of 404ing forever.
+  a stale entry is resolved again instead of 404ing forever. The resume file
+  (`state/resume/<hash>.resume`, a few KB of metadata + peer list) survives the removal, so a
+  replayed torrent restores its metadata and peer list instead of doing a cold DHT/tracker
+  rediscovery; the directory is LRU-bounded to 10 MiB (`enforce_resume_state_budget`), which
+  never frees the OOM-guarded payload — payload deletion on switch is unchanged.
   While the player is not on screen the engine is throttled to a background ceiling
   (`sbengine: background throttled`, 64 KiB/s down and up) so it does not saturate CPU or
   bandwidth under Home; the wait for the 1 MiB prebuffer in `resolve_stream` counts only the new

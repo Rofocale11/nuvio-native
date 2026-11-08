@@ -41,6 +41,11 @@ namespace {
 
 constexpr std::size_t maximum_session_state_size = 4 * 1024 * 1024;
 constexpr std::size_t maximum_resume_state_size = 16 * 1024 * 1024;
+// The resume directory holds tiny swarm state (metadata + peer list), not payload:
+// metadata is 1-4 KB, peers a few KB per hundred. 10 MiB is therefore ~1000
+// saved torrents, far past any real session, and three orders of magnitude
+// below the 40 MiB RAM payload budget it must never be counted against.
+constexpr std::uint64_t resume_state_budget_bytes = 10ULL * 1024 * 1024;
 constexpr std::size_t maximum_pending_disk_reclaims = 256;
 constexpr int peer_connect_timeout_seconds = 3;
 constexpr int peer_handshake_timeout_seconds = 20;
@@ -434,17 +439,11 @@ public:
         warm_since_.erase(id);
         quiesced_torrents_.erase(id);
         stream_bridge_->remove_torrent(id);
-        try {
-            storage::remove_file_if_present(resume_path(id));
-        } catch (const std::exception& error) {
-            queued_events_.push_back({
-                BackendEventType::torrent_error,
-                request_id,
-                id,
-                std::string("failed to remove persisted torrent state: ") + error.what(),
-                {},
-            });
-        }
+        // Resume state survives remove(): it is the swarm memory (metadata +
+        // peer list) that makes a replay instant, not the payload the window
+        // holds. The payload (Delete files through the window) went above;
+        // the directory is bounded by enforce_resume_state_budget().
+        enforce_resume_state_budget();
         const auto prepare = pending_prepares_.find(id);
         if (prepare != pending_prepares_.end()) {
             queued_events_.push_back({
@@ -921,6 +920,68 @@ private:
 
     [[nodiscard]] std::filesystem::path resume_path(const std::string& id) const {
         return resume_directory_ / (id + ".resume");
+    }
+
+    // Resume state is swarm memory, not payload: it survives remove() so a
+    // replayed torrent restores its metadata and peer list instead of doing a
+    // cold DHT/tracker rediscovery. Its directory is LRU-bounded to
+    // resume_state_budget_bytes; on overflow the least-recently-used resume
+    // goes, never a live torrent's.
+    void enforce_resume_state_budget() {
+        std::error_code error;
+        if (!std::filesystem::is_directory(resume_directory_, error)) {
+            return;
+        }
+        struct Entry {
+            std::filesystem::path path;
+            std::uint64_t size;
+            std::filesystem::file_time_type mtime;
+        };
+        std::vector<Entry> entries;
+        std::uint64_t total = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(resume_directory_, error)) {
+            if (error) {
+                return;
+            }
+            std::error_code entry_error;
+            if (!entry.is_regular_file(entry_error) || entry_error) {
+                continue;
+            }
+            if (entry.path().extension() != ".resume") {
+                continue;
+            }
+            const auto stem = entry.path().stem().string();
+            if (!is_canonical_torrent_id(stem)) {
+                continue;
+            }
+            const auto size = entry.file_size(entry_error);
+            const auto mtime = entry.last_write_time(entry_error);
+            if (entry_error) {
+                continue;
+            }
+            entries.push_back({entry.path(), size, mtime});
+            total += size;
+        }
+        if (total <= resume_state_budget_bytes) {
+            return;
+        }
+        const auto protected_ids = protected_torrents();
+        std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+            return a.mtime < b.mtime;
+        });
+        for (const auto& entry : entries) {
+            if (total <= resume_state_budget_bytes) {
+                break;
+            }
+            const auto stem = entry.path.stem().string();
+            if (protected_ids.contains(stem)) {
+                continue;
+            }
+            std::error_code remove_error;
+            if (std::filesystem::remove(entry.path, remove_error) && !remove_error) {
+                total -= entry.size;
+            }
+        }
     }
 
     [[nodiscard]] std::filesystem::path prepare_payload_path(
@@ -1859,18 +1920,9 @@ private:
         stream_bridge_->remove_torrent(id);
         pending_prepares_.erase(id);
         pending_resume_saves_.erase(context);
+        // As in remove_torrent: the resume survives; only the payload goes.
         if (!cache_removal) {
-            try {
-                storage::remove_file_if_present(resume_path(id));
-            } catch (const std::exception& error) {
-                events.push_back({
-                    BackendEventType::torrent_error,
-                    request_id,
-                    id,
-                    std::string("failed to remove persisted torrent state: ") + error.what(),
-                    {},
-                });
-            }
+            enforce_resume_state_budget();
         }
         const auto active = active_.find(id);
         if (active != active_.end()) {
