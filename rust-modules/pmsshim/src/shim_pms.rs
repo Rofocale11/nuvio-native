@@ -2486,6 +2486,43 @@ mod tmdb_metadata_tests {
         assert_eq!(body(&shim.handle(&get()))["complete"], true);
     }
 
+    /// The swarm warm's gate: a key with no resume point, or no remembered torrent, is inert —
+    /// nothing was played there, so no swarm may be dialed. A remembered torrent behind a resume
+    /// point admits the warm (the engine call is best effort on its own thread; no engine is
+    /// bound under test, and a refused open must still answer 200 rather than break the caller).
+    #[test]
+    fn nuvio_warm_is_inert_without_a_remembered_torrent() {
+        let backend = Arc::new(RecordingBackend::default());
+        let shim = Arc::new(Shim::new(backend, Config::default()));
+        let get = |rk: &str| Request {
+            method: "GET".into(),
+            path: "/nuvio/warm".into(),
+            query: HashMap::from([("ratingKey".into(), rk.into())]),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+        let ok = |r: &Response| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["ok"].as_bool().unwrap_or(true)
+        };
+        let response = shim.handle(&get("7"));
+        assert_eq!(response.status, 200);
+        assert!(!ok(&response), "P2P off warms nothing");
+        shim.set_p2p(true, None);
+        assert!(!ok(&shim.handle(&get("7"))), "a key with no resume point warms nothing");
+
+        shim.watch.progress(7, 60_000, 7_200_000, None);
+        assert!(!ok(&shim.handle(&get("7"))), "a resume point with no remembered source warms nothing");
+
+        shim.watch.set_last_stream(
+            7,
+            crate::shim_store::LastStream {
+                info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+                ..Default::default()
+            },
+        );
+        assert!(ok(&shim.handle(&get("7"))), "the remembered torrent behind the resume point is admitted");
+    }
+
     #[test]
     fn a_related_show_answers_complete_without_waiting_for_a_stream() {
         let backend = Arc::new(RecordingBackend::default());
@@ -6817,11 +6854,58 @@ impl Shim {
                     _ => Response::json_status(404, &json!({"ok": false})),
                 }
             }
+            (_, ["nuvio", "warm"]) => self.warm_torrent(req),
             _ => {
                 eprintln!("pmsshim: unhandled {} {}", req.method, req.path);
                 ok_empty()
             }
         }
+    }
+
+    /// Open the remembered torrent for `ratingKey` now, so the engine restores its
+    /// kept swarm (metadata + saved peers) and dials them BEFORE the viewer presses
+    /// Play. No stream, no file priorities, no payload: the win is the connection
+    /// set, which is what a cold resume spends its first seconds on.
+    ///
+    /// Silent (200, `ok: false`) for a title with no resume point, no remembered
+    /// source, or a non-torrent source — a debrid link has no swarm to warm. The
+    /// engine call runs on its own thread: `open` takes the engine mutex, and the
+    /// shim's request thread must never wait behind the event loop.
+    fn warm_torrent(&self, req: &Request) -> Response {
+        let rk = req
+            .q("ratingKey")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(-1);
+        if rk < 0 || !self.p2p_enabled() {
+            return Response::json(&json!({"ok": false}));
+        }
+        let watch = self.watch.get(rk);
+        if watch.offset_ms <= 0 {
+            return Response::json(&json!({"ok": false}));
+        }
+        let Some(hash) = watch.last_stream.and_then(|last| last.info_hash) else {
+            return Response::json(&json!({"ok": false}));
+        };
+        if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Response::json(&json!({"ok": false}));
+        }
+        let ih = hash.to_ascii_lowercase();
+        let tag = ih[..12].to_string();
+        let spawned = std::thread::Builder::new()
+            .name("p2p-warm".into())
+            .spawn(move || {
+                let ok = plx_stremio::sbengine::warm(&ih);
+                plx_base::eventlog::log(&format!(
+                    "sbengine: warm {tag} — {}",
+                    if ok {
+                        "swarm opened (no stream, no payload)"
+                    } else {
+                        "engine refused"
+                    }
+                ));
+            })
+            .is_ok();
+        Response::json(&json!({"ok": spawned}))
     }
 
     fn catalog_listing(

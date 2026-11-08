@@ -232,9 +232,15 @@ pub struct MetadataAdapter {
     held_detail: std::sync::Mutex<Vec<(plx_plex::plex::ServerId, String, u32, Option<i64>)>>,
     /// The focus prefetch's admitted keys ([`MetadataCmd::WarmDetail`]).
     warm: WarmBook,
+    /// The torrent warm's admitted keys ([`MetadataCmd::WarmTorrent`]) — its own book, so a
+    /// detail prefetch that already ran does not suppress the swarm warm, and vice versa.
+    torrent_warm: WarmBook,
     /// TEST ONLY: warm reads [`warm_detail`] admitted, parked here instead of on a worker.
     #[cfg(any(test, feature = "test-support"))]
     held_warm: std::sync::Mutex<Vec<(plx_plex::plex::ServerId, String)>>,
+    /// TEST ONLY: torrent warms [`warm_torrent`] admitted, parked here instead of on a worker.
+    #[cfg(any(test, feature = "test-support"))]
+    held_torrent_warm: std::sync::Mutex<Vec<(plx_plex::plex::ServerId, String)>>,
 }
 
 impl Default for MetadataAdapter {
@@ -258,8 +264,11 @@ impl Default for MetadataAdapter {
             #[cfg(any(test, feature = "test-support"))]
             held_detail: std::sync::Mutex::new(Vec::new()),
             warm: WarmBook::default(),
+            torrent_warm: WarmBook::default(),
             #[cfg(any(test, feature = "test-support"))]
             held_warm: std::sync::Mutex::new(Vec::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            held_torrent_warm: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -4084,6 +4093,40 @@ fn warm_detail(adapter: &std::sync::Arc<MetadataAdapter>, sid: plx_plex::plex::S
     }
 }
 
+/// Warm the title's remembered torrent: the shim opens it (`/nuvio/warm`) so the engine restores
+/// its kept swarm and dials the saved peers, with no stream and no payload. The engine work is
+/// best effort and off this thread; [`WarmBook`] drops a repeat ask for the same key inside its
+/// TTL, so a detail open after a focus warm (or a re-opened page) costs one command.
+fn warm_torrent(adapter: &std::sync::Arc<MetadataAdapter>, sid: plx_plex::plex::ServerId, rk: &str) {
+    if !adapter.torrent_warm.claim(sid, rk, std::time::Instant::now()) {
+        return;
+    }
+    plx_base::eventlog::log(&format!("p2p: warm requested rk={rk} sid={sid:?} — swarm"));
+    let rk = rk.to_string();
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        adapter.torrent_warm.finish(sid, &rk, std::time::Instant::now());
+        adapter
+            .held_torrent_warm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((sid, rk));
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let worker = std::sync::Arc::clone(adapter);
+        let key = rk.clone();
+        let spawned = plx_base::task::spawn_small("p2p-warm", move || {
+            let _ = plx_plex::plex::client_for(sid).is_some_and(|client| client.nuvio_warm(&key));
+            worker.torrent_warm.finish(sid, &key, std::time::Instant::now());
+        });
+        if !spawned {
+            // The OS refused the worker: nothing warmed, so do not hide the key for the TTL.
+            adapter.torrent_warm.release(sid, &rk);
+        }
+    }
+}
+
 fn finish_detail_fetch(
     adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId, rk: &str, gen: u32,
     fetch: impl FnOnce() -> Option<Detail> + std::panic::UnwindSafe,
@@ -4106,6 +4149,12 @@ pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
             // Silent by design: warms the shim's caches without landing a Detail or moving the
             // generation counters, so the page (and any open detail) sees no change.
             warm_detail(adapter, sid, &rk);
+            false
+        }
+        MetadataCmd::WarmTorrent { sid, rk } => {
+            // Same silence, and the same one-per-rest bookkeeping: the engine work happens
+            // behind the shim, and a repeat ask for the same title inside the TTL is dropped.
+            warm_torrent(adapter, sid, &rk);
             false
         }
         MetadataCmd::RequestDetail { sid, rk } => {

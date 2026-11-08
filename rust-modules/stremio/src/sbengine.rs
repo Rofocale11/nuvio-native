@@ -250,6 +250,24 @@ pub fn open(magnet: &str, ih: &str) -> bool {
     unsafe { (a.open)(c_magnet.as_ptr(), c_ih.as_ptr()) == 0 }
 }
 
+/// Open `ih` so the engine restores its kept swarm state (metadata, trackers,
+/// saved peer addresses) and dials those peers, WITHOUT preparing a stream: no
+/// file priorities, no reads, no payload. The play that follows finds the
+/// handle already open and the swarm connected, so it behaves like a seek on a
+/// live torrent instead of paying the connection ramp.
+///
+/// The info hash is enough — the `.resume` file carries everything else. No
+/// resume file means the add is cold (metadata from DHT/trackers), which is
+/// still the play's own work, just started earlier. Best effort: false when the
+/// engine is not bound or the add was refused.
+pub fn warm(ih: &str) -> bool {
+    let Some(a) = api() else { return false };
+    let magnet = format!("magnet:?xt=urn:btih:{ih}");
+    let c_magnet = CString::new(magnet).unwrap();
+    let c_ih = CString::new(ih).unwrap();
+    unsafe { (a.open)(c_magnet.as_ptr(), c_ih.as_ptr()) == 0 }
+}
+
 /// The torrent's files once metadata is ready. Returns `None` if the engine is
 /// not bound, `Some(Err(msg))` for a failed torrent, and `Some(Ok(files))`
 /// (possibly empty while metadata is still in flight) otherwise.

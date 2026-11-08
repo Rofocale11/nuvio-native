@@ -46,6 +46,16 @@ impl Client {
         self.get_bytes(&path).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             .is_some_and(|v| v["ok"] == true)
     }
+
+    /// Ask the shim to open the title's remembered torrent so its swarm is connected
+    /// before the play (no stream, no payload — see the shim's `/nuvio/warm`). Best
+    /// effort: false when this is not a Nuvio server or nothing was warmed.
+    pub fn nuvio_warm(&self, rk: &str) -> bool {
+        if !self.is_nuvio() { return false; }
+        let path = QueryBuilder::new("/nuvio/warm").str("ratingKey", rk).build();
+        self.get_bytes(&path).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .is_some_and(|v| v["ok"] == true)
+    }
 }
 
 /// Read the durable installation preference through the session cache.

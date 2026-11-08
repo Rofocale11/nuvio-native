@@ -299,6 +299,16 @@ server") can take far longer than the steady-state media inactivity timeout
 (`stream.rs MEDIA_RECV_TIMEOUT_MS`, 15 s) and curl's 30 s low-speed floor; probing at decision
 time (generous deadline) means the player's own open hits a warmed torrent.
 
+**Resume warms the swarm on intent.** The resume file and the durable probe verdict make a
+resume's metadata and track table free (measured: metadata 100–309 ms, resolve 200–410 ms), and a
+replay inside one process skips the probe entirely. What is left is that a torrent closed for a
+day has no open connections: the first telemetry tick after a resume measured 75–714 KB/s with
+0–4 MB across the test set, reaching 1.4–8 MB/s one tick later. So opening the title's detail page
+— or, under the Play setting, resting one second on its Continue Watching card — asks the shim to
+open the remembered torrent (`/nuvio/warm`): info hash only, no stream, no file priorities, no
+payload, so the engine restores the kept swarm and dials its peers before the press. A debrid or
+direct link has no swarm and the warm is a no-op for it.
+
 Cold starts that skip the probe are covered by a **first-byte grace**. A plaintext media open
 arms `MEDIA_FIRST_BYTE_TIMEOUT_MS` (45 s) on its socket for the FIRST body byte only; the first
 successful read restores `MEDIA_RECV_TIMEOUT_MS` (15 s) for the rest of the transfer. It is

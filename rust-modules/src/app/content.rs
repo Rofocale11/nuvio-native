@@ -512,6 +512,18 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
         match request {
             ContentReq::Push(arg) => {
                 halt_preview(app);
+                // Opening a title's page is the intent the swarm warm waits for: the remembered
+                // torrent is opened now (no stream, no payload) so its peers are connected by the
+                // time the page's Play is pressed. The deck card's own rest covers the setting
+                // where OK on Continue Watching plays directly instead of opening this page.
+                if let ContentArg::Detail { sid, rk } = &arg {
+                    app.bridge.metadata_mut().run(
+                        plx_data::stores::metadata::MetadataCmd::WarmTorrent {
+                            sid: *sid,
+                            rk: rk.clone(),
+                        },
+                    );
+                }
                 // The page's own press frame captured `ret`, so it rides the request rather than
                 // being re-read at the commit: the user can still move focus during the dip, and
                 // BACK must return them to where they pressed.
@@ -670,6 +682,13 @@ fn home_requests(app: &mut App, now: u32) {
                     sid, &rk, Some(resume_ns), ret, now);
             }
             HomeReq::Detail { sid, rk } => {
+                // The click that opens the page is the swarm warm's intent (see `ContentReq::Push`).
+                app.bridge.metadata_mut().run(
+                    plx_data::stores::metadata::MetadataCmd::WarmTorrent {
+                        sid,
+                        rk: rk.clone(),
+                    },
+                );
                 activate_home_item(&mut app.player.session, &mut app.adapters.player,
                     &mut app.pages, &mut app.bridge, &mut app.menu_play_await,
                     sid, &rk, None, ret, now);

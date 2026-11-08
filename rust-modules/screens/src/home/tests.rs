@@ -6086,3 +6086,86 @@ fn a_scroll_through_cards_does_not_warm_each_one() {
     }
     assert!(sent.is_empty(), "scrolling past a card must not warm it: {sent:?}");
 }
+
+/// The deck's swarm warm and its gate. OK on a Continue Watching card under `DeckPress::Play`
+/// starts the player from the card, so the card's rest is the swarm's only lead time: after 1 s
+/// the remembered torrent is opened (no stream, no payload). Under `Details` the page's open
+/// carries that intent (see the application's detail push), and merely resting on a card must
+/// warm no swarm at all — that is the scroll-through-15-cards regression.
+fn deck_torrent_warm(out: &[Stamped<TestHost>]) -> Vec<(plx_plex::plex::ServerId, String)> {
+    out.iter()
+        .filter_map(|stamped| match &stamped.fx {
+            Fx::App(AppFx::Store(
+                StoreId::Metadata,
+                StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmTorrent {
+                    sid,
+                    rk,
+                }),
+            )) => Some((*sid, rk.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn deck_warm_frames(
+    s: &mut HomeScreen,
+    view: HubsView<'_>,
+    card: FocusKey<u32>,
+    from: u32,
+    frames: u32,
+) -> Vec<(plx_plex::plex::ServerId, String)> {
+    let mut sent = Vec::new();
+    for n in 0..frames {
+        let (_, out, _) = step(
+            s,
+            view,
+            Some(card),
+            &ScreenEvent::Tick(Tick { ms: from + n * 16, dt_us: 16_667 }),
+        );
+        sent.extend(deck_torrent_warm(&out));
+    }
+    sent
+}
+
+#[test]
+fn a_resting_deck_card_warms_its_torrent_once_the_press_can_play() {
+    let _guard = plx_base::testlock::serial();
+    let _press = deck_press_is(plx_media::route::DeckPress::Play);
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 3, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let view = snapshot.view();
+    let mut s = screen(view);
+    let card = first_card(&s);
+    let key = {
+        let context = cx(view, Some(card));
+        let item = s.focused_item(Some(card), &context).unwrap();
+        (item.sid, item.rk.clone())
+    };
+    step(&mut s, view, Some(card), &ScreenEvent::FocusMoved { from: None, to: card, by: By::Dir });
+
+    // The detail prefetch fires at 0.75 s; the swarm warm waits its own 1 s.
+    let early = deck_warm_frames(&mut s, view, card, 16, 55);
+    assert!(early.is_empty(), "no swarm warm before the 1 s dwell: {early:?}");
+    let sent = deck_warm_frames(&mut s, view, card, 16 + 55 * 16, 30);
+    assert_eq!(sent, vec![key], "one swarm warm once the card rests");
+    assert!(deck_warm_frames(&mut s, view, card, 2000, 30).is_empty(), "resting longer asks again never");
+}
+
+#[test]
+fn a_resting_deck_card_under_details_warms_no_swarm() {
+    let _guard = plx_base::testlock::serial();
+    let _press = deck_press_is(plx_media::route::DeckPress::Details);
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, 3, plx_data::pms::HubState::Ready);
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let view = snapshot.view();
+    let mut s = screen(view);
+    let card = first_card(&s);
+    step(&mut s, view, Some(card), &ScreenEvent::FocusMoved { from: None, to: card, by: By::Dir });
+    // More than the swarm dwell: under Details the detail page's open is the intent.
+    let sent = deck_warm_frames(&mut s, view, card, 16, 90);
+    assert!(sent.is_empty(), "resting on a deck card under Details must not warm a swarm: {sent:?}");
+}

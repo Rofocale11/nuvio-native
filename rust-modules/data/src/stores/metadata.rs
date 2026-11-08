@@ -173,6 +173,10 @@ pub enum MetadataCmd {
     /// Warm the shim's caches for a card the focus rests on: the same GET `RequestDetail` makes,
     /// with the body dropped. Never lands in this store and raises no notice.
     WarmDetail { sid: ServerId, rk: String },
+    /// Open the title's remembered torrent so its swarm is connected before the play. Same
+    /// silence as `WarmDetail` — the engine work happens behind the shim, and nothing here lands.
+    /// Sent after a Continue Watching card rests when OK plays, and when a detail page opens.
+    WarmTorrent { sid: ServerId, rk: String },
     /// Supersede any in-flight load and fetch `(sid, rk)` off-thread; lands through `pump_detail`.
     RequestDetail { sid: ServerId, rk: String },
     /// Close the page: drop the item and supersede everything in flight.
@@ -337,7 +341,9 @@ impl MetadataStore {
     /// state clears, so a worker spawned before the reset can only land into the retired `Arc` —
     /// mirrors `PersonStore::run`/`SearchStore::run_with_directory`'s `Reset` arm.
     pub fn run(&mut self, cmd: MetadataCmd) -> bool {
-        if self.warm_denied && matches!(&cmd, MetadataCmd::WarmDetail { .. }) {
+        if self.warm_denied
+            && matches!(&cmd, MetadataCmd::WarmDetail { .. } | MetadataCmd::WarmTorrent { .. })
+        {
             return false;
         }
         if matches!(&cmd, MetadataCmd::Reset) {
@@ -348,7 +354,9 @@ impl MetadataStore {
         // nothing either. Every other command bumps whatever it returned.
         let silent = matches!(
             &cmd,
-            MetadataCmd::ApplyView { .. } | MetadataCmd::WarmDetail { .. }
+            MetadataCmd::ApplyView { .. }
+                | MetadataCmd::WarmDetail { .. }
+                | MetadataCmd::WarmTorrent { .. }
         );
         let changed = crate::metadata::run(&mut self.state, &self.adapter, cmd);
         if changed || !silent {

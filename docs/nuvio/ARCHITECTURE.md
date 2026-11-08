@@ -239,7 +239,8 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   The Settings server URL is therefore optional: `Shim::torrent_server` falls back to the
   default loopback address when the field is empty and the engine is loaded, so torrents stay
   offered.
-  The engine keeps every opened torrent downloading until it is removed, so resolving a
+  The engine keeps every opened torrent alive — downloading once a stream has prepared its
+  file, connected-but-idle for a warmed one — until it is removed, so resolving a
   different hash removes the previous one (`sbengine: released previous torrent <hash>`), which
   also deletes its payload. That invalidates every URL the engine handed out for it, so
   `sbengine::active_hash()` names the live torrent and `open_url`'s resolved-URL cache reuses an
@@ -252,6 +253,14 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   directory holds `probe-cache.json`, the shim's durable probe verdicts (see `PLAYBACK.md`), so a
   replayed torrent's codec/duration/track table is read from disk instead of re-fetched from the
   swarm.
+  The play's swarm is warmed on intent, before Play: opening a title's detail page, or resting
+  1 s on its Continue Watching card when that setting makes OK play, has the shim open the
+  remembered torrent (`/nuvio/warm`) — `sbengine::warm` adds the info hash with a bare magnet, so
+  the kept `.resume` restores metadata and peers and libtorrent dials them while the engine is
+  still in upload mode: no stream, no file priorities, no payload. The play then finds the handle
+  open and the swarm connected, so a resume behaves like a seek on a live torrent instead of
+  paying the connection ramp. The detail/backdrop prefetch (`WarmDetail`) is a separate command
+  and does not do this, so a card the viewer only scrolls past never warms a swarm.
   While the player is not on screen the engine is throttled to a background ceiling
   (`sbengine: background throttled`, 64 KiB/s down and up) so it does not saturate CPU or
   bandwidth under Home; the wait for the 1 MiB prebuffer in `resolve_stream` counts only the new

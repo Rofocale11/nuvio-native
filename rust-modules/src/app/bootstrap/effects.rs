@@ -235,6 +235,7 @@ fn store(command: &plx_data::stores::StoreCmd) -> Result<Value, &'static str> {
             json!({"metadata":match cmd {
                 MetadataCmd::RequestDetail { sid, rk } => json!({"request_detail":[sid.raw(),rk]}),
                 MetadataCmd::WarmDetail { sid, rk } => json!({"warm_detail":[sid.raw(),rk]}),
+                MetadataCmd::WarmTorrent { sid, rk } => json!({"warm_torrent":[sid.raw(),rk]}),
                 MetadataCmd::Clear => json!("clear"),
                 MetadataCmd::ClearItem { sid, rk } => json!({"clear_item":[sid.raw(),rk]}),
                 MetadataCmd::Withdraw { sid, rk } => json!({"withdraw":[sid.raw(),rk]}),

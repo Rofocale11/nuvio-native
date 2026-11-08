@@ -2511,48 +2511,78 @@ impl HomeScreen {
     /// Warm the shim's caches for the card the focus is resting on, once per rest. A focus move
     /// restarts the clock; the data layer drops a repeat ask for the same key inside its TTL, so
     /// a later return to the card costs one command and no request.
+    ///
+    /// A Continue Watching card also warms its remembered TORRENT, but only when OK on that card
+    /// plays (`DeckPress::Play`): that press starts the player directly, so the card's rest is
+    /// the only lead time the swarm can get. Under `Details` the page's open is the intent, and
+    /// warming a card the viewer is merely scrolling past would spend connections for nothing.
+    /// A scroll never dwells long enough to fire either warm.
     fn tick_prefetch<H: HomeLike>(&mut self, cx: &Cx<'_, H>, dt: f32, fx: &mut Effects<'_, H>) {
         let item = self.focused_item(cx.focus.current, cx);
         let key = item.map(|item| (item.sid, item.rk.clone()));
+        let from_deck = self.focused_loc(cx.focus.current).is_some_and(|located| match located {
+            Located::Item(row, _) => self
+                .rows
+                .get(row)
+                .is_some_and(|h| h.identity == HomeHubIdentity::ContinueWatching),
+            _ => false,
+        });
+        let warm_swarm = from_deck && plx_media::route::deck_press().press_plays();
         if key != self.prefetch.key {
             self.prefetch.key = key;
             self.prefetch.dwell = 0.0;
             self.prefetch.sent = false;
+            self.prefetch.torrent_sent = false;
         }
         let Some((sid, rk)) = self.prefetch.key.clone() else { return };
         // A timer that only adds `dt` never fires on an idle page: the idle gate parks the loop
-        // unless the screen reports `Motion`. Report only while the dwell is still running, so a
-        // card that has already warmed lets the page park again.
-        if self.prefetch.sent {
+        // unless the screen reports `Motion`. Report until the LAST warm this rest can still
+        // send has run, then let the page park again.
+        if self.prefetch.sent && (self.prefetch.torrent_sent || !warm_swarm) {
             return;
         }
         plx_ui::dwell::accumulate(&mut self.prefetch.dwell, dt, &mut |event| {
             fx.note(event);
         });
-        if self.prefetch.dwell < PREFETCH_DWELL_S {
-            return;
+        if !self.prefetch.sent && self.prefetch.dwell >= PREFETCH_DWELL_S {
+            self.prefetch.sent = true;
+            fx.push(Fx::App(AppFx::Store(
+                StoreId::Metadata,
+                StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmDetail {
+                    sid,
+                    rk: rk.clone(),
+                }),
+            )));
+            // The command above warms the shim's DATA caches only; the detail page's own first
+            // frame still fetched its backdrop cold (≈450-600 ms of fetch+decode, then a solo
+            // upload frame). Warm the exact key the page draws — same server, same path, same
+            // 1280×720 box as `DetailScreen::draw_backdrop` — so the page opens on art that is
+            // already resident. A probe rather than a warm: a warm is refused while ANY visible
+            // request is outstanding, which on a browsing page is almost always. Movies and
+            // collections are exact; a show whose detail page settles on an episode still warms the
+            // show backdrop, which that page also uses when the episode has none.
+            if let Some(item) = item.filter(|item| !item.art.is_empty()) {
+                plx_ui::widgets::resolve_tex_wh_on(
+                    item.sid.raw(),
+                    &item.art,
+                    super::detail::BACKDROP_W,
+                    super::detail::BACKDROP_H,
+                    0,
+                );
+            }
         }
-        self.prefetch.sent = true;
-        fx.push(Fx::App(AppFx::Store(
-            StoreId::Metadata,
-            StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmDetail { sid, rk }),
-        )));
-        // The command above warms the shim's DATA caches only; the detail page's own first
-        // frame still fetched its backdrop cold (≈450-600 ms of fetch+decode, then a solo
-        // upload frame). Warm the exact key the page draws — same server, same path, same
-        // 1280×720 box as `DetailScreen::draw_backdrop` — so the page opens on art that is
-        // already resident. A probe rather than a warm: a warm is refused while ANY visible
-        // request is outstanding, which on a browsing page is almost always. Movies and
-        // collections are exact; a show whose detail page settles on an episode still warms the
-        // show backdrop, which that page also uses when the episode has none.
-        if let Some(item) = item.filter(|item| !item.art.is_empty()) {
-            plx_ui::widgets::resolve_tex_wh_on(
-                item.sid.raw(),
-                &item.art,
-                super::detail::BACKDROP_W,
-                super::detail::BACKDROP_H,
-                0,
-            );
+        if warm_swarm
+            && !self.prefetch.torrent_sent
+            && self.prefetch.dwell >= PREFETCH_TORRENT_DWELL_S
+        {
+            self.prefetch.torrent_sent = true;
+            fx.push(Fx::App(AppFx::Store(
+                StoreId::Metadata,
+                StoreCmd::Metadata(plx_data::stores::metadata::MetadataCmd::WarmTorrent {
+                    sid,
+                    rk,
+                }),
+            )));
         }
     }
 
@@ -3641,12 +3671,20 @@ fn disc_hex(item: &PmsMovie) -> Option<[u8; 12]> {
 /// `a_scroll_through_cards_does_not_warm_each_one`).
 const PREFETCH_DWELL_S: f32 = 0.750;
 
+/// How long a Continue Watching card must hold the focus before its torrent is opened. Longer
+/// than [`PREFETCH_DWELL_S`] because this warm dials peers (not just a shim GET), and the press
+/// that would use it is a deliberate one: a viewer who taps past cards must warm none of them.
+const PREFETCH_TORRENT_DWELL_S: f32 = 1.0;
+
 /// The card the focus rests on and how long it has been there. Fed by `Tick`; not logical state.
 #[derive(Default)]
 struct PrefetchDwell {
     key: Option<(plx_plex::plex::ServerId, String)>,
     dwell: f32,
     sent: bool,
+    /// The deck card's torrent warm has been sent for this rest (see
+    /// [`PREFETCH_TORRENT_DWELL_S`]); `sent` is the detail/backdrop warm.
+    torrent_sent: bool,
 }
 
 /// The bookmark disc's Home half: which title the shared [`plx_appkit::watchlist_disc::Disc`] is
