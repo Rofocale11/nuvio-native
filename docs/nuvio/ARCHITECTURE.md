@@ -52,7 +52,7 @@ server" below.
 
 - Catalogs → PMS library sections and Home hubs. Metas → movie/show/season/episode items.
   Search → `/hubs/search`. Streams → the item's `Media[]` list (one Media per stream, with
-  resolution/codec/HDR/size/bitrate from `plx_stremio::classify`). Each Media also carries
+  resolution/codec/HDR/seeders/size/bitrate from `plx_stremio::classify`, ranked resolution → seeders → HDR → size among torrents). Each Media also carries
   `addon_name`, the `Addon::label()` of the addon that returned it (empty only on the
   "Finding streams…" placeholder). Part URLs redirect (or proxy, when headers are needed) to the
   stream's real URL. The decision endpoint waits for discovery/probing and refuses media that

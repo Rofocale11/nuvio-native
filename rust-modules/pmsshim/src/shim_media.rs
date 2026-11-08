@@ -64,7 +64,9 @@ fn hdr_rank(h: Hdr) -> u8 {
 }
 
 /// Keep the playable streams, classify, and order best first: debrid-cached/direct HTTP before
-/// torrents, then resolution, then HDR, then size (bigger is higher bitrate for the same title).
+/// torrents, then the [`StreamInfo::rank`] key — resolution, then seeders, then HDR, then size
+/// (bigger is higher bitrate for the same title). Seeders matters only among torrents: a cached
+/// stream has no seeder count to compare, and in any case the direct flag floats it ahead outright.
 /// `audio_ok`: the TV's audio codecs; a stream whose label names a codec outside it (DTS, TrueHD on
 /// a CX) ranks after the playable ones of its resolution. Empty = unknown.
 pub fn rank(streams: &[Stream], runtime_secs: Option<u32>, torrent_server: Option<&str>, audio_ok: &[String]) -> Vec<Classified> {
@@ -83,6 +85,7 @@ pub fn rank(streams: &[Stream], runtime_secs: Option<u32>, torrent_server: Optio
                 std::cmp::Reverse(direct),
                 std::cmp::Reverse(c.info.height.unwrap_or(0)),
                 audio_bad,
+                std::cmp::Reverse(c.info.seeders.unwrap_or(0)),
                 std::cmp::Reverse(hdr_rank(c.info.hdr)),
                 std::cmp::Reverse(c.info.size_bytes.unwrap_or(0)),
             )
@@ -357,6 +360,42 @@ mod tests {
         let r = rank(&v, None, Some("http://10.0.0.2:11470/"), &[]);
         assert_eq!(r.len(), 3);
         assert!(r[2].url.starts_with(TORRENT_SCHEME), "no fileIdx: resolved on play");
+    }
+
+    /// **A torrent's seeder count outranks its size (and its HDR) once resolution is tied.**
+    /// The first [`rank`] kept HDR and size ahead of seeders, so a huge dead torrent beat a
+    /// small lively one at the same resolution. Both are pure torrents here (a `torrent:` marker
+    /// each, no cached/direct-http flag), at the same 1080p, so the ONLY differences are
+    /// seeders/HDR/size, and seeders must decide while the debrid/direct group still leads outright.
+    #[test]
+    fn ranks_torrents_by_seeders_then_size_after_resolution() {
+        let hash = |h: u8| format!("{h:02x}").repeat(20);
+        // (name, seeders) — the size is in the name as well so size also differs.
+        let mk = |name: &str, desc: &str, h: u8| {
+            let mut st = s(name, None, Some(&hash(h)));
+            st.description = Some(desc.into());
+            st
+        };
+        let v = vec![
+            mk("1080p big dead", "👤 2 💾 20 GB", 1),
+            mk("1080p HDR small lively", "👤 950 💾 2 GB", 2),
+            mk("1080p mid", "👤 10 💾 8 GB", 3),
+            mk("1080p unknown seeders", "💾 99 GB", 4),
+            mk("1080p zero seeders", "👤 0 💾 90 GB", 5),
+            mk("4k tiny", "👤 1 💾 1 GB", 6),
+        ];
+        let r = rank(&v, None, Some("http://10.0.0.2:11470/"), &[]);
+        assert_eq!(r.len(), 6);
+        // 4K with 1 seeder still leads: resolution is the outermost key.
+        assert!(r[0].url.ends_with(&hash(6)), "resolution dominates seeders: {:?}", r[0].stream.name);
+        // Within the 1080p torrent group: most seeders first, then size.
+        assert!(r[1].url.ends_with(&hash(2)), "950 seeders beats a bigger HDR file");
+        assert!(r[2].url.ends_with(&hash(3)));
+        // 2-seeder torrent beats the unknown/zero-seeder huge files.
+        assert!(r[3].url.ends_with(&hash(1)), "2 known seeders beat unknown/zero");
+        // Unknown seeders sort as 0, so they fall to size among the zero-seeder group.
+        assert!(r[4].url.ends_with(&hash(4)), "unknown seeders treat as 0, then size decides");
+        assert!(r[5].url.ends_with(&hash(5)));
     }
 
     #[test]

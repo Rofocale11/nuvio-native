@@ -69,15 +69,20 @@ impl StreamInfo {
         }
     }
 
-    /// A sort key: higher is better (resolution, then DV/HDR, then cached, then size).
-    pub fn rank(&self) -> (u32, u8, bool, u64) {
+    /// A sort key: higher is better. Resolution first — a 4K file always outranks a lively 1080p
+    /// one. Among torrents at the same resolution, the seeder count decides next (whether the
+    /// stream plays at all mattered more than HDR or size), then HDR, then size (bigger is higher
+    /// bitrate for the same title). A debrid/direct-http stream is not decided by this key: the
+    /// shim's `rank` floats those ahead of torrents outright. A stream with no seeder count sorts
+    /// as 0 — any known count outranks an unknown one.
+    pub fn rank(&self) -> (u32, u32, u8, u64) {
         let hdr = match self.hdr {
             Hdr::DolbyVision { .. } => 3,
             Hdr::Hdr10Plus => 2,
             Hdr::Hdr10 | Hdr::Hlg => 1,
             Hdr::Sdr => 0,
         };
-        (self.height.unwrap_or(0), hdr, self.cached, self.size_bytes.unwrap_or(0))
+        (self.height.unwrap_or(0), self.seeders.unwrap_or(0), hdr, self.size_bytes.unwrap_or(0))
     }
 }
 
