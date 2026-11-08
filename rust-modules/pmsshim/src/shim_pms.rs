@@ -2352,6 +2352,66 @@ mod tmdb_metadata_tests {
         );
     }
 
+    /// A synthetic movie's detail open starts the addon stream fetch in the background:
+    /// the same `StreamSlot` the Streams picker polled lazily now starts at the metadata
+    /// route (`warm_synthetic_streams`), so clicking a Related movie no longer waits for
+    /// Streams to be opened. A synthetic show has no stream id until an episode is chosen,
+    /// so it stays slotless; a collection/person never reaches the movie branch. This is
+    /// the click-time counterpart of Home's focus prefetch — it fires on the detail open
+    /// itself, not on focus, and the picker reuses the slot rather than starting a second
+    /// fetch.
+    #[test]
+    fn synthetic_movie_detail_open_starts_stream_fetch() {
+        let backend = Arc::new(RecordingBackend::default());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        // 1_000_000_603 = TMDB_FALLBACK_KEY_BASE + 603 (The Matrix).
+        shim.warm_synthetic_streams(1_000_000_603);
+        // The slot spawns its stream/subtitle workers as threads: wait for them to report.
+        for _ in 0..100 {
+            if !backend.streams.lock().unwrap().is_empty()
+                && !backend.subtitles.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let asked = backend.streams.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].0, "movie");
+        assert!(
+            matches!(asked[0].1.as_str(), "tmdb:603" | "tt0133093"),
+            "the addon was asked for {:?}, which is not the Matrix",
+            asked[0].1
+        );
+        assert_eq!(
+            backend.subtitles.lock().unwrap().clone(),
+            asked,
+            "streams and subtitles ask for the same title id"
+        );
+        // The slot exists in the shim's map: `/nuvio/streams` now polls a running fetch
+        // instead of creating one.
+        assert!(shim.streams.lock().unwrap().contains_key(&1_000_000_603));
+        // A repeat detail open reuses the slot — no second worker pair.
+        shim.warm_synthetic_streams(1_000_000_603);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            backend.streams.lock().unwrap().len(),
+            1,
+            "a second open must reuse the slot, not spawn again"
+        );
+        // Synthetic shows and collections never get a slot: no stream id exists for them.
+        shim.warm_synthetic_streams(2_000_000_603); // show base
+        shim.warm_synthetic_streams(4_000_000_234); // collection base
+        shim.warm_synthetic_streams(3_000_000_638); // person base
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            backend.streams.lock().unwrap().len(),
+            1,
+            "shows/collections/persons must not start a stream fetch: {:?}",
+            backend.streams.lock().unwrap()
+        );
+    }
+
     #[test]
     fn synthetic_rating_keys_reach_addons_as_tmdb_ids() {
         let backend = Arc::new(RecordingBackend::default());
@@ -4888,6 +4948,32 @@ impl Shim {
         Some(self.tmdb_details_row(&details, rk))
     }
 
+    /// Auto-fetch addon streams for a synthetic movie when its detail page opens.
+    ///
+    /// The synthetic movie branch in the metadata route used to return a bare TMDB row:
+    /// no `Media`, no stream slot, no addon fetch. Streams only started when the viewer
+    /// opened the Streams picker (`/nuvio/streams`, which does `synthetic_ident` + `ranked`
+    /// + `slot`). Clicking a Related movie therefore paid a cold addon fetch at picker time,
+    /// unlike a real library item whose detail read goes through `item_probed` and spawns
+    /// the slot in the background while the page paints.
+    ///
+    /// This routes a synthetic movie through the same slot the picker uses, so the fetch
+    /// starts on detail open and the picker finds it in the `StreamSlot` (dedup + `STREAM_TTL`
+    /// already apply — a second call returns the live slot, never a second worker). Only
+    /// movies: a series has no stream id until an episode is chosen (`stream_target` is
+    /// `None` for series), and collections/persons have no ident at all, so those branches
+    /// never reach here. The row itself is unchanged — streams are not embedded; `/nuvio/streams`
+    /// and `item_probed` read the same slot afterwards.
+    fn warm_synthetic_streams(&self, rk: i64) {
+        if synthetic_tmdb_id(rk).is_none() {
+            return;
+        }
+        let Some(ident) = synthetic_ident(rk) else { return };
+        // `slot()` spawns the background addon workers and caches the `StreamSlot`;
+        // `ranked` with zero wait is avoided — no blocking here, just start the fetch.
+        let _ = self.slot(rk, &ident);
+    }
+
     fn tmdb_show_recommendation_row(&self, show: &TmdbShow) -> Value {
         let stremio_id = format!("tmdb:{}", show.id);
         if let Some(meta) = self.meta("series", &stremio_id) {
@@ -6270,9 +6356,18 @@ impl Shim {
                             );
                         };
                         return match client.movie_details(tmdb_id) {
-                            Ok(details) => Response::json(&container(json!({
-                                "Metadata": [self.tmdb_details_row(&details, key)]
-                            }))),
+                            Ok(details) => {
+                                // Clicking a Related (or any synthetic) movie opens this
+                                // branch: start the addon stream fetch now, in the background,
+                                // so the Streams picker finds it already running — the same
+                                // slot `/nuvio/streams` polls and `item_probed` fills `Media`
+                                // from. Non-blocking (`slot()` never waits on addons), and
+                                // deduped by the slot map + `STREAM_TTL`.
+                                self.warm_synthetic_streams(key);
+                                Response::json(&container(json!({
+                                    "Metadata": [self.tmdb_details_row(&details, key)]
+                                })))
+                            }
                             Err(error) => Response::json_status(
                                 503,
                                 &container(json!({
