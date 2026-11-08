@@ -1387,7 +1387,9 @@ fn the_landed_stream_list_seats_the_engine_and_a_late_seat_cannot_steal_a_down()
     *p.stream_mailbox.lock().unwrap() = Some(StreamReply::List(Some(
         plx_plex::plex::nuvio::StreamList {
             complete: true,
+            subtitles_complete: true,
             streams: two_addons(),
+            subtitles: Vec::new(),
         },
     )));
     buf.clear();
