@@ -461,6 +461,53 @@ mod activate_card_tests {
         }
     }
 
+    /// **OK on a Continue Watching card under Play starts the film the card names.** The shim's
+    /// hub rows carry no `Media`, so a deck row has no Part key at all: the shim's `/decision`
+    /// names the file (the same door the hero picker's `PlayIntent::Item` takes with an empty
+    /// part). A guard in `request_play_movie` refused that row outright, so the press queued
+    /// nothing and said nothing — a dead tile. A server that is NOT the shim still refuses: a row
+    /// with no Part there names no file.
+    #[test]
+    fn a_deck_play_starts_a_row_whose_shim_names_the_part() {
+        let _guard = plx_base::testlock::serial();
+        let mut ps = plx_media::route::PlaybackSession::default();
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut pa = plx_media::player::adapter::PlayerAdapter::new(mt);
+        let mut pages = plx_ui::dispatch::Dispatcher::<super::bridge::AppHost>::new();
+        let mut bridge = super::bridge::Bridge::for_test(|| 0);
+        let mut menu_play_await = None;
+
+        struct Cleanup(*mut super::bridge::Bridge);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                // SAFETY: captured from `bridge` just below, which outlives this guard.
+                unsafe { &mut *self.0 }.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::Clear);
+                plx_plex::plex::reset_servers_for_test();
+            }
+        }
+        let _cleanup = Cleanup(&mut bridge as *mut _);
+        plx_plex::plex::reset_servers_for_test();
+        let row = |sid, rk: &str| plx_data::pms::PmsMovie { sid, rk: rk.into(), kind: 0,
+            resume_ms: 30_000, dur_ns: 600_000_000_000, ..Default::default() };
+
+        let alien = plx_plex::plex::register_for_test("alien-pms", "127.0.0.1", 1, "t", "c-alien");
+        unsafe {
+            activate_card(&mut ps, &mut pa, &row(alien, "r1"), true, 1000, None,
+                &mut pages, &mut bridge, &mut menu_play_await, 0);
+        }
+        assert!(!pages.has_pending_navigation(),
+            "a row with no Part on a server that is not the shim names no file to start");
+
+        let shim = plx_plex::plex::register_for_test("nuvionative-pmsshim-0001", "127.0.0.1", 1, "t", "c-shim");
+        unsafe {
+            activate_card(&mut ps, &mut pa, &row(shim, "10058"), true, 1000, None,
+                &mut pages, &mut bridge, &mut menu_play_await, 0);
+        }
+        assert!(pages.has_pending_navigation(),
+            "the press must queue the player: the shim's /decision names the Part its hub row does not carry");
+        plx_media::route::cancel_play(&mut ps);
+    }
+
     #[test]
     fn a_collection_card_opens_the_collection_page() {
         let _guard = plx_base::testlock::serial();

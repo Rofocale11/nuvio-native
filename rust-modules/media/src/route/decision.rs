@@ -8300,7 +8300,13 @@ fn retry_context_with(ps: &PlaybackSession, resume_ns: i64, direct_play: Option<
 /// (`app::playback::movie_ctx`) because the runtime string is `ui::fmt`'s and `route` sits below
 /// `ui`.
 pub fn request_play_movie(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::MetadataStore, m: &PmsMovie, ctx: &str) -> bool {
-    if m.part.is_empty() {
+    let sid = item_sid(m.sid);
+    // A shim hub row carries no `Media`, so a Continue Watching card has no Part key: the shim's
+    // `/decision` names the file from the item's ranked streams (the same door the hero picker's
+    // `PlayIntent::Item` takes with an empty part). Refusing it here made OK on a deck card under
+    // Play queue nothing at all — the dead tile. Any other server still refuses: a row there with
+    // no Part names no file.
+    if m.part.is_empty() && !plx_plex::plex::client_for(sid).is_some_and(|c| c.is_nuvio()) {
         return false;
     }
     // **The ITEM's server, not the browsed one.** This passed `surface_sid()` — i.e. whichever
@@ -8316,7 +8322,7 @@ pub fn request_play_movie(ps: &mut PlaybackSession, meta: &mut plx_data::stores:
     request_play(
         ps,
         meta,
-        item_sid(m.sid),
+        sid,
         &m.rk,
         &m.part,
         &m.vcodec,

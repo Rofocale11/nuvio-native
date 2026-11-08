@@ -309,6 +309,13 @@ open the remembered torrent (`/nuvio/warm`): info hash only, no stream, no file 
 payload, so the engine restores the kept swarm and dials its peers before the press. A debrid or
 direct link has no swarm and the warm is a no-op for it.
 
+**A Continue Watching card under Play starts from the row itself.** The shim's hub rows carry no
+`Media` — a row is the list projection, not the item — so the card has no Part key. The press
+plays it anyway: `request_play_movie` admits an empty Part on the shim, whose `/decision` names
+the file from the item's ranked streams (the same door the hero picker's `PlayIntent::Item` takes
+with an empty part), and refuses it on any other server, where a row with no Part names no file.
+Refusing it there too left the press queuing nothing at all — a dead tile with no error.
+
 Cold starts that skip the probe are covered by a **first-byte grace**. A plaintext media open
 arms `MEDIA_FIRST_BYTE_TIMEOUT_MS` (45 s) on its socket for the FIRST body byte only; the first
 successful read restores `MEDIA_RECV_TIMEOUT_MS` (15 s) for the rest of the transfer. It is
