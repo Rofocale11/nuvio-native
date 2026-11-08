@@ -458,6 +458,15 @@ pub struct PlaybackSession {
     /// reason: `stream_fps` is what the Load declares for the stream now playing, and a route
     /// rebuilt mid-play needs the file's rate again ([`video_copy_fps`]).
     src_fps: f64,
+    /// The SOURCE file's name and size in bytes (0 = unknown), from the part `/decision` named.
+    /// Diagnostics only: "which file is this" is the question the read-out answers, and on the
+    /// shim the name is the release's own (`Part.file`), not a server path. Both survive a route
+    /// rebuild — they describe the file, not the delivery.
+    src_file: String,
+    src_bytes: i64,
+    /// The local torrent engine feeds this file (the shim's `Media.p2p`). Diagnostics uses it to
+    /// show live swarm numbers; no route decision reads it.
+    p2p: bool,
     /// The streamed item's Media video/audio codec (h264/hevc, ac3/eac3/aac), so the player picks
     /// the H265 Load payload for a native HEVC direct-play and the matching audio codec.
     stream_vcodec: String,
@@ -622,6 +631,9 @@ impl PlaybackSession {
         src_vcodec: String::new(),
         src_acodec: String::new(),
         src_fps: 0.0,
+        src_file: String::new(),
+        src_bytes: 0,
+        p2p: false,
         stream_vcodec: String::new(),
         stream_acodec: String::new(),
         stream_fps: 0.0,
@@ -709,6 +721,9 @@ impl PlaybackSession {
             src_vcodec,
             src_acodec,
             src_fps,
+            src_file,
+            src_bytes,
+            p2p,
             stream_vcodec,
             stream_acodec,
             stream_fps,
@@ -776,6 +791,9 @@ impl PlaybackSession {
             src_vcodec: src_vcodec.clone(),
             src_acodec: src_acodec.clone(),
             src_fps: *src_fps,
+            src_file: src_file.clone(),
+            src_bytes: *src_bytes,
+            p2p: *p2p,
             stream_vcodec: stream_vcodec.clone(),
             stream_acodec: stream_acodec.clone(),
             stream_fps: *stream_fps,
@@ -5858,6 +5876,21 @@ pub fn source_vcodec(ps: &PlaybackSession) -> String {
     ps.src_vcodec.clone()
 }
 
+/// The SOURCE file's name and size in bytes as the plan named them (`""` / `0` = unknown). The
+/// diagnostics read-out's File row reads these; nothing in the route consumes them.
+pub fn source_file(ps: &PlaybackSession) -> String {
+    ps.src_file.clone()
+}
+pub fn source_bytes(ps: &PlaybackSession) -> i64 {
+    ps.src_bytes
+}
+
+/// Is the local torrent engine feeding this file? The diagnostics panel uses it to show swarm
+/// numbers instead of the adaptive model the shim never runs. False on a real server.
+pub fn is_p2p(ps: &PlaybackSession) -> bool {
+    ps.p2p
+}
+
 /// **Can the pixels of this playback's source reach the panel untouched?** See
 /// [`PlaybackSession::cur_source_decodable`]. `false` is the state in which the quality ladder's
 /// "Original" row is a promise the pipeline cannot keep.
@@ -8590,6 +8623,16 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         // move together because `stream_*` is what arrives and `src_*` is what the file is, and the
         // diagnostics read-out needs both.
         let src_fps = if plan.vcodec.is_empty() { s.src_fps } else { plan.src_fps };
+        // Same skip as the codec quartet: a landing that decided nothing keeps the file the
+        // session already names rather than blanking the read-out's only "which file" row — and
+        // it keeps the delivery marker with it, so a failed landing cannot turn a torrent's swarm
+        // block back into the adaptive one mid-play.
+        let (src_file, src_bytes) = if plan.vcodec.is_empty() {
+            (std::mem::take(&mut s.src_file), std::mem::take(&mut s.src_bytes))
+        } else {
+            (plan.file, plan.file_bytes)
+        };
+        let p2p = if plan.vcodec.is_empty() { s.p2p } else { plan.p2p };
         let (stream_vcodec, stream_acodec, src_vcodec, src_acodec) = if plan.vcodec.is_empty() {
             (
                 std::mem::take(&mut s.stream_vcodec),
@@ -8675,6 +8718,9 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             src_vcodec,
             src_acodec,
             src_fps,
+            src_file,
+            src_bytes,
+            p2p,
             stream_vcodec,
             stream_acodec,
             stream_fps: plan.fps,

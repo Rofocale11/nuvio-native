@@ -674,6 +674,11 @@ pub struct Media {
     /// placeholder.
     #[serde(rename = "addon_name", default)]
     pub addon_name: String,
+    /// The Nuvio shim's marker for "the local torrent engine serves this file" (no addon URL —
+    /// the shim resolves the info hash itself). Absent from every real PMS answer; the diagnostics
+    /// panel swaps its Plex-model rows for live swarm stats when it is true.
+    #[serde(default)]
+    pub p2p: bool,
     #[serde(rename = "Part", default)]
     pub part: Vec<MediaPart>,
 }

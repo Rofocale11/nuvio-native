@@ -2557,6 +2557,28 @@ mod tmdb_metadata_tests {
         assert!(!last["streams"].as_array().unwrap().is_empty(), "{last}");
     }
 
+    /// The Audio tab's Boost dialog / Normalize loudness toggles exist because a real PMS analyzes
+    /// the track and does the DSP (`serverinfo::Subscription` gates the offer on Plex Pass). This
+    /// shim never will, so it must not claim to be a Plex Pass server: saying yes drew both rows
+    /// and then "your Plex server needs to scan its sound first" for the whole session.
+    #[test]
+    fn the_shim_is_not_a_plex_pass_server() {
+        let shim = Arc::new(Shim::new(Arc::new(RecordingBackend::default()), Config::default()));
+        let body: Value = serde_json::from_slice(
+            &shim
+                .handle(&Request {
+                    method: "GET".into(),
+                    path: "/".into(),
+                    query: HashMap::new(),
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                })
+                .body,
+        )
+        .unwrap();
+        assert_eq!(body["MediaContainer"]["myPlexSubscription"], false, "{body}");
+    }
+
     /// The swarm warm's gate: a key with no resume point, or no remembered torrent, is inert —
     /// nothing was played there, so no swarm may be dialed. A remembered torrent behind a resume
     /// point admits the warm (the engine call is best effort on its own thread; no engine is
@@ -6456,7 +6478,11 @@ impl Shim {
         match (req.method.as_str(), segs.as_slice()) {
             (_, []) | (_, ["identity"]) => Response::json(&container(json!({
                 "machineIdentifier": MACHINE_ID, "friendlyName": "Nuvio", "version": "1.41.0.0000-nuvio",
-                "platform": "webOS", "myPlex": false, "myPlexSubscription": true,
+                // No Plex Pass, truthfully: the one Pass-gated surface is the audio DSP
+                // (Boost dialog / Normalize loudness), which needs a scanned track this shim
+                // never produces. Claiming it drew both rows and "your server needs to scan
+                // its sound first" forever.
+                "platform": "webOS", "myPlex": false, "myPlexSubscription": false,
             }))),
             // plex.tv: the app's plex.tv base points here; sign-in maps onto the Nuvio account.
             (_, ["api", "v2", rest @ ..]) => self.account.handle(req, rest),

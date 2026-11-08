@@ -1443,6 +1443,14 @@ pub struct Plan {
     pub tsession: String,
     pub sess: String,
     pub part_id: i64,
+    /// The SOURCE file's name and size in bytes (0 = unknown), from the part `/decision` named.
+    /// Diagnostics only — the read-out's "which file is this" row. The shim fills both from the
+    /// release itself; a real PMS names a server-side path or nothing, which the row leaves out.
+    pub file: String,
+    pub file_bytes: i64,
+    /// The local torrent engine serves this file (the shim's `Media.p2p`), so the diagnostics
+    /// panel can show live swarm numbers instead of an adaptive model the shim never runs.
+    pub p2p: bool,
     pub pq_id: String,
     pub pq_item_id: String,
     pub machine_id: String, // "" = leave the cached one alone
@@ -1675,6 +1683,11 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     let acodec = nuvio_media.map_or(acodec, |m| m.audio_codec.as_str());
     let part = nuvio_media.and_then(|m| m.part.first()).map_or(part, |p| p.key.as_str());
     plan.part_id = part_id_of(part);
+    if let Some(p) = nuvio_media.and_then(|m| m.part.first()) {
+        plan.file = p.file.clone();
+        plan.file_bytes = p.size;
+    }
+    plan.p2p = nuvio_media.is_some_and(|m| m.p2p);
     plan.src_vcodec = vcodec.to_string();
     plan.src_acodec = acodec.to_string();
     if !rk.is_empty() && !env.preview {

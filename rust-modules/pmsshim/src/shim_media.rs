@@ -307,6 +307,10 @@ pub fn media_json(rk: i64, idx: usize, c: &Classified, duration_ms: i64, subs: &
         // The addon that returned this stream, so the picker can group its list by source. Empty
         // only on the placeholder Media that stands in while the addons are still answering.
         "addon_name": c.stream.addon_name,
+        // The delivery is the local torrent engine (no addon URL — the shim resolves the hash
+        // itself). The diagnostics panel reads this to swap its Plex-model block for live swarm
+        // stats; a real PMS never sends it, so it reads false there.
+        "p2p": c.stream.url.is_none(),
         "Part": [{
             "id": part_id, "key": format!("/library/parts/{part_id}/0/file.{ext}"),
             "duration": duration_ms, "file": c.info.filename.clone().unwrap_or_default(),
@@ -398,15 +402,38 @@ mod tests {
         assert!(r[5].url.ends_with(&hash(5)));
     }
 
+    /// **A torrent stream is marked for the engine.** `p2p` is what lets the player's diagnostics
+    /// panel swap its Plex-model block for live swarm numbers; an addon URL is not engine-fed, so
+    /// it must not claim to be.
+    #[test]
+    fn media_json_marks_only_engine_fed_streams_as_p2p() {
+        let direct = Classified {
+            stream: s("direct", Some("https://h/f.mkv"), None),
+            info: StreamInfo::default(),
+            url: "https://h/f.mkv".into(),
+        };
+        let torrent = Classified {
+            stream: s("torrent", None, Some("abcdef0123456789abcdef0123456789abcdef01")),
+            info: StreamInfo::default(),
+            url: format!("{TORRENT_SCHEME}abcdef0123456789abcdef0123456789abcdef01"),
+        };
+        let d = media_json(10_001, 0, &direct, 0, &[]);
+        let t = media_json(10_002, 0, &torrent, 0, &[]);
+        assert_eq!(d["p2p"], false, "an addon URL plays without the engine");
+        assert_eq!(t["p2p"], true, "an info-hash stream is the engine's to fetch");
+    }
+
     #[test]
     fn media_shape() {
         let mut stream = s("x", Some("https://h/f.mkv?t=1"), None);
         stream.addon_name = "Torrentio".into();
-        let c = Classified { stream, info: StreamInfo { height: Some(2160), hdr: Hdr::DolbyVision { with_hdr10_fallback: true }, size_bytes: Some(60_000_000_000), ..Default::default() }, url: "https://h/f.mkv?t=1".into() };
+        let c = Classified { stream, info: StreamInfo { height: Some(2160), hdr: Hdr::DolbyVision { with_hdr10_fallback: true }, size_bytes: Some(60_000_000_000), filename: Some("Some.Release.2024.2160p.mkv".into()), ..Default::default() }, url: "https://h/f.mkv?t=1".into() };
         let m = media_json(10_001, 3, &c, 7_200_000, &[SubRef { id: 9, lang: "eng".into(), title: "Some.Release".into(), selected: false }]);
         assert_eq!(m["videoResolution"], "4k");
         assert_eq!(m["container"], "mkv");
         assert_eq!(m["addon_name"], "Torrentio", "the picker groups by addon");
+        assert_eq!(m["Part"][0]["file"], "Some.Release.2024.2160p.mkv", "the release's own name is what the diagnostics File row shows");
+        assert_eq!(m["Part"][0]["size"], 60_000_000_000i64);
         assert_eq!(m["videoCodec"], "hevc");
         assert_eq!(m["Part"][0]["id"], 10_001_003);
         assert_eq!(m["Part"][0]["key"], "/library/parts/10001003/0/file.mkv");

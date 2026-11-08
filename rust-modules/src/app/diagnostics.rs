@@ -138,7 +138,7 @@ pub(crate) struct Diagnostics {
     history: SweepHistory,
     /// Formatted only at the 2 Hz sampling boundary, never in the render loop, so the whole-string
     /// glyph cache sees the same held values the ordinary rows do.
-    chart_values: [String; 3],
+    chart_values: [String; 2],
     /// SDL_ttf measurement of [`CHART_LABELS`] plus their sibling gap, measured once rather than
     /// three times on every presented playback frame. A `Cell` because it is a cache filled during
     /// a `&self` draw — main-thread draw state, like `Popover::rise`.
@@ -170,7 +170,7 @@ impl Default for Diagnostics {
         Self {
             prev_fed: (0, 0, 0),
             history: SweepHistory::new(),
-            chart_values: [String::new(), String::new(), String::new()],
+            chart_values: [String::new(), String::new()],
             chart_key_w: Cell::new(0.0),
             next_sample: 0,
             was_on: false,
@@ -246,7 +246,13 @@ const SAMPLE_MS: u32 = 500;
 /// value is inactive, but it may not delete the row and slide unrelated evidence into its place —
 /// photographs from two modes must be directly comparable by y-coordinate.
 const LEFT_ROWS: usize = 13;
-const RIGHT_ROWS: usize = 9;
+const RIGHT_ROWS: usize = 10;
+/// Rows the torrent swarm block contributes. The File, Size and RAM rows are pushed around it, so
+/// a torrent's whole column is [`SWARM_ROWS`] + 3 — exactly [`RIGHT_ROWS`].
+const SWARM_ROWS: usize = 7;
+/// The direct/debrid block: File, Size, Rate, Quality and RAM — everything such a route knows
+/// without a swarm or an adaptive session.
+const LINK_ROWS: usize = 5;
 /// Compatibility name for the support-panel budget and its existing host assertions. Playback
 /// uses [`LEFT_ROWS`] as the taller of the two fixed columns; the pre-playback device card uses
 /// only the rows it actually has. **Test-only, and stated as such since this module left `ui/`**:
@@ -266,21 +272,24 @@ const CHART_ROWS: usize = LEFT_ROWS - RIGHT_ROWS;
 /// Sixteen seconds at 2 Hz is long enough to show a segment acquisition, a quality transaction and
 /// its buffer consequence while keeping every cell wide enough to survive a phone camera.
 const HIST_N: usize = 32;
-/// The three plot keys, in the UI language. A function rather than a table because the catalog is
+/// The two plot keys, in the UI language. A function rather than a table because the catalog is
 /// the only place the words live; [`Diagnostics::chart_key_width`] measures exactly these runs.
-fn chart_labels() -> [&'static str; 3] {
+///
+/// It was three. The `BUDGET / DEMAND` lane plotted the adaptive controller's safe spend against
+/// the stream's demand, and this product never runs that controller — the shim opens no adaptive
+/// session, so the lane printed `— budget · 2.2 demand Mbps` on every photograph. A plot nobody
+/// reads is a third of the chart spent on nothing.
+fn chart_labels() -> [&'static str; 2] {
     use plx_platform::i18n::msg;
-    [msg::browse_diagnostics_chart_budget(), msg::browse_diagnostics_chart_network(), msg::browse_diagnostics_chart_buffer()]
+    [msg::browse_diagnostics_chart_network(), msg::browse_diagnostics_chart_buffer()]
 }
-/// Conservative paint width before SDL_ttf is ready. The live path measures the same three runs
-/// the chart draws; this fallback is the widest one's 1920×1080 simulator measurement rounded up.
+/// Conservative paint width before SDL_ttf is ready. The live path measures the same runs the
+/// chart draws; this fallback is the widest one's 1920×1080 simulator measurement rounded up.
 const CHART_LABEL_FALLBACK_PX: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SweepSample {
     valid: bool,
-    budget_kbps: i64,
-    demand_kbps: i64,
     activity_kbps: i64,
     buffer_ms: i64,
 }
@@ -288,8 +297,6 @@ struct SweepSample {
 impl SweepSample {
     const EMPTY: Self = Self {
         valid: false,
-        budget_kbps: -1,
-        demand_kbps: -1,
         activity_kbps: -1,
         buffer_ms: -1,
     };
@@ -337,13 +344,7 @@ impl SweepHistory {
         self.filled = self.filled.saturating_add(1).min(HIST_N);
     }
 
-    fn record(
-        &mut self,
-        epoch: u32,
-        d: &plx_media::player::Diag,
-        selected: plx_media::route::Quality,
-        now: u32,
-    ) {
+    fn record(&mut self, epoch: u32, d: &plx_media::player::Diag, now: u32) {
         if !self.has_epoch || self.epoch != epoch {
             self.reset_for(epoch);
         }
@@ -352,8 +353,6 @@ impl SweepHistory {
         self.prev_at = now;
         self.push(SweepSample {
             valid: true,
-            budget_kbps: d.abr_safe_kbps,
-            demand_kbps: chart_demand_kbps(d, selected),
             activity_kbps,
             buffer_ms: observed_buffer_ms(d).unwrap_or(-1),
         });
@@ -384,23 +383,6 @@ impl SweepHistory {
                 (sum + i128::from(sample.activity_kbps), count + 1)
             });
         (count > 0).then(|| i64::try_from(sum / count).unwrap_or(i64::MAX))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LinkState {
-    Unknown,
-    Deficit,
-    Sustains,
-}
-
-fn link_state(budget_kbps: i64, demand_kbps: i64) -> LinkState {
-    if budget_kbps < 0 || demand_kbps <= 0 {
-        LinkState::Unknown
-    } else if budget_kbps < demand_kbps {
-        LinkState::Deficit
-    } else {
-        LinkState::Sustains
     }
 }
 
@@ -438,17 +420,17 @@ impl Diagnostics {
             columns(ps, &d, prev, now)
         };
         self.prev_fed = (d.fed_v, d.fed_a, now);
-        self.history.record(
-            plx_media::route::playback_trace_generation(),
-            &d,
-            plx_media::route::quality(),
-            now,
-        );
+        self.history.record(plx_media::route::playback_trace_generation(), &d, now);
         self.chart_values = chart_values(&self.history);
         // a re-sample changes what is on screen, and no spring is involved — see `plx_machine::idle`
         plx_machine::idle::invalidate();
     }
 }
+
+/// What this build calls itself on a surface a person photographs. `plex::identity::PRODUCT` is
+/// the name on the wire (every `X-Plex-Product`, the account's device list) and stays `PlxNative`;
+/// the product being looked at is Nuvio Native.
+const PRODUCT_NAME: &str = "Nuvio Native";
 
 /// The two header facts: **who this build is** and **what the pipeline thinks it is doing**.
 ///
@@ -465,26 +447,62 @@ fn header(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, n
         format!("webOS {} · api {}", w.release, w.api)
     };
     let (_, _, vw, vh) = plx_base::surface::viewport();
-    [
-        // via `plex::identity`, not a literal + `env!`: that module exists precisely so the
-        // product name and version cannot disagree between surfaces, and this one is photographed.
-        // The firmware CODENAME is dropped — it identifies the release no better than the release
-        // number does, and this line has to fit beside it.
-        plx_platform::i18n::msg::browse_diagnostics_header(
-            if cfg!(feature = "devtriggers") {
-                plx_platform::i18n::msg::browse_diagnostics_build_dev()
-            } else {
-                plx_platform::i18n::msg::browse_diagnostics_build_release()
-            },
-            plx_platform::devcaps::dv::capability().compact_display(),
-            &vh.to_string(),
-            &os,
-            plx_plex::plex::identity::PRODUCT,
-            plx_plex::plex::identity::version(),
-            &vw.to_string(),
-        ),
-        playback_line(ps, d, now),
-    ]
+    // via `plex::identity`, not a literal + `env!`: that module exists precisely so the product
+    // name and version cannot disagree between surfaces, and this one is photographed. The
+    // firmware CODENAME is dropped — it identifies the release no better than the release number
+    // does, and this line has to fit beside it.
+    let facts = plx_platform::i18n::msg::browse_diagnostics_header(
+        if cfg!(feature = "devtriggers") {
+            plx_platform::i18n::msg::browse_diagnostics_build_dev()
+        } else {
+            plx_platform::i18n::msg::browse_diagnostics_build_release()
+        },
+        plx_platform::devcaps::dv::capability().compact_display(),
+        &vh.to_string(),
+        &os,
+        PRODUCT_NAME,
+        plx_plex::plex::identity::version(),
+        &vw.to_string(),
+    );
+    [facts, playback_line(ps, d, now)]
+}
+
+/// The set's RAM as `(used, total)` in BYTES. `used` is `MemTotal - MemAvailable` — the
+/// reclaimable cache a Linux box can hand back is not pressure, and this number is read by a
+/// person deciding whether the app is starving the set. `None` where `/proc` does not answer
+/// (the host simulator on macOS) or `MemTotal` is missing.
+fn mem_usage() -> Option<(u64, u64)> {
+    parse_meminfo(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// The RAM row's value, in whole megabytes. `—` where the set does not answer, rather than a
+/// zero that would read as an empty machine.
+fn ram_value() -> String {
+    match mem_usage() {
+        Some((used, total)) => {
+            const MIB: u64 = 1024 * 1024;
+            plx_platform::i18n::msg::browse_diagnostics_ram(
+                &(total / MIB).to_string(),
+                &(used / MIB).to_string(),
+            )
+        }
+        None => "—".to_string(),
+    }
+}
+
+fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|v| v.trim().strip_suffix("kB"))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+    };
+    let total = field("MemTotal:")?;
+    // A kernel without MemAvailable (or a truncated read) reports everything as used rather than
+    // inventing free memory.
+    let available = field("MemAvailable:").unwrap_or(0).min(total);
+    Some((total - available, total))
 }
 
 /// The verdict text: what the pipeline thinks it is doing, wrapped in the diagnostic header.
@@ -652,7 +670,7 @@ fn decoder_summary(c: &plx_platform::devcaps::Caps, measured: bool) -> String {
 /// model.  Fixed playback keeps every right-hand row and says `inactive`; that stability is what
 /// makes a LAN/Original photograph directly comparable with a remote/HLS one.
 fn columns(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, prev: (i64, i64, u32), now: u32) -> [Vec<Field>; 2] {
-    [pipeline_rows(ps, d, prev, now), model_rows(ps, d)]
+    [pipeline_rows(ps, d, prev, now), model_rows(ps, d, now)]
 }
 
 /// Flattened only for host assertions that inspect the whole schema.  Production draws the two
@@ -665,7 +683,7 @@ fn rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, pre
 
 fn pipeline_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, prev: (i64, i64, u32), now: u32) -> Vec<Field> {
     let mut v = Vec::with_capacity(LEFT_ROWS);
-    v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_connection(), connection_line(ps)));
+    v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_connection(), connection_line()));
     v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_route(), route_line(ps, d)));
 
     let mut video = chain(
@@ -855,24 +873,64 @@ fn fps_milli_str(fps_milli: i64) -> String {
     }
 }
 
-fn connection_line(ps: &plx_media::route::PlaybackSession) -> String {
-    let sid = plx_media::route::cur_sid(ps);
-    let Some(client) = plx_plex::plex::client_for(sid) else {
-        return plx_platform::i18n::msg::browse_diagnostics_standalone().to_string();
-    };
-    let tier = match client.link() {
-        Some(plx_plex::plex::probe::Location::Local) => "LAN",
-        Some(plx_plex::plex::probe::Location::Remote) => plx_platform::i18n::msg::browse_diagnostics_remote(),
-        Some(plx_plex::plex::probe::Location::Relay) => plx_platform::i18n::msg::browse_diagnostics_relay(),
-        None => plx_platform::i18n::msg::browse_diagnostics_unknown_link(),
-    };
-    format!(
-        "{tier} · PMS {}",
-        server_line(
-            &plx_plex::plex::serverinfo::version_of(sid),
-            plx_plex::plex::serverinfo::subscription_of(sid),
-        )
-    )
+/// The File row: **which file the route is carrying**. A real PMS names an absolute path on the
+/// server; only its last component is useful (and safe) to show. The shim names the release.
+fn base_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or("").trim()
+}
+
+fn file_name(ps: &plx_media::route::PlaybackSession) -> String {
+    match base_name(&plx_media::route::source_file(ps)) {
+        "" => plx_platform::i18n::msg::browse_diagnostics_no_file().to_string(),
+        name => name.to_string(),
+    }
+}
+
+/// The Size row's value, in the same units as every other byte figure here. `0` is the plan saying
+/// nothing, not an empty file.
+fn file_size(ps: &plx_media::route::PlaybackSession) -> String {
+    size_value(plx_media::route::source_bytes(ps))
+}
+
+fn size_value(bytes: i64) -> String {
+    if bytes > 0 { mb(bytes) } else { "—".to_string() }
+}
+
+/// The one-row form, kept for the adaptive-model block: its nine model rows plus one File row
+/// already spend the column's budget, so that block cannot afford a Size row of its own.
+fn file_line(ps: &plx_media::route::PlaybackSession) -> String {
+    file_value(&plx_media::route::source_file(ps), plx_media::route::source_bytes(ps))
+}
+
+fn file_value(path: &str, bytes: i64) -> String {
+    let name = base_name(path);
+    match (name.is_empty(), bytes) {
+        (true, _) => plx_platform::i18n::msg::browse_diagnostics_no_file().to_string(),
+        (false, 0) => name.to_string(),
+        (false, b) => format!("{} · {}", name, mb(b)),
+    }
+}
+
+/// A direct/debrid link's delivery rate: bytes handed to FFmpeg over the time since the request
+/// opened. A mean, not an instantaneous sample — the chart's NETWORK ACTIVITY lane is the
+/// per-sample figure, and a plain HTTP source has no swarm to ask for one.
+fn link_rate(d: &plx_media::player::Diag, now: u32) -> String {
+    let ms = since(d.load_at, now);
+    if d.net_rx <= 0 || ms < 1_000 {
+        return "—".to_string();
+    }
+    let bytes_per_s = i64::try_from(d.net_rx)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1_000)
+        / i64::from(ms);
+    plx_platform::i18n::msg::browse_diagnostics_link_rate(&mb(bytes_per_s))
+}
+
+/// The Connection row: **this app is its own server**, so the honest answer is the product and the
+/// build answering — not a foreign PMS release it never contacted nor a Plex Pass state nobody
+/// holds. It read `LAN · PMS 1.41.0 · no Plex Pass`, which described a server that does not exist.
+fn connection_line() -> String {
+    format!("{PRODUCT_NAME} {}", plx_plex::plex::identity::version())
 }
 
 fn route_line(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag) -> String {
@@ -999,13 +1057,100 @@ fn frames_str(d: &plx_media::player::Diag, now: u32) -> String {
 /// Build the fixed right-hand schema.  `inactive` is data: it says that a manual selection owns the
 /// playback and no Auto estimate should be inferred from the empty cells.  Deleting those cells
 /// made every mode a different panel and is the regression this shape prevents.
-fn model_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag) -> Vec<Field> {
+fn model_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, now: u32) -> Vec<Field> {
     let mut v = Vec::with_capacity(RIGHT_ROWS);
-    // One selection snapshot for the whole block.  A quality press must not leave Mode saying
-    // Auto while the lower rows have already formatted the new manual state.
-    abr_rows(ps, d, plx_media::route::quality(), &mut v);
-    debug_assert_eq!(v.len(), RIGHT_ROWS);
+    match (plx_media::route::is_p2p(ps), plx_stremio::sbengine::stats()) {
+        // **A torrent.** File identity, then the swarm. The name and the size get a row each: a
+        // release name is long enough that "name · size" wraps onto a second line anyway, and the
+        // size is the number a reader compares with what the swarm has delivered.
+        (true, Some(s)) => {
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_file(), file_name(ps)));
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_size(), file_size(ps)));
+            swarm_rows(d, &s, &mut v);
+            // The one pitch the swarm block leaves free: the set's own memory, which is the other
+            // half of "is this television coping" beside the engine's window and cache.
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_ram(), ram_value()));
+            debug_assert_eq!(v.len(), SWARM_ROWS + 3);
+        }
+        // **A live adaptive session** — never the shim, which serves no transcoder. Its nine model
+        // rows already spend the column's budget, so this block's File row carries name and size.
+        _ if d.abr_mode != 0 => {
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_file(), file_line(ps)));
+            // One selection snapshot for the whole block.  A quality press must not leave Mode
+            // saying Auto while the lower rows have already formatted the new manual state.
+            abr_rows(ps, d, plx_media::route::quality(), &mut v);
+            debug_assert_eq!(v.len(), RIGHT_ROWS);
+        }
+        // **A direct or debrid link.** No swarm, no adaptive session, so every model row would be
+        // an inert placeholder ("model idle", "not sampled", "no adaptive session"). These four
+        // rows are what such a route actually knows; the chart takes the freed pitches.
+        _ => {
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_file(), file_name(ps)));
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_size(), file_size(ps)));
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_rate(), link_rate(d, now)));
+            v.push(Field::new(
+                plx_platform::i18n::msg::browse_diagnostics_field_quality(),
+                abr_quality(d, plx_media::route::quality()),
+            ));
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_ram(), ram_value()));
+            debug_assert_eq!(v.len(), LINK_ROWS);
+        }
+    }
     v
+}
+
+/// The DELIVERY column while a torrent plays: what the swarm and the local engine are doing, in
+/// the slots the adaptive model would otherwise spend on "controller idle" placeholders. Rates are
+/// engine-wide, which during a play is this title's own downloading plus the window it is keeping
+/// resident.
+fn swarm_rows(d: &plx_media::player::Diag, s: &plx_stremio::sbengine::EngineStats, v: &mut Vec<Field>) {
+    v.push(Field::new(
+        plx_platform::i18n::msg::browse_diagnostics_field_peers(),
+        plx_platform::i18n::msg::browse_diagnostics_peers(
+            &s.peers.to_string(),
+            &s.connecting.to_string(),
+            &s.known.to_string(),
+        ),
+    ));
+    v.push(Field::new(
+        plx_platform::i18n::msg::browse_diagnostics_field_seeds(),
+        plx_platform::i18n::msg::browse_diagnostics_seeds(
+            &s.peers.max(s.seeds).to_string(),
+            &s.seeds.to_string(),
+        ),
+    ));
+    v.push(Field::new(
+        plx_platform::i18n::msg::browse_diagnostics_field_rate(),
+        plx_platform::i18n::msg::browse_diagnostics_rate(
+            &mb(s.down_bps as i64),
+            &mb(s.up_bps as i64),
+        ),
+    ));
+    v.push(Field::new(
+        plx_platform::i18n::msg::browse_diagnostics_field_window(),
+        mb(s.window as i64),
+    ));
+    v.push(Field::new(
+        plx_platform::i18n::msg::browse_diagnostics_field_cache(),
+        plx_platform::i18n::msg::browse_diagnostics_cache(
+            &mb(s.freed as i64),
+            &mb(s.resident as i64),
+        ),
+    ));
+    // Pieces the engine had to fetch again after eviction: the one swarm number that says the
+    // window is thrashing rather than just working. `Downloaded` is gone — the left column's
+    // Transfer row already carries the bytes this playback received — and `Disk` is gone because
+    // its "free" was the window budget minus a used figure that may legally exceed it, i.e. it
+    // printed "0 B free" while nothing was wrong.
+    v.push(Field::new(
+        plx_platform::i18n::msg::browse_diagnostics_field_refetch(),
+        s.refetched.to_string(),
+    ));
+    // The one row of the old block that was never inert: what the decoder actually received.
+    v.push(Field::new(
+        plx_platform::i18n::msg::browse_diagnostics_field_quality(),
+        abr_quality(d, plx_media::route::quality()),
+    ));
 }
 
 fn abr_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, selected: plx_media::route::Quality, v: &mut Vec<Field>) {
@@ -1193,21 +1338,6 @@ fn abr_rate(kbps: i64) -> String {
     }
 }
 
-/// Demand is what the current delivery has to carry, not the request ceiling when PMS emitted a
-/// smaller VBR stream. Manual fixed HLS has no segment estimator, so its explicit ceiling is the
-/// honest planning demand; Original uses the whole-file transport rate captured by the resolve.
-fn chart_demand_kbps(d: &plx_media::player::Diag, selected: plx_media::route::Quality) -> i64 {
-    match d.abr_mode {
-        plx_media::player::ABR_MODE_HLS => [d.abr_media_kbps, d.abr_declared_kbps, d.abr_kbps]
-            .into_iter()
-            .find(|&v| v > 0)
-            .unwrap_or(-1),
-        plx_media::player::ABR_MODE_ORIGINAL if d.abr_kbps > 0 => d.abr_kbps,
-        _ if selected == plx_media::route::Quality::Original && d.source_kbps > 0 => d.source_kbps,
-        _ => selected.ceiling().map_or(-1, |c| i64::from(c.max_kbps)),
-    }
-}
-
 /// Bytes delivered to FFmpeg during this held sample, expressed as a wire rate. A counter reset is
 /// a reload inside the interval: the new counter still names bytes received since that reset and
 /// is therefore the best lower bound available. `-1` keeps "not observed" distinct from an idle
@@ -1233,34 +1363,11 @@ fn chart_rate(kbps: i64) -> String {
     }
 }
 
-fn chart_budget_demand(budget_kbps: i64, demand_kbps: i64) -> String {
-    if budget_kbps.max(demand_kbps) >= 1_000 {
-        let n = |v: i64| {
-            if v < 0 {
-                "—".to_string()
-            } else {
-                decimal(v as f64 / 1_000.0, 1)
-            }
-        };
-        plx_platform::i18n::msg::browse_diagnostics_chart_budget_mbps(&n(budget_kbps), &n(demand_kbps))
-    } else {
-        let n = |v: i64| {
-            if v < 0 {
-                "—".to_string()
-            } else {
-                plx_platform::i18n::current().number(v)
-            }
-        };
-        plx_platform::i18n::msg::browse_diagnostics_chart_budget_kbps(&n(budget_kbps), &n(demand_kbps))
-    }
-}
-
-fn chart_values(history: &SweepHistory) -> [String; 3] {
+fn chart_values(history: &SweepHistory) -> [String; 2] {
     let Some(s) = history.latest() else {
-        return ["—".into(), "—".into(), "—".into()];
+        return ["—".into(), "—".into()];
     };
     [
-        chart_budget_demand(s.budget_kbps, s.demand_kbps),
         plx_platform::i18n::msg::browse_diagnostics_network_mean(&history.mean_activity_kbps().map(chart_rate).unwrap_or_else(|| "—".to_string()), &chart_rate(s.activity_kbps)),
         if s.buffer_ms >= 0 {
             plx_platform::i18n::msg::core_seconds(&decimal(s.buffer_ms as f64 / 1_000.0, 1))
@@ -1745,7 +1852,9 @@ pub(crate) fn draw(&self) {
     )
     .draw(&e, p);
 
-    let cy = top + FieldList::height(FieldList::wrapped_line_count(&cols[1]).max(RIGHT_ROWS));
+    // The chart starts under the RIGHT COLUMN'S ACTUAL rows, not under its budget: a torrent
+    // spends two rows fewer than the adaptive model, and the freed pitches belong to the chart.
+    let cy = top + FieldList::height(FieldList::wrapped_line_count(&cols[1]));
     self.draw_chart(
         p,
         Rect::new(
@@ -1757,11 +1866,12 @@ pub(crate) fn draw(&self) {
     );
 }
 
-/// Three fixed-slot sweep lanes, deliberately named after quantities the app actually knows:
-/// conservative delivery BUDGET against current media DEMAND, bytes delivered to FFmpeg during
-/// this sample, and the player's content-time reserve. It is not labelled connection speed —
-/// an object can only send the bytes it contains, so ordinary playback does not independently
-/// identify the physical link ceiling.
+/// Two fixed-slot sweep lanes, deliberately named after quantities the app actually knows: bytes
+/// delivered to FFmpeg during this sample, and the player's content-time reserve. It is not
+/// labelled connection speed — an object can only send the bytes it contains, so ordinary playback
+/// does not independently identify the physical link ceiling. (A third lane plotted the adaptive
+/// controller's budget against demand; this product never runs that controller — see
+/// [`chart_labels`] — so it spent a third of the plot on `—`.)
 ///
 /// Deliberately LOCAL rather than a `ui::widgets` component. It is a debug read-out, not a design
 /// system piece: it has no focus, no state and no springs, and
@@ -1783,22 +1893,13 @@ fn draw_chart(&self, p: Painter, r: Rect) {
             .unwrap_or(0)
             .max(1) as f32
     };
-    let link_peak = history
-        .slots
-        .iter()
-        .copied()
-        .filter(|s| s.valid)
-        .flat_map(|s| [s.budget_kbps, s.demand_kbps])
-        .max()
-        .unwrap_or(0)
-        .max(1) as f32;
     let activity_peak = peak(|s| s.activity_kbps);
     let activity_mean = history.mean_activity_kbps();
     let buffer_peak = peak(|s| s.buffer_ms);
 
     const CHART_VALUE_W: f32 = 280.0;
     const CHART_GAP: f32 = 8.0;
-    let lane_h = r.h / 3.0;
+    let lane_h = r.h / 2.0;
     let key_w = self.chart_key_width();
     let bx = r.x + key_w;
     let bars_w = (r.w - key_w - CHART_VALUE_W - CHART_GAP).max(1.0);
@@ -1812,16 +1913,7 @@ fn draw_chart(&self, p: Painter, r: Rect) {
             Label::new(cs.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_TERTIARY)
                 .draw(p, Rect::new(r.x, by, key_w, lane_h));
         }
-        let latest = history.latest().unwrap_or(SweepSample::EMPTY);
-        let value_tint = match i {
-            0 => match link_state(latest.budget_kbps, latest.demand_kbps) {
-                LinkState::Sustains => theme::DIAG_LINK_SUSTAINS,
-                LinkState::Deficit => theme::DIAG_LINK_DEFICIT,
-                LinkState::Unknown => theme::TEXT_TERTIARY,
-            },
-            1 => theme::DIAG_NETWORK_ACTIVITY,
-            _ => theme::RESUME_FILL,
-        };
+        let value_tint = if i == 0 { theme::DIAG_NETWORK_ACTIVITY } else { theme::RESUME_FILL };
         if let Ok(cs) = CString::new(values[i].as_str()) {
             Label::new(cs.as_ptr(), theme::size::DIAGNOSTIC, value_tint)
                 .draw(p, Rect::new(value_x, by, CHART_VALUE_W, lane_h));
@@ -1840,18 +1932,10 @@ fn draw_chart(&self, p: Painter, r: Rect) {
             if !s.valid {
                 continue;
             }
-            let (raw, scale, tint) = match i {
-                0 => (
-                    s.budget_kbps,
-                    link_peak,
-                    match link_state(s.budget_kbps, s.demand_kbps) {
-                        LinkState::Sustains => theme::DIAG_LINK_SUSTAINS,
-                        LinkState::Deficit => theme::DIAG_LINK_DEFICIT,
-                        LinkState::Unknown => theme::TEXT_TERTIARY,
-                    },
-                ),
-                1 => (s.activity_kbps, activity_peak, theme::DIAG_NETWORK_ACTIVITY),
-                _ => (s.buffer_ms, buffer_peak, theme::RESUME_FILL),
+            let (raw, scale, tint) = if i == 0 {
+                (s.activity_kbps, activity_peak, theme::DIAG_NETWORK_ACTIVITY)
+            } else {
+                (s.buffer_ms, buffer_peak, theme::RESUME_FILL)
             };
             if raw >= 0 {
                 let bh = ((raw as f32 / scale).clamp(0.0, 1.0) * band).max(0.0);
@@ -1865,23 +1949,11 @@ fn draw_chart(&self, p: Painter, r: Rect) {
                     );
                 }
             }
-            // Demand is a per-sample threshold, not a second filled series. A one-pixel amber
-            // marker keeps "budget is high" visually distinct from "budget covers THIS stream".
-            if i == 0 && s.demand_kbps > 0 {
-                let y = by + band - (s.demand_kbps as f32 / link_peak).clamp(0.0, 1.0) * band;
-                p.rect(
-                    Rect::new(bx + k as f32 * bw, y, (bw - 1.0).max(1.0), 1.0),
-                    0.0,
-                    theme::RESUME_FILL,
-                    theme::RESUME_FILL,
-                    0.0,
-                );
-            }
         }
         // One line over the same exact 16-second physical window as the bars. It is the arithmetic
         // mean inflow, explicitly labelled at the right; unlike a percentile it makes no claim
         // about unobserved link capacity and unlike the bursty median it does not collapse to zero.
-        if i == 1 {
+        if i == 0 {
             if let Some(mean_kbps) = activity_mean {
                 let y = by + band - (mean_kbps as f32 / activity_peak).clamp(0.0, 1.0) * band;
                 p.rect(
@@ -2131,17 +2203,6 @@ mod tests {
         );
     }
 
-    /// There is no taste threshold in the link colour. Green means the conservative budget
-    /// physically covers demand; red means it does not; absent evidence stays neutral.
-    #[test]
-    fn chart_link_colour_is_the_budget_inequality() {
-        assert_eq!(link_state(-1, 4_000), LinkState::Unknown);
-        assert_eq!(link_state(4_000, -1), LinkState::Unknown);
-        assert_eq!(link_state(3_999, 4_000), LinkState::Deficit);
-        assert_eq!(link_state(4_000, 4_000), LinkState::Sustains);
-        assert_eq!(link_state(12_000, 4_000), LinkState::Sustains);
-    }
-
     #[test]
     fn network_activity_is_bytes_delivered_during_the_sample() {
         assert_eq!(
@@ -2178,33 +2239,14 @@ mod tests {
         }
         assert_eq!(history.mean_activity_kbps(), Some(100));
         assert_eq!(
-            chart_values(&history)[1],
+            chart_values(&history)[0],
             "200 kbps · mean 100 kbps",
             "the right-hand legend names both the current bar and the exact visible-window statistic",
         );
-    }
-
-    #[test]
-    fn manual_original_keeps_the_same_demand_lane() {
-        let d = plx_media::player::Diag {
-            source_kbps: 28_000,
-            ..Default::default()
-        };
         assert_eq!(
-            chart_demand_kbps(&d, plx_media::route::Quality::Original),
-            28_000
-        );
-        let hls = plx_media::player::Diag {
-            abr_mode: plx_media::player::ABR_MODE_HLS,
-            abr_kbps: 22_000,
-            abr_declared_kbps: 18_600,
-            abr_media_kbps: 17_900,
-            ..Default::default()
-        };
-        assert_eq!(
-            chart_demand_kbps(&hls, plx_media::route::Quality::Auto),
-            17_900,
-            "actual measured HLS demand outranks both PMS declaration and request ceiling",
+            chart_values(&history)[1],
+            "—",
+            "no buffer was observed, and the buffer lane says so",
         );
     }
 
@@ -2232,16 +2274,20 @@ mod tests {
                 };
                 let [left, right] = columns(&ps, &d, (0, 0, 0), 1_000);
                 assert_eq!(left.len(), LEFT_ROWS, "vp={vp} abr={abr_mode}: left");
-                assert_eq!(right.len(), RIGHT_ROWS, "vp={vp} abr={abr_mode}: right");
+                // An adaptive session keeps the full model schema; everything else (this product
+                // always) shows the compact link block.
+                let want = if abr_mode == 0 { LINK_ROWS } else { RIGHT_ROWS };
+                assert_eq!(right.len(), want, "vp={vp} abr={abr_mode}: right");
             }
         }
     }
 
-    /// A photograph must be directly comparable across every delivery mode.  Rows that disappear
-    /// in fixed/Original mode make the reader compare two different instruments and, worse, move
-    /// every pipeline fact to a different y between photographs.
+    /// A photograph must be directly comparable across delivery modes. Original and HLS are one
+    /// instrument — they move values, never rows. The two routes this product actually has each
+    /// keep a stable schema of their own: a direct/debrid link never carries the adaptive model's
+    /// inert rows (the shim serves no transcoder), and a torrent's column is graded separately.
     #[test]
-    fn every_delivery_mode_keeps_the_same_schema() {
+    fn every_delivery_mode_keeps_a_stable_schema() {
         let ps = plx_media::route::PlaybackSession::IDLE;
         let schema = |mode| {
             rows(&ps, 
@@ -2256,25 +2302,30 @@ mod tests {
             .map(|f| f.key)
             .collect::<Vec<_>>()
         };
-        let fixed = schema(0);
+        let adaptive = schema(plx_media::player::ABR_MODE_ORIGINAL);
         assert!(
-            fixed.contains(&"Acquisition"),
-            "the cadence row disappeared from the fixed schema"
+            adaptive.contains(&"Acquisition"),
+            "the cadence row disappeared from the adaptive schema"
         );
         assert!(
-            !fixed.contains(&"Encoder"),
+            !adaptive.contains(&"Encoder"),
             "the end-to-end cadence was mislabeled as server state"
         );
         assert_eq!(
-            schema(plx_media::player::ABR_MODE_ORIGINAL),
-            fixed,
-            "Original moved or added rows"
-        );
-        assert_eq!(
             schema(plx_media::player::ABR_MODE_HLS),
-            fixed,
+            adaptive,
             "HLS moved or added rows"
         );
+        let direct = schema(0);
+        for key in ["File", "Size", "Rate", "Quality", "Ram"] {
+            assert!(direct.contains(&key), "the direct-link schema lost {key}: {direct:?}");
+        }
+        for key in ["Acquisition", "Sample", "Mode", "Peers"] {
+            assert!(
+                !direct.contains(&key),
+                "a direct/debrid link must not show the inert model row {key}: {direct:?}"
+            );
+        }
     }
 
     /// Regression for the photographed `6.9 s · +0.2 s/s · starves in 116 s` reading.  The
@@ -2685,9 +2736,11 @@ mod tests {
                 };
                 let [left, right] = columns(&ps, &d, (0, 0, 0), 1_000);
                 let ll = FieldList::wrapped_line_count(&left).max(LEFT_ROWS);
-                let rl = FieldList::wrapped_line_count(&right).max(RIGHT_ROWS);
-                let h = HEAD_H + FieldList::height(ll.max(rl + CHART_ROWS)) + PAD;
-                let band = h - PAD - HEAD_H - FieldList::height(rl);
+                let reserved = FieldList::wrapped_line_count(&right).max(RIGHT_ROWS) + CHART_ROWS;
+                let h = HEAD_H + FieldList::height(ll.max(reserved)) + PAD;
+                // The draw starts the chart under the column's ACTUAL rows, so a block that
+                // spends fewer pitches hands them to the band rather than leaving a gap.
+                let band = h - PAD - HEAD_H - FieldList::height(FieldList::wrapped_line_count(&right));
                 assert!(
                     band >= 60.0,
                     "vp={vp} abr={abr_mode}: chart band is {band}px, it would not draw"
@@ -2713,6 +2766,7 @@ mod tests {
         };
         let build_with = |d: &plx_media::player::Diag, selected: plx_media::route::Quality| {
             let mut v = Vec::new();
+            v.push(Field::new(plx_platform::i18n::msg::browse_diagnostics_field_file(), file_line(&ps)));
             abr_rows(&ps, d, selected, &mut v);
             v
         };
@@ -3366,6 +3420,74 @@ mod tests {
             assert!(english_only.is_empty(),
                 "{lang}: an English-only message (`translate: false`) must not be translated: {english_only:?}");
         }
+    }
+
+    /// The File and Size rows answer "which file is this" the way the panel's readers ask it: the
+    /// release's own name (a server path keeps only its last component) with the size on its own
+    /// row beneath, and nothing invented when the plan named no file at all.
+    #[test]
+    fn the_file_rows_name_the_release_and_its_size() {
+        assert_eq!(base_name("/Volumes/DAS/Movies/X.mkv"), "X.mkv");
+        assert_eq!(base_name("Some.Release.2024.1080p.mkv"), "Some.Release.2024.1080p.mkv");
+        assert_eq!(base_name(""), "");
+        assert_eq!(size_value(3 * 1024 * 1024 * 1024), "3.00 GB");
+        assert_eq!(size_value(0), "—", "nobody said, and an empty file is not the claim");
+        // The one-row form the adaptive-model block still uses.
+        assert_eq!(file_value("/Volumes/DAS/Movies/X.mkv", 3 * 1024 * 1024 * 1024), "X.mkv · 3.00 GB");
+        assert_eq!(file_value("Some.Release.2024.1080p.mkv", 0), "Some.Release.2024.1080p.mkv");
+        assert_eq!(file_value("", 1 << 30), plx_platform::i18n::msg::browse_diagnostics_no_file());
+    }
+
+    /// The RAM row's figure: used is `MemTotal` minus the kernel's AVAILABLE number (not MemFree —
+    /// reclaimable cache is not pressure). A kernel without MemAvailable says "everything used"
+    /// rather than inventing headroom, and a missing MemTotal says nothing.
+    #[test]
+    fn the_ram_figure_reads_meminfo_honestly() {
+        let text = "MemTotal:        1228800 kB\nMemFree:          123456 kB\nMemAvailable:     204800 kB\n";
+        assert_eq!(parse_meminfo(text), Some(((1228800 - 204800) * 1024, 1228800 * 1024)));
+        assert_eq!(
+            parse_meminfo("MemTotal: 1000 kB\nMemFree: 100 kB\n"),
+            Some((1000 * 1024, 1000 * 1024)),
+            "no MemAvailable means no claim about free memory",
+        );
+        assert_eq!(parse_meminfo("MemFree: 100 kB\n"), None);
+    }
+
+    /// While a torrent plays, the DELIVERY column carries the swarm's own numbers instead of the
+    /// adaptive model's "controller idle" placeholders. Seven swarm rows sit between the file
+    /// identity rows and the set's RAM; the column is exactly its fixed budget.
+    #[test]
+    fn the_swarm_block_fills_the_model_slots_when_a_torrent_plays() {
+        use plx_platform::i18n::msg;
+        let s = plx_stremio::sbengine::EngineStats {
+            peers: 9,
+            seeds: 7,
+            known: 41,
+            connecting: 3,
+            down_bps: 2 << 20,
+            up_bps: 0,
+            downloaded: 108 << 20,
+            disk_used: 8 << 20,
+            disk_capacity: 100 << 20,
+            window: 32 << 20,
+            resident: 8 << 20,
+            freed: 0,
+            refetched: 33,
+            mem_cache_used: 0,
+            window_unsupported: 0,
+        };
+        let mut v = Vec::new();
+        swarm_rows(&plx_media::player::Diag::default(), &s, &mut v);
+        assert_eq!(v.len(), SWARM_ROWS, "seven swarm rows between File/Size and RAM");
+        let val = |key: &str| v.iter().find(|f| f.key == key).and_then(|f| f.val.as_deref()).unwrap_or("missing");
+        assert_eq!(val(msg::browse_diagnostics_field_peers()), "9 connected · 3 connecting · 41 known");
+        assert_eq!(val(msg::browse_diagnostics_field_seeds()), "7 of 9 peers");
+        assert_eq!(val(msg::browse_diagnostics_field_rate()), "down 2.0 MB/s · up 0 B/s");
+        assert_eq!(val(msg::browse_diagnostics_field_window()), "32.0 MB");
+        assert_eq!(val(msg::browse_diagnostics_field_cache()), "8.0 MB resident · 0 B freed");
+        assert_eq!(val(msg::browse_diagnostics_field_refetch()), "33");
+        assert!(v.iter().all(|f| f.key != "Downloaded"), "Transfer already carries the bytes");
+        assert!(v.iter().all(|f| f.key != "Disk"), "the disk row's 'free' was the window budget, not disk space");
     }
 
     #[test]

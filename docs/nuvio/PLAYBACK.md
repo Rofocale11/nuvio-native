@@ -309,6 +309,15 @@ open the remembered torrent (`/nuvio/warm`): info hash only, no stream, no file 
 payload, so the engine restores the kept swarm and dials its peers before the press. A debrid or
 direct link has no swarm and the warm is a no-op for it.
 
+While such a torrent plays, the diagnostics read-out's `DELIVERY / CONTROL` column shows the live
+swarm instead of the Plex adaptive-model rows (which the shim never runs): the file name with its
+size on the row beneath, connected/connecting/known peers, seeds, down/up rate, the streaming
+window, resident/freed cache, pieces re-fetched after eviction, and the set's RAM as `used/total`
+MB (`/proc/meminfo`'s `MemTotal` minus `MemAvailable`, resampled with the panel). A direct or debrid
+link — no `Media.p2p` — has no swarm and no adaptive session either, so it shows the compact
+file/size/rate/quality block rather than nine "model idle" placeholders; the chart takes the rows a
+block does not spend. The swap is keyed on the decision's `Media.p2p` marker.
+
 **A Continue Watching card under Play starts from the row itself.** The shim's hub rows carry no
 `Media` — a row is the list projection, not the item — so the card has no Part key. The press
 plays it anyway: `request_play_movie` admits an empty Part on the shim, whose `/decision` names

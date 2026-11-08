@@ -814,6 +814,65 @@
     "translate": false,
     "description": "Diagnostics panel: no connection"
   },
+  "browse.diagnostics.no_file": {
+    "value": "no file named",
+    "translate": false,
+    "description": "Diagnostics panel: the plan named no source file"
+  },
+  "browse.diagnostics.ram": {
+    "value": "{used}/{max} MB",
+    "args": {
+      "max": "str",
+      "used": "str"
+    },
+    "translate": false,
+    "description": "Diagnostics panel, the Ram row: the set's memory in use against its total, in whole megabytes (the row label already names it)"
+  },
+  "browse.diagnostics.peers": {
+    "value": "{connected} connected · {connecting} connecting · {known} known",
+    "args": {
+      "connected": "str",
+      "connecting": "str",
+      "known": "str"
+    },
+    "translate": false,
+    "description": "Diagnostics panel, torrent swarm block: the peer census"
+  },
+  "browse.diagnostics.seeds": {
+    "value": "{seeds} of {peers} peers",
+    "args": {
+      "peers": "str",
+      "seeds": "str"
+    },
+    "translate": false,
+    "description": "Diagnostics panel, torrent swarm block: how many connected peers are seeds"
+  },
+  "browse.diagnostics.rate": {
+    "value": "down {down}/s · up {up}/s",
+    "args": {
+      "down": "str",
+      "up": "str"
+    },
+    "translate": false,
+    "description": "Diagnostics panel, torrent swarm block: transfer rates"
+  },
+  "browse.diagnostics.cache": {
+    "value": "{resident} resident · {freed} freed",
+    "args": {
+      "freed": "str",
+      "resident": "str"
+    },
+    "translate": false,
+    "description": "Diagnostics panel, torrent swarm block: payload bytes held and bytes freed"
+  },
+  "browse.diagnostics.link_rate": {
+    "value": "down {down}/s · mean since open",
+    "args": {
+      "down": "str"
+    },
+    "translate": false,
+    "description": "Diagnostics panel, direct/debrid link block: the average bytes per second delivered to FFmpeg since the request opened"
+  },
   "browse.diagnostics.refused": {
     "value": "REFUSED",
     "translate": false,
@@ -1394,24 +1453,6 @@
     "translate": false,
     "description": "Diagnostics panel: predicted ratio"
   },
-  "browse.diagnostics.chart_budget_mbps": {
-    "value": "{budget} budget · {demand} demand Mbps",
-    "args": {
-      "budget": "str",
-      "demand": "str"
-    },
-    "translate": false,
-    "description": "Diagnostics panel: chart budget mbps"
-  },
-  "browse.diagnostics.chart_budget_kbps": {
-    "value": "{budget} budget · {demand} demand kbps",
-    "args": {
-      "budget": "str",
-      "demand": "str"
-    },
-    "translate": false,
-    "description": "Diagnostics panel: chart budget kbps"
-  },
   "browse.diagnostics.network_mean": {
     "value": "{rate} · mean {mean}",
     "args": {
@@ -1892,6 +1933,51 @@
     "translate": false,
     "description": "Row label in the playback diagnostics read-out (the delivery route: streaming transport and whether the server converts the file). It is right-aligned into a narrow gutter at the dense diagnostic size, so it must stay short (about 12 characters)."
   },
+  "browse.diagnostics.field.file": {
+    "value": "File",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out (the source file's name). It is right-aligned into a narrow gutter at the dense diagnostic size, so it must stay short (about 12 characters)."
+  },
+  "browse.diagnostics.field.size": {
+    "value": "Size",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out, directly under File (the source file's size, e.g. 1.85 GB). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
+  "browse.diagnostics.field.ram": {
+    "value": "Ram",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out (the television's memory in use against its total). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
+  "browse.diagnostics.field.peers": {
+    "value": "Peers",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out, torrent swarm block (connected, connecting and known peers). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
+  "browse.diagnostics.field.seeds": {
+    "value": "Seeds",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out, torrent swarm block (how many connected peers are seeds). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
+  "browse.diagnostics.field.rate": {
+    "value": "Rate",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out, torrent swarm block (download and upload bytes per second). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
+  "browse.diagnostics.field.window": {
+    "value": "Window",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out, torrent swarm block (the streaming window size kept around the playhead). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
+  "browse.diagnostics.field.cache": {
+    "value": "Cache",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out, torrent swarm block (payload bytes resident and bytes freed). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
+  "browse.diagnostics.field.refetch": {
+    "value": "Pieces",
+    "translate": false,
+    "description": "Row label in the playback diagnostics read-out, torrent swarm block (how many pieces the engine had to download again after eviction). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
+  },
   "browse.diagnostics.field.video": {
     "value": "Video",
     "translate": false,
@@ -1987,20 +2073,15 @@
     "translate": false,
     "description": "Row label in the playback diagnostics read-out (why the quality controller is doing it). It is right-aligned into a narrow gutter at the dense diagnostic size, so it must stay short (about 12 characters)."
   },
-  "browse.diagnostics.chart.budget": {
-    "value": "BUDGET / DEMAND",
-    "translate": false,
-    "description": "Uppercase key beside one of the three plots in the playback diagnostics chart (bandwidth the quality controller may spend beside what the stream needs)."
-  },
   "browse.diagnostics.chart.network": {
     "value": "NETWORK ACTIVITY",
     "translate": false,
-    "description": "Uppercase key beside one of the three plots in the playback diagnostics chart (bytes arriving from the network)."
+    "description": "Uppercase key beside one of the two plots in the playback diagnostics chart (bytes arriving from the network)."
   },
   "browse.diagnostics.chart.buffer": {
     "value": "BUFFER HEALTH",
     "translate": false,
-    "description": "Uppercase key beside one of the three plots in the playback diagnostics chart (seconds of media buffered)."
+    "description": "Uppercase key beside one of the two plots in the playback diagnostics chart (seconds of media buffered)."
   },
   "browse.diagnostics.build_dev": {
     "value": "dev",
