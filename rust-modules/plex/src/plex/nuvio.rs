@@ -20,12 +20,31 @@ pub struct StreamChoice {
     pub seeders: Option<u32>,
 }
 
+/// One ranked addon sidecar (`/nuvio/streams`'s `subtitles`): the id the shim will serve at
+/// `/library/streams/{id}` and the pick the track menu draws.
+#[derive(Clone, Default, Debug, PartialEq, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SubChoice {
+    pub id: i64,
+    pub lang: String,
+    pub title: String,
+}
+
 #[derive(Default, serde::Deserialize)]
 pub struct StreamList {
     #[serde(default)]
     pub complete: bool,
+    /// Whether the subtitle addons have finished. Separate from `complete` because streams
+    /// unblock a play and subtitles do not: a poll that stops on `complete` alone never sees
+    /// the sidecars that answer after the last stream.
+    #[serde(default)]
+    pub subtitles_complete: bool,
     #[serde(default)]
     pub streams: Vec<StreamChoice>,
+    /// The ranked subtitle sidecars so far. A play that started before the subtitle addons
+    /// answered gets the late ones from the poll that reads this route.
+    #[serde(default)]
+    pub subtitles: Vec<SubChoice>,
 }
 
 impl Client {

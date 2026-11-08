@@ -2486,6 +2486,77 @@ mod tmdb_metadata_tests {
         assert_eq!(body(&shim.handle(&get()))["complete"], true);
     }
 
+    /// **The sidecars ride the poll.** A play planned before the subtitle addons answered (the
+    /// deck's straight-to-player press) has only the tracks `/decision` already had; the same
+    /// `/nuvio/streams` answer carries the ranked sidecars so the player's track list can gain the
+    /// late ones. Ids are the ones the shim serves at `/library/streams/{id}`.
+    #[test]
+    fn nuvio_streams_carries_the_ranked_sidecars() {
+        struct OneSidecarBackend;
+        impl Backend for OneSidecarBackend {
+            fn catalogs(&self) -> Vec<CatalogInfo> { Vec::new() }
+            fn all_catalogs(&self) -> Vec<CatalogInfo> { Vec::new() }
+            fn catalog_page(&self, _: &str, _: u32, _: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+                Ok(Vec::new())
+            }
+            fn search(&self, _: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> { Vec::new() }
+            fn meta(&self, _: &str, _: &str) -> Option<Meta> { None }
+            fn streams(
+                &self,
+                _: &str,
+                _: &str,
+                _: Duration,
+                _: &mut dyn FnMut(&[Stream]),
+            ) -> Vec<Stream> {
+                vec![Stream { url: Some("https://example.invalid/movie.mkv".into()), ..Default::default() }]
+            }
+            fn subtitles(&self, _: &str, _: &str) -> Vec<plx_stremio::model::Subtitle> {
+                // The real ordering: the sub addons answer after the last stream. The play must
+                // not wait for them, and the poll must not stop when the streams do.
+                std::thread::sleep(Duration::from_millis(30));
+                vec![plx_stremio::model::Subtitle {
+                    url: "https://example.invalid/sub-en.srt".into(),
+                    lang: "en".into(),
+                    movie_release_name: Some("A Release".into()),
+                    ..Default::default()
+                }]
+            }
+        }
+        let shim = Arc::new(Shim::new(Arc::new(OneSidecarBackend), Config::default()));
+        let get = || Request {
+            method: "GET".into(),
+            path: "/nuvio/streams".into(),
+            query: HashMap::from([("ratingKey".into(), "1000000603".into())]),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+        // Streams complete first and the play-start poll may stop only when BOTH flags say done.
+        let mut last = Value::Null;
+        for _ in 0..200 {
+            last = serde_json::from_slice(&shim.handle(&get()).body).unwrap();
+            if last["complete"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(last["complete"], true, "{last}");
+        assert_eq!(last["subtitlesComplete"], false, "the streams finish before the sidecars: {last}");
+        // The slot's stream and subtitle workers are threads: poll like the player's picker does.
+        for _ in 0..200 {
+            last = serde_json::from_slice(&shim.handle(&get()).body).unwrap();
+            if last["subtitlesComplete"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(last["subtitlesComplete"], true, "{last}");
+        let subs = last["subtitles"].as_array().expect("the answer carries a subtitles list");
+        assert_eq!(subs.len(), 1, "{last}");
+        assert_eq!(subs[0]["lang"], "en", "{last}");
+        assert!(subs[0]["id"].as_i64().is_some_and(|id| id > 0), "a sidecar without an id names no /library/streams key: {last}");
+        assert!(!last["streams"].as_array().unwrap().is_empty(), "{last}");
+    }
+
     /// The swarm warm's gate: a key with no resume point, or no remembered torrent, is inert —
     /// nothing was played there, so no swarm may be dialed. A remembered torrent behind a resume
     /// point admits the warm (the engine call is best effort on its own thread; no engine is
@@ -3461,7 +3532,9 @@ impl Shim {
     }
 
     /// The ranked playable streams of an item (waiting per the deadline/grace rules) and the
-    /// subtitles known so far. Each entry carries its arrival index.
+    /// subtitles known so far. Each entry carries its arrival index. The last bool says whether
+    /// the sub-addon thread has finished: streams usually complete first (a play must not wait
+    /// for subtitles), so a caller that wants the late sidecars has to keep asking.
     ///
     /// **`chosen` ends the wait once a stream has been picked.** `/nuvio/select` records the
     /// viewer's file, and from that moment no addon still answering can change which one plays —
@@ -3477,9 +3550,9 @@ impl Shim {
         runtime_secs: Option<u32>,
         max_wait: Duration,
         chosen: bool,
-    ) -> (Vec<(usize, Classified)>, Vec<SubRef>, bool) {
+    ) -> (Vec<(usize, Classified)>, Vec<SubRef>, bool, bool) {
         let Some(slot) = self.slot(rk, ident) else {
-            return (Vec::new(), Vec::new(), true);
+            return (Vec::new(), Vec::new(), true, true);
         };
         let deadline = self
             .cfg
@@ -3585,6 +3658,7 @@ impl Shim {
         let indexed: Vec<Stream> = st.streams.clone();
         let selected = st.selected;
         let done = st.done;
+        let subs_done = st.subs_done;
         drop(st);
         let mut out: Vec<(usize, Classified)> = Vec::new();
         let audio = self
@@ -3616,7 +3690,7 @@ impl Shim {
             let last = self.watch.get(rk).last_stream;
             Self::promote_last_stream(&mut out, last.as_ref(), false);
         }
-        (out, subs, done)
+        (out, subs, done, subs_done)
     }
 
     // ---- rows -------------------------------------------------------------------------------
@@ -5748,7 +5822,7 @@ impl Shim {
                 Duration::ZERO
             };
             let ranked_at = Instant::now();
-            let (ranked, subs, done) = self.ranked(
+            let (ranked, subs, done, _subs_done) = self.ranked(
                 rk,
                 &ident,
                 u32::try_from(dur / 1000).ok(),
@@ -6826,9 +6900,19 @@ impl Shim {
                 // slot map cannot answer that — an absent slot must NOT read as "still loading".
                 // The picker polls this route while addon workers report batches. Never wait here:
                 // return the streams cached so far and let the next poll observe later addons.
-                let (ranked, _, done) = self.ranked(rk, &ident, None, Duration::ZERO, false);
+                let (ranked, subs, done, subs_done) =
+                    self.ranked(rk, &ident, None, Duration::ZERO, false);
+                // The sidecars ride the same answer: a play that starts before the subtitle addons
+                // finish (the deck's straight-to-player press) gets the late ones from the poll
+                // that reads this route instead of never seeing them. `complete` speaks only for
+                // the streams — the play-start poll stops on BOTH flags, because subtitle addons
+                // routinely answer seconds after the last stream.
                 Response::json(&json!({"ratingKey": rk, "complete": done,
-                    "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>()}))
+                    "subtitlesComplete": subs_done,
+                    "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>(),
+                    "subtitles": subs.iter().map(|s| json!({
+                        "id": s.id, "lang": s.lang, "title": s.title
+                    })).collect::<Vec<_>>()}))
             }
             (_, ["nuvio", "select"]) => {
                 let rk = req
@@ -7309,7 +7393,7 @@ impl Shim {
         // Make sure the slot exists (a resume after a restart lands here first) and has waited.
         // A pick already made ends that wait: the player is opening THAT file, and no addon still
         // answering can change it.
-        let (ranked, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline, true);
+        let (ranked, _, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline, true);
         let stream = if idx == BEST_PART {
             ranked.first().map(|(_, c)| c.stream.clone())
         } else {

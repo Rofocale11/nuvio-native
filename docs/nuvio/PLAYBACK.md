@@ -316,6 +316,16 @@ the file from the item's ranked streams (the same door the hero picker's `PlayIn
 with an empty part), and refuses it on any other server, where a row with no Part names no file.
 Refusing it there too left the press queuing nothing at all — a dead tile with no error.
 
+That play fetches its addons at the press rather than on a page. The play-start poll keeps asking
+`/nuvio/streams` until the shim reports the ranking complete — not until the first non-empty
+answer, which is usually one addon's partial list — so the player's Sources list fills in as the
+addons reply. The ranked subtitle sidecars ride the same answer and are appended to the playing
+item's track list as they land (the same ids, `/library/streams/{id}` keys and pick behaviour a
+detail-page play carries), instead of being frozen at whatever `/decision` had when it landed.
+The answer's `subtitlesComplete` flag is separate from the streams' `complete` on purpose: subtitle
+addons routinely answer after the last stream (the streams unblock the play, the subtitles do not),
+so the poll keeps going until both are done.
+
 Cold starts that skip the probe are covered by a **first-byte grace**. A plaintext media open
 arms `MEDIA_FIRST_BYTE_TIMEOUT_MS` (45 s) on its socket for the FIRST body byte only; the first
 successful read restores `MEDIA_RECV_TIMEOUT_MS` (15 s) for the rest of the transfer. It is

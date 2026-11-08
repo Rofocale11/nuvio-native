@@ -266,6 +266,51 @@ pub(crate) fn enter_player(
 /// Load (direct-play av_seek / transcode &offset restart), start the engine, record the
 /// Stop/BACK/EOS return target, reset the HUD focus cursor, and show the HUD. A missed step
 /// here used to silently fork behavior between the interactive and headless paths.
+/// Bumped at every playback start: an older play's stream/subtitle poll stops at its next tick
+/// instead of overwriting the live play's Source list or naming a different item's sidecars.
+static STREAM_FETCH_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Install the addon subtitle sidecars that answered AFTER the play was planned. The plan
+/// snapshots the tracks `/decision` had at landing; on a straight-to-player deck press (the Play
+/// setting) the subtitle addons are still running at that moment, so their sidecars would never
+/// reach the track menu. The play-start poll publishes them (`route::ranked_subs`); this appends
+/// the new ones to the playing item exactly like the Subtitles → Search page's download does. A
+/// publication for an item that is not playing is dropped, and re-tried next frame until the plan
+/// that installs the playing item has landed — the poll can beat it.
+pub(crate) fn drain_ranked_subs(meta: &mut plx_data::stores::metadata::MetadataStore) -> bool {
+    static APPLIED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let rev = plx_media::route::ranked_subs_rev();
+    if rev == APPLIED.load(Relaxed) {
+        return false;
+    }
+    let Some((sid, rk, subs)) = plx_media::route::ranked_subs() else { return false };
+    // Without the plan's playing item installed there is nothing to append to yet; leave the
+    // revision unmarked so the landing frame retries.
+    let playing = meta.view().playing().map(|p| (p.sid, p.rk.clone()));
+    let Some((psid, prk)) = playing else { return false };
+    if !plx_plex::plex::same_item((psid, &prk), (sid, &rk)) {
+        return false;
+    }
+    APPLIED.store(rev, Relaxed);
+    for (id, lang, title) in subs {
+        meta.run(plx_data::stores::metadata::MetadataCmd::AppendPlayingSub {
+            sid,
+            rk: rk.clone(),
+            stream: plx_data::metadata::Stream {
+                id,
+                codec: "srt".into(),
+                lang: lang.clone(),
+                lang_code: lang.to_lowercase(),
+                title,
+                external: true,
+                key: format!("/library/streams/{id}.srt"),
+                ..Default::default()
+            },
+        });
+    }
+    true
+}
+
 pub(crate) fn start_playback(
     ps: &mut plx_media::route::PlaybackSession,
     pa: &mut plx_media::player::adapter::PlayerAdapter,
@@ -389,28 +434,53 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     bridge: &mut super::bridge::Bridge,
     resources: &mut R,
 ) -> bool {
-    // FORK (RichiL10): Fetch streams in the background (does not block video start)
+    // FORK (RichiL10): Fetch streams in the background (does not block video start).
+    // Poll until the shim's ranking is COMPLETE, not until the first non-empty answer: a deck
+    // press (Play setting) starts the ranking at the press, so the first answer is usually one
+    // addon's partial list, and stopping there left the Sources menu short for the whole session.
+    // The same poll carries the addon subtitle sidecars that answer after the play was planned.
     plx_media::route::set_available_streams(Vec::new());
+    let fetch_gen = STREAM_FETCH_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     if let Some(req) = &ps.request {
         let fetch_sid = req.sid;
         let fetch_rk = req.rk.clone();
         let _ = plx_base::task::spawn("fetch-nuvio-streams", move || {
-            if let Some(client) = plx_plex::plex::client_for(fetch_sid) {
-                if client.is_nuvio() {
-                    for _attempt in 1..=10 {
-                        if let Some(list) = client.nuvio_streams(&fetch_rk) {
-                            if !list.streams.is_empty() {
-                                let saved: Vec<(usize, String, String, Option<u32>)> = list.streams.iter()
-                                    .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default(), s.seeders))
-                                    .collect();
-                                plx_media::route::set_available_streams(saved);
-                                plx_machine::idle::invalidate(); // <--- THIS TRIGGERS THE LIVE UPDATE!
-                                break;
-                            }
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+            let Some(client) = plx_plex::plex::client_for(fetch_sid) else { return };
+            if !client.is_nuvio() { return; }
+            let mut streams: Vec<(usize, String, String, Option<u32>)> = Vec::new();
+            let mut subs: Vec<(i64, String, String)> = Vec::new();
+            // 90 × 500 ms bounds an abandoned title by the shim's own stream deadline (45 s); a
+            // play that supersedes this one stops it at the next tick (`STREAM_FETCH_GEN`).
+            for _attempt in 0..90 {
+                if STREAM_FETCH_GEN.load(std::sync::atomic::Ordering::SeqCst) != fetch_gen { return; }
+                if let Some(list) = client.nuvio_streams(&fetch_rk) {
+                    let now: Vec<_> = list.streams.iter()
+                        .map(|s| (s.index, s.label.clone(), s.addon.clone().unwrap_or_default(), s.seeders))
+                        .collect();
+                    if now != streams {
+                        plx_media::route::set_available_streams(now.clone());
+                        streams = now;
+                        plx_machine::idle::invalidate(); // <--- THIS TRIGGERS THE LIVE UPDATE!
                     }
+                    let late: Vec<_> = list.subtitles.iter()
+                        .map(|s| (s.id, s.lang.clone(), s.title.clone()))
+                        .collect();
+                    if late != subs {
+                        plx_base::eventlog::log(&format!(
+                            "nuvio: play-start poll rk={} carried {} subtitle sidecar(s) (streams done={}, subs done={})",
+                            fetch_rk, late.len(), list.complete, list.subtitles_complete
+                        ));
+                        plx_media::route::set_ranked_subs(fetch_sid, fetch_rk.clone(), late.clone());
+                        subs = late;
+                        plx_machine::idle::invalidate();
+                    }
+                    // Streams unblock the play; subtitles do not. Stopping on `complete` alone
+                    // meant the poll gave up while the sub addons were still answering (a
+                    // subscene timeout showed exactly this), so the deck's straight-to-player
+                    // play never saw a single sidecar.
+                    if list.complete && list.subtitles_complete { return; }
                 }
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         });
     }
@@ -1740,5 +1810,51 @@ mod commit_track_tests {
                 "commit_track must not call {forgotten}: that commit forgets the menu's memo"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ranked_subs_tests {
+    use super::*;
+
+    fn playing_item(sid: plx_plex::plex::ServerId, rk: &str) -> plx_data::metadata::PlayingItem {
+        plx_data::metadata::PlayingItem {
+            sid, rk: rk.into(), show_rk: String::new(), kind: String::new(), audio: Vec::new(),
+            subs: Vec::new(), video_fps: 0.0, width: 0, height: 0, bitrate: 0, dovi: Default::default(),
+            hdr: false, markers: Vec::new(), chapters: Vec::new(),
+        }
+    }
+
+    /// **A sidecar that answered after the play was planned still reaches the track list.** The
+    /// plan snapshots the tracks `/decision` had at landing; on a straight-to-player deck press the
+    /// subtitle addons are still running then, so the play-start poll publishes the late ones and
+    /// this drain appends them to the playing item — the Search download's own command. A
+    /// publication for an item that is not playing appends nothing and stays queued for the
+    /// landing frame; a repeat lists each sidecar once.
+    #[test]
+    fn a_late_ranked_sidecar_is_appended_to_the_playing_item() {
+        let _guard = plx_base::testlock::serial();
+        let sid = plx_plex::plex::ServerId::from_raw(0);
+        let mut store = plx_data::stores::metadata::MetadataStore::default();
+        assert!(store.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(
+            playing_item(sid, "10058")
+        ))));
+
+        plx_media::route::set_ranked_subs(sid, "other-rk".into(), vec![(7, "fr".into(), "Other".into())]);
+        assert!(!drain_ranked_subs(&mut store), "a sidecar for another item is not appended");
+        assert!(store.view().playing().is_some_and(|p| p.subs.is_empty()));
+
+        plx_media::route::set_ranked_subs(sid, "10058".into(), vec![(900000043, "en".into(), "A Release".into())]);
+        assert!(drain_ranked_subs(&mut store));
+        let subs = store.view().playing().unwrap().subs.clone();
+        assert_eq!(subs.len(), 1);
+        assert_eq!((subs[0].id, subs[0].lang_code.as_str(), subs[0].external), (900000043, "en", true));
+        assert_eq!(subs[0].key, "/library/streams/900000043.srt");
+
+        plx_media::route::set_ranked_subs(sid, "10058".into(), vec![(900000043, "en".into(), "A Release".into())]);
+        assert!(drain_ranked_subs(&mut store));
+        assert_eq!(store.view().playing().unwrap().subs.len(), 1, "the same sidecar is listed once");
+
+        store.run(plx_data::stores::metadata::MetadataCmd::RetirePlaying);
     }
 }

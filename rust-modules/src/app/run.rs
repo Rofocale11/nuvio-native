@@ -2340,6 +2340,12 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         if app.bridge.metadata_pump_detail() {
             plx_machine::idle::invalidate(); // a detail landing rewrites the page under us
         }
+        // The play-start poll's late addon sidecars (see `playback::drain_ranked_subs`). Route-
+        // unconditional for the same reason as the two pumps above: a Play from Home flips
+        // straight to the player, and the track list must gain them there.
+        if crate::app::playback::drain_ranked_subs(app.bridge.metadata_mut()) {
+            plx_machine::idle::invalidate();
+        }
         // Async season load: install the worker's episode list into CURRENT. Route-unconditional
         // for the same reason as pump_detail above; see `stores/metadata.rs`'s module doc for why
         // this call site went missing for a whole migration and how it was found.

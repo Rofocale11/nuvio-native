@@ -116,6 +116,15 @@ server" below.
   which also carries the stream's technical facts). `route::AVAILABLE_STREAMS` is written only
   through `route::set_available_streams`, so a revision stamp tells the player panel's per-tick
   poll that nothing moved.
+  Playback start polls `/nuvio/streams` until the shim reports the ranking **complete**, not until
+  its first non-empty answer: a deck press starts the ranking at the press, so the first answer is
+  usually one addon's partial list, and stopping there left the Sources menu short for the whole
+  session. The same answer carries the ranked subtitle sidecars; the loop appends the ones that
+  answered after the plan to the playing item (`route::set_ranked_subs` →
+  `playback::drain_ranked_subs`, the Search download's own `AppendPlayingSub`), so the track menu
+  lists them exactly as it lists the tracks `/decision` already had. Its `subtitlesComplete` flag
+  is separate from the streams' `complete`: subtitle addons answer after the last stream, so the
+  poll stops only when both are done (the play itself never waits for either).
 - **A press opens the picker; a pick IS the play.** Every surface that used to start a file
   directly raises this panel first, and the commit starts the thing the panel was about:
   - **Detail page**: the hero's **Streams** pill lists the page's own item; an **episode's still**
