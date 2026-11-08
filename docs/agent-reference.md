@@ -789,8 +789,12 @@ kills the process at `exec()` — before `main`, before the event log exists. So
 its own and PINS it.** This doc used to file FFmpeg beside curl and ACB as "SONAME moves,
 55→57→58→59→60", which is the wrong mental model to carry into any FFmpeg change today.
 `ci/build-ffmpeg.sh` cross-compiles FFmpeg **9.0** with the NDK — shared, LGPL-clean (no
-`--enable-gpl`), under a `-plx` build suffix: `libavutil-plx.so.61`, `libavcodec-plx.so.63`,
-`libavformat-plx.so.63`, plus `libswscale-plx.so.10` in dev builds only. `make deploy`/`make ipk`
+`--enable-gpl`), under a `-plx` build suffix: `libavutil-plx.so.61`, `libswresample-plx.so.7`,
+`libavcodec-plx.so.63`, `libavformat-plx.so.63`, plus `libswscale-plx.so.10` in dev builds only.
+libswresample is not for the app's own use: FFmpeg's `opus` decoder depends on it, and configure
+silently drops the decoder when it is off — which is how a build whose `--enable-decoder` list
+named `opus` shipped a libavcodec with no Opus decoder, and the AC3 encode lane learned it at Load
+as "the bundled FFmpeg has no opus decoder" (2026-11-08). `make deploy`/`make ipk`
 ship those `.so` files **beside the binary**, and `ff.rs::load_libraries` opens them by **absolute
 path out of `paths::app_dir()`**, in dependency order under `RTLD_GLOBAL` (they carry no rpath —
 FFmpeg's configure evals its flags and `$ORIGIN` does not survive), after which `boot()` refuses to

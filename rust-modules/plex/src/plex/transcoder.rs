@@ -436,12 +436,12 @@ fn target_audio(
 
 fn profile_extra(delivery: TranscodeDelivery, audio: super::params::AudioTarget) -> String {
     let caps = plx_platform::devcaps::caps();
-    let baseline = profile_for_delivery(caps, delivery);
+    let baseline = profile_for_delivery(&caps, delivery);
     if matches!(delivery, TranscodeDelivery::FixedHls { .. }) {
         return baseline;
     }
     let output = sound_output_value();
-    let list = target_audio(caps, audio, &output, plx_base::forkknobs::get("encode_audio").as_deref());
+    let list = target_audio(&caps, audio, &output, plx_base::forkknobs::get("encode_audio").as_deref());
     plx_base::eventlog::log(&format!("audio: target={list} for {audio:?} (sound output={output})"));
     // PMS's spelling in the profile text (`dca` for DTS, #899): both the list the baseline
     // carries and the one replacing it.
@@ -497,7 +497,7 @@ fn profile_codec_name(codec: &str) -> &str {
 }
 
 fn forced_direct_profile() -> String {
-    forced_direct_profile_for(plx_platform::devcaps::caps())
+    forced_direct_profile_for(&plx_platform::devcaps::caps())
 }
 
 impl Client {
@@ -1297,6 +1297,7 @@ mod tests {
                 av1_row: (0, 0, 0),
                 audio: "aac,ac3,eac3".into(),
             audio_channels: Default::default(),
+            native_ceiling: Default::default(),
             },
             s.contract.delivery,
         );
@@ -1513,7 +1514,10 @@ mod tests {
                 "{codec}: {on}"
             );
         }
-        assert!(on.contains("scopeName=opus&type=upperBound&name=audio.channels&value=6&replace=true"));
+        // FORK (Nuvio Native): a surround Opus source is converted in-app to AC3 5.1 too, so with the
+        // lane on the profile states the width the lane accepts; with it off, the set's own row.
+        assert!(on.contains("scopeName=opus&type=upperBound&name=audio.channels&value=8&replace=true"));
+        assert!(on.contains("scopeName=opus&type=upperBound&name=audio.samplingRate&value=48000&replace=true"));
         assert!(on.contains("scopeName=truehd&type=upperBound&name=audio.samplingRate&value=48000&replace=true"));
         assert!(on.contains("scopeName=mlp&type=upperBound&name=audio.samplingRate&value=48000&replace=true"));
         // FORK: DTS is encoded in-app too (no resampler), and it is named once, not twice
@@ -1585,6 +1589,7 @@ mod tests {
             av1_row: (0, 0, 0),
             audio: "aac,ac3,eac3".into(),
             audio_channels: Default::default(),
+            native_ceiling: Default::default(),
         };
         let p = super::profile_for(&caps);
         assert!(!p.contains("hevc"), "hevc must not appear anywhere in {p}");
@@ -1616,6 +1621,7 @@ mod tests {
                 av1_row: (0, 0, 0),
                 audio: "aac".into(),
                 audio_channels: Default::default(),
+                native_ceiling: Default::default(),
             },
         ] {
             let p = super::profile_for(&caps);
@@ -1644,6 +1650,7 @@ mod tests {
             av1_row: (0, 0, 0),
             audio: "aac".into(),
             audio_channels: Default::default(),
+            native_ceiling: Default::default(),
         };
         let p = super::profile_for(&caps);
         let dp = p.split("add-transcode-target").next().unwrap();

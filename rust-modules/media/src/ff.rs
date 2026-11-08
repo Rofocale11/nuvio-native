@@ -486,6 +486,22 @@ plx_base::dynlib! {
     ) -> *const AVDictionaryEntry;
 }}
 plx_base::dynlib! {
+    // The fifth library, and the one that is not for the app's own use at all: **libavcodec's
+    // `opus` decoder depends on libswresample**, and configure silently drops the decoder when
+    // the library is off. Nothing here calls into it; it is loaded so libavcodec's own import
+    // resolves from the copy we shipped rather than failing (or, worse, finding the firmware's).
+    // See ci/build-ffmpeg.sh and the AC3 encode lane's Opus tenant (`ff_enc.rs`).
+    swresample: [
+        // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
+        // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
+        // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
+        // it could not open, and only one of these two can ever exist in an app directory.
+        "libswresample-plx.so.7",
+        "libswresample-plx.7.dylib",
+    ] {
+    fn swresample_version() -> c_uint;
+}}
+plx_base::dynlib! {
     swscale: [
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
@@ -1430,7 +1446,8 @@ fn ver(v: c_uint) -> String {
     format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
 }
 
-/// Resolve the four FFmpeg libraries by SONAME candidate list. `false` means this device has no
+/// Resolve the FFmpeg libraries by SONAME candidate list: avutil, swresample, avcodec and
+/// avformat are required; swscale is optional (see below). `false` means this device has no
 /// FFmpeg we can use, and NOTHING in this module may be called — not even `avformat_version`.
 ///
 /// Kept separate from the version check that follows it because the two failures are different
@@ -1442,8 +1459,9 @@ fn load_libraries() -> bool {
     // a bare SONAME there could open the television's copy instead of ours.
     let dir = Some(plx_base::paths::app_dir());
 
-    // DEPENDENCY ORDER, and it is load-bearing. libavformat NEEDs libavcodec NEEDs libavutil by
-    // SONAME, and these libraries carry no rpath (FFmpeg's configure evals its flags, so
+    // DEPENDENCY ORDER, and it is load-bearing. libavformat NEEDs libavcodec, libavcodec NEEDs
+    // libavutil and (since the `opus` decoder is enabled) libswresample, all by SONAME, and these
+    // libraries carry no rpath (FFmpeg's configure evals its flags, so
     // -Wl,-rpath,$ORIGIN does not survive — see ci/build-ffmpeg.sh). Loading a dependency FIRST
     // with RTLD_GLOBAL puts it in the global scope under its SONAME, so when the next library
     // names it the loader finds the one we just opened rather than searching the system paths and
@@ -1451,6 +1469,9 @@ fn load_libraries() -> bool {
     let mut ok = true;
     for (what, verdict) in [
         ("avutil", avutil::load(dir)),
+        // Between avutil and avcodec because libavcodec NAMEs it (the `opus` decoder's
+        // dependency), so it has to be in the global scope first — the same rule as avutil.
+        ("swresample", swresample::load(dir)),
         ("avcodec", avcodec::load(dir)),
         ("avformat", avformat::load(dir)),
     ] {
@@ -1475,7 +1496,7 @@ fn load_libraries() -> bool {
     }
     // swscale is NOT required, and treating it as required broke the RELEASE build entirely:
     // `RELEASE=1` drops it from the package (only the dev capture stream's RGBA->YUV conversion
-    // uses it), so an all-or-nothing loop over four libraries would have found three, reported
+    // uses it), so an all-or-nothing loop over every library would have found one short, reported
     // failure, and refused to play anything — in the configuration users actually receive, and in
     // no configuration ever tested here.
     match swscale::load(dir) {
@@ -1907,6 +1928,10 @@ use pcm::PcmLane;
 mod enc;
 pub use enc::{declare as declare_enc, EncSpec};
 use enc::EncLane;
+// NuvioNative: what a session feeds the television's OWN decoder — recorded for the player, which
+// learns a native-audio refusal from it (`player::native_stall`, `player::pump`).
+#[path = "ff_native_audio.rs"]
+pub(crate) mod native_audio;
 // NuvioNative: open a third-party stream and report what it really holds (the PMS shim's input).
 #[path = "ff_probe.rs"]
 pub mod probe;
@@ -9882,7 +9907,12 @@ pub fn demux(
                         free_avio(avio);
                         break;
                     }
-                    if std::ffi::CStr::from_ptr(avcodec_get_name((*acp).codec_id)).to_bytes() == b"opus" {
+                    if std::ffi::CStr::from_ptr(avcodec_get_name((*acp).codec_id)).to_bytes() == b"opus"
+                        && enc_lane.is_none()
+                    {
+                        // Only when it really is fed natively. A surround Opus track takes the AC3
+                        // encode lane above, and printing "OPUS native" beside the lane's own line
+                        // is how a log read like the lane was not running.
                         crate::player::log(&format!(
                             "ff: audio lane OPUS native {}ch (OpusHead {} bytes)",
                             (*acp).ch_layout.nb_channels,
@@ -9910,7 +9940,12 @@ pub fn demux(
                         free_avio(avio);
                         break;
                     }
-                    if std::ffi::CStr::from_ptr(avcodec_get_name((*acp).codec_id)).to_bytes() == b"opus" {
+                    if std::ffi::CStr::from_ptr(avcodec_get_name((*acp).codec_id)).to_bytes() == b"opus"
+                        && enc_lane.is_none()
+                    {
+                        // Only when it really is fed natively. A surround Opus track takes the AC3
+                        // encode lane above, and printing "OPUS native" beside the lane's own line
+                        // is how a log read like the lane was not running.
                         crate::player::log(&format!(
                             "ff: audio lane OPUS native {}ch (OpusHead {} bytes)",
                             (*acp).ch_layout.nb_channels,
@@ -9937,6 +9972,22 @@ pub fn demux(
                 } else {
                     None
                 };
+                // Opus goes to the television's own decoder (`ff_native_audio.rs`; its header travels
+                // in the Load). What is fed natively is recorded for the player, which learns a
+                // refusal from it. FLAC/PCM are decoded in the app (`pcm`) and are not native, and
+                // the speed session decodes its own audio too.
+                if ai >= 0 && FEED_AUDIO.load(Ordering::Relaxed) && speed_dec.is_none() {
+                    let acp = stream_codecpar(*streams.add(ai as usize));
+                    let aname = std::ffi::CStr::from_ptr(avcodec_get_name((*acp).codec_id)).to_string_lossy().into_owned();
+                    if let Some(kind) = native_audio::Kind::from_ffmpeg_name(&aname) {
+                        let channels = u32::try_from((*acp).ch_layout.nb_channels).unwrap_or(0);
+                        crate::player::log(&format!(
+                            "ff: {aname} fed to the TV's own decoder (channels={channels} rate={})",
+                            (*acp).sample_rate
+                        ));
+                        native_audio::publish_fed(kind, channels);
+                    }
+                }
                 let dur = fmt_duration(fmt);
                 if dur > 0 {
                     SHARED

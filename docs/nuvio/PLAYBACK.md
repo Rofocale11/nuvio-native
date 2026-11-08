@@ -303,6 +303,7 @@ An explicit user audio choice takes precedence over this initial selection.
 | FLAC / ALAC / PCM 3–8 ch the PCM lane does not admit | **AC3 encode lane** (`ff_enc.rs`) |
 | TrueHD / MLP, any channel count | **AC3 encode lane** |
 | DTS, any channel count — **whether or not the table has a `dts` row** | **AC3 encode lane** |
+| Opus above 2 channels (Opus is 48 kHz by definition) | **AC3 encode lane** |
 | MP3 / Vorbis — only with `lossy=on` (off by default) | PCM lane, stereo S16 (`ff_pcm.rs`) |
 
 ALAC rides the lossless PCM lane: the bundled FFmpeg decodes it with the same
@@ -325,13 +326,62 @@ downmixes whatever layout arrives to stereo (`speed_audio::downmix`) and feeds S
 rate (decimated above 48 kHz like the lossless lane). The knob also announces `mp3`/`vorbis` in
 the direct-play profile and states an 8-channel bound, because the lane downmixes locally.
 
-The encode lane is real and shipped: the bundled FFmpeg carries `dca`/`truehd`/`mlp`/`flac`
+**Native Opus is bounded by what this firmware is known to take.** Opus is the one codec fed
+straight to the pipeline here (FLAC/PCM and, with `lossy=on`, MP3/Vorbis are app-decoded), and its
+Load string is `OPUS`. What the set announces is one monotone fold, logged at boot as
+`devcaps: ... audio layers:`: its codec table, minus the codecs `/etc/gst/gstcool.conf` ranks
+every decoder of at off (`apply_gst_decoders`; a codec the file never names keeps its default
+rank), minus `devcaps::EXCLUSIONS` — measured rows per firmware codename, each carrying its
+evidence (the C1's `kisscurl-koli` limits Opus to stereo; wider tracks stay with the server), minus
+the refusals this install learned. Auto's own stereo ceiling for Opus
+(`OPUS_AUTO_MAX_CHANNELS`) holds whatever a table row claims **only while the AC3 encode lane has
+its sink** (a measured AC3 row of six channels), and a measured row is honoured by Force Direct
+Play too (`Caps::forced_feeds_audio_track`).
+
+**A surround Opus track is converted in-app, not direct-played.** Opus above two channels takes
+the AC3 encode lane: the bundled FFmpeg decodes it (Opus is 48 kHz by definition, so the lane's
+no-resampler rule costs nothing here), the lane folds it to 5.1 and feeds AC3 640 kbps, so the
+television's hardware sees a format it already decodes. That is the answer to the failure this
+fork measured on an LG B4 (webOS 10.3.1, `ponytail-papikonda`, 2026-11-08): the native decoder
+takes the Load and a few access units and then presents nothing, and this product has no server
+to convert for it. Stereo Opus stays native — it is the one width measured clean. The ceiling
+above is gated on the lane for the same reason: with no lane and no converter, taking the width
+away turns a silent track into a failed route (the plan stops direct-playing, asks for an audio
+conversion, and the shim answers `start.mkv` with an empty body, which demuxes to no access unit).
+
+**A refusal is learned, and the next play converts.** A native Load that ends in
+`smp_cb type=18 num=200` (`Audio Codec Not Supported`) before any picture, or a surround Opus
+feed that stalls silently (`player::native_stall`: more than two channels, Load returned, both AU
+queues holding data, no AU accepted for 4 s, no picture), is taken off the capability answer at
+once and recorded in the install-scope `native_audio_refused` preference keyed by the firmware
+BUILD (`tv::device::Info::build`). An LG update is a new decoder, so another build's rows stop
+counting and the new build gets a fresh native try. A surround refusal limits the codec to stereo,
+a stereo refusal removes it. The failed open then recovers in the same frame through
+`open_failure_action` → `route::dispatch_native_audio_conversion`, which rebuilds today's route as
+the plain Original remux (video copied, only the refused audio converted) and reloads onto it;
+the viewer keeps the spinner, and a conversion the server refuses ends in the ordinary read-out.
+`nativeaudiolearn`/`nativeaudioforget`/`nativeaudiowide` are the debug switches.
+
+**The shim does not convert.** `/video/:/transcode/universal/start*` answers 404 ("no transcoder:
+streams play direct") and `/decision` always directplays, so `session::server_converts_audio` is
+false with the in-process shim installed: a learned refusal still persists, but the recovery adds
+no action of its own (the ordinary failure ladder decides) and the route is left alone — the shim
+is never asked for a route it cannot serve.
+
+The encode lane is real and shipped: the bundled FFmpeg carries `dca`/`truehd`/`mlp`/`flac`/`opus`
 decoders and the `ac3_fixed` encoder (`ci/build-ffmpeg.sh`), the demux thread decodes the track,
 folds it to 5.1(side) by channel role in Q15 integer arithmetic, and encodes AC3 640 kbps at
-48 kHz. The Load then declares it exactly as a native AC3 5.1 track (`AudioLaneInfo::Ac3Encode`),
-so the television's hardware sees a format it already decodes. The encode lane has no resampler of
-its own (`--disable-swresample`), so it takes 48 kHz sources only; the route leaves any other rate
-with the server. (The lossless PCM lane is the exception: it decimates stereo hi-res itself, see
+48 kHz. The decoded frame is read in whatever sample format the decoder emits — S16/S32 for FLAC,
+TrueHD and DTS, **float (FLTP) for Opus, whose decoder has no integer path** — and float is scaled
+to full-scale i32 on the way in (`ff_enc::interleave`). Reading only the integer formats is what
+made every Opus frame "unsupported" and left the pipeline an AC3 track with no frames: video
+presented, audio clock dead, stall (owner's B4, 2026-11-08). The Load then declares it exactly as a
+native AC3 5.1 track (`AudioLaneInfo::Ac3Encode`),
+so the television's hardware sees a format it already decodes. The lane does no resampling of its
+own, so it takes 48 kHz sources only; the route leaves any other rate with the server. (The
+build ships libswresample because FFmpeg's `opus` decoder depends on it and configure drops the
+decoder silently without it; nothing in the lane calls into it. The
+lossless PCM lane is the exception to the rate rule: it decimates stereo hi-res itself, see
 above.) A rate the Media does not state takes the lane anyway and the lane's own open
 refuses it if the stream reports anything else — the shim publishes the probed `samplingRate`
 (`shim_probe::Audio::sample_rate`), and before that every track arrived with the rate unstated,

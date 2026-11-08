@@ -6,8 +6,8 @@
 //! burn-in and every track switch through a server with no hardware transcoder. Here instead the
 //! demux thread:
 //!
-//! 1. decodes the track with the bundled FFmpeg (`flac`, `truehd`, `mlp`; native `A_PCM/*` is
-//!    read as-is through the PCM lane's [`SrcFmt`]);
+//! 1. decodes the track with the bundled FFmpeg (`flac`, `truehd`, `mlp`, `dts`, and `opus` above
+//!    two channels; native `A_PCM/*` is read as-is through the PCM lane's [`SrcFmt`]);
 //! 2. folds it to 5.1(side) — FL FR FC LFE SL SR — by channel ROLE, in Q15 fixed point with
 //!    saturation ([`fold_matrix`], [`fold`]);
 //! 3. cuts exact 1536-sample frames with a timestamped FIFO ([`Fifo`]) and encodes them with
@@ -273,8 +273,10 @@ pub(super) fn packet_pts(frame_pts_ns: i64) -> i64 {
 // AVSampleFormat values, asserted in ci/ffabi-assert.c.
 const FMT_S16: c_int = 1;
 const FMT_S32: c_int = 2;
+const FMT_FLT: c_int = 3;
 const FMT_S16P: c_int = 6;
 const FMT_S32P: c_int = 7;
+const FMT_FLTP: c_int = 8;
 /// AV_OPT_SEARCH_CHILDREN: reach a codec's PRIVATE options (TrueHD's `downmix`).
 const OPT_SEARCH_CHILDREN: c_int = 1;
 /// AV_CODEC_ID_AC3, asserted in ci/ffabi-assert.c.
@@ -546,10 +548,59 @@ pub(super) struct EncLane {
     errors: u32,
 }
 
+/// Interleave one decoded frame's samples into `out` as full-scale i32, or `false` when `format`
+/// is one the lane cannot read (the caller logs and skips the frame).
+///
+/// **Float is the normal case for Opus.** FFmpeg's `opus` decoder emits `AV_SAMPLE_FMT_FLTP` and
+/// nothing else — it has no integer path — so a lane that only knew S16/S32 read every packet as
+/// "an unsupported sample format", skipped it, and fed the pipeline an AC3 track with no frames in
+/// it: the television presented the video, the audio clock never advanced, and playback stalled
+/// (measured on the owner's LG B4, 2026-11-08). `SrcFmt::F32Le` already does the scaling the PCM
+/// lane uses (round to full-scale i32, NaN to silence).
+///
+/// `planes` are the frame's data pointers: one for interleaved, `ch` for planar.
+unsafe fn interleave(format: c_int, ch: usize, samples: usize, planes: &[*const u8], out: &mut Vec<i32>) -> bool {
+    if ch == 0 || ch > 8 || samples == 0 {
+        return false;
+    }
+    let planar = matches!(format, FMT_S16P | FMT_S32P | FMT_FLTP);
+    let width = match format {
+        FMT_S16 | FMT_S16P => 2,
+        FMT_S32 | FMT_S32P | FMT_FLT | FMT_FLTP => 4,
+        _ => return false,
+    };
+    if planes.len() < if planar { ch } else { 1 } || planes.iter().any(|p| p.is_null()) {
+        return false;
+    }
+    let read = |b: &[u8]| match format {
+        FMT_S16 | FMT_S16P => SrcFmt::S16Le.read(b),
+        FMT_S32 | FMT_S32P => SrcFmt::S32Le.read(b),
+        _ => SrcFmt::F32Le.read(b),
+    };
+    out.clear();
+    if planar {
+        out.reserve(samples * ch);
+        for i in 0..samples {
+            for p in &planes[..ch] {
+                out.push(read(std::slice::from_raw_parts(p.add(i * width), width)));
+            }
+        }
+    } else {
+        let raw = std::slice::from_raw_parts(planes[0], samples * ch * width);
+        out.extend(raw.chunks_exact(width).map(read));
+    }
+    true
+}
+
 impl EncLane {
     /// The codecs the lane takes (FFmpeg names).
+    ///
+    /// FORK (Nuvio Native): `opus` at more than two channels. LG's own Opus decoder is the one that
+    /// stalls silently on a C1 above ~1500 B packets and, on the owner's B4, takes the Load and then
+    /// never presents; the bundled FFmpeg decodes Opus, and Opus is 48 kHz by definition, so the lane
+    /// takes it with no resampler. Stereo Opus never comes here: it is measured clean natively.
     pub(super) fn takes(name: &str) -> bool {
-        matches!(name, "flac" | "truehd" | "mlp" | "dts") || SrcFmt::from_pcm_codec(name).is_some()
+        matches!(name, "flac" | "truehd" | "mlp" | "dts" | "opus") || SrcFmt::from_pcm_codec(name).is_some()
     }
 
     /// Open the lane for the stream the Load declared as encode-lane AC3. `Err(reason)`: it
@@ -635,7 +686,8 @@ impl EncLane {
         &self.out
     }
 
-    unsafe fn decode(&mut self, pkt: *mut AVPacket, pts_ns: Option<i64>) {
+
+unsafe fn decode(&mut self, pkt: *mut AVPacket, pts_ns: Option<i64>) {
         let Source::Decoded(dec) = &self.src else { return };
         let (ctx, frame) = (dec.ctx, dec.frame);
         let ret = avcodec_send_packet(ctx, pkt);
@@ -658,35 +710,12 @@ impl EncLane {
             let format = frame_i32(frame, OFF_EFRAME_FORMAT);
             let roles = layout_roles(frame_layout(frame));
             let ch = roles.len();
-            self.s32.clear();
-            match format {
-                FMT_S16 | FMT_S32 => {
-                    let p = frame_plane(frame, 0);
-                    if !p.is_null() {
-                        let w = if format == FMT_S16 { 2 } else { 4 };
-                        let raw = std::slice::from_raw_parts(p, samples * ch * w);
-                        let f = if format == FMT_S16 { SrcFmt::S16Le } else { SrcFmt::S32Le };
-                        self.s32.extend(raw.chunks_exact(w).map(|b| f.read(b)));
-                    }
-                }
-                FMT_S16P | FMT_S32P if ch <= 8 => {
-                    let w = if format == FMT_S16P { 2 } else { 4 };
-                    let f = if format == FMT_S16P { SrcFmt::S16Le } else { SrcFmt::S32Le };
-                    let planes: Vec<*const u8> = (0..ch).map(|c| frame_plane(frame, c) as *const u8).collect();
-                    if planes.iter().all(|p| !p.is_null()) {
-                        self.s32.reserve(samples * ch);
-                        for i in 0..samples {
-                            for p in &planes {
-                                self.s32.push(f.read(std::slice::from_raw_parts(p.add(i * w), w)));
-                            }
-                        }
-                    }
-                }
-                other => {
-                    self.error(&format!("decoder gave sample format {other} / {ch}ch; frame skipped"));
-                    av_frame_unref(frame);
-                    continue;
-                }
+            let n = if matches!(format, FMT_S16P | FMT_S32P | FMT_FLTP) { ch } else { 1 };
+            let planes: Vec<*const u8> = (0..n).map(|c| frame_plane(frame, c) as *const u8).collect();
+            if !interleave(format, ch, samples, &planes, &mut self.s32) {
+                self.error(&format!("decoder gave sample format {format} / {ch}ch; frame skipped"));
+                av_frame_unref(frame);
+                continue;
             }
             av_frame_unref(frame);
             self.take_samples(&roles, at.take());
@@ -902,6 +931,73 @@ mod tests {
             assert_eq!(bytes.len(), 2560, "packet {k}: 640 kbps frame size");
             assert_eq!(*pts, packet_pts(t0 + 32_000_000 * k as i64), "packet {k}: 32 ms step");
         }
+    }
+
+    /// **The Opus decoder emits FLTP and nothing else**, and the lane used to read that as an
+    /// unsupported format: every frame skipped, an AC3 track with no frames in it, video ahead of
+    /// a dead audio clock and a stall (owner's B4, 2026-11-08). Conversion is `SrcFmt::F32Le`'s —
+    /// clamp to ±1, round to full-scale i32, NaN to silence — so this asserts the same values.
+    #[test]
+    fn float_frames_from_opus_convert_to_full_scale_i32() {
+        let f = |v: f32| v.to_le_bytes();
+        let full = i32::MAX;
+        let mut out = Vec::new();
+
+        // Interleaved FLT: stereo, three frames.
+        let mut l = Vec::new();
+        for v in [0.5f32, -0.5, 0.0, 1.0, -1.0, 2.0] {
+            l.extend_from_slice(&f(v));
+        }
+        let planes = [l.as_ptr()];
+        assert!(unsafe { interleave(FMT_FLT, 2, 3, &planes, &mut out) });
+        assert_eq!(out, [full / 2 + 1, -(full / 2 + 1), 0, full, -full, full]);
+
+        // Planar FLTP: stereo, two frames, interleaved frame-major.
+        let q = |v: f64| (v * 2_147_483_647.0).round() as i32;
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for v in [0.25f32, -0.75] {
+            a.extend_from_slice(&f(v));
+        }
+        for v in [-0.25f32, 0.75] {
+            b.extend_from_slice(&f(v));
+        }
+        let planes = [a.as_ptr(), b.as_ptr()];
+        assert!(unsafe { interleave(FMT_FLTP, 2, 2, &planes, &mut out) });
+        assert_eq!(out, [q(0.25), q(-0.25), q(-0.75), q(0.75)]);
+
+        // A format the lane does not read, and a planar frame with a plane missing, are refused
+        // rather than silently treated as silence.
+        assert!(!unsafe { interleave(9, 2, 1, &planes, &mut out) }, "DBLP is not read");
+        assert!(!unsafe { interleave(FMT_FLTP, 2, 1, &planes[..1], &mut out) }, "a missing plane is refused");
+    }
+
+    /// **A decoder named in `ci/build-ffmpeg.sh`'s flag list is not a decoder in the library.**
+    /// FFmpeg's configure satisfies a decoder's dependencies or drops it, and the drop is one
+    /// line in a summary nobody diffs — `--enable-decoder=...,opus,...` beside
+    /// `--disable-swresample` produced a shipped libavcodec **with no Opus decoder**, and the
+    /// encode lane learned it at Load on the owner's B4 (2026-11-08) as "the bundled FFmpeg has
+    /// no opus decoder", after the route had already given up native playback: a black screen
+    /// with a read-out. The lane's tenants and the encoder are therefore asserted against the
+    /// LIBRARY here, not against the script.
+    #[test]
+    #[ignore = "needs the host build of the bundled FFmpeg"]
+    fn every_tenant_decoder_and_the_ac3_encoder_are_in_the_bundled_build() {
+        let _g = plx_base::testlock::serial();
+        let _ffmpeg = super::super::image_subtitle_tests::bind_host_ffmpeg();
+        for name in ["flac", "truehd", "mlp", "dca", "opus"] {
+            let n = CString::new(name).unwrap();
+            let d = unsafe { avcodec_find_decoder_by_name(n.as_ptr()) };
+            assert!(
+                !d.is_null(),
+                "the bundled FFmpeg has no {name} decoder — a dependency of it is switched off \
+                 in ci/build-ffmpeg.sh (the `opus` decoder needs libswresample)"
+            );
+        }
+        let n = CString::new("ac3_fixed").unwrap();
+        assert!(
+            !unsafe { avcodec_find_encoder_by_name(n.as_ptr()) }.is_null(),
+            "the bundled FFmpeg has no ac3_fixed encoder"
+        );
     }
 
     /// FORK (RichiL10): **real FLAC and TrueHD streams through the whole lane**: decoder (and

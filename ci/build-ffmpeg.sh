@@ -201,8 +201,17 @@ fi
 #              PCM lane (ff_pcm.rs). `truehd`/`mlp` (+ the `mlp` parser) and `ac3_fixed` are the
 #              AC3 encode lane (ff_enc.rs): a track the TV cannot decode is decoded here, folded
 #              to 5.1 and re-encoded to AC3 640 kbps in INTEGER arithmetic (the build is
-#              soft-float ARM, so the float `ac3` encoder is not wanted). No resampler:
-#              `--disable-swresample` stays, and the lane takes 48 kHz sources only.
+#              soft-float ARM, so the float `ac3` encoder is not wanted). The lane still takes
+#              48 kHz sources only and does no resampling; but `--disable-swresample` had to go,
+#              because **libavcodec's `opus` decoder depends on libswresample** and configure
+#              silently drops the decoder without it — one line among the summary,
+#              "WARNING: Disabled opus_decoder because not all dependencies are satisfied:
+#              swresample", while the flag list (and the `configuration` string baked into the
+#              library) still names opus. Nothing outside the library could see the difference:
+#              the shipped libavcodec linked and loaded, and the app only learned the decoder was
+#              absent at Load, as "the bundled FFmpeg has no opus decoder" (measured on the
+#              owner's LG B4, 2026-11-08). So libswresample is built and shipped as a fifth
+#              library — see ff.rs's loader order and the Makefile's FFMPEG_SONAMES.
 #
 # `--disable-autodetect` is NOT redundant beside `--disable-everything`, which governs the
 # component registry and says nothing about EXTERNAL libraries. Without it configure goes looking
@@ -244,7 +253,7 @@ set -- "$@" \
   --enable-shared --disable-static --enable-pic \
   --extra-cflags='-Dstatic_assert=_Static_assert' \
   --disable-programs --disable-doc --disable-avdevice --disable-avfilter \
-  --disable-network --disable-swresample \
+  --disable-network \
   --disable-debug --enable-small \
   --disable-everything \
   --disable-autodetect \
@@ -583,7 +592,7 @@ mkdir -p "$PREFIX"
 cp -R "$WORK/destdir/plx/." "$PREFIX/"
 # Strip each real ELF, then prove the exact strip transformation against its link receipt.
 if [ -z "$HOST" ]; then
-  for elf in "$SRC"/libavutil/libavutil-plx.so.* "$SRC"/libavcodec/libavcodec-plx.so.* "$SRC"/libavformat/libavformat-plx.so.* "$SRC"/libswscale/libswscale-plx.so.*; do
+  for elf in "$SRC"/libavutil/libavutil-plx.so.* "$SRC"/libswresample/libswresample-plx.so.* "$SRC"/libavcodec/libavcodec-plx.so.* "$SRC"/libavformat/libavformat-plx.so.* "$SRC"/libswscale/libswscale-plx.so.*; do
     case "$elf" in *.link.*) continue ;; esac
     [ -f "$elf" ] && [ ! -L "$elf" ] || continue
     target="$PREFIX/lib/$(basename "$elf")"

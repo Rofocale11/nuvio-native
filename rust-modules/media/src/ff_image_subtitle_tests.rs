@@ -422,6 +422,9 @@ pub(super) fn bind_host_ffmpeg() -> HostFfmpeg {
     let dir = host_ffmpeg_dir();
     for (what, verdict) in [
         ("avutil", avutil::load(Some(&dir))),
+        // libavcodec NAMEs libswresample (the `opus` decoder's dependency), so it is opened
+        // first, exactly as `ff::load_libraries` does on the device.
+        ("swresample", swresample::load(Some(&dir))),
         ("avcodec", avcodec::load(Some(&dir))),
         ("avformat", avformat::load(Some(&dir))),
     ] {

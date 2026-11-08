@@ -1748,8 +1748,8 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     let dv = dv_decision.presentation;
     // FORK (RichiL10): the item's HDR fact, kept for the whole playback (see `Plan::source_hdr`).
     plan.source_hdr = plan.playing.as_ref().is_some_and(|p| p.hdr);
-    let video_dp = if forced { video_feed_supported(vcodec, dv, plx_platform::devcaps::caps()) } else {
-        video_direct_plays(vcodec, src_w, src_h, dv, plx_platform::devcaps::caps())
+    let video_dp = if forced { video_feed_supported(vcodec, dv, &plx_platform::devcaps::caps()) } else {
+        video_direct_plays(vcodec, src_w, src_h, dv, &plx_platform::devcaps::caps())
     };
     // Carried to the session so the quality menu can say whether "Original" means anything for
     // this item without evaluating the gate a second time against a different set of facts.
@@ -3130,7 +3130,7 @@ pub(super) fn pick_dp_audio_pref(
 }
 
 pub(super) fn audio_direct_plays(mode: DirectPlayMode, codec: &str, channels: i64) -> bool {
-    audio_direct_plays_with(plx_platform::devcaps::caps(), mode, codec, channels)
+    audio_direct_plays_with(&plx_platform::devcaps::caps(), mode, codec, channels)
 }
 
 /// [`audio_direct_plays`] over an explicit capability snapshot. Auto and Forced both go through
@@ -3139,7 +3139,8 @@ pub(super) fn audio_direct_plays_with(
     caps: &plx_platform::devcaps::Caps, mode: DirectPlayMode, codec: &str, channels: i64,
 ) -> bool {
     if mode == DirectPlayMode::Forced {
-        caps.forced_feeds_audio(codec)
+        // No table ceiling, but a ceiling measured on this firmware holds (`devcaps::EXCLUSIONS`).
+        caps.forced_feeds_audio_track(codec, channels)
     } else {
         caps.audio_supports(codec, channels)
     }
@@ -3894,7 +3895,7 @@ pub fn playback_preview_with_audio(
     if part.is_empty() {
         return None; // nothing playable loaded (a show still resolving its episode)
     }
-    let video = video_direct_plays(vcodec, width, height, dv, plx_platform::devcaps::caps());
+    let video = video_direct_plays(vcodec, width, height, dv, &plx_platform::devcaps::caps());
     inputs.dv_declared = dv.declared().is_some();
     let converted = video && audio_intent_needs_conversion(audio_streams, part, video, inputs);
     // Mirrors `build_stream`'s own ladder: the video gate decides whether an ENCODER runs at all,

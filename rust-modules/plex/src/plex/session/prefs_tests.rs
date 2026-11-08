@@ -124,14 +124,14 @@ fn every_marker_names_its_own_field() {
     // and is `Row` only (`Option<String>` is not `Copy`), so it has no `check_row` here.
     check_row::<RatingSourcePref>(RatingSource::RottenTomatoes);
     check_row::<P2pEnabledPref>(true);
-    // The table lists exactly these nineteen `Setting` rows, the four list rows below, the two
+    // The table lists exactly these nineteen `Setting` rows, the five list rows below, the two
     // memory-door rows (`TrackMemoryPref`, whose field check is
     // `track_memory_tests::the_list_row_names_its_own_field`, and `SubtitleOffsetsPref`, checked by
     // `the_subtitle_offsets_row_names_its_own_field`), the per-profile record list
     // (`ProfilePrefsPref`, `profile_prefs_tests::nothing_picked_serializes_to_no_key`) and the one
     // scalar `Row` without `Setting` (`P2pServerUrlPref`): a row needs its line in one of the five
     // places.
-    assert_eq!(DESCRIPTORS.len(), 19 + 4 + 2 + 1 + 1);
+    assert_eq!(DESCRIPTORS.len(), 19 + 5 + 2 + 1 + 1);
 }
 
 /// `P2pServerUrlPref` is the one scalar row without `Setting` (its `Option<String>` is not `Copy`),
@@ -374,6 +374,8 @@ fn garbage_fixtures() -> Vec<(&'static str, Vec<Value>)> {
         // A list's garbage is anything that is not an array; a mixed array is driven separately.
         ("plaintext_consent", not_a_list()),
         ("server_key_pins", not_a_list()),
+        // FORK (Nuvio Native): the native-audio refusal list (an install fact).
+        ("native_audio_refused", not_a_list()),
         ("last_library", not_a_list()),
         ("library_sorts", not_a_list()),
         ("track_memory", not_a_list()),
@@ -395,6 +397,7 @@ fn good_element(key: &str) -> Value {
     match key {
         "plaintext_consent" => json!({"machine_id":"m","account":"a","choice":"allowed"}),
         "server_key_pins" => json!({"machine_id":"m","pin":"sha256//x"}),
+        "native_audio_refused" => json!({"firmware":"kisscurl-koli","codec":"vorbis","channels":2}),
         "last_library" => json!({"user":"u1","libs":[{"kind":"movie","machine_id":"m","key":1}]}),
         "library_sorts" => json!({"user":"u1","libs":[{"machine_id":"m","key":1,"sort":"plays"}]}),
         "subtitle_offsets" => json!({"user":"u1","items":[{"machine_id":"m","rating_key":"42","offset_ms":1500}]}),

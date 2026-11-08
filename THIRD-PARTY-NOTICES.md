@@ -34,7 +34,7 @@ they no longer do, because the TV's version moves with the firmware (libavformat
 
 | Shipped file | Upstream | Licence |
 |---|---|---|
-| `libavutil-plx.so.61`, `libavcodec-plx.so.63`, `libavformat-plx.so.63` | FFmpeg **9.0.2**, unmodified | LGPL-2.1-or-later |
+| `libavutil-plx.so.61`, `libswresample-plx.so.7`, `libavcodec-plx.so.63`, `libavformat-plx.so.63` | FFmpeg **9.0.2**, unmodified | LGPL-2.1-or-later |
 
 **These libraries are covered by the GNU Lesser General Public License, version 2.1 or later.** A
 complete copy of that licence is supplied with this package at `licenses/LGPL-2.1.txt`.
@@ -62,9 +62,11 @@ has always done).
 `--enable-gpl`, `--enable-version3` or `--enable-nonfree`, so no GPL-licensed or non-free FFmpeg
 component is present. Only demuxers, parsers, bitstream filters and *subtitle* decoders are
 enabled — video and audio are decoded by the television's hardware, not by FFmpeg — plus, for
-the fork's audio lanes (RichiL10), the `flac`, `truehd` and `mlp` decoders, the `mlp` parser and
-the integer `ac3_fixed` encoder, which turn audio the television cannot decode into PCM or AC3
-before it is fed. The one
+the fork's audio lanes (RichiL10), the `flac`, `truehd`, `mlp` and `opus` decoders, the `mlp`
+parser and the integer `ac3_fixed` encoder, which turn audio the television cannot decode into PCM
+or AC3 before it is fed. libavcodec's `opus` decoder depends on libswresample — FFmpeg's own
+resampling library, part of the same source and the same licence, not a separate component — so
+it is shipped as `libswresample-plx.so.7`. The one
 external library enabled is **zlib**, the television's own `libz.so.1` (not redistributed — see
 section 3), which the Matroska demuxer needs to inflate compressed subtitle tracks.
 

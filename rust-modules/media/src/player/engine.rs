@@ -1098,7 +1098,7 @@ pub(crate) fn speed_fps_ceiling(
 pub(crate) fn speed_fps_ceiling_now(ps: &crate::route::PlaybackSession) -> f64 {
     speed_fps_ceiling(
         LoadVideo::of_stream(&crate::route::stream_vcodec(ps)),
-        plx_platform::devcaps::caps(),
+        &plx_platform::devcaps::caps(),
         plx_platform::devcaps::measured() && !crate::route::forced_direct_play(ps),
     )
 }
@@ -1169,7 +1169,7 @@ fn sink_envelope_now(ps: &crate::route::PlaybackSession, video: LoadVideo) -> Si
         video,
         crate::route::sink_max_raster(ps),
         fed_fps(crate::route::stream_fps(ps), super::applied_rate_permille()),
-        plx_platform::devcaps::caps(),
+        &plx_platform::devcaps::caps(),
         plx_platform::devcaps::measured() && !crate::route::forced_direct_play(ps),
     )
 }
@@ -1413,7 +1413,7 @@ impl AudioLaneInfo {
     /// itself, and for a lane codec whose facts are missing (the caller refuses that Load).
     pub fn for_track(acodec: &str, rate: i64, channels: i64, bit_depth: i64, pcm_hi: Option<&str>) -> Option<AudioLaneInfo> {
         Self::for_track_with(
-            plx_platform::devcaps::caps(),
+            &plx_platform::devcaps::caps(),
             plx_platform::devcaps::encode_lane_on(),
             acodec,
             rate,
@@ -1843,6 +1843,8 @@ fn start_bufferfeed_inner(
     ATOT.store(0, Ordering::Relaxed);
     VATT.store(0, Ordering::Relaxed);
     AATT.store(0, Ordering::Relaxed);
+    // A new session: forget the last one's native-audio watch, packet-size sample and fed codec.
+    super::native_stall::reset();
     // resolve the URL, in precedence order: route (a selected movie) wins, then
     // /tmp/plxnative-playurl (a URL + its declaration), then /tmp/plxnative-url (a URL
     // alone), then a local sample.
@@ -1984,7 +1986,7 @@ fn start_bufferfeed_inner(
             SHARED.demux_failed.store(true, Ordering::Release);
             return Err(crate::route::RouteStartResult::StartFailed);
         };
-        if load_video_refused(lv, plx_platform::devcaps::caps()) {
+        if load_video_refused(lv, &plx_platform::devcaps::caps()) {
             log(&format!(
                 "start_bufferfeed: {} stream but the device table lists no such decoder; refusing the Load",
                 lv.payload_name()
@@ -2172,6 +2174,8 @@ fn start_bufferfeed_inner(
             let acodec = crate::route::stream_acodec(ps);
             let abr = crate::route::hls_abr_control(ps);
             let auto_original = crate::route::auto_original_watch(ps);
+            // Before the demuxer exists, so what it publishes is this session's.
+            crate::ff::native_audio::reset();
             SHARED.side_subs_owner.store(side_target.is_some(), Ordering::Release);
             stream_th = plx_base::task::spawn_off_frame_keeping("demux", move |off| {
                 crate::ff::demux(off, origin, path, acodec, abr, auto_original, aqp, aqap, hsp)
@@ -3851,6 +3855,14 @@ fn feed_audio_lane(mt: &MainThread, eng: &mut Engine) {
         }
         if (r as u8) == b'O' {
             ATOT.fetch_add(1, Ordering::Relaxed); // accepted, not attempted — see feed_stream
+            // The first AUs of a natively fed track, as the per-packet-size evidence line
+            // (`player::native_stall`): the C1's Opus decoder stalls from about 1500 B a packet.
+            let mut sizes = super::native_stall::SIZES.lock().unwrap_or_else(|e| e.into_inner());
+            if sizes.open() && crate::ff::native_audio::fed().is_some() {
+                if let Some(line) = sizes.record(len as u32) {
+                    log(&format!("native audio: packet sizes of the first AUs fed: {line}"));
+                }
+            }
         }
         if (r as u8) != b'O' {
             break; // 'B' BufferFull -> keep pending, retry next tick (AUDIO lane only)
