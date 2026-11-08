@@ -103,6 +103,27 @@ pub struct Watch {
     pub duration_ms: i64,
     pub view_count: i64,
     pub last_viewed_at: i64,
+    /// The source last played for this item, so a resume re-selects that file
+    /// instead of re-deriving it from whatever escape currently ranks first.
+    /// Local-only: the account watch-progress schema has no source column, so
+    /// this never leaves the TV.
+    pub last_stream: Option<LastStream>,
+}
+
+/// A stable identity of one playable stream: the addon that offered it plus a
+/// release identity that survives re-ranking. Never a signed URL (those expire
+/// and carry credentials), and never the arrival index (that shifts as addons
+/// answer). Two streams match last-stream identity only on the fields below.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LastStream {
+    pub addon: String,
+    pub info_hash: Option<String>,
+    pub file_idx: Option<u32>,
+    pub filename: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub height: Option<u32>,
+    pub label: String,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -163,11 +184,40 @@ impl WatchState {
         if w.duration_ms > 0 && offset_ms * 10 >= w.duration_ms * 9 {
             w.view_count += 1;
             w.offset_ms = 0;
+            w.last_stream = None;
         } else {
             w.offset_ms = offset_ms.max(0);
         }
         if let Some(r) = row {
             g.rows.insert(key.to_string(), r);
+        }
+        self.save(&g);
+    }
+
+    /// Remember the source just played for this item, so the next resume
+    /// re-selects it while it is still offered. Storage only: a viewer picker
+    /// choice updates the fingerprint via the same path the player uses.
+    pub fn set_last_stream(&self, key: i64, last: LastStream) {
+        if last.addon.is_empty() && last.info_hash.is_none() && last.filename.is_none() {
+            return;
+        }
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let w = g.items.entry(key.to_string()).or_default();
+        w.last_stream = Some(last);
+        self.save(&g);
+    }
+
+    /// The source remembered for this item, if one was played and not cleared.
+    pub fn last_stream(&self, key: i64) -> Option<LastStream> {
+        self.get(key).last_stream
+    }
+
+    /// Forget the remembered source (a finished or removed resume point must
+    /// not promote a stale file the viewer no longer wants).
+    pub fn clear_last_stream(&self, key: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(w) = g.items.get_mut(&key.to_string()) {
+            w.last_stream = None;
         }
         self.save(&g);
     }
@@ -222,6 +272,7 @@ impl WatchState {
         if watched {
             w.view_count += 1;
             w.last_viewed_at = now_secs();
+            w.last_stream = None;
         } else {
             w.view_count = 0;
         }
@@ -232,6 +283,7 @@ impl WatchState {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(w) = g.items.get_mut(&key.to_string()) {
             w.offset_ms = 0;
+            w.last_stream = None;
         }
         self.save(&g);
     }
@@ -873,6 +925,35 @@ mod tests {
         w.progress(5, 9500, 10_000, None);
         assert_eq!(w.get(5).view_count, 1);
         assert!(w.in_progress().is_empty());
+    }
+
+    #[test]
+    fn last_stream_survives_a_reopen_and_clears_with_the_resume_point() {
+        let dir = std::env::temp_dir().join(format!("pmsshim-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let last = LastStream {
+            addon: "Torrentio".into(),
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            file_idx: Some(0),
+            filename: Some("Film.2160p.mkv".into()),
+            size_bytes: Some(58_200_000_000),
+            height: Some(2160),
+            label: "4K DV Torrentio".into(),
+        };
+        {
+            let w = WatchState::open(Some(&dir));
+            w.progress(5, 1000, 10_000, None);
+            w.set_last_stream(5, last.clone());
+        }
+        let reopened = WatchState::open(Some(&dir));
+        assert_eq!(reopened.last_stream(5), Some(last));
+        // Empty identity records nothing; a finished title clears its pick.
+        reopened.set_last_stream(6, LastStream::default());
+        assert_eq!(reopened.last_stream(6), None);
+        reopened.progress(5, 9500, 10_000, None);
+        assert_eq!(reopened.last_stream(5), None, "watched clears the source pick");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

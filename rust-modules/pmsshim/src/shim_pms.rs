@@ -6,7 +6,8 @@ use crate::shim_core::{Config, MACHINE_ID};
 use crate::shim_http::{pct_encode, Request, Response};
 use crate::shim_media::{self, Classified, SubRef, PART_STRIDE};
 use crate::shim_store::{
-    now_secs, EnrichCache, Enrichment, Ident, Keys, MetaCache, RelatedSource, Watch, WatchState,
+    now_secs, EnrichCache, Enrichment, Ident, Keys, LastStream, MetaCache, RelatedSource, Watch,
+    WatchState,
 };
 use plx_stremio::addons_tmdb::{
     TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
@@ -3126,6 +3127,70 @@ impl Shim {
         }
     }
 
+    /// A stable source identity for one ranked stream — exactly the fields
+    /// `shim_store::LastStream` carries, built from the classified stream. The
+    /// signed URL is never included: a debrid link expires, and a torrent digest
+    /// is the file the engine selects by `file_idx` anyway.
+    fn last_stream_of(c: &Classified) -> LastStream {
+        LastStream {
+            addon: c.stream.addon_name.clone(),
+            info_hash: plx_stremio::torrent::info_hash(&c.stream),
+            file_idx: c.stream.file_idx,
+            filename: c.info.filename.clone(),
+            size_bytes: c.info.size_bytes,
+            height: c.info.height,
+            label: c.info.label.clone(),
+        }
+    }
+
+    /// Does candidate `c` answer the remembered source? Express release identity
+    /// outranks profile identity: a torrent hash (+ its file index) names one
+    /// file in one swarm, while addon + size + filename + height is the direct/
+    /// debrid fallback, since a signed URL expires with every re-resolution.
+    fn matches_last(c: &Classified, last: &LastStream) -> bool {
+        if let Some(ch) = plx_stremio::torrent::info_hash(&c.stream) {
+            return last.info_hash.as_deref() == Some(ch.as_str())
+                && (last.file_idx.is_none() || c.stream.file_idx == last.file_idx);
+        }
+        if last.info_hash.is_some() {
+            return false;
+        }
+        let same_addon = !last.addon.is_empty() && c.stream.addon_name == last.addon;
+        let same_name = match (&last.filename, &c.info.filename) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        let same_size = match (last.size_bytes, c.info.size_bytes) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        let same_height = match (last.height, c.info.height) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        same_addon && same_name && same_size && same_height
+    }
+
+    /// Re-order a fresh ranking, promoting the remembered source ahead of the
+    /// best-ranked stream — unless the viewer already picked inside the slot.
+    fn promote_last_stream(
+        out: &mut Vec<(usize, Classified)>,
+        last: Option<&LastStream>,
+        already_selected: bool,
+    ) {
+        if already_selected {
+            return;
+        }
+        let Some(last) = last else { return };
+        if let Some(p) = out.iter().position(|(_, c)| Self::matches_last(c, last)) {
+            let x = out.remove(p);
+            out.insert(0, x);
+        }
+    }
+
     /// The (type, id) an item's streams are asked for, and its runtime.
     fn stream_target(&self, ident: &Ident) -> Option<(String, String)> {
         match ident {
@@ -3422,6 +3487,10 @@ impl Shim {
                 let x = out.remove(p);
                 out.insert(0, x);
             }
+        }
+        if selected.is_none() {
+            let last = self.watch.get(rk).last_stream;
+            Self::promote_last_stream(&mut out, last.as_ref(), false);
         }
         (out, subs, done)
     }
@@ -5543,6 +5612,11 @@ impl Shim {
                         )),
                     };
                     verdict = r.clone();
+                    // Remember the source the viewer actually plays, so a
+                    // resume re-selects it while it is still offered.
+                    if let Some(Ok(_)) = r.clone() {
+                        self.watch.set_last_stream(rk, Self::last_stream_of(c));
+                    }
                     r
                 } else {
                     self.cached_open_url(rk, &c.url)
@@ -7021,6 +7095,10 @@ impl Shim {
                     .cloned()
             })
         };
+        // A Part id is a stream's arrival index: the player asks for the
+        // Media it was given. Preferring the remembered stream here would
+        // serve a different file from the one the viewer picked in the
+        // picker, so it is not done on this path.
         let url = stream.as_ref().and_then(|s| {
             let u = shim_media::playable_url(s, self.torrent_server().as_deref())?;
             self.open_url(rk, s, &u)
@@ -8155,6 +8233,61 @@ mod account_progress_tests {
         assert_eq!(episode_numbers("tt0944947"), (None, None));
         assert_eq!(episode_numbers("tmdb:1396"), (None, None));
         assert_eq!(episode_numbers("tt0944947:1"), (None, None));
+    }
+
+    fn classified(name: &str, url: &str, hash: Option<&str>, label: &str) -> Classified {
+        let mut stream = Stream {
+            name: Some(name.to_string()),
+            url: Some(url.to_string()),
+            info_hash: hash.map(Into::into),
+            ..Default::default()
+        };
+        stream.addon_name = "Torrentio".into();
+        Classified {
+            url: url.to_string(),
+            stream,
+            info: plx_stremio::classify::StreamInfo {
+                label: label.to_string(),
+                filename: Some(format!("{name}.mkv")),
+                size_bytes: Some(10_000),
+                height: Some(1080),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_remembered_torrent_promotes_even_when_ranking_demotes_it() {
+        let pinned = classified("pinned", "https://x/pinned.mkv", None, "pinned");
+        let best = classified("best", "https://x/best.mkv", None, "best");
+        let last = Shim::last_stream_of(&pinned);
+        let mut out = vec![(0usize, best), (1usize, pinned)];
+        Shim::promote_last_stream(&mut out, Some(&last), false);
+        assert_eq!(out[0].1.info.label, "pinned");
+    }
+
+    #[test]
+    fn a_missing_source_and_an_explicit_pick_steer_randomly_differently() {
+        let best = classified("best", "https://x/best.mkv", None, "best");
+        let other = classified("other", "https://x/other.mkv", None, "other");
+        let last = LastStream {
+            addon: "Torrentio".into(),
+            filename: Some("gone.mkv".into()),
+            size_bytes: Some(10_000),
+            height: Some(1080),
+            label: "gone".into(),
+            ..Default::default()
+        };
+        let mut out = vec![(0usize, best), (1usize, other)];
+        Shim::promote_last_stream(&mut out, Some(&last), false);
+        assert_eq!(out[0].1.info.label, "best", "nothing promoted, ranking stands");
+
+        let best = classified("best", "https://x/best.mkv", None, "best");
+        let pinned = classified("pinned", "https://x/pinned.mkv", None, "pinned");
+        let last = Shim::last_stream_of(&pinned);
+        let mut out = vec![(0usize, best), (1usize, pinned)];
+        Shim::promote_last_stream(&mut out, Some(&last), true);
+        assert_eq!(out[0].1.info.label, "best", "an explicit pick beats the memory");
     }
 
     /// A row Nuvio's own app pushed with a synthetic episode video id is placed through the

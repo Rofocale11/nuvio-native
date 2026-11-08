@@ -166,6 +166,32 @@ generation is re-checked, and only then does the sink fire — a superseded load
 `profile_id`, never across the HTTP call. A push happens while the player is reporting; holding that
 lock across a network round trip would stall the UI's account reads behind playback.
 
+## Last played source
+
+The account mirror above carries only the position. A resume that re-ranked
+from scratch often picked a different file: seeders move, addon order moves,
+and the film's best source on Monday is not the best source on Friday. To
+keep Continue Watching on the same release a viewer actually chose, the
+shim also keeps — **local to this TV, inside the same `watch.json`** — a
+stable identity of the stream each resume point last played:
+
+- addon name, and for a torrent the `info_hash` + `file_idx` (the engine
+  selects its file by that digest); for a direct/debrid stream the addon,
+  file name, size and height. **Never the signed URL and never the arrival
+  index:** a debrid link expires on every re-resolution, and the arrival
+  index shifts as addons answer.
+- The identity is written when a stream is actually probed at `/decision`
+  (the play that starts), not on a detail read and not on every
+  `/:timeline` tick.
+- On the next play, `ranked()` promotes a still-offered stream matching
+  that identity ahead of the best-ranked one — an explicit picker choice in
+  the current slot outranks the memory, and a source the addons no longer
+  offer falls back to plain ranking instead of promoting a dead pick.
+- `merge_remote` does **not** touch it: a position pulled from the account
+  is about where a viewer stopped, not which file this TV should prefer.
+  Each episode is its own ratingKey, so an episode's pick cannot bleed into
+  another episode of the same series.
+
 ## What is not covered
 
 - A scrobble (watched) is not pushed. Nuvio's history has no separate watched flag in this RPC pair,
@@ -173,11 +199,14 @@ lock across a network round trip would stall the UI's account reads behind playb
   plays past it.
 - Nothing is pushed while signed out, and nothing is pushed for a title that has neither an IMDb
   nor a TMDB id (a kitsu-only entry).
-- The local `watch.json` and the `account_keys` map still live in the Developer Mode runtime
-  directory (`/tmp`), so a TV reboot loses the local side. The next boot's pull restores what the
-  account holds; a row whose account identity no local addon can resolve a meta for (an episode
-  the series does not list, a title whose id the addon set does not answer) has no row snapshot
-  and stays off Continue Watching.
+- The local `watch.json` and the `account_keys` map live in the shim's
+  data directory — `/media/developer/{app id}.nuvio/shim` on a TV, which is
+  persistent storage; the runtime directory (`/tmp`) is only the fallback
+  when that path is not writable. A TV reboot therefore keeps the local
+  side; the boot pull still refreshes positions from the account. A row
+  whose account identity no local addon can resolve a meta for (an episode
+  the series does not list, a title whose id the addon set does not answer)
+  has no row snapshot and stays off Continue Watching.
 - Deletions are a zero position, not a row delete (see Push).
 
 ## Verification
@@ -193,6 +222,12 @@ Host tests, `make test-crate C=plx_pmsshim` and `C=plx_stremio`:
 - `shim_pms::account_progress_tests::a_synthetic_episode_row_is_placed_through_season_and_episode`
   — a `__nuvio_episode__:S:E` row lands on the addon's real episode, and a season/episode the
   series does not have is skipped rather than stored rowless.
+- `shim_pms::account_progress_tests::a_remembered_torrent_promotes_even_when_ranking_demotes_it`
+  — a ranking that puts the remembered release second promotes it back to `Media[0]`;
+  `a_missing_source_and_an_explicit_pick_steer_randomly_differently` — a source the addons no
+  longer offer leaves the ranking alone, and an explicit in-slot pick beats the memory.
+- `shim_store::tests::last_stream_survives_a_reopen_and_clears_with_the_resume_point` — the
+  identity persists in `watch.json` across a reopen, and finishing at/after 90% clears it.
 - `nuvio::progress_tests::an_episode_row_names_its_series_and_its_own_progress_key` — the
   `content_id_sNe` key and the season/episode fields of the push body.
 - `nuvio::progress_tests` — the push body's row shape and the 50-entry cap, and row parsing from
