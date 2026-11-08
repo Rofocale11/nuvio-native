@@ -401,9 +401,7 @@ fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result
                 let url = url_trim(&buf);
                 let url_wait = started.elapsed();
                 let restored = was_restored(ih);
-                let prebuffer = if retry_same {
-                    PrebufferOutcome::Skipped
-                } else if restored {
+                let prebuffer = if retry_same || restored {
                     PrebufferOutcome::Skipped
                 } else {
                     wait_for_prebuffer(baseline, deadline)
