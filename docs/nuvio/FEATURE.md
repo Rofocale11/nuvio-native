@@ -44,10 +44,12 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
 - Addon configuration stored as an opaque JSON record in the app's private DB8 kind (separate records
   per debug/stable/nightly), loaded/saved through the authenticated storage helper with readback
   verification.
-- Torrents (`infoHash`) play through the in-process C engine (`libsbengine.so`), or through a
-  Stremio-compatible streaming server URL when one is configured; debrid-resolved HTTP links
-  (Torrentio/AIOStreams) play directly; local server scanning off by default, gated by
-  `enableTorrents`.
+- Torrents (`infoHash`) play through the in-process C engine (`libsbengine.so`), the only
+  streaming engine — the legacy Node streaming server (`js-service/server.js`) is retired and
+  no longer spawned; when the C engine cannot load, torrents are unavailable on that install.
+  A configured `torrentServer` URL can be used directly; debrid-resolved HTTP links
+  (Torrentio/AIOStreams) play directly. Local server scanning is off by default and
+  requires `enableTorrents`.
 - Nuvio account sign-in surface on the TV; addon list imported from the account (Supabase) since
   WebView localStorage is unreadable cross-app in Developer Mode.
 - Release discovery permits plaintext credentials for the registered in-process shim only when its
@@ -59,18 +61,19 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   never cross origin; seeks reopen with `Range`.
 - TLS roots-mode fallback: debrid/addon hosts verified against the TV store first, retried once
   against bundled Mozilla roots on missing-issuer failure; control plane gets the same ladder.
-- 45s first-byte grace for cold media streams; prewarm torrent pieces on create; reject TrueHD in
-  forced direct play.
+- 45s first-byte grace for cold media streams; torrent resolve waits for a short prebuffer
+  before serving the loopback URL; TrueHD in forced direct play is routed through the AC3
+  encode lane.
 - Auto-play movies immediately after stream selection; immediate playback during background polling;
   Home hero play button and TV episode clicks route to the Streams picker instead of direct play.
 - Source picker groups streams by addon on both Detail and in-player menu; Plex quality ladder
   removed.
 - Seeder counts shown on the in-player source page and leading stream details.
-- P2P streaming toggle in Playback settings; the server URL is optional (the C engine needs none)
-  and names the Node fallback when set. Two engines ship: the in-process C engine
-  (`libsbengine.so`, preferred when it loads) and the Stremio `node` child from `js-service/`
-  (spawned only when it does not).
-- Buffer tuning for low-RAM TVs (50 MB video / 4 MB audio; later 15/2), skip disk cache when
+- P2P streaming toggle in Playback settings; the server URL is optional (the C engine needs
+  none) and empty uses the local engine's ports. One engine ships: the in-process C engine
+  (`libsbengine.so`); the legacy Node streaming server (`js-service/server.js`) is retired
+  and no longer spawned — when the C engine cannot load, torrents are unavailable instead.
+- Buffer tuning for low-RAM TVs (50 MiB video / 4 MiB audio), skip disk cache when
   caching disabled.
 - Subtitle and audio preferences: `defaultAudioLanguage`, `defaultSubtitleLanguage`,
   `autoSelectSubtitle` and `defaultSubtitleForced` are written to `nuvio-session.json` whether or
@@ -85,7 +88,7 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   clickable headshots, collection/franchise shelves.
 - Single HTTP request per title (`append_to_response=credits,recommendations,images`); responses
   cached 15 min.
-- `TMDB_API_KEY` baked at compile time (GitHub Secrets) with runtime env fallback; unset key
+- `TMDB_API_KEY` baked at compile time (GitHub repository variable) with runtime env fallback; unset key
   disables TMDB gracefully.
 - Synthetic numeric rating keys for TMDB-only items (related movies/shows, people, collections)
   with a key table for real catalog items; see `ID-MANAGEMENT.md`.
@@ -113,12 +116,13 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
 
 - BetterPosters Rotten Tomatoes posters; WebP poster decode; RT/IMDb rating-source preference in
   native session record.
-- Dynamic OSD layout for movie vs episode ClearArt; 4× ClearArt; left-aligned OSD logo.
+- ClearArt logos are cropped to their ink (title logo only) with the crop cached, so
+  transparent margins do not offset the OSD logo.
 - Subtitles rendered at video resolution (crisp 4K) with thicker outlines; scaled outlines.
 - Movie collections and franchise shelves on Home.
 - Addons settings page with per-addon enable/disable (session-scoped).
-- Focus-engine dispatch patch resolving dead cursor trap on OK press; More menu cursor stays on a
-  row.
+- Focus-engine dispatch fixes focus being left off the table;
+  More menu cursor stays on a row.
 - Dynamic ambient background gradient (Home/Library/Detail) restored: `plx_pmsshim` now emits a
   deterministic `UltraBlurColors` envelope per poster URL, so the wash tracks the focused artwork
   instead of the static brown ground.
@@ -144,12 +148,12 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
 ## Build, packaging & tooling
 
 - Rebrand: app id `com.nuvionative.app` (debug `.debug`), title, icons from Nuvio brand mark.
-- GitHub Actions workflow building the IPK; CI builds only on tag creation.
-- P2P server merged as a webOS service into a single IPK; `launch:true` descriptor.
+- GitHub Actions workflow building the IPK (manual dispatch, or on tags; CI also runs on push/PR).
+- P2P server merged as a webOS service into a single IPK.
 - ffmpeg fallback to GitHub; node invoked directly instead of luna service.
-- Developer-mode tooling: `tools/nv-tv.py` (install/launch/keys/log/capture without root),
+- Developer-mode tooling: tv-lock/tv-session (device access only via the skills),
   addon importer over DevTools, web-app FPS benchmark.
-- `TMDB_API_KEY` injected at compile time via GitHub Secrets.
+- `TMDB_API_KEY` injected at compile time via GitHub repository variable.
 
 ## Notes
 
