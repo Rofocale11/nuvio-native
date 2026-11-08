@@ -119,6 +119,33 @@ fn synthetic_collection_id(rk: i64) -> Option<u64> {
 const TRAILER_KEY_SPAN: i64 = 10_000_000_000;
 const MAX_TRAILERS: usize = 12;
 
+/// How many shelf candidates the AUTOPLAY tile's quality scan may resolve
+/// before it settles. Each resolve is a paced Node spawn, so this is a budget,
+/// not a full ranking: TMDB commonly lists a 1080p cut first and the 4K
+/// rendition second. Every 4K trailer measured on the dev set was the first or
+/// second candidate, so two buys the quality without turning the detail open's
+/// background warm into a batch job. The scan also stops early on a candidate
+/// at the device's own ceiling (`TrailerResolver::max_height`).
+const TRAILER_QUALITY_SCAN: usize = 2;
+
+/// The rendition rung a trailer raster belongs to — the same thresholds the
+/// clip row declares (`4k`/`1080`/`720`/`576`/`sd`). WIDTH counts because a
+/// widescreen 4K trailer is 3840x1600: its height is below 2000, but it is
+/// still a 4K rendition and must both rank above 1080p and settle the scan.
+fn trailer_rung(width: i64, height: i64) -> i64 {
+    if height >= 2000 || width >= 3800 {
+        2160
+    } else if height >= 1000 || width >= 1900 {
+        1080
+    } else if height >= 700 || width >= 1260 {
+        720
+    } else if height >= 560 {
+        576
+    } else {
+        480
+    }
+}
+
 /// The clip key for trailer `index` of `parent`.
 fn trailer_rk_at(parent: i64, index: usize) -> i64 {
     TRAILER_KEY_BASE + parent + index as i64 * TRAILER_KEY_SPAN
@@ -3958,8 +3985,10 @@ impl Shim {
     /// tail checks); doing it here means the player's first Part request finds
     /// the MPD already in `trailer_dash` instead of waiting for it.
     ///
-    /// Only the first tile is warmed — the rest resolve on the click that asks
-    /// for them (`trailer_row_at`). A no-op under test so call counts stay
+    /// Only the autoplay tile is warmed — though it may resolve several
+    /// candidates to find the tallest (see `trailer_row`) — and the rest
+    /// resolve on the click that asks for them (`trailer_row_at`). A no-op
+    /// under test so call counts stay
     /// deterministic, and a cheap check of the published maps keeps a cached
     /// page from spawning a thread per open.
     fn prefetch_trailer(self: &Arc<Self>, parent: i64) {
@@ -4095,12 +4124,17 @@ impl Shim {
         }
     }
 
-    /// DASH video-track probe: `mp4`/`mov`/`webm` + `h264`/`vp9` + decodable
-    /// video. Probes the address the player will actually open — the proxy
-    /// loopback URL when the proxy answered, else the raw video-track URL.
+    /// DASH video-track probe: `mp4`/`mov`/`mkv` + `h264`/`vp9`/`av1` +
+    /// decodable video. Probes the address the player will actually open — the
+    /// proxy loopback URL when the proxy answered, else the raw video-track URL.
     /// `None` = no prober (unverified: the caller publishes the DASH as
     /// before); `Some(false)` = a known refusal (e.g. a 403 on the
     /// video-only URL), which must not ship as a playable `Media`.
+    ///
+    /// `mkv` is the WebM arm: YouTube serves VP9/AV1 DASH tracks in a Matroska
+    /// container, and `MediaProbe::container()` names that family `mkv` (its
+    /// format string is `matroska,webm`), so a `webm`-only allow-list refused
+    /// every 4K pair and demoted the shelf to the 360p muxed file.
     fn trailer_probe_dash_logged(&self, url: &str) -> Option<bool> {
         let res = self.probes.probe(url)?;
         match res {
@@ -4109,7 +4143,7 @@ impl Shim {
                 Some(false)
             }
             Ok(p) => {
-                let ok = matches!(p.container.as_str(), "mp4" | "mov" | "webm")
+                let ok = matches!(p.container.as_str(), "mp4" | "mov" | "webm" | "mkv")
                     && p.video
                         .as_ref()
                         .is_some_and(|v| v.codec == "h264" || v.codec == "vp9" || v.codec == "av1")
@@ -4174,16 +4208,12 @@ impl Shim {
             } else {
                 "24p"
             };
-            let res = if d.height >= 2000 || d.width >= 3800 {
-                "4k"
-            } else if d.height >= 1000 || d.width >= 1900 {
-                "1080"
-            } else if d.height >= 700 || d.width >= 1260 {
-                "720"
-            } else if d.height >= 560 {
-                "576"
-            } else {
-                "sd"
+            let res = match trailer_rung(d.width, d.height) {
+                2160 => "4k",
+                1080 => "1080",
+                720 => "720",
+                576 => "576",
+                _ => "sd",
             };
             media.push(json!({
                 "id": dash_part_id,
@@ -4304,20 +4334,36 @@ impl Shim {
         }))
     }
 
-    /// Resolve the FIRST trailer for `parent`, walking the candidates the
-    /// shelf shows. A candidate whose DASH pair fails the probe/tail gate falls
-    /// through to the next; the first verified muxed row is kept only when no
-    /// DASH candidate survives. The result is published at index 0, so the
-    /// shelf's first tile and `GET /library/metadata/{rk}/trailer` agree.
+    /// Resolve the BEST trailer for `parent` — the autoplay tile. The first
+    /// candidate is not necessarily the best one: TMDB routinely lists a 1080p
+    /// cut first and the 2160p VP9/AV1 rendition later, and picking candidate
+    /// 0 pinned autoplay to that 1080p trailer. So the scan resolves up to
+    /// [`TRAILER_QUALITY_SCAN`] candidates (stopping at the device's ceiling)
+    /// and publishes the tallest DASH pair, trying the next-tallest if the
+    /// probe/tail gate refuses one. The first verified muxed row is kept only
+    /// when no DASH candidate survives. The result is published at index 0, so
+    /// the shelf's autoplay tile and `GET /library/metadata/{rk}/trailer`
+    /// agree.
     ///
     /// This never runs on a detail open: `/extras` answers the shelf rows from
     /// `trailer_shelf_rows`, and the resolve happens on the player's first Part
     /// request (`part`) or in the background warm that request then finds.
     fn trailer_row(&self, parent: i64) -> Option<Value> {
         let candidates = self.playable_candidates(parent);
-        let mut muxed_only: Option<(TrailerCandidate, crate::shim_trailer::TrailerResolved)> =
-            None;
-        for candidate in &candidates {
+        let max_height = self.trailer_resolver.max_height();
+        let ceiling_rung = if max_height > 0 {
+            trailer_rung(0, max_height)
+        } else {
+            0
+        };
+        let mut dash: Vec<((i64, i64), usize, crate::shim_trailer::TrailerResolved)> = Vec::new();
+        let mut muxed_only: Option<(usize, crate::shim_trailer::TrailerResolved)> = None;
+        let mut tried = 0usize;
+        for (index, candidate) in candidates.iter().enumerate() {
+            if tried >= TRAILER_QUALITY_SCAN {
+                break;
+            }
+            tried += 1;
             let Some(resolved) = crate::shim_trailer::resolve_cached(
                 self.trailer_resolver.as_ref(),
                 &self.trailer_cache,
@@ -4326,48 +4372,54 @@ impl Shim {
             ) else {
                 continue;
             };
-            if resolved.dash.is_some() {
-                if let Some(row) = self.publish_trailer(parent, 0, resolved, candidate) {
-                    return Some(row);
+            match &resolved.dash {
+                Some(d) => {
+                    let rank = (trailer_rung(d.width, d.height), d.height);
+                    dash.push((rank, index, resolved));
+                    if ceiling_rung > 0 && rank.0 >= ceiling_rung {
+                        break;
+                    }
                 }
-                continue;
-            }
-            if muxed_only.is_none() {
-                muxed_only = Some((candidate.clone(), resolved));
+                None => {
+                    if muxed_only.is_none() {
+                        muxed_only = Some((index, resolved));
+                    }
+                }
             }
         }
-        let (candidate, resolved) = muxed_only?;
-        self.publish_trailer(parent, 0, resolved, &candidate)
+        dash.sort_by_key(|(rank, ..)| std::cmp::Reverse(*rank));
+        for (_, index, resolved) in dash {
+            if let Some(row) = self.publish_trailer(parent, 0, resolved, &candidates[index]) {
+                return Some(row);
+            }
+        }
+        let (index, resolved) = muxed_only?;
+        self.publish_trailer(parent, 0, resolved, &candidates[index])
     }
 
     /// Resolve the trailer at `index` exactly — the tile the viewer clicked,
     /// not whichever candidate answers best. `None` leaves that Part 404 rather
     /// than silently playing a different trailer.
+    ///
+    /// Index 0 is the AUTOPLAY tile, and it is deliberately not "candidate 0":
+    /// it is the title's best-resolved trailer ([`Self::trailer_row`]), so the
+    /// background warm and the player's first Part request pick the same 4K
+    /// rendition the shelf cannot promise without resolving.
     fn trailer_row_at(&self, parent: i64, index: usize) -> Option<Value> {
-        let candidates = self.playable_candidates(parent);
-        if let Some(candidate) = candidates.get(index) {
-            let resolved = crate::shim_trailer::resolve_cached(
-                self.trailer_resolver.as_ref(),
-                &self.trailer_cache,
-                &self.trailer_flight,
-                &candidate.youtube_id,
-            );
-            if let Some(row) = resolved
-                .and_then(|resolved| self.publish_trailer(parent, index, resolved, candidate))
-            {
-                return Some(row);
-            }
-            if index != 0 {
-                // The viewer pressed THIS tile; do not silently play another.
-                return None;
-            }
-        }
-        // Tile 0 is the autoplay tile: if its grant is limited, keep the old
-        // walk so the screen still gets a playable trailer instead of a 404.
         if index == 0 {
             return self.trailer_row(parent);
         }
-        None
+        let candidates = self.playable_candidates(parent);
+        let candidate = candidates.get(index)?;
+        let resolved = crate::shim_trailer::resolve_cached(
+            self.trailer_resolver.as_ref(),
+            &self.trailer_cache,
+            &self.trailer_flight,
+            &candidate.youtube_id,
+        )?;
+        // The viewer pressed THIS tile; a refusal leaves it 404 rather than
+        // silently playing a different trailer.
+        self.publish_trailer(parent, index, resolved, candidate)
     }
 
     /// Probe/tail-gate one resolved candidate and build its clip row, or
@@ -9376,6 +9428,39 @@ mod trailer_tests {
         }
     }
 
+    /// A 2160p trailer pair. YouTube ships 4K only as VP9/AV1, and the VP9
+    /// DASH track is WebM — `ff_probe::MediaProbe::container()` names that
+    /// family `mkv`, because the format string is `matroska,webm`.
+    fn dash_4k_resolved() -> crate::shim_trailer::TrailerResolved {
+        crate::shim_trailer::TrailerResolved {
+            url: "https://cdn.example/video4k?sig=a&exp=1".into(),
+            itag: 313,
+            height: 2160,
+            is_dash: true,
+            dash: Some(crate::shim_trailer::DashInfo {
+                video_url: "https://cdn.example/video4k?sig=a&exp=1".into(),
+                audio_url: "https://cdn.example/audio?sig=c&exp=1".into(),
+                video_itag: 313,
+                audio_itag: 140,
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                video_mime: "video/webm; codecs=\"vp9\"".into(),
+                audio_mime: "audio/mp4; codecs=\"mp4a.40.2\"".into(),
+                video_bitrate: 20_000_000,
+                audio_bitrate: 128_000,
+                video_init: (0, 999),
+                video_index: (1000, 2000),
+                audio_init: (2001, 2999),
+                audio_index: (3000, 4000),
+                duration_ms: 145_000,
+            }),
+            muxed_url: Some("https://cdn.example/muxed.mp4?sig=x".into()),
+            muxed_itag: 18,
+            muxed_height: 360,
+        }
+    }
+
     fn ok_probe(container: &str, vcodec: &str) -> crate::shim_probe::ProbeInfo {
         crate::shim_probe::ProbeInfo {
             container: container.into(),
@@ -9430,6 +9515,276 @@ mod trailer_tests {
             }),
         );
         (shim, parent)
+    }
+
+    /// The same shim with `ids` as the title's trailer list, in order.
+    fn parent_with_trailers(ids: &[&str]) -> (Arc<Shim>, i64) {
+        let backend = Arc::new(TrailerMetaBackend {
+            calls: AtomicUsize::new(0),
+            trailer: ids.first().copied().unwrap_or("dQw4w9WgXcQ").into(),
+        });
+        let shim = Arc::new(Shim::new(backend, Config::default()));
+        let parent = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt9990001".into(),
+        });
+        let trailer_streams = ids
+            .iter()
+            .map(|id| json!(format!("https://www.youtube.com/watch?v={id}")))
+            .collect();
+        shim.metas.insert(
+            "movie",
+            "tt9990001",
+            Arc::new(Meta {
+                id: "tt9990001".into(),
+                type_: "movie".into(),
+                name: "Trailer Host".into(),
+                trailer_streams,
+                ..Default::default()
+            }),
+        );
+        (shim, parent)
+    }
+
+    /// One candidate's rendition, keyed by its id (the URL carries the id so
+    /// a test prober can answer per candidate).
+    fn resolved_at(id: &str, height: i64) -> crate::shim_trailer::TrailerResolved {
+        let width = if height >= 2000 { 3840 } else { 1920 };
+        resolved_dims(id, width, height)
+    }
+
+    /// The same, with the raster stated: a widescreen trailer is 3840x1600.
+    fn resolved_dims(id: &str, width: i64, height: i64) -> crate::shim_trailer::TrailerResolved {
+        let (itag, mime) = if width >= 3800 || height >= 2000 {
+            (313, "video/webm; codecs=\"vp9\"")
+        } else {
+            (137, "video/mp4; codecs=\"avc1.640028\"")
+        };
+        let dash = crate::shim_trailer::DashInfo {
+            video_url: format!("https://cdn.example/{id}/video?sig=a&exp=1"),
+            audio_url: format!("https://cdn.example/{id}/audio?sig=c&exp=1"),
+            video_itag: itag,
+            audio_itag: 140,
+            width,
+            height,
+            fps: 24,
+            video_mime: mime.into(),
+            audio_mime: "audio/mp4; codecs=\"mp4a.40.2\"".into(),
+            video_bitrate: 5_000_000,
+            audio_bitrate: 128_000,
+            video_init: (0, 999),
+            video_index: (1000, 2000),
+            audio_init: (2001, 2999),
+            audio_index: (3000, 4000),
+            duration_ms: 145_000,
+        };
+        crate::shim_trailer::TrailerResolved {
+            url: dash.video_url.clone(),
+            itag,
+            height,
+            is_dash: true,
+            dash: Some(dash),
+            muxed_url: Some(format!("https://cdn.example/{id}/muxed.mp4?sig=x")),
+            muxed_itag: 18,
+            muxed_height: 360,
+        }
+    }
+
+    /// Per-id rendition heights, with the device ceiling the scan stops at.
+    struct MapResolver {
+        heights: HashMap<String, i64>,
+        ceiling: i64,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::shim_trailer::TrailerResolver for MapResolver {
+        fn resolve(&self, youtube_id: &str) -> Option<crate::shim_trailer::TrailerResolved> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let height = *self.heights.get(youtube_id)?;
+            Some(resolved_at(youtube_id, height))
+        }
+        fn max_height(&self) -> i64 {
+            self.ceiling
+        }
+    }
+
+    /// Per-id rasters, for the widescreen case (3840x1600).
+    struct DimsResolver {
+        dims: HashMap<String, (i64, i64)>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::shim_trailer::TrailerResolver for DimsResolver {
+        fn resolve(&self, youtube_id: &str) -> Option<crate::shim_trailer::TrailerResolved> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (width, height) = *self.dims.get(youtube_id)?;
+            Some(resolved_dims(youtube_id, width, height))
+        }
+        fn max_height(&self) -> i64 {
+            2160
+        }
+    }
+
+    /// A 3840x1600 trailer is 4K even though its height is below 2000: it must
+    /// rank above 1080p and settle the scan at the device ceiling on its own.
+    #[test]
+    fn a_widescreen_4k_raster_reaches_the_ceiling_by_width() {
+        let (shim, parent) = parent_with_trailers(&["AAAAAAAAAAA", "BBBBBBBBBBB"]);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        let calls = Arc::new(AtomicUsize::new(0));
+        shim.trailer_resolver = Box::new(DimsResolver {
+            dims: HashMap::from([
+                ("AAAAAAAAAAA".to_string(), (1920, 1080)),
+                ("BBBBBBBBBBB".to_string(), (3840, 1600)),
+            ]),
+            calls: calls.clone(),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("a row");
+        assert_eq!(row["Media"][0]["width"], 3840);
+        assert_eq!(row["Media"][0]["height"], 1600);
+        assert_eq!(row["Media"][0]["videoResolution"], "4k");
+        // The widescreen 4K is the SECOND candidate, so the scan spends two
+        // spawns (1080p first), then stops — no third candidate exists.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // With the same raster listed FIRST, the width alone settles the scan:
+        // no second spawn for a 1080p candidate the device would never prefer.
+        let (shim, parent) = parent_with_trailers(&["BBBBBBBBBBB", "AAAAAAAAAAA"]);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        let calls = Arc::new(AtomicUsize::new(0));
+        shim.trailer_resolver = Box::new(DimsResolver {
+            dims: HashMap::from([
+                ("AAAAAAAAAAA".to_string(), (1920, 1080)),
+                ("BBBBBBBBBBB".to_string(), (3840, 1600)),
+            ]),
+            calls: calls.clone(),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("a row");
+        assert_eq!(row["Media"][0]["videoResolution"], "4k");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The scan is a budget, not a full ranking: with no 4K anywhere it stops
+    /// at [`TRAILER_QUALITY_SCAN`] candidates and publishes the first one
+    /// rather than resolving the whole shelf.
+    #[test]
+    fn the_scan_budget_caps_how_many_candidates_autoplay_waits_for() {
+        let (shim, parent) =
+            parent_with_trailers(&["AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC"]);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        let calls = Arc::new(AtomicUsize::new(0));
+        shim.trailer_resolver = Box::new(MapResolver {
+            heights: HashMap::from([
+                ("AAAAAAAAAAA".to_string(), 1080),
+                ("BBBBBBBBBBB".to_string(), 1080),
+                ("CCCCCCCCCCC".to_string(), 1080),
+            ]),
+            ceiling: 2160,
+            calls: calls.clone(),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("a row");
+        assert_eq!(row["Media"][0]["height"], 1080);
+        assert_eq!(calls.load(Ordering::SeqCst), TRAILER_QUALITY_SCAN);
+    }
+
+    /// The autoplay tile is the title's BEST trailer, not its first: TMDB
+    /// routinely lists a 1080p cut before the 4K rendition, and the old
+    /// first-resolved walk pinned autoplay to the 1080p one.
+    #[test]
+    fn the_autoplay_tile_picks_the_tallest_resolved_trailer() {
+        let (shim, parent) =
+            parent_with_trailers(&["AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC"]);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        let calls = Arc::new(AtomicUsize::new(0));
+        shim.trailer_resolver = Box::new(MapResolver {
+            heights: HashMap::from([
+                ("AAAAAAAAAAA".to_string(), 1080),
+                ("BBBBBBBBBBB".to_string(), 2160),
+                ("CCCCCCCCCCC".to_string(), 720),
+            ]),
+            ceiling: 2160,
+            calls: calls.clone(),
+        });
+        shim.probes.set_prober(Arc::new(|url: &str, _deadline| {
+            if url.contains("BBBBBBBBBBB") {
+                Ok(ok_probe("mkv", "vp9"))
+            } else {
+                Ok(ok_probe("mp4", "h264"))
+            }
+        }));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("the best trailer");
+        assert!(
+            row["thumb"].as_str().unwrap().contains("BBBBBBBBBBB"),
+            "the row names the 4K candidate that actually plays"
+        );
+        let media = row["Media"].as_array().unwrap();
+        assert_eq!(media[0]["height"], 2160);
+        assert_eq!(media[0]["videoResolution"], "4k");
+        assert_eq!(media[0]["videoCodec"], "vp9");
+        // 1080p first, then the 2160p candidate: the scan settles at the
+        // device ceiling and never pays a third spawn for the 720p one.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The player's first Part request goes through the same scan, so the
+    /// background warm and the request cannot disagree about which trailer
+    /// plays.
+    #[test]
+    fn the_autoplay_part_resolves_to_the_tallest_trailer() {
+        let (shim, parent) = parent_with_trailers(&["AAAAAAAAAAA", "BBBBBBBBBBB"]);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(MapResolver {
+            heights: HashMap::from([
+                ("AAAAAAAAAAA".to_string(), 1080),
+                ("BBBBBBBBBBB".to_string(), 2160),
+            ]),
+            ceiling: 2160,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        let shim = Arc::new(shim);
+        let clip = trailer_rk(parent);
+        // Asking for tile 0's Part resolves the 2160p candidate, not tile 0's
+        // own 1080p video.
+        let resp = shim.part(clip * 1000 + 998);
+        assert_eq!(resp.status, 200);
+        let mpd = String::from_utf8(resp.body).unwrap();
+        assert!(mpd.contains("BBBBBBBBBBB"), "{mpd}");
+        assert!(mpd.contains("height=\"2160\""), "{mpd}");
+    }
+
+    /// A 1080p set cannot decode 4K, so the scan settles on the first 1080p
+    /// candidate instead of paying a second spawn it could not use.
+    #[test]
+    fn a_1080p_ceiling_stops_the_scan_at_the_first_1080p_candidate() {
+        let (shim, parent) = parent_with_trailers(&["AAAAAAAAAAA", "BBBBBBBBBBB"]);
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        let calls = Arc::new(AtomicUsize::new(0));
+        shim.trailer_resolver = Box::new(MapResolver {
+            heights: HashMap::from([
+                ("AAAAAAAAAAA".to_string(), 1080),
+                ("BBBBBBBBBBB".to_string(), 2160),
+            ]),
+            ceiling: 1080,
+            calls: calls.clone(),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("a row");
+        assert_eq!(row["Media"][0]["height"], 1080);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -9600,6 +9955,38 @@ mod trailer_tests {
         );
         // The refused DASH part never entered the map.
         assert_eq!(shim.part(dash_part_id).status, 404);
+    }
+
+    /// The 4K rung. YouTube's only 2160p formats are VP9/AV1, and its VP9
+    /// DASH track is WebM — which the probe names `mkv` (`matroska,webm`), not
+    /// `webm`. A gate that accepts only `mp4|mov|webm` therefore refused every
+    /// 4K pair and demoted the row to the 360p muxed file; this pins the
+    /// published 2160p VP9 row.
+    #[test]
+    fn a_vp9_webm_dash_pair_publishes_the_4k_row() {
+        let (shim, parent) = parent_with_trailer();
+        let clip = trailer_rk(parent);
+        let dash_part_id = clip * 1000 + 998;
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_4k_resolved()),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mkv", "vp9"))));
+        let shim = Arc::new(shim);
+        let row = shim.trailer_row(parent).expect("the 4k dash row");
+        let media = row["Media"].as_array().unwrap();
+        assert_eq!(media.len(), 2, "DASH leads, muxed falls back");
+        assert_eq!(media[0]["videoResolution"], "4k");
+        assert_eq!(media[0]["height"], 2160);
+        assert_eq!(media[0]["container"], "webm");
+        assert_eq!(media[0]["videoCodec"], "vp9");
+        let mpd_resp = shim.part(dash_part_id);
+        assert_eq!(mpd_resp.status, 200, "the 4k MPD is registered");
+        let mpd = String::from_utf8(mpd_resp.body).unwrap();
+        assert!(mpd.contains("video/webm"), "{mpd}");
+        assert!(mpd.contains("width=\"3840\""), "{mpd}");
+        assert!(mpd.contains("height=\"2160\""), "{mpd}");
     }
 
     #[test]

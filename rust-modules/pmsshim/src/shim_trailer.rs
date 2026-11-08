@@ -98,6 +98,15 @@ pub trait TrailerResolver: Send + Sync {
     fn blocked(&self, _youtube_id: &str) -> bool {
         false
     }
+
+    /// The tallest rendition this host decodes — the device's own ceiling — or
+    /// `0` when unknown. The autoplay quality scan stops as soon as a candidate
+    /// resolves at this height, so a 1080p-only set does not pay a second Node
+    /// spawn looking for a 4K track it cannot decode. `0` (the default, and
+    /// every test fake) makes the scan settle on the first DASH candidate.
+    fn max_height(&self) -> i64 {
+        0
+    }
 }
 
 /// Always `None`. The default in tests and on hosts without Node/script.
@@ -275,6 +284,10 @@ impl TrailerResolver for NodeTrailerResolver {
 
     fn blocked(&self, youtube_id: &str) -> bool {
         self.blocked_id(youtube_id)
+    }
+
+    fn max_height(&self) -> i64 {
+        self.max_height as i64
     }
 }
 

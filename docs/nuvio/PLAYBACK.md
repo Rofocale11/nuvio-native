@@ -33,7 +33,13 @@ deterministic (`trailer_rk_at(parent, index) * 1000 + 998`), so `/extras` — wh
 detail page's critical path — never spawns the Node child. The resolve happens on the player's
 first Part request (`part`), and the shelf's FIRST tile is also warmed in the background as soon
 as `/extras` is served: the detail page autoplays after its 2 s dwell, so that thread's work is
-normally already in `trailer_dash` by the time the player asks. This used to run inside `/extras`
+normally already in `trailer_dash` by the time the player asks. That warm resolves the title's
+**best** trailer, not TMDB's first entry: it scans up to two candidates (stopping at the device's
+own ceiling rung, width counted because a widescreen 4K is `3840x1600`) and publishes the tallest
+pair, since TMDB routinely lists a 1080p cut before the 4K rendition — the case that pinned
+autoplay to 1080p while a 2160p VP9 trailer sat later in the shelf. Each resolve is a paced Node
+spawn, so the budget is two, not the whole shelf: every 4K trailer measured on the dev set was the
+first or second candidate, and a wider scan only slowed the autoplay. This used to run inside `/extras`
 on the request thread, which measured as a 3–5 s detail open against a 1 s baseline because each
 resolve also waited on the 300 ms decipher gate. `/library/metadata/{rk}/trailer` still answers
 the *resolved* first row. A title whose meta and TMDB `videos` name no YouTube id at all (and
@@ -98,7 +104,7 @@ its **last 64 KiB** (`Shim::trailer_tracks_reachable`, through the `Reacher` ins
 The probe and the tail check run together on separate threads, and the two tracks' head→tail walks
 run together, so the gate waits for its slowest ask instead of the sum of them. Both are hard
 gates: a limited grant passes the
-head probe and then fails mid-playback, so the tail ask is what catches it. A refused probe *or* tail does not publish the DASH `Media` at all — the
+head probe and then fails mid-playback, so the tail ask is what catches it. The video-track probe admits `mp4`/`mov` and the Matroska family (`mkv`, as `ff_probe` names a `matroska,webm` stream) beside `h264`/`vp9`/`av1`, so a 4K VP9 pair is not mistaken for an unknown container. A refused probe *or* tail does not publish the DASH `Media` at all — the
 row falls back to the verified muxed row, so playback still plays 360p instead of erroring. That
 refusal now happens at the Part request too: the shelf advertises the trailer, and a candidate that
 cannot be served simply leaves the MPD route 404 rather than hiding the control on the detail page.
