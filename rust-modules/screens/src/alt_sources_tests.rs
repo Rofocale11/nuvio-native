@@ -818,7 +818,7 @@ mod focus_and_hit {
     };
 
     #[derive(Clone)]
-    struct FixtureArg;
+    pub(super) struct FixtureArg;
     impl LogicalState for FixtureArg {
         fn write(&self, _: &mut Canon) {}
         fn probe(&self, _: &mut String) {}
@@ -837,7 +837,7 @@ mod focus_and_hit {
             true
         }
     }
-    struct HostFixture;
+    pub(super) struct HostFixture;
     impl Host for HostFixture {
         type Arg = FixtureArg;
         type Fx = AppFx;
@@ -852,7 +852,7 @@ mod focus_and_hit {
             test_store().view()
         }
     }
-    fn fixture_cx(focus: Option<FocusKey<u32>>) -> plx_machine::machine::Cx<'static, HostFixture> {
+    pub(super) fn fixture_cx(focus: Option<FocusKey<u32>>) -> plx_machine::machine::Cx<'static, HostFixture> {
         plx_machine::machine::Cx {
             views: (),
             tick: Tick::default(),
@@ -869,7 +869,6 @@ mod focus_and_hit {
             kind: InputKind::Key { key, sym: 0, wcode: 0, edge, at_edge: false },
         })
     }
-
     /// Two copies, so the panel has two real rows to walk and to commit against.
     fn two_row_panel() -> (AltSourcesScreen, ServerId, ServerId) {
         let here = sid(1);
@@ -1194,13 +1193,28 @@ fn the_streams_picker_lists_addons_first_and_then_one_addons_streams() {
     );
 }
 
-/// **The pages push and pop on the panel's own stack**: drilling in replaces its rows (leaving the
-/// panel where it is — nothing is reported to the Detail page until a stream is picked), and BACK
-/// returns to the addon list with the opener focused.
+/// **The pages push and pop on the panel's own stack, with the in-player picker's slide**:
+/// drilling in replaces its rows (leaving the panel where it is — nothing is reported to the
+/// Detail page until a stream is picked) and BACK returns to the addon list with the opener
+/// focused. Both the push and the pop hand the outgoing page whole to
+/// [`PanelMotion::begin_slide`] (`+1.0` for a push, `−1.0` for a pop) and the panel steps
+/// [`PanelMotion::step`] on [`Self::step_motion`], exactly like
+/// [`MoreMenuState::push`]/[`MoreMenuState::pop`] — so the PAGES slide inside the card's
+/// clip on a staggered fade instead of the table snapping whole and jumping the scroll to
+/// the top.
 #[test]
 fn the_picker_drills_in_and_back_out_without_leaving_the_panel() {
+    use plx_base::fontcov::advances::ShippedMeasure;
+
     let _serial = plx_base::testlock::serial();
     let mut p = picker(None);
+
+    // The panel starts at rest.
+    p.motion.step(1.0 / 60.0, p.natural(&ShippedMeasure));
+    assert!(!p.sliding() && !p.transitioning(), "a fresh panel is at rest");
+    let at_rest = p.shown(&ShippedMeasure);
+    assert_eq!(at_rest, p.natural(&ShippedMeasure), "at rest the card is its layout");
+
     // the addon row is a Nav row, so a press pushes rather than commits
     assert_eq!(
         p.form.index_of_key(RowKey(1)).and_then(|i| p.form.activate(i)),
@@ -1211,26 +1225,85 @@ fn the_picker_drills_in_and_back_out_without_leaving_the_panel() {
     p.push_stream_page(1);
     assert_eq!(p.stream_page, Some(5), "named by that addon's first RANKED index");
     assert_eq!(p.form.table.title().as_deref(), Some("Sootio"));
-    assert_eq!(
-        p.root_return.as_ref().map(|(id, _)| id.clone()),
-        Some(AltId::addon(1, "Sootio")),
-        "the opener is banked so a pop can seat it"
-    );
+    assert_eq!(p.pages.len(), 1, "one page was pushed onto the stack");
+    assert_eq!(p.pages.top(), Some(5), "the pushed page names the addon's lead stream");
+    assert!(p.sliding(), "a push slides the page");
+    // The arriving page enters from the right (a push travels left).
+    assert!(p.live_dx() > 0.0, "the arriving page comes in from the right on a push (live_dx={:?})", p.live_dx());
+    // The page it replaced is gone from the focusable form: the new page owns the pill.
     assert_eq!(
         p.form.selected_id(),
         Some(&AltId::stream(5)),
         "the new page opens on its own first stream"
     );
+    assert_eq!(p.pages.first().map(|s| s.return_id.clone()), Some(AltId::addon(1, "Sootio")), "the opener is banked so a pop can seat it (PageStack entry)");
+    // The banked scroll is the addon list's, reinstated by a pop.
+    assert_eq!(p.pages.first().map(|s| s.scroll), Some(0.0), "the scroll the list was left at is banked");
+
+    // Push motion must settle, leaving nothing sliding and no pointer hold.
+    {
+        let mut n = 0;
+        while p.transitioning() {
+            p.step_motion(1.0 / 60.0, &ShippedMeasure);
+            n += 1;
+            if n > 240 { panic!("the push never settles"); }
+        }
+        assert!(!p.sliding());
+        assert_eq!(p.live_dx(), 0.0);
+    }
 
     assert!(p.pop_stream_page(), "BACK pops the page");
     assert_eq!(p.stream_page, None);
     assert_eq!(p.form.table.title(), None, "the band goes with the page");
+    assert_eq!(p.pages.len(), 0, "the stack is empty again");
+    assert!(p.sliding(), "a pop slides the page back");
+    // A pop travels right: the arriving page comes in from the left.
+    assert!(p.live_dx() < 0.0, "a pop brings the page in from the left (live_dx={:?})", p.live_dx());
     assert_eq!(
         p.form.selected_id(),
         Some(&AltId::addon(1, "Sootio")),
-        "the opener comes back focused"
+        "the opener comes back focused — never the top row the join snapped to before"
     );
+
+    // The pop motion must settle too.
+    {
+        let mut n = 0;
+        while p.transitioning() {
+            p.step_motion(1.0 / 60.0, &ShippedMeasure);
+            n += 1;
+            if n > 240 { panic!("the pop never settles"); }
+        }
+        assert!(!p.sliding());
+        assert_eq!(p.live_dx(), 0.0);
+        assert_eq!(p.shown(&ShippedMeasure), p.natural(&ShippedMeasure), "at rest the card is its layout");
+    }
+
     assert!(!p.pop_stream_page(), "there is nothing to pop at the first level");
+}
+
+/// **A pop whose opener the re-rank dropped lands on the page's first focusable row**,
+/// never on a stale id and never on the top row the join jumped to: the landing is the
+/// banked opener only while the new form still holds it (see
+/// [`MoreMenuState::pop`]'s landing rule).
+#[test]
+fn a_pop_whose_opener_was_dropped_lands_on_the_first_focusable_row() {
+    let _serial = plx_base::testlock::serial();
+    let mut p = picker(None);
+    p.form.table.sel = 1;
+    p.push_stream_page(1);
+    assert_eq!(p.stream_page, Some(5));
+
+    // A re-rank drops "Sootio" mid-drill: the page goes back up by itself.
+    p.stream_choices = p.stream_choices.into_iter().filter(|c| c.addon.as_deref() != Some("Sootio")).collect();
+    p.rebuild(crate::alt_sources::Sel::Keep, test_store().view());
+
+    assert_eq!(p.stream_page, None, "the emptied page goes back up");
+    assert_eq!(p.pages.len(), 0);
+    assert_eq!(
+        p.form.selected_id(),
+        Some(&AltId::addon(0, "Torrentio")),
+        "the fallback is the first focusable row, not the dropped opener and not the top"
+    );
 }
 
 /// **A stream that no addon claimed stays reachable**, under the fallback heading: the shim tags
@@ -1253,6 +1326,197 @@ fn an_untagged_stream_gets_the_fallback_heading() {
             rows: vec![0],
         }]
     );
+}
+
+/// **The stream list landing seats the engine, and a late seat cannot overwrite a DOWN.**
+/// The Streams picker mounts with only its inert "Finding streams…" note, so the modal's
+/// `Enter::Fresh{ContainerGroup(0)}` seats nothing and the engine keeps no current focus.
+/// When the async list lands, `Tick` → `rebuild(Sel::Keep)` moves `table.sel` onto the
+/// first addon row but no `Enter` is pushed — the first DOWN then hits the engine's
+/// no-focus fallback (`seat_first`) instead of moving, i.e. it is eaten, and only the
+/// second DOWN moves. `follow_seat` (mirroring WatchlistScreen) must push the panel's
+/// own seat as `Enter::Fresh{Elem(first row)}` when the rows land, and a seat queued
+/// before the reader acted must restore the reader's focus rather than steal it.
+#[test]
+fn the_landed_stream_list_seats_the_engine_and_a_late_seat_cannot_steal_a_down() {
+    use crate::alt_sources::tests::focus_and_hit::fixture_cx;
+    use crate::registry::AppFx;
+    use plx_machine::machine::{
+        Edge, FocusKey, Handled, InputEvent, InputKind, Key, Machine, Source, Tick,
+    };
+    use plx_ui::screen::{Enter, FocusTarget, ScreenEvent};
+
+    let _serial = plx_base::testlock::serial();
+
+    // --- the landing seats the engine ---
+    let mut p = panel(sid(0), "0");
+    p.stream_mode = true;
+    p.stream_pending = true;
+    // the harness has no client, so request_streams never ran; the placeholder form is
+    // the real `stream_form` over an empty list: one inert note, no focusable row.
+    p.form.set(p.stream_form(), None);
+    assert_eq!(p.form.focusable_len(), 0, "no focusable row before the list lands");
+    let entry = p.entry;
+    let cx_none = fixture_cx(None);
+    // Mount: the panel asks to seat nothing yet (no row to offer).
+    let mut buf = Vec::new();
+    let mut present = plx_machine::present::Present::default();
+    {
+        let mut fx = plx_machine::machine::Effects::new(
+            &mut buf,
+            plx_machine::machine::MachineId::Input,
+            &mut present,
+        );
+        assert_eq!(Machine::step(&mut p, &ScreenEvent::Mount, &cx_none, &mut fx), Handled::Yes);
+    }
+    assert_eq!(p.seat, Some(None), "the arrival is owed until rows land");
+    assert_eq!(p.own_enters, 0, "no seat to ask for while there is no row");
+    // the modal's mint: the container's Enter::Fresh{ContainerGroup(0)}
+    {
+        let mut fx = plx_machine::machine::Effects::new(
+            &mut buf,
+            plx_machine::machine::MachineId::Input,
+            &mut present,
+        );
+        let ev = ScreenEvent::Enter(Enter::Fresh {
+            focus: FocusTarget::ContainerGroup(GroupId(0)),
+        });
+        assert_eq!(Machine::step(&mut p, &ev, &cx_none, &mut fx), Handled::Yes);
+    }
+    // the stream list lands on Tick
+    *p.stream_mailbox.lock().unwrap() = Some(StreamReply::List(Some(
+        plx_plex::plex::nuvio::StreamList {
+            complete: true,
+            streams: two_addons(),
+        },
+    )));
+    buf.clear();
+    {
+        let mut fx = plx_machine::machine::Effects::new(
+            &mut buf,
+            plx_machine::machine::MachineId::Input,
+            &mut present,
+        );
+        let ev = ScreenEvent::Tick(Tick::default());
+        // Tick rides on a static cx for the test harness; the real cx.focus is None
+        // (no engine focus yet), which is exactly the pre-fix state.
+        assert_eq!(Machine::step(&mut p, &ev, &cx_none, &mut fx), Handled::Yes);
+    }
+    assert_eq!(p.form.focusable_len(), 2, "the two addons landed");
+    assert!(
+        buf.iter().any(|s| matches!(
+            &s.fx,
+            plx_machine::machine::Fx::Deliver(_, plx_machine::machine::Delivery::Screen(
+                ScreenEvent::Enter(Enter::Fresh { focus: FocusTarget::Elem(key) })
+            )) if key.entry == entry
+        )),
+        "the landed first row is seated in the engine, so the first DOWN moves"
+    );
+
+    // --- a seat queued before the reader acted restores their focus ---
+    let mut p2 = picker(None);
+    p2.seat = Some(p2.form.selected_key());
+    p2.own_enters = 1;
+    // the reader's first DOWN: engine now holds row 1 (Sootio), table synced
+    p2.form.table.sel = 1;
+    let cx_reader = fixture_cx(Some(FocusKey {
+        entry: p2.entry,
+        elem: 1,
+    }));
+    let down = ScreenEvent::Input(InputEvent {
+        at: Tick::default(),
+        source: Source::Script,
+        kind: InputKind::Key { key: Key::Down, sym: 0, wcode: 0, edge: Edge::Down, at_edge: false },
+    });
+    let mut buf2 = Vec::new();
+    let mut present2 = plx_machine::present::Present::default();
+    {
+        let mut fx = plx_machine::machine::Effects::new(
+            &mut buf2,
+            plx_machine::machine::MachineId::Input,
+            &mut present2,
+        );
+        assert_eq!(
+            Machine::step(&mut p2, &down, &cx_reader, &mut fx),
+            Handled::No,
+            "a non-BACK key must decline so the dispatcher's engine arm moves/activates it"
+        );
+    }
+    assert_eq!(p2.stale_enters, 1, "the queued seat is now stale");
+    // the stale seat Enter comes back: it must re-ask for the reader's row
+    buf2.clear();
+    {
+        let mut fx = plx_machine::machine::Effects::new(
+            &mut buf2,
+            plx_machine::machine::MachineId::Input,
+            &mut present2,
+        );
+        let ev = ScreenEvent::Enter(Enter::Fresh {
+            focus: FocusTarget::Elem(FocusKey { entry: p2.entry, elem: 0 }),
+        });
+        assert_eq!(Machine::step(&mut p2, &ev, &cx_reader, &mut fx), Handled::Yes);
+    }
+    assert_eq!(p2.own_enters, 1, "the restore itself is a new own seat");
+    assert!(
+        buf2.iter().any(|s| matches!(
+            &s.fx,
+            plx_machine::machine::Fx::Deliver(_, plx_machine::machine::Delivery::Screen(
+                ScreenEvent::Enter(Enter::Fresh {
+                    focus: FocusTarget::Elem(FocusKey { entry, elem: 1 })
+                })
+            )) if *entry == p2.entry
+        )),
+        "the stale seat restores the reader's DOWN, not the row queued before it"
+    );
+    let _ = AppFx::Content as *const () as u8; // keep the import used in every cfg
+}
+
+/// **A pop's landing wins deterministically, even when the engine's held key still names a
+/// row on the returning page.** `FormTable::restore` computes `reseat` because the engine's
+/// held key names a different row after the page swap, but `AltSourcesScreen::reconcile`
+/// used to keep whatever the engine held — so BACK intermittently landed where the engine
+/// was (the opener) or at the top row, depending on whether the old key still happened
+/// to name an addon row. `reconcile` must answer the landed row whenever `reseat` names one.
+#[test]
+fn a_pop_reconciles_to_the_landed_opener_not_the_held_key() {
+    use crate::alt_sources::tests::focus_and_hit::{fixture_cx, HostFixture};
+    use plx_machine::machine::FocusKey;
+    use plx_ui::form::RowKeys;
+    use plx_ui::screen::Focusable;
+
+    let _serial = plx_base::testlock::serial();
+
+    let mut p = picker(None);
+    // The engine's HOLD: on the pushed page the engine follows the push (FocusMoved
+    // reports the new page's first row, stream index 5 => RowKey(5)), and that key no
+    // longer names anything on the returning addon page — so `restore` computes a
+    // reseat to the banked opener. The intermittent bug is: reconcile kept the held
+    // key when it still named a row on the returning page (e.g. a stream index 0 or 1
+    // naming an addon row), landing wherever the engine was.
+    let cx = fixture_cx(Some(FocusKey { entry: p.entry, elem: 0 }));
+    p.form.table.sel = 1;
+    p.push_stream_page(1);
+    assert_eq!(p.form.selected_id(), Some(&AltId::stream(5)));
+    // The push installed a new page under the engine; FocusMoved reports the new
+    // page's row (RowKey(5)). note_engine_key sets it so `restore` can compute the reseat.
+    p.form.note_engine_key(Some(RowKey(5)));
+    assert!(p.pop_stream_page());
+    // `reseat` is set because the engine's RowKey(5) names nothing on the returning
+    // addon page, and the landing is the opener Sootio (RowKey(1)).
+    let reseat = p.form.reseat();
+    assert!(reseat.is_some(), "the pop must compute a reseat when the engine's held key names nothing on the returning page");
+
+    // THIS is the bug: reconcile ignored `reseat` and kept the engine's key (RowKey(5)), which
+    // on some pages still names a row — landing on the top row or wherever. After the
+    // restore it must reconcile to the landed opener.
+    let want = FocusKey { entry: p.entry, elem: 5 };
+    let got = Focusable::<HostFixture>::reconcile(&p, want, &cx);
+    assert_eq!(
+        got.elem, 1,
+        "a pop reconciles ENGINE focus to the landed opener (reseat), not to the key the engine was holding (got elem {})",
+        got.elem
+    );
+    assert_eq!(p.form.selected_id(), Some(&AltId::addon(1, "Sootio")));
 }
 
 /// **Both Streams-picker pages fit the panel in every shipped language.** None of their text is

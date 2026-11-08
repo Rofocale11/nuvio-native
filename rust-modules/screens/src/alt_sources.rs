@@ -104,17 +104,18 @@ use crate::registry::{AppLike, AppMsg, ContentArg, PageMemory};
 use plx_ui::consts::{SCR_H, SCR_W};
 use plx_ui::frame::Budget;
 use plx_machine::machine::{
-    Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputKind,
-    InstanceId, Key, LogicalState, Machine, MachineId, NavOp,
+    Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent,
+    InputKind, InstanceId, Key, LogicalState, Machine, MachineId, NavOp,
 };
 use plx_ui::screen::{
-    Activate, At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, FocusSource, Focusable, GroupKind,
-    GroupSpec, Hover, HitSource, Placed, RenderStrategy, Screen, ScreenEvent, Scrim, Seat, Step,
-    Stop,
+    Activate, At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, Enter, FocusSource, FocusTarget,
+    Focusable, GroupKind, GroupSpec, Hover, HitSource, Placed, RenderStrategy, Screen, ScreenEvent,
+    Scrim, Seat, Step, Stop,
 };
-use plx_ui::form::{Form, FormSection, FormTable, RowKey, RowKind};
+use plx_ui::form::{Form, FormSection, FormTable, RowKey, RowKeys, RowKind};
+use plx_ui::panel_motion::PanelMotion;
 use plx_ui::table::{Badge, Row, TableView, MENU_MAX_W, MENU_MIN_W};
-use plx_ui::{theme, Rect};
+use plx_ui::{page_stack, theme, Rect};
 
 /// The fields [`AltSourcesScreen::write`] canonicalises, for the recorder's shape pin (§5.4). The
 /// selected ROW is in it deliberately: this panel's UP/DOWN changes nothing else in the app, so
@@ -424,9 +425,41 @@ pub struct AltSourcesScreen {
     /// across a rebuild — the list is ranked fresh each poll, so a position could name another
     /// source, while the stream that led the group cannot (the group would be empty otherwise).
     stream_page: Option<usize>,
-    /// What the addon list looked like when the page was pushed — the opener focused and the
-    /// scroll it was left at — reinstated by a pop ([`FormTable::restore`]).
-    root_return: Option<(AltId, f32)>,
+    /// **The arrival seat, while nobody has chosen another**: the row key the panel's own
+    /// arrival seated (`None` once the reader acts, the panel is restored, or the first
+    /// row holds it). Mirrors `WatchlistScreen`'s `seat`/`follow_seat`: the modal's
+    /// `Enter::Fresh{ContainerGroup(0)}` fires before the async stream list lands, so the
+    /// engine seats nothing (the group is only the inert "Finding streams…" note) and
+    /// the arrival must be re-seated when rows actually arrive — unless the reader has
+    /// already moved by then.
+    seat: Option<Option<RowKey>>,
+    /// Seats this panel asked the engine for whose `Enter` has not come back yet: those
+    /// are the panel's own, not a new arrival. Mirrors the Watchlist counters.
+    own_enters: u8,
+    /// How many of the [`own_enters`](Self::own_enters) still in flight were queued
+    /// BEFORE the reader acted (the oldest ones: the dispatcher's queue is FIFO). A
+    /// drain budget can carry a seat `Enter` past the reader's next key, and the engine
+    /// seats an `Enter` whatever the panel answers, so the panel cannot refuse it: it
+    /// puts the reader's focus back when it arrives (see `Machine::step`).
+    stale_enters: u8,
+    /// **The panel's slide motion** — the same `plx_ui::panel_motion::PanelMotion` the
+    /// in-player Streams picker (`MoreMenuState`) uses: a push/pop swaps the whole
+    /// [`TableView`] for a blank one of the same kind, hands the outgoing page to
+    /// [`PanelMotion::begin_slide`], and `draw` steps the two pages sideways inside the
+    /// card's clip (0.22 of the card width, staggered fade). Without this the
+    /// [`Self::push_stream_page`]/[`Self::pop_stream_page`] pair snaps the pill and
+    /// jumps the scroll to the top, because `form.restore`/`refresh_with` alone never
+    /// animate a whole-page replacement.
+    motion: PanelMotion,
+    /// **The drill-in stack above the addon list**: one entry (page, opener, scroll) when
+    /// an addon's page is up. It is the same [`plx_ui::page_stack::PageStack`] the
+    /// in-player Source page stands on, so what a push saves and what a pop restores
+    /// cannot drift from that picker's.
+    pages: page_stack::PageStack<usize, AltId>,
+    /// What `Screen::pointer_held` answers for this panel — `motion.transitioning()`,
+    /// mirroring the player overlay's `Panel::More`. While the card resizes or pages
+    /// slide the pointer is held, so no click mutates a surface in motion.
+    pub(crate) held: bool,
 }
 
 enum StreamReply {
@@ -450,7 +483,12 @@ impl AltSourcesScreen {
             stream_error: false,
             stream_attempts: 0,
             stream_page: None,
-            root_return: None,
+            motion: PanelMotion::new(),
+            pages: page_stack::PageStack::new(),
+            held: false,
+            seat: None,
+            own_enters: 0,
+            stale_enters: 0,
         };
         if screen.stream_mode { screen.request_streams(); }
         screen.rebuild(Sel::OnTheCopyYouAreOn, meta);
@@ -519,8 +557,14 @@ impl AltSourcesScreen {
     }
 
     /// **Drill into an addon, or come back up one page.** The panel keeps its own stack because a
-    /// pick on the lower level is not a choice the Detail page has to act on — it is a request the
-    /// shim performs — so there is nothing for the container to route.
+    /// pick on the lower level is not a choice the Detail page has to act on — it is a request
+    /// the shim performs — so there is nothing for the container to route.
+    ///
+    /// A push is the in-player picker's push ([`MoreMenuState::push`]): bank the opener
+    /// and its scroll on the [`PageStack`], hand the outgoing page whole to
+    /// [`PanelMotion::begin_slide`] (`+1.0`, pages travel left), install the new
+    /// page's form, and re-jump the pill onto its first row after the title band moves
+    /// every row — so the pill snaps on the page it is now on and only the PAGES slide.
     fn push_stream_page(&mut self, group: usize) {
         let Some(g) = plx_appkit::source_list::addon_pages(&self.stream_choices).into_iter().nth(group)
         else {
@@ -528,24 +572,42 @@ impl AltSourcesScreen {
         };
         // what the list looked like, so a pop brings it back exactly as it was left
         if let Some(opener) = self.form.selected_id().cloned() {
-            self.root_return = Some((opener, self.form.table.scroll_pos()));
+            self.pages.push(g.lead, opener, self.form.table.scroll_pos());
         }
         // the page is NAMED by its addon's first RANKED index (see `stream_page`), not by the
         // position in the group list
         self.stream_page = Some(g.lead);
+        let leaving = page_stack::leave_page(&mut self.form);
         // nothing on the new page is "current": it opens on its own first row
         self.form.open(self.stream_form(), None);
         self.form.table.set_title(self.stream_title());
+        self.motion.begin_slide(leaving, 1.0);
     }
 
-    /// Pop the addon page: the first level comes back exactly as it was left. `false` at the first
+    /// Pop the addon page: the first level comes back exactly as it was left, WITH the same
+    /// slide the in-player picker's pop uses ([`MoreMenuState::pop`]). `false` at the first
     /// level (nothing to pop — the caller dismisses the panel).
+    ///
+    /// The page beneath is rebuilt from the live list, the landing is the banked opener
+    /// when it is still on offer else the page's first focusable row (a re-rank can
+    /// drop the opener, and a stale id must never be named again), and the pill
+    /// SNAPS on the returning page while the PAGES slide — that is the picker's slide:
+    /// two tables drawn inside the card's clip on a staggered fade, `−1.0` (pages
+    /// travel right), while the card resizes to the returning page's height.
     fn pop_stream_page(&mut self) -> bool {
         if self.stream_page.take().is_none() {
             return false;
         }
-        let (opener, scroll) = self.root_return.take().unzip();
-        self.form.restore(self.stream_form(), opener.as_ref(), scroll.unwrap_or(0.0));
+        let Some(saved) = self.pages.pop() else { return true };
+        let leaving = page_stack::leave_page(&mut self.form);
+        self.motion.begin_slide(leaving, -1.0);
+        let form = self.stream_form();
+        let landing = if form.contains(&saved.return_id) {
+            Some(saved.return_id.clone())
+        } else {
+            form.slots().into_iter().flatten().next().map(|b| b.id.clone())
+        };
+        self.form.restore(form, landing.as_ref(), saved.scroll);
         self.form.table.set_title(None);
         true
     }
@@ -612,24 +674,127 @@ impl AltSourcesScreen {
             }
         }
         // A rebuild can be the stream list arriving, re-ranking, or emptying under an open addon
-        // page: the band names the page as it is NOW, and one the change emptied goes back up.
+        // page: the band names the page as it is NOW, and one the change emptied goes back up —
+        // by restoring the banked opener and scroll, like the picker's own pop, never by landing
+        // on the first row at the top. The card resize is animated by `motion.step` on Tick.
         if self.stream_mode {
             let pages = plx_appkit::source_list::addon_pages(&self.stream_choices);
             if self.stream_page.is_some_and(|p| !pages.iter().any(|g| g.lead == p)) {
                 self.stream_page = None;
-                self.form.set(self.stream_form(), None);
+                if let Some(saved) = self.pages.pop() {
+                    self.form.restore(self.stream_form(), Some(&saved.return_id), saved.scroll);
+                } else {
+                    self.form.set(self.stream_form(), None);
+                }
             }
             self.form.table.set_title(self.stream_title());
         }
     }
 
+    /// The table's natural rect: the anchor's placement of the table's currently measured
+    /// size. The card as drawn resizes around it via the [`PanelMotion`] springs
+    /// ([`Self::motion`]); [`Self::shown`] answers that drawn rect.
     pub fn frame(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
         let [x, y, w, h] = self.arg.anchor.map(f32::from_bits);
         panel_at(Rect::new(x, y, w, h), self.form.table.measured_width(measure), self.form.table.measured_height())
     }
 
+    /// The natural rect cached against the table's `layout_rev`, so the per-frame callers
+    /// (Tick, draw, every stop's place) re-measure text only when the table changed.
+    fn natural(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
+        self.motion.natural(self.form.table.layout_rev(), || self.frame(measure))
+    }
+
+    /// The card as drawn this frame: top and left on their springs toward [`Self::natural`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn shown(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
+        self.motion.shown(self.natural(measure))
+    }
+
+    /// Is the panel still moving — the card resizing or the page slide running?
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn transitioning(&self) -> bool {
+        self.motion.transitioning()
+    }
+
+    /// Is a page slide running right now?
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sliding(&self) -> bool {
+        self.motion.sliding()
+    }
+
+    /// The live page's sideways offset (0 at rest), so a test can prove the slide's
+    /// direction without any rendering.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn live_dx(&self) -> f32 {
+        self.motion.live_dx()
+    }
+
+    /// The card's resize/page-slide engine step, and the table's own springs. Runs on
+    /// Tick after the mailbox and `form.table.update` — the same two calls
+    /// `MoreMenuState::update` makes. `update` subtracts its own top/bottom padding,
+    /// but the picker anchors its panel by its measured height, so the table steps
+    /// against the raw height. The pixel held on the pointer follows
+    /// [`PanelMotion::transitioning`].
+    fn step_motion(&mut self, dt: f32, measure: &dyn plx_machine::machine::Measure) {
+        let natural = self.natural(measure);
+        self.form.table.update(dt, natural.h);
+        self.motion.step(dt, natural);
+        self.held = self.motion.transitioning();
+    }
+
     fn dismiss<H: AppLike>(&self, fx: &mut Effects<'_, H>) {
         fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
+    }
+
+    /// **Seat the arrival in the panel, and follow it when the rows land.** The modal's
+    /// `Enter::Fresh` fires while the panel has only its inert placeholder note, so the
+    /// engine seats nothing; this re-asks for the row the panel is already showing
+    /// (`table.sel`'s own row, which `rebuild` keeps on the first row / the checked copy)
+    /// as the panel's OWN seat, so a late delivery cannot be mistaken for a new arrival.
+    /// While the reader has not acted, `follow_seat` re-seats whenever what the panel
+    /// can offer has moved.
+    fn seat_first<H: AppLike<Memory = PageMemory>>(&mut self, fx: &mut Effects<'_, H>) {
+        let want = self.form.selected_key();
+        // The arrival is owed while nobody has chosen another: `Some(None)` means the
+        // panel asked to seat nothing yet (no row to offer), so `follow_seat` re-asks
+        // when rows land. Only the first row itself needs no follow (nothing lands
+        // above it to follow).
+        if want.is_none() {
+            self.seat = Some(None);
+        } else {
+            self.seat = (want != self.form.opening_key()).then_some(want);
+        }
+        if let Some(key) = want {
+            self.seat_own(
+                FocusTarget::Elem(FocusKey { entry: self.entry, elem: key.0 }),
+                fx,
+            );
+        }
+    }
+
+    /// Re-seat the arrival when what the panel can offer has moved (`seat_first`), while
+    /// it is still the panel's own.
+    fn follow_seat<H: AppLike<Memory = PageMemory>>(&mut self, fx: &mut Effects<'_, H>) {
+        let Some(seated) = self.seat else { return };
+        if seated != self.form.selected_key() {
+            self.seat_first(fx);
+        }
+    }
+
+    /// Ask the engine to seat `focus` as the panel's OWN seat: counted in
+    /// [`own_enters`](Self::own_enters), so the `Enter` that comes back is not mistaken
+    /// for a new arrival.
+    fn seat_own<H: AppLike<Memory = PageMemory>>(
+        &mut self,
+        focus: FocusTarget<u32>,
+        fx: &mut Effects<'_, H>,
+    ) {
+        self.own_enters = self.own_enters.saturating_add(1);
+        fx.push(Fx::Deliver(
+            fx.from(),
+            Delivery::Screen(ScreenEvent::Enter(Enter::Fresh { focus })),
+        ));
     }
 
     /// The panel's own content moved (a page push or pop): nothing in the app changed, so this is
@@ -692,9 +857,74 @@ impl AltSourcesScreen {
 impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H> for AltSourcesScreen {
     type Ev = ScreenEvent<H>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
+        // The reader acting at the seat makes it theirs. It must be claimed HERE, on the
+        // event: an OK-down arms a press the dispatcher commits only if focus is still on
+        // its key, and this panel's next Tick may run before that commit. Mirrors
+        // WatchlistScreen::step.
+        if let ScreenEvent::Input(InputEvent { kind, .. }) = ev {
+            if matches!(
+                kind,
+                InputKind::Key { edge: Edge::Down, .. }
+                    | InputKind::Pointer { .. }
+                    | InputKind::Click { .. }
+                    | InputKind::Drag { .. }
+                    | InputKind::Wheel { .. }
+            ) {
+                // Any direction/pointer act — not just BACK, which already dismissed —
+                // claims the seat: a first DOWN that lands via the engine's no-focus
+                // fallback must not be overwritten by a seat Enter queued before it.
+                self.seat = None;
+                // Whatever seat Enters are still queued were asked for before this act.
+                self.stale_enters = self.own_enters;
+            }
+        }
         match ev {
-            ScreenEvent::Mount | ScreenEvent::Enter(_) => {
+            ScreenEvent::Mount => {
                 self.refresh(H::metadata(cx));
+                self.seat_first(fx);
+                Handled::Yes
+            }
+            ScreenEvent::Enter(enter) => {
+                match enter {
+                    Enter::Fresh { .. } if self.own_enters > 0 => {
+                        self.own_enters -= 1;
+                        if self.stale_enters > 0 {
+                            // The reader acted after this seat was asked for and before
+                            // it came back: the engine is about to seat it over their
+                            // move. Ask for their focus back, as an Enter of the panel's
+                            // own like the seat itself (so a key before THAT one is
+                            // stale in the same way). Mirrors WatchlistScreen::step.
+                            self.stale_enters -= 1;
+                            if let Some(held) =
+                                cx.focus.current.filter(|key| key.entry == self.entry)
+                            {
+                                self.own_enters = self.own_enters.saturating_add(1);
+                                fx.push(Fx::Deliver(
+                                    fx.from(),
+                                    Delivery::Screen(ScreenEvent::Enter(Enter::Fresh {
+                                        focus: FocusTarget::Elem(held),
+                                    })),
+                                ));
+                            }
+                        }
+                    }
+                    // The container's mint: a panel shown for the first time in this
+                    // visit. The modal's Enter::Fresh{ContainerGroup(0)} seats nothing
+                    // in stream mode (the group is only the inert placeholder note),
+                    // so seating is the panel's own: `seat_first` asks for the row it
+                    // is already showing, and `follow_seat` re-asks when the async
+                    // stream list lands. In the Plex-copies mode the rows are
+                    // synchronous and the arrival is the checked copy, through the
+                    // same path.
+                    Enter::Fresh { .. } => self.seat_first(fx),
+                    // Restored (an evicted panel coming back): the seat is the reader's.
+                    Enter::Restored => {
+                        self.seat = None;
+                        self.stale_enters = self.own_enters;
+                    }
+                }
+                self.refresh(H::metadata(cx));
+                fx.invalidate(plx_machine::present::Provenance::Nav);
                 Handled::Yes
             }
             ScreenEvent::StoreChanged(ord, _) => {
@@ -746,10 +976,14 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                     .filter(|key| key.entry == self.entry)
                     .and_then(|key| self.form.index_of_key(RowKey(key.elem)))
                     .map_or(self.form.table.sel, |i| i as i32);
-                self.form.table.update(tick.dt(), self.frame(cx.measure).h);
+                self.step_motion(tick.dt(), cx.measure);
+                self.follow_seat(fx);
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { to, .. } => {
+                self.form.note_engine_key(
+                    self.form.index_of_key(RowKey(to.elem)).map(|_| RowKey(to.elem)),
+                );
                 if let Some(i) = self.form.index_of_key(RowKey(to.elem)) {
                     self.form.table.sel = i as i32;
                 }
@@ -790,6 +1024,10 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                     }
                     Handled::Yes
                 }
+                // Everything else (UP/DOWN/OK/…) must stay `Handled::No`: `after_step`
+                // only runs the engine's `move_dir`/OK arm for a declined key
+                // (`dispatch.rs:2293`). The seat claim still runs — it is the pre-match
+                // block above — so the reader's first DOWN is honoured AND moves.
                 _ => Handled::No,
             },
             _ => Handled::No,
@@ -811,7 +1049,7 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for AltSourcesScreen {
             seat: Seat::Remembered,
             reachable: AxisMask::BOTH,
             edge: [EdgeRule::Stop; 4],
-            extent: self.frame(cx.measure),
+            extent: self.motion.shown(self.natural(cx.measure)),
             len: self.form.focusable_len(),
             elem: ElemKind::Bare,
         });
@@ -835,15 +1073,29 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for AltSourcesScreen {
     }
     fn place(&self, elem: &u32, cx: &Cx<'_, H>, _at: At) -> Option<Placed> {
         let index = self.form.index_of_key(RowKey(*elem))?;
-        let rect = self.form.table.row_frame(self.frame(cx.measure), index as i32)?;
+        let natural = self.natural(cx.measure);
+        let dx = self.motion.live_dx();
+        let rect = self.form.table.row_frame(natural, index as i32)?;
+        let moved = Rect::new(rect.x + dx, rect.y, rect.w, rect.h);
         Some(Placed {
-            rect,
+            rect: moved,
             rest_rect: rect,
-            clip: self.frame(cx.measure),
+            clip: self.motion.shown(natural),
             index: Some(index as u32),
         })
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, H>) -> FocusKey<u32> {
+        // A rebuild's identity landing wins over the engine's key. After a push/pop
+        // `form.restore`/`form.open` computed `reseat` because the engine's held key
+        // names a different row on the new page (or none at all); without this, a
+        // key the new page still happens to carry is KEPT, and BACK lands wherever
+        // the engine was — intermittently the opener, intermittently the top row.
+        if let Some(r) = self.form.reseat() {
+            if self.form.index_of_key(r).is_some() {
+                let elem = r.0;
+                return FocusKey { entry: self.entry, elem };
+            }
+        }
         if self.group_of(&want.elem, cx).is_some() {
             want
         } else {
@@ -928,7 +1180,11 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Screen<H> 
     }
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>) {
         let appear = f.page_alpha;
-        let r = self.frame(f.measure);
+        let natural = self.natural(f.measure);
+        // The panel rises toward its layout while the container's `page_alpha` does; the
+        // [`PanelMotion`] ALSO fades each leaving/arriving page on its own staggered
+        // alpha inside the card's clip — the in-player picker's slide. `motion.draw`
+        // paints the card AND the pages.
         let p = f.painter.alpha(appear).translate(0.0, RISE * (1.0 - appear));
         if self.stream_mode && self.stream_pending && self.stream_choices.is_empty() {
             plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::WorkingReadout, &self.arg.rk);
@@ -937,16 +1193,27 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Screen<H> 
         // Named for `/tmp/plxnative-cpuprof` beside the page's own phases, so a slow frame while
         // this panel is up can be read as the PANEL or as the host under it.
         let field = f.underlay;
+        // While the picker's PAGES slide the hit map is held: see `pointer_held`. Every
+        // stop registers on the SETTLED geometry (`self.natural()`), not the transient
+        // slide the painter draws with — at rest (`appear == 1`, motion at rest) the
+        // two coincide exactly (`RISE * (1.0 - appear)` is 0), and only during the
+        // open/close fade and the drill-in slide would they differ;
+        // `ui/hit.rs`'s own module doc already carries the wider version of this gap
+        // (no container feeds a fading surface's alpha into the map yet), so this
+        // keeps the one known edge rather than inventing a second.
         plx_ui::profile::phase("dt.alt", || {
-            plx_ui::widgets::panel_ground(p, r, PANEL_RAD, field, plx_ui::widgets::Ground::Sheet);
-            self.form.table.draw(p, r, measure);
+            // The frosted field ground + glass rim (what this panel wore before PanelMotion):
+            // panel_ground(Sheet) draws the latched underlay under a frost with the GLASS_RIM rim.
+            // PanelMotion::draw would otherwise paint a flat sheet with no rim — the plain-grey-card
+            // regression in 1.png. Drawn at the animated (shown) rect, so the rim follows the slide.
+            plx_ui::widgets::panel_ground(p, self.motion.shown(natural), PANEL_RAD, field, plx_ui::widgets::Ground::Sheet);
+            self.motion.draw(p, natural, PANEL_RAD, &self.form.table, measure);
         });
-        // The hit map's stops are registered against the SETTLED geometry (`self.frame()`, what
-        // `Focusable::place` answers) rather than the transient slide `p` draws with — at rest
-        // (`appear == 1`) the two coincide exactly (`RISE * (1.0 - appear)` is 0), and only during
-        // the open/close fade would they differ; `ui/hit.rs`'s own module doc already carries the
-        // wider version of this gap (no container feeds a fading surface's alpha into the map
-        // yet), so this keeps the one known edge rather than inventing a second.
+        // The hit map's stops register with the panel's slide offset on x and its
+        // animated card as the clip: `place` moves a row's rect by `live_dx`, the same
+        // offset `motion.draw` paints the live page with. At rest `live_dx` is 0 and
+        // the card is its layout, so the two coincide; during a slide the pointer is
+        // held, so no click is resolved at all.
         let hit_p = f.painter.alpha(appear);
         for index in 0..self.form.table.n_rows() as usize {
             let Some(elem) = self.form.key_at(index).map(|k| k.0) else {
@@ -969,6 +1236,9 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Screen<H> 
                 );
             }
         }
+    }
+    fn pointer_held(&self) -> bool {
+        self.motion.transitioning()
     }
     fn render(&self) -> RenderStrategy {
         RenderStrategy::Page
