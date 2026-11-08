@@ -17,7 +17,7 @@
 
 namespace {
 struct Stream { std::string id, url, error; std::uint64_t request = 0; bool ready = false; };
-struct Torrent { std::string engineId, error; std::uint64_t addRequest = 0; bool metadata = false; std::vector<sbe_file> files; std::map<std::uint32_t, Stream> streams; };
+struct Torrent { std::string engineId, error; std::uint64_t addRequest = 0; bool metadata = false; bool restored = false; std::vector<sbe_file> files; std::map<std::uint32_t, Stream> streams; };
 
 nuvio_engine *engine = nullptr;
 std::mutex mu;
@@ -58,7 +58,16 @@ void event_loop() {
     case NUVIO_ENGINE_EVENT_TORRENT_ADDED: if (r != addRequests.end()) torrents[r->second].engineId = tid; break;
     case NUVIO_ENGINE_EVENT_TORRENT_METADATA_READY:
       t = by_engine_id(tid); if (!t && r != addRequests.end()) t = &torrents[r->second];
-      if (t) { if (t->engineId.empty()) t->engineId = tid; refresh_files(*t); }
+      if (t) {
+        if (t->engineId.empty()) t->engineId = tid;
+        // The message carries "metadata_source=restored" when the engine loaded
+        // a kept resume file instead of doing a cold metadata fetch. The app
+        // exposes nothing else that says so, and the 1 MiB prebuffer gate must
+        // not fire for a restored swarm (the swarm is already known and the
+        // probe must not wait for it to re-earn the gate).
+        t->restored = std::strstr(e.message, "metadata_source=restored") != nullptr;
+        refresh_files(*t);
+      }
       break;
     case NUVIO_ENGINE_EVENT_STREAM_PREPARED:
       for (auto &kv : torrents) for (auto &s : kv.second.streams) if (s.second.request == e.request_id) { s.second.id = e.stream_id; s.second.url = e.stream_url; s.second.ready = true; }
@@ -123,6 +132,11 @@ int files(const char *ih, sbe_file *out, int max) {
   int n = 0; for (auto &f : it->second.files) { if (n < max) out[n] = f; n++; }
   return n;
 }
+int restored(const char *ih) {
+  std::lock_guard<std::mutex> lock(mu);
+  auto it = torrents.find(lower(ih));
+  return it != torrents.end() && it->second.restored ? 1 : 0;
+}
 int stream(const char *ih, uint32_t idx, char *url, int cap) {
   std::lock_guard<std::mutex> lock(mu);
   auto it = torrents.find(lower(ih)); if (it == torrents.end() || !engine) return -1;
@@ -175,6 +189,6 @@ struct StopAtExit { ~StopAtExit() { stop(); } } stopAtExit;
 } // namespace
 
 extern "C" __attribute__((visibility("default"))) const sbe_api *sbe_get(void) {
-  static const sbe_api a = { api, version, start, stop, open, files, stream, error, stats, limits, remove_one, remove_all, window, setting, relocate };
+  static const sbe_api a = { api, version, start, stop, open, files, stream, error, stats, limits, remove_one, remove_all, window, setting, relocate, restored };
   return &a;
 }

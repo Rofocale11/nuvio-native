@@ -645,18 +645,52 @@ pub(crate) fn start_sbengine() {
             plx_base::eventlog::log("sbengine: libsbengine.so not available; torrents unavailable (no Node fallback)");
             return;
         }
-        let p2p_root = plx_base::paths::runtime_dir().join("serverp2p");
-        let state = p2p_root.join("state");
-        let cache = p2p_root.join("cache");
-        for dir in [&state, &cache] {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                plx_base::eventlog::log(&format!(
-                    "sbengine: could not create {}: {e}",
-                    dir.display()
-                ));
-                return;
+        let p2p_root = plx_base::paths::runtime_dir().join("nuvio-p2p");
+        let cache = p2p_root.join("payload");
+        // Swarm state (torrent metadata + saved peer lists + DHT, KB-scale) is
+        // durable: it survives a reboot at the first writable rung of
+        // p2p_state_candidates() (/media/developer/{id}-engine-p2p/state,
+        // /media/internal/..., /media/developer/temp/..., runtime dir last).
+        // The payload stays under the runtime root on tmpfs in every profile.
+        let state = plx_base::paths::p2p_state_candidates()
+            .into_iter()
+            .find(|dir| std::fs::create_dir_all(dir).is_ok());
+        let state = match state {
+            Some(dir) => dir,
+            None => {
+                let fallback = p2p_root.join("state");
+                if let Err(e) = std::fs::create_dir_all(&fallback) {
+                    plx_base::eventlog::log(&format!(
+                        "sbengine: could not create state {}: {e}",
+                        fallback.display()
+                    ));
+                    return;
+                }
+                fallback
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&cache) {
+            plx_base::eventlog::log(&format!(
+                "sbengine: could not create {}: {e}",
+                cache.display()
+            ));
+            return;
+        }
+        // The /media/developer/temp candidate sits in a world-writable dir:
+        // create it owner-only like imgcache, else peer addresses it holds are
+        // readable by any local process (image_cache_dir's private rule).
+        if plx_base::paths::p2p_state_dir_is_private(&state) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700));
             }
         }
+        plx_base::eventlog::log(&format!(
+            "sbengine: state {} cache {}",
+            state.display(),
+            cache.display()
+        ));
         let state_s = state.to_string_lossy().into_owned();
         let cache_s = cache.to_string_lossy().into_owned();
         // ponytail: start blocks on the C++ shim's internal mutex; ceiling is a synchronous

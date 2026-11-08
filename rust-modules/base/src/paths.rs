@@ -648,6 +648,51 @@ pub fn image_cache_dir_is_private(path: &Path) -> bool {
     path.parent() == Some(Path::new("/media/developer/temp"))
 }
 
+/// Where the torrent swarm state may live (`state`), best first, as DIRECTORIES.
+/// The engine's `stateDir` holds only swarm state — torrent metadata + saved
+/// peer lists (the `resume/` directory) and the DHT session — a few KB per
+/// tournament, bounded to 10 MiB by the engine's `enforce_resume_state_budget`.
+/// It is NOT payload: payload (`cache/payload`, the 32 MiB streaming window)
+/// stays under `runtime_dir()/serverp2p/cache` on tmpfs in both jail profiles,
+/// so this candidate ladder never feeds the OOM-guarded budget.
+///
+/// Shape matches `image_cache_candidates()` / `session_candidates()`: flat
+/// `{id}-` suffix under `/media/...`, never a directory named by the app id —
+/// `appinstalld` replaces the app directory wholesale on reinstall and a
+/// human scanning `/media/developer/` must not read state as an install.
+/// Per-flavour (the app id), so stable and debug never share a swarm cache.
+/// A steerable build's instance root comes first for the usual reason: two
+/// simulators must not race one `resume/` directory.
+///
+/// `/media/developer/temp/{id}-engine-p2p` mirrors the `imgcache` entry: on a
+/// 2016 set running webOS 3.4.3 it is the only persistent directory a Developer
+/// Mode app may write (`/media/developer` itself is root-owned and
+/// `/media/internal` read-only there). If every durable candidate fails to
+/// create, `boot::start_sbengine` falls back to `in_runtime_dir("serverp2p/state")`
+/// — tmpfs, same-session-only, logged rather than silent, exactly the
+/// `session: could not persist` ladder's last rung.
+pub fn p2p_state_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if ENV_STEERABLE {
+        v.push(in_runtime_dir("serverp2p/state"));
+    }
+    let id = app_id();
+    v.extend([
+        PathBuf::from(format!("/media/developer/{id}-engine-p2p/state")),
+        PathBuf::from(format!("/media/internal/.{id}-engine-p2p/state")),
+        PathBuf::from(format!("/media/developer/temp/{id}-engine-p2p/state")),
+        in_runtime_dir("serverp2p/state"),
+    ]);
+    v
+}
+
+/// Whether the p2p state dir must be created owner-only: like `imgcache`, the
+/// one candidate sitting in the world-writable `/media/developer/temp` must not
+/// stay group/other-readable — it holds peer addresses the swarm found.
+pub fn p2p_state_dir_is_private(path: &Path) -> bool {
+    path.parent().and_then(|p| p.parent()) == Some(Path::new("/media/developer/temp"))
+}
+
 /// The spool, beside the decision that authorised it.
 ///
 /// **Same directories, same search order, different file** — and not merged into
@@ -749,6 +794,37 @@ mod tests {
             .collect();
         assert_eq!(private.len(), 1, "{c:?}");
         assert!(private[0].starts_with("/media/developer/temp"), "{c:?}");
+    }
+
+    /// The p2p state ladder is the same flat `{id}-` shape as imgcache/session,
+    /// per-flavour, with the runtime dir last. A directory named by the app id
+    /// (`{id}/engine-p2p`) is refused for the reason the function doc records:
+    /// it reads as an install under `/media/developer/` and invites the
+    /// appinstalld wholesale-replace to take the swarm state with the package.
+    #[test]
+    fn p2p_state_candidates_are_flat_per_flavour_with_runtime_last() {
+        let c = super::p2p_state_candidates();
+        assert!(c.len() >= 2, "{c:?}");
+        assert_eq!(*c.last().unwrap(), super::in_runtime_dir("serverp2p/state"));
+        for p in &c {
+            // Flat: no candidate nests a subdir under a directory named by the
+            // app id. Only the first path segment under /media/ may carry the id.
+            let s = p.to_string_lossy();
+            assert!(
+                !s.contains(&format!("/{}/", super::app_id())),
+                "a candidate nests under the id, reading as an install: {s}"
+            );
+            if s.starts_with("/media/developer/") && !s.contains("/temp/") {
+                assert!(s.contains(&format!("{}-engine-p2p", super::app_id())), "{s}");
+                assert!(s.ends_with("-engine-p2p/state"), "{s}");
+            }
+        }
+        let privates: Vec<_> = c
+            .iter()
+            .filter(|p| super::p2p_state_dir_is_private(p))
+            .collect();
+        assert_eq!(privates.len(), 1, "{c:?}");
+        assert!(privates[0].starts_with("/media/developer/temp"), "{c:?}");
     }
 
     /// The runtime root is a path in the shared, sticky `/tmp`, and `ensure_runtime_dir` chmods it

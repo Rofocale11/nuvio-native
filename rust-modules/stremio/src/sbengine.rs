@@ -133,6 +133,7 @@ struct EngineApi {
     window: unsafe extern "C" fn(u64),
     setting: unsafe extern "C" fn(*const c_char, c_int) -> c_int,
     relocate: unsafe extern "C" fn(*const c_char, u64) -> c_int,
+    restored: unsafe extern "C" fn(*const c_char) -> c_int,
 }
 
 plx_base::dynlib! {
@@ -332,6 +333,22 @@ fn remember(ih: &str) {
     }
 }
 
+/// Whether `ih` resolved from a kept resume file (metadata restored, peer
+/// list remembered) instead of a cold fetch. A restored swarm is already
+/// known, so the prebuffer gate must not fire for it — it only earns its
+/// keep for a cold start. `None` when the engine is not bound, told apart
+/// from "definitely cold" by the caller.
+pub fn is_restored(ih: &str) -> Option<bool> {
+    let a = api()?;
+    let c_ih = CString::new(ih).unwrap();
+    Some(unsafe { (a.restored)(c_ih.as_ptr()) } != 0)
+}
+
+/// Whether `ih` resolved from a kept resume file (see [`is_restored`]).
+fn was_restored(ih: &str) -> bool {
+    is_restored(ih).unwrap_or(false)
+}
+
 /// [`resolve_stream`] once the magnet is already open: wait for metadata (30 s bound by the
 /// caller), pick the file, then wait for the engine's stream URL. Split out so a re-resolve of an
 /// already-open torrent does not re-add it.
@@ -383,11 +400,20 @@ fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result
             Some(1) => {
                 let url = url_trim(&buf);
                 let url_wait = started.elapsed();
+                let restored = was_restored(ih);
                 let prebuffer = if retry_same {
+                    PrebufferOutcome::Skipped
+                } else if restored {
                     PrebufferOutcome::Skipped
                 } else {
                     wait_for_prebuffer(baseline, deadline)
                 };
+                if restored {
+                    plx_base::eventlog::log(&format!(
+                        "sbengine: {} resumed from kept swarm state (metadata + peers restored); prebuffer gate skipped",
+                        &ih[..ih.len().min(12)]
+                    ));
+                }
                 // One line per opened stream: without the split, a slow start on the TV cannot be
                 // attributed to peer discovery, our prebuffer gate, or the caller's deadline.
                 plx_base::eventlog::log(&format!(

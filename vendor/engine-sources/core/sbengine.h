@@ -33,5 +33,6 @@ typedef struct {
   /* the payload moves to another folder (the old one vanished with its drive, or a better one is chosen between films):
      torrents download again there, streams keep their address; 0 = queued */
   int         (*relocate)(const char *cacheDir, uint64_t segmentBytes);
+  int         (*restored)(const char *ih);                           /* 1 = metadata came from a kept resume file */
 } sbe_api;
 #endif
