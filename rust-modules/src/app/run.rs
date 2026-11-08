@@ -2364,7 +2364,16 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         // unconditional for the same reason as the two pumps around it — the user can walk off
         // Home or off the detail page between pressing and the server answering, and the refresh
         // is owed either way. Invalidates from inside, per landing.
+        // The player is on top: the reconcile reads stay owed until it leaves (an Up Next chain
+        // costs one batch at its exit); the patches below are not held.
+        app.bridge.hold_network(matches!(app.route(), AppArg::Player));
+        // Stops first: the resume patch lands before any read of the item is asked for.
+        app.bridge.stops_pump();
         let endpoints = app.bridge.viewstate_pump();
+        super::bridge::execute_endpoint_outcomes(&mut app.pages, endpoints);
+        // …and the read-back it owes: what the server now says about the item(s) just written, on
+        // every route for the same reason (a refused write is put right here, not by a refetch).
+        let endpoints = app.bridge.reconcile_pump();
         super::bridge::execute_endpoint_outcomes(&mut app.pages, endpoints);
         // A server on a plaintext grant keeps trying HTTPS (`plex::grant::UpgradeRetry`): its
         // endpoint re-discovery races every HTTPS route first and retires the grant when one
@@ -2373,6 +2382,12 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         super::bridge::execute_endpoint_outcomes(&mut app.pages, upgrades);
         app.bridge.person_pump();
         app.bridge.collection_pump();
+        // …and the Detail pages whose item, season or show it just spoke about: re-read from the
+        // server's word, wherever on the stack they are (`content::reconcile_details`).
+        let landed = app.bridge.take_landed_views();
+        if !landed.is_empty() {
+            super::content::reconcile_details(&mut app.pages, &mut app.bridge, &landed);
+        }
 
         // …and the cross-source resolve it kicked off. Route-unconditional for the same reason,
         // and separate because it lands one round trip per source LATER than the page does —
@@ -4209,10 +4224,7 @@ mod lifecycle_regression_tests {
         );
         frame(&mut rig.app, 48);
         assert!(super::super::bridge::player(&rig.app.pages).is_none());
-        assert!(matches!(
-            rig.app.player.lifecycle.state,
-            ForegroundState::Prepared { .. }
-        ));
+        assert_eq!(rig.app.player.lifecycle.state, ForegroundState::Idle);
 
         assert!(plx_media::route::request_play(
             &mut rig.app.player.session,
@@ -4227,10 +4239,7 @@ mod lifecycle_regression_tests {
         ));
         rig.accept_start();
         assert!(plx_media::route::play_pending());
-        assert!(matches!(
-            rig.app.player.lifecycle.state,
-            ForegroundState::Prepared { .. }
-        ));
+        assert_eq!(rig.app.player.lifecycle.state, ForegroundState::Idle);
         poll_until("replacement landing remained blocked by the old lifecycle", || {
             unsafe {
                 playback_tick(&mut rig.app, &mut fr);
@@ -4562,12 +4571,18 @@ mod lifecycle_regression_tests {
         let back = back_key(t + 16);
         step(&mut rig.app, &mut t, vec![back]);
         settle(&mut rig.app, &mut t);
-        for _ in 0..8 { step(&mut rig.app, &mut t, vec![]); }
-        let reads_after = plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref());
-        assert!(
-            reads_after > reads_before,
-            "returning to the page re-read nothing: its resume point is still the one it opened with",
-        );
+        assert!(super::super::bridge::player(&rig.app.pages).is_none(), "premise: BACK left the player");
+        // The re-read waits for the stop report AND the read-back it owes (`Stores::stops_landed`),
+        // both of which a worker thread answers, and these frames take no wall time: wait for the
+        // generation itself rather than counting frames.
+        // The rig's engine decodes no frame, so its own teardown has no final position to report:
+        // post the stop it would have (the production path past that point, mail and read-back).
+        plx_media::route::scrobble_stop(&mut rig.app.player.session, Some(("1".into(), 30_000, 60_000)), None);
+        plx_media::route::drain_scrobble();
+        poll_until("returning to the page re-read nothing: its resume point is still the one it opened with", || {
+            step(&mut rig.app, &mut t, vec![]);
+            plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref()) > reads_before
+        });
     }
 
     /// The same session drained to its end with nothing queued after it: `finish_playback` leaves

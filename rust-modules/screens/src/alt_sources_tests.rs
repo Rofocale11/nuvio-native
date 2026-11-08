@@ -1295,7 +1295,7 @@ fn a_pop_whose_opener_was_dropped_lands_on_the_first_focusable_row() {
 
     // A re-rank drops "Sootio" mid-drill: the page goes back up by itself.
     p.stream_choices = p.stream_choices.into_iter().filter(|c| c.addon.as_deref() != Some("Sootio")).collect();
-    p.rebuild(crate::alt_sources::Sel::Keep, test_store().view());
+    p.rebuild(super::Sel::Keep, test_store().view());
 
     assert_eq!(p.stream_page, None, "the emptied page goes back up");
     assert_eq!(p.pages.len(), 0);
@@ -1339,7 +1339,7 @@ fn an_untagged_stream_gets_the_fallback_heading() {
 /// before the reader acted must restore the reader's focus rather than steal it.
 #[test]
 fn the_landed_stream_list_seats_the_engine_and_a_late_seat_cannot_steal_a_down() {
-    use crate::alt_sources::tests::focus_and_hit::fixture_cx;
+    use self::focus_and_hit::fixture_cx;
     use crate::registry::AppFx;
     use plx_machine::machine::{
         Edge, FocusKey, Handled, InputEvent, InputKind, Key, Machine, Source, Tick,
@@ -1479,7 +1479,7 @@ fn the_landed_stream_list_seats_the_engine_and_a_late_seat_cannot_steal_a_down()
 /// to name an addon row. `reconcile` must answer the landed row whenever `reseat` names one.
 #[test]
 fn a_pop_reconciles_to_the_landed_opener_not_the_held_key() {
-    use crate::alt_sources::tests::focus_and_hit::{fixture_cx, HostFixture};
+    use self::focus_and_hit::{fixture_cx, HostFixture};
     use plx_machine::machine::FocusKey;
     use plx_ui::form::RowKeys;
     use plx_ui::screen::Focusable;

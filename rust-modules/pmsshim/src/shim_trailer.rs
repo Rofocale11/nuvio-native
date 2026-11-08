@@ -874,12 +874,14 @@ fn parse_port_line(line: &str) -> Result<(u16, String), String> {
 }
 
 /// `POST /register {"u":…,"ua":"ios"}` → track id. Plain `TcpStream` on
-/// purpose: the whole request is loopback, so `plx_net`'s UA injection and TLS
-/// ladder would be dead weight. The registered URL is never logged.
+/// purpose: the whole request is loopback, so `plx_net`'s TLS ladder would be
+/// dead weight. The product User-Agent is still sent, like every other
+/// hand-built request. The registered URL is never logged.
 fn post_register(port: u16, google_url: &str, ua: &str) -> Option<u64> {
     let body = serde_json::json!({"u": google_url, "ua": ua}).to_string();
     let request = format!(
-        "POST /register HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /register HTTP/1.1\r\nHost: 127.0.0.1\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        plx_net::net::user_agent_header_line(),
         body.len(),
         body
     );

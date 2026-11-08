@@ -2549,8 +2549,8 @@ impl HomeScreen {
             plx_ui::widgets::resolve_tex_wh_on(
                 item.sid.raw(),
                 &item.art,
-                crate::detail::BACKDROP_W,
-                crate::detail::BACKDROP_H,
+                super::detail::BACKDROP_W,
+                super::detail::BACKDROP_H,
                 0,
             );
         }

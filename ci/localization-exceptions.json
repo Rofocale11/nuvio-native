@@ -8,7 +8,13 @@
   {
     "path": "rust-modules/media/src/route/plan.rs",
     "boundary": ".verdict =",
-    "text": "nuvio-profile-",
-    "reason": "The prefix of a Nuvio profile's synthesized uuid: it is matched against the shim's identity, never drawn. The account read for such a profile comes from the shim's own preferences file instead of plex.tv."
+    "text": "decision: the shim refused the play — {why}",
+    "reason": "Event-log line for a refused play decision, never drawn: the scanner reaches it by following `part` (used to build a later verdict) back through `nuvio_media` into `nuvio_decision`'s initializer."
+  },
+  {
+    "path": "rust-modules/media/src/route/plan.rs",
+    "boundary": ".verdict =",
+    "text": "decision: the shim answered no usable decision; the play cannot be planned",
+    "reason": "Event-log line for an unusable shim decision, never drawn: the scanner reaches it by following `part` (used to build a later verdict) back through `nuvio_media` into `nuvio_decision`'s initializer."
   }
 ]

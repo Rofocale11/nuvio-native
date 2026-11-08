@@ -10362,7 +10362,7 @@ mod host_c_engine {
         );
     }
 
-    fn host_shim(backend: OneMagnetBackend, id: &str) -> (crate::Handle, i64) {
+    fn host_shim(backend: OneMagnetBackend, id: &str) -> (crate::shim_core::Handle, i64) {
         let cfg = Config {
             p2p_enabled: true,
             // Only the marker that torrents are on; the engine serves its own URL and this
@@ -10370,7 +10370,7 @@ mod host_c_engine {
             torrent_server: Some("http://127.0.0.1:1".into()),
             ..Config::default()
         };
-        let handle = crate::start(Arc::new(backend), cfg, 0).expect("bind loopback");
+        let handle = crate::shim_core::start(Arc::new(backend), cfg, 0).expect("bind loopback");
         let rk = handle.shim.keys.key_of(&Ident::Title {
             type_: "movie".into(),
             id: id.into(),
