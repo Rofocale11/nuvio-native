@@ -568,7 +568,6 @@ fn item_subscription(d: &Detail) -> plx_plex::plex::serverinfo::Subscription {
     plx_plex::plex::serverinfo::subscription_of(d.sid)
 }
 
-const FACTS_GLYPH_D: f32 = theme::size::CAPTION as f32;
 fn converts_on_server_c() -> &'static CStr { plx_platform::i18n::msg::browse_detail_converts_c() }
 
 #[derive(Clone, Copy)]
@@ -576,7 +575,6 @@ enum Bit {
     Word(&'static CStr, [f32; 4], c_int),
     /// The separator dot, `FACTS_SEP_PAD` from the run on each side (the flow's own gap).
     Sep,
-    Glyph,
     /// The gap after the bit before it, in place of the flow's own (`Item::after`).
     Air(f32),
     Capsule,
@@ -600,6 +598,13 @@ fn play_mode_bits_for(
     after: bool,
 ) -> ([Bit; FACTS_BITS], usize) {
     let mut bits = [Bit::Air(0.0); FACTS_BITS];
+    let note = play_note(preview, hdr, subscription);
+    // The HDR → SDR tone-mapping notice is deliberately not drawn: it was a
+    // server-subscription claim about a conversion the viewer cannot act on,
+    // and it crowded the facts row it shares with the date and runtime.
+    if note == PlayNote::Warn {
+        return (bits, 0);
+    }
     let mut n = 0;
     let mut push = |bit: Bit| {
         bits[n] = bit;
@@ -608,7 +613,7 @@ fn play_mode_bits_for(
     if after {
         push(Bit::Sep);
     }
-    match play_note(preview, hdr, subscription) {
+    match note {
         PlayNote::Quiet => push(Bit::Word(
             match preview {
                 plx_media::route::Preview::DirectPlay => plx_platform::i18n::msg::browse_detail_direct_play_c(),
@@ -632,15 +637,7 @@ fn play_mode_bits_for(
             push(Bit::Air(theme::space::SM));
             push(Bit::Capsule);
         }
-        PlayNote::Warn => {
-            push(Bit::Glyph);
-            push(Bit::Air(theme::space::SM));
-            push(Bit::Word(c"HDR \u{2192} SDR", theme::TEXT_SECONDARY, 1));
-            push(Bit::Sep);
-            push(Bit::Word(plx_platform::i18n::msg::browse_detail_tonemap_needs_c(), theme::TEXT_SECONDARY, 0));
-            push(Bit::Air(theme::space::SM));
-            push(Bit::Capsule);
-        }
+        PlayNote::Warn => {}
     }
     (bits, n)
 }
@@ -664,7 +661,6 @@ fn bits_flow(
         let w = match *bit {
             Bit::Word(text, _, bold) => measure.width(text, theme::size::CAPTION, bold != 0),
             Bit::Sep => measure.width(c"\u{b7}", theme::size::CAPTION, false),
-            Bit::Glyph => FACTS_GLYPH_D,
             Bit::Capsule => plx_ui::widgets::pass_capsule_w(measure),
             Bit::Air(_) => continue,
         };
@@ -707,12 +703,6 @@ fn paint_bits(p: Painter, bits: &[Bit], x: f32, y: f32, measure: &dyn plx_machin
         Bit::Sep => {
             p.text(c"\u{b7}".as_ptr(), span.x, y, theme::size::CAPTION, theme::TEXT_SEPARATOR, 0, 0);
         }
-        Bit::Glyph => plx_ui::icons::draw(
-            p,
-            plx_ui::icons::Icon::Alert,
-            Rect::new(span.x, cy - FACTS_GLYPH_D * 0.5, FACTS_GLYPH_D, FACTS_GLYPH_D),
-            theme::TEXT_SECONDARY,
-        ),
         Bit::Capsule => {
             plx_ui::widgets::pass_capsule(p, span.x, cy, false, measure);
         }
@@ -1171,6 +1161,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The HDR → SDR tone-mapping notice was removed from the facts row: a `Warn` note draws
+    /// no clause at all, and in particular leaves no dangling separator behind when a fact
+    /// (the year or runtime) precedes it.
+    #[test]
+    fn the_tone_mapping_warning_draws_no_clause() {
+        use plx_plex::plex::serverinfo::Subscription::No;
+        use plx_media::route::Preview::Converts;
+        for after in [false, true] {
+            let (bits, n) = play_mode_bits_for(Converts, true, No, after);
+            assert_eq!(n, 0, "a warning note renders no bits (after={after})");
+            assert!(bits.iter().all(|b| matches!(b, Bit::Air(_))));
+        }
+        // The soft note the same server still carries keeps its leading separator.
+        let (bits, n) = play_mode_bits_for(Converts, false, No, true);
+        assert!(matches!(bits[0], Bit::Sep), "the clause still hangs off the fact before it");
+        assert!(n > 1);
     }
 
     #[test]

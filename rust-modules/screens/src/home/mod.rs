@@ -204,8 +204,8 @@ impl Located {
     }
 }
 
-fn hero_streams_first(kind: std::os::raw::c_int, nuvio: bool) -> bool {
-    nuvio && !matches!(kind, 1 | 2)
+fn hero_streams_first(kind: std::os::raw::c_int, nuvio: bool, resuming: bool) -> bool {
+    nuvio && !resuming && !matches!(kind, 1 | 2)
 }
 
 fn heading_group(shelf: GroupId) -> GroupId {
@@ -2080,8 +2080,14 @@ impl HomeScreen {
                 // opens the Detail page's own *Streams* picker for the billboard's item, exactly
                 // as an episode's still does there, and the pick starts it. A show or season has
                 // no stream of its own to list, so those still play their on-deck episode.
+                // **Unless the press is a RESUME.** The shim remembers the source each resume
+                // point last played and `/decision` promotes it back ahead of the ranking, so a
+                // Resume starts the film straight away; asking again which stream to use is the
+                // one press whose whole point is to be a continuation.
+                let resume_ns = plx_data::metadata::resume_ns(item.resume_ms, item.dur_ns / 1_000_000);
                 if hero_streams_first(item.kind,
-                    plx_plex::plex::client_for(item.sid).is_some_and(|c| c.is_nuvio()))
+                    plx_plex::plex::client_for(item.sid).is_some_and(|c| c.is_nuvio()),
+                    resume_ns > 0)
                 {
                     self.streams_item = Some((item.sid, item.rk.clone()));
                     // The hero is not a card with a drawn opener, so the panel opens centred.
@@ -2094,7 +2100,6 @@ impl HomeScreen {
                     ))));
                     return;
                 }
-                let resume_ns = plx_data::metadata::resume_ns(item.resume_ms, item.dur_ns / 1_000_000);
                 (
                     item,
                     HomeReq::Play {

@@ -65,7 +65,9 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   before serving the loopback URL; TrueHD in forced direct play is routed through the AC3
   encode lane.
 - Auto-play movies immediately after stream selection; immediate playback during background polling;
-  Home hero play button and TV episode clicks route to the Streams picker instead of direct play.
+  Home hero play button and TV episode clicks route to the Streams picker instead of direct play —
+  except a **Resume**: an item with a position to return to plays at once, and the shim re-selects
+  the source that position last played (its remembered source per resume point).
 - Source picker groups streams by addon on both Detail and in-player menu; Plex quality ladder
   removed.
 - Seeder counts shown on the in-player source page and leading stream details.

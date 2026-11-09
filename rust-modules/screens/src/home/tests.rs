@@ -2099,13 +2099,17 @@ fn only_a_nuvio_film_or_episode_hero_opens_the_streams_picker() {
     // The hero's Play is a Play everywhere else: a show and a season have no stream list of their
     // own (their Play starts the on-deck episode), and an ordinary Plex server has no picker at
     // all.
-    assert!(hero_streams_first(0, true), "a film on the shim picks its stream first");
-    assert!(hero_streams_first(3, true), "an episode on the shim does too");
-    assert!(!hero_streams_first(1, true), "a show plays its on-deck episode");
-    assert!(!hero_streams_first(2, true), "so does a season");
+    assert!(hero_streams_first(0, true, false), "a film on the shim picks its stream first");
+    assert!(hero_streams_first(3, true, false), "an episode on the shim does too");
+    assert!(!hero_streams_first(1, true, false), "a show plays its on-deck episode");
+    assert!(!hero_streams_first(2, true, false), "so does a season");
     for kind in [0, 1, 2, 3, 4] {
-        assert!(!hero_streams_first(kind, false), "a Plex source has no stream picker");
+        assert!(!hero_streams_first(kind, false, false), "a Plex source has no stream picker");
     }
+    // A RESUME is not a pick: the shim re-plays the source this resume point last
+    // played, so the press starts the film instead of asking which file to use.
+    assert!(!hero_streams_first(0, true, true), "a film's Resume resumes its remembered source");
+    assert!(!hero_streams_first(3, true, true), "an episode's Resume does the same");
 }
 
 #[test]

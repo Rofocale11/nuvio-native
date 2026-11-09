@@ -675,15 +675,11 @@ pub fn video_codec_name(codec: &str) -> String {
 /// deliberately NOT stated: that is the server's runtime choice and it reaches the client only in
 /// the live transcode session, so naming it would be a guess.
 ///
-/// **No warning belongs on this line.** The tone-mapping case in particular lives on the DETAIL
-/// page, before Play: this card is behind a keypress, so a warning here is one the user finds only
-/// after watching a washed-out picture. That is `Player Screen.dc.html`'s own standing comment
-/// ("Warning before Play is the DETAIL page's job"), and it contradicts a bullet in the **design
-/// project's** `CLAUDE.md` — the Pass-rules file in the Claude Design project, NOT this repo's root
-/// `CLAUDE.md`, which says nothing about tone mapping — that lists this card beside the detail
-/// facts row. The mock is the later artifact and its reasoning matches the owner's standing rule
-/// that a warning exists to be seen BEFORE Play, so the code follows it; the two documents still
-/// need reconciling by the owner, and that is a docs edit, not a behaviour change.
+/// **No warning belongs on this line.** A warning here is one the user finds only after watching a
+/// washed-out picture — `Player Screen.dc.html`'s own standing comment is "Warning before Play is
+/// the DETAIL page's job". The tone-mapping warning that once stood on the detail facts row was
+/// later removed there too (it stated a server-subscription consequence the viewer could not act
+/// on), so no surface carries it now.
 ///
 /// PURE, so every arm is host-testable. `streaming` is "there is a resolved stream to describe".
 /// The caller composes it from `route::has_url()` **and** `!route::play_pending()`, and the second

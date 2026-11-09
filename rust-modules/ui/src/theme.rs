@@ -830,11 +830,10 @@ pub const RESUME_FILL: [f32; 4] = with_a(AMBER_300, 0.95);
 /// (`Plex Pass Awareness.dc.html`, "the amber decision"). Two ambers exist ON PURPOSE and stay
 /// two tokens: [`RESUME_FILL`] is ours and tunable; this one names somebody else's colour and
 /// must not drift when the first is retuned. They never meet: progress fill lives on card art;
-/// pass-gold appears on exactly TWO surfaces, both derived from Plex's own Pass docs (the owner's
-/// directive — design as visual baseline, logic from the docs): the failure read-out's filled
-/// capsule, and the detail facts row's two Pass-gated states (`detail::play_note`, the docs-derived
-/// truth table — hardware conversion and HDR tone mapping are both Pass-gated server features, and
-/// the warning outranks the soft note because a wrong picture outranks a slower one). Every use of
+/// pass-gold appears on exactly TWO surfaces: the failure read-out's filled capsule, and the detail
+/// facts row's soft conversion note (`detail::play_note`) — hardware conversion is a Pass-gated
+/// server feature and the row still names it. The HDR tone-mapping warning that also stood there
+/// was removed at the owner's request; the row carries no warning state at all now. Every use of
 /// the name is load-bearing,
 /// which is the trademark position. [`crate::widgets::pass_capsule`] is its only consumer
 /// besides ink; a line carries at most one gold thing, and warning severity is never amber — it

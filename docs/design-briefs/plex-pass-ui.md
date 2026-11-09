@@ -8,6 +8,12 @@
 > the docs-derived truth table), the two quiet states stand, and the mock's C-variant wording
 > ("cannot encode video without PLEX PASS") was not adopted — the read-out keeps the causally
 > honest reason with the capsule as a separately stated fact.
+>
+> **Superseded in part (2026-11-09, owner's request): the HDR → SDR tone-mapping warning is
+> removed from the detail facts row.** It stated a server-subscription consequence the viewer
+> could not act on and crowded the date/runtime runs it shared. The row now shows only the quiet
+> direct-play/direct-stream states and the soft conversion note; `detail::play_note` still
+> classifies the HDR case but draws no clause for it.
 
 Paste this whole brief into the Claude Design project. Deliverables come back as preview cards
 (HTML mockups + a short spec each) so they can be pulled into the codebase via design-sync, the
