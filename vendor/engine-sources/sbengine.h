@@ -3,7 +3,7 @@
 #ifndef SB_ENGINE_H
 #define SB_ENGINE_H
 #include <stdint.h>
-#define SBE_API_VERSION 3
+#define SBE_API_VERSION 4
 typedef struct { char path[512]; uint64_t size; } sbe_file;
 typedef struct {
   uint32_t peers, seeds, known, connecting;
@@ -11,6 +11,14 @@ typedef struct {
   uint64_t window, resident, freed, refetched;   /* the streaming window: its size, the payload kept, what was freed and fetched again */
   uint64_t mem_cache_used;                       /* the engine's own piece cache in RAM */
   uint32_t window_unsupported;                   /* the storage cannot free played pieces (no hole punching) */
+  /* API 4: the playing stream's own numbers, so the transfer log can say where the bytes went:
+     downloaded is engine-wide, delivered is what the player actually read */
+  uint32_t scheduled_pieces;                     /* pieces the stream's current schedule asks libtorrent for */
+  uint32_t active_demands;                       /* player HTTP reads in flight */
+  uint64_t delivered;                            /* bytes served to the player since the stream opened */
+  uint64_t piece_bytes;                          /* the torrent's piece length (pieces are the eviction unit) */
+  uint64_t primary_demand_start;                 /* file-relative offset of the newest player read */
+  uint64_t secondary_demand_start;               /* a second live read, if one exists (0 otherwise) */
 } sbe_stats;
 typedef struct {
   int         (*api)(void);

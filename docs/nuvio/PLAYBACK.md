@@ -215,7 +215,7 @@ the decoder, so they are the first thing to size honestly:
 | poster pool | `ui::tex::TEX_RESIDENT_BYTES_MAX` | **32 MiB** | the measured zero-refusal point for one Home session; 24 MiB refused 171 arrivals (blank tiles) in a longer simulator session, 16 MiB re-armed constantly. The rest re-upload from the disk cache |
 | image-subtitle store | `player::SUB_BITMAP_BUDGET` | 40 MiB | **not** a cache: this IS the delayed-caption window, measured at 31.1 MB worst case for 4K PGS |
 | torrent engine RAM | `sbengine::DEFAULT_MEM_CACHE_BYTES` | **8 MiB** | verified pieces the in-process engine keeps for re-reads; it is a ceiling, and it saturates (`sbengine: … mem=` in the event log). A duplicate of bytes the window file already holds, so it is small on purpose |
-| torrent engine window | `sbengine::DEFAULT_WINDOW_BYTES` | **32 MiB in RAM** | payload around the playhead, trimmed back below the cap, a file smaller than the window kept whole, and removed with the torrent. **Not "storage" on the set:** the runtime root is a RAM-backed tmpfs, the window is read with `pread`, so it is shmem — invisible in `VmRSS`, paid for out of the TV's 1.2 GB all the same |
+| torrent engine window | `sbengine::DEFAULT_WINDOW_BYTES` | **32 MiB in RAM** | payload around the playhead, trimmed in whole pieces, a file smaller than the window kept whole, and removed with the torrent. The byte cap is a target, not a floor: head, tail, two pieces behind the playhead and the forward schedule are each whole pieces, so a 16 MiB-piece season pack settles near 80–128 MB however the cap is set. **Not "storage" on the set:** the runtime root is a RAM-backed tmpfs, the window is read with `pread`, so it is shmem — invisible in `VmRSS`, paid for out of the TV's 1.2 GB all the same |
 | Starfish source buffers | `PAYLOAD_AV.bufferingCtrInfo` | 8 MiB video / 1 MiB audio | the pipeline's own, not ours |
 
 The two queues were 96/8 MiB until 2026-11-01 (an LG B4 sizing, 2026-09-22); on this set that peak
@@ -236,6 +236,31 @@ decision. The set is also not the only thing in `/tmp`: four leftover
 it, and removing them took `MemFree` from 57.8 MB to **148.7 MB** and `MemAvailable` from 78.1 MB
 to **169.0 MB**. That is the first thing to check when the set looks short of memory — the
 package installer never cleans up after itself.
+
+The window is evicted in whole pieces, and that has a network consequence. The behind cushion was
+a flat 4 MiB, smaller than one 16 MiB piece of a 1080p season pack: the piece the player had just
+left was punched the moment the read head moved 4 MiB past it, so the next re-read of it (a
+container re-sync, a heal, a small step back) downloaded that whole piece from the swarm again.
+Measured on the set with True Detective S01E1: the engine pulled 4.9–8.8 MB/s for minutes while
+the player's queue sat full at 81.5 s and it consumed ~0.5 MB/s, `got` reached 487 MB against
+122 MB delivered, and the refetch counter climbed from 6 to 27 — essentially every freed piece
+was re-downloaded. The cushion is now at least two pieces (`trim_route`), so a re-read up to two
+pieces behind the playhead is served from RAM. The forward schedule and the head/tail keep the
+window above its byte cap for large pieces, which is intentional: the cap bounds small-piece
+torrents, and the Diagnostics Window row reports the cap while Cache resident reports what the
+whole-piece floor actually holds. `nuvio_engine_streaming_window_resync_test` pins the cushion
+with 16 MiB pieces. The same set then played a 162-minute film with the fixed engine: `got`
+stopped at 126 MB once the window plus the player's 46 MB queue were full, `down` fell from
+5.8 MB/s to 3 KB/s while the picture kept playing at 48 fps, and `refetch` stayed at 1 — the
+transfer line is now `sbengine: peers seeds down up got delivered window resident scheduled
+demands at piece mem refetch unsupported`, so "downloading for the player" (`delivered`) can be
+told from "downloading for itself" (the difference, with `scheduled` naming how many pieces the
+schedule still asks for, `at` the file offsets of the live reads, and `piece` the eviction
+granularity). The fallback schedule (used when no read is missing data) follows the
+**most recently served** demand that is missing data — never the newest request, and never a
+re-read that is already resident — so a probe or an abandoned seek cannot keep the download
+pointed at an offset the window then evicts and refetches. Every event-log record also carries a
+UTC timestamp (`2026-11-09T12:34:56.789Z line`), written by the one sink both log exits share.
 
 ## Real metadata: `plx_media::ff::probe::probe_url`
 

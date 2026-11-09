@@ -216,11 +216,46 @@ pub fn open_log_append(path: &std::path::Path) -> std::io::Result<std::fs::File>
     Ok(file)
 }
 
+/// The wall-clock prefix every record carries: `2026-11-09T12:34:56.789Z ` (UTC).
+///
+/// The log had no clock at all, so a 10 s `sbengine:` line could only be placed by counting lines
+/// in the file. UTC rather than local time: the set's timezone is a user setting, and a support
+/// log must line up with the other side of the conversation without asking which zone it was in.
+/// `gmtime_r` rather than a civil-date implementation because it is the same libc the rest of the
+/// sink already uses; a failure there is not worth a panic in the diagnostic path, so the line
+/// simply goes out without a stamp.
+fn timestamp() -> String {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = since.as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `gmtime_r` writes only into the `tm` we own; a null return leaves it zeroed.
+    if unsafe { libc::gmtime_r(&seconds, &mut tm) }.is_null() {
+        return String::new();
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z ",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        since.subsec_millis()
+    )
+}
+
 /// Append one complete record with one [`std::io::Write::write`] call. The event log has several
 /// independently opened `O_APPEND` descriptors; formatting the line and newline separately lets
 /// another thread append between them, gluing two otherwise valid records together.
+///
+/// Every record is stamped here, the one function both sinks share, so a line cannot be written
+/// without a clock even if a caller forgets.
 fn write_log_line(writer: &mut impl std::io::Write, line: &str) -> std::io::Result<()> {
-    let mut record = Vec::with_capacity(line.len() + 1);
+    let stamp = timestamp();
+    let mut record = Vec::with_capacity(stamp.len() + line.len() + 1);
+    record.extend_from_slice(stamp.as_bytes());
     record.extend_from_slice(line.as_bytes());
     record.push(b'\n');
     match writer.write(&record)? {
@@ -328,6 +363,32 @@ mod log_sink_tests {
     use super::{open_log_append, write_log_line};
     use std::io::Write;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn every_record_carries_an_iso_utc_stamp() {
+        let mut sink: Vec<u8> = Vec::new();
+        write_log_line(&mut sink, "sbengine: got=126MB").unwrap();
+        let stamp = &sink[..25];
+        let shape = |bytes: &[u8]| -> bool {
+            bytes[0..4].iter().all(u8::is_ascii_digit)
+                && bytes[4] == b'-'
+                && bytes[5..7].iter().all(u8::is_ascii_digit)
+                && bytes[7] == b'-'
+                && bytes[8..10].iter().all(u8::is_ascii_digit)
+                && bytes[10] == b'T'
+                && bytes[11..13].iter().all(u8::is_ascii_digit)
+                && bytes[13] == b':'
+                && bytes[14..16].iter().all(u8::is_ascii_digit)
+                && bytes[16] == b':'
+                && bytes[17..19].iter().all(u8::is_ascii_digit)
+                && bytes[19] == b'.'
+                && bytes[20..23].iter().all(u8::is_ascii_digit)
+                && bytes[23] == b'Z'
+                && bytes[24] == b' '
+        };
+        assert!(shape(stamp), "not an ISO-8601 UTC stamp: {:?}", String::from_utf8_lossy(stamp));
+        assert!(sink.ends_with(b"sbengine: got=126MB\n"), "{:?}", String::from_utf8_lossy(&sink));
+    }
 
     #[test]
     fn a_symlink_cannot_redirect_the_rust_log_sink() {
@@ -497,6 +558,10 @@ mod log_sink_tests {
         let mut sink = Sink::default();
         write_log_line(&mut sink, "install: id=com.nuvionative.app.debug").unwrap();
         assert_eq!(sink.calls, 1);
-        assert_eq!(sink.bytes, b"install: id=com.nuvionative.app.debug\n");
+        // One write, and it is the whole record: the 26-byte UTC stamp, the line, one newline.
+        assert_eq!(sink.bytes.len(), 25 + b"install: id=com.nuvionative.app.debug\n".len());
+        assert!(sink.bytes.ends_with(b"install: id=com.nuvionative.app.debug\n"));
+        assert_eq!(sink.bytes[23], b'Z');
+        assert_eq!(sink.bytes[24], b' ');
     }
 }

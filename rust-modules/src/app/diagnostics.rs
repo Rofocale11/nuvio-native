@@ -3475,6 +3475,12 @@ mod tests {
             refetched: 33,
             mem_cache_used: 0,
             window_unsupported: 0,
+            scheduled: 2,
+            active_demands: 1,
+            delivered: 6 << 20,
+            piece_bytes: 4 << 20,
+            primary_demand_start: 0,
+            secondary_demand_start: 0,
         };
         let mut v = Vec::new();
         swarm_rows(&plx_media::player::Diag::default(), &s, &mut v);

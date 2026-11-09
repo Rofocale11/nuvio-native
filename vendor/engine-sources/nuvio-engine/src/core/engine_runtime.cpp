@@ -414,6 +414,7 @@ void EngineRuntime::refresh_stats() {
         snapshot.secondary_demand_start = stream.secondary_demand_start;
         snapshot.secondary_demand_end = stream.secondary_demand_end;
         snapshot.schedule_revision = stream.schedule_revision;
+        snapshot.piece_size = stream.piece_size;
         stream_stats_.insert_or_assign(stream.stream_id, snapshot);
     }
 }

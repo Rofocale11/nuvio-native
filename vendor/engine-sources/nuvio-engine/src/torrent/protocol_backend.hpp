@@ -144,6 +144,7 @@ struct BackendStats {
         std::uint64_t secondary_demand_start = 0;
         std::uint64_t secondary_demand_end = 0;
         std::uint64_t schedule_revision = 0;
+        std::uint64_t piece_size = 0;
     };
     std::vector<Stream> streams{};
 };

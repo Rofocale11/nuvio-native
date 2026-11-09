@@ -226,6 +226,9 @@ typedef struct nuvio_engine_stream_stats {
     uint64_t secondary_demand_start;
     uint64_t secondary_demand_end;
     uint64_t schedule_revision;
+    /* API 4 addition (appended): the torrent's piece length, so a client can turn the piece
+       counters (scheduled, refetched, freed) into bytes without its own metadata. */
+    uint64_t piece_size;
 } nuvio_engine_stream_stats;
 
 NUVIO_ENGINE_API uint32_t nuvio_engine_api_version(void);

@@ -75,6 +75,23 @@ void event_loop() {
     case NUVIO_ENGINE_EVENT_STREAM_STOPPED:
       for (auto &kv : torrents) for (auto it = kv.second.streams.begin(); it != kv.second.streams.end();) { if (it->second.id == e.stream_id) it = kv.second.streams.erase(it); else ++it; }
       break;
+    case NUVIO_ENGINE_EVENT_TORRENT_REMOVED:
+      // The engine drops a handle on its own when its disk-cache policy unloads an
+      // inactive warm torrent (the resume file is kept). This map entry then names a
+      // torrent the engine no longer has: every later `open` answers "already open",
+      // `prepare_stream` answers NOT_FOUND, and the player retries the source forever
+      // ("sbengine: resolve failed, torrents unavailable (torrent not found)").
+      // Forget the entry so the next `open` adds the magnet again and the kept resume
+      // restores it. A removal this shim asked for has no entry left — nothing to do.
+      for (auto it = torrents.begin(); it != torrents.end(); ++it) {
+        if (it->second.engineId == tid) {
+          std::fprintf(stderr, "[p2p] engine dropped torrent %s (forgotten; next open re-adds)\n", tid.c_str());
+          addRequests.erase(it->second.addRequest);
+          torrents.erase(it);
+          break;
+        }
+      }
+      break;
     case NUVIO_ENGINE_EVENT_TORRENT_ERROR: {
       { static std::string last; static auto lastT = std::chrono::steady_clock::time_point{}; auto now = std::chrono::steady_clock::now();
         if (last != e.message || now - lastT > std::chrono::seconds(10)) { last = e.message; lastT = now; // into the app's log (a storage error, a move that failed), once per 10 s when it repeats
@@ -116,11 +133,12 @@ int open(const char *magnet, const char *ih) {
   std::lock_guard<std::mutex> lock(mu);
   std::string key = lower(ih);
   auto it = torrents.find(key);
-  if (it != torrents.end() && it->second.error.empty()) return 0;   // added already (or being added)
+  if (it != torrents.end() && it->second.error.empty()) { lastError.clear(); return 0; }   // added already (or being added)
   nuvio_engine_torrent_request q; nuvio_engine_torrent_request_init(&q); q.magnet_uri = magnet; q.source_type = NUVIO_ENGINE_TORRENT_SOURCE_MAGNET;
   std::uint64_t rid = 0;
   nuvio_engine_status st = nuvio_engine_add_torrent(engine, &q, &rid);
   if (st != NUVIO_ENGINE_STATUS_OK) { lastError = nuvio_engine_status_message(st); return -1; }
+  lastError.clear();   // `error()` falls back to this; a stale failure must not name a live torrent
   Torrent t; t.addRequest = rid; torrents[key] = t; addRequests[rid] = key;
   return 0;
 }
@@ -167,6 +185,23 @@ int stats(sbe_stats *o) {
   o->disk_used = st.disk_cache_used_bytes; o->disk_capacity = st.disk_cache_capacity_bytes;
   o->window = st.window_capacity_bytes; o->resident = st.window_resident_bytes; o->freed = st.window_freed_bytes; o->refetched = st.window_refetched_pieces;
   o->mem_cache_used = st.memory_cache_used_bytes; o->window_unsupported = st.window_unsupported;
+  // The playing stream's own numbers: `downloaded` above is engine-wide, so without `delivered` a
+  // transfer line cannot say whether the engine is pulling for the player or for itself. Taken out
+  // of the torrent map under `mu`, but the engine call is made after the unlock: the event thread
+  // calls into the engine and then takes `mu`, so holding it across the call could invert the order.
+  std::string playing;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    for (auto &kv : torrents) for (auto &s : kv.second.streams) if (s.second.ready && !s.second.id.empty()) playing = s.second.id;
+  }
+  if (!playing.empty()) {
+    nuvio_engine_stream_stats ss; nuvio_engine_stream_stats_init(&ss);
+    if (nuvio_engine_get_stream_stats(engine, playing.c_str(), &ss) == NUVIO_ENGINE_STATUS_OK) {
+      o->scheduled_pieces = ss.scheduled_pieces; o->active_demands = ss.active_demands; o->delivered = ss.delivered_bytes;
+      o->piece_bytes = ss.piece_size;
+      o->primary_demand_start = ss.primary_demand_start; o->secondary_demand_start = ss.secondary_demand_start;
+    }
+  }
   return 0;
 }
 void window(uint64_t bytes) { if (engine) nuvio_engine_set_streaming_window(engine, bytes); }

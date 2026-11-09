@@ -65,4 +65,18 @@ if(NUVIO_ENGINE_ENABLE_LIBTORRENT AND NOT WIN32)
         NAME nuvio_engine_streaming_window_test
         COMMAND nuvio_engine_streaming_window_test
     )
+
+    add_executable(
+        nuvio_engine_streaming_window_resync_test
+        streaming_window_resync_test.cpp
+    )
+    target_link_libraries(
+        nuvio_engine_streaming_window_resync_test
+        PRIVATE Nuvio::Engine torrent-rasterbar
+    )
+    target_compile_features(nuvio_engine_streaming_window_resync_test PRIVATE cxx_std_20)
+    add_test(
+        NAME nuvio_engine_streaming_window_resync_test
+        COMMAND nuvio_engine_streaming_window_resync_test
+    )
 endif()

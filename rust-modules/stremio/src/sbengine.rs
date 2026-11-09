@@ -42,8 +42,10 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 
-/// The engine's own compatibility gate (`SBE_API_VERSION` in sbengine.h).
-pub const API_VERSION: c_int = 3;
+/// The engine's own compatibility gate (`SBE_API_VERSION` in sbengine.h). 4 appends the playing
+/// stream's counters (`scheduled_pieces`, `active_demands`, `delivered`) to `sbe_stats`, which is
+/// what lets the transfer log tell "downloading for the player" from "downloading for itself".
+pub const API_VERSION: c_int = 4;
 
 /// Bytes of payload kept around the playhead (the streaming window).
 ///
@@ -112,6 +114,18 @@ pub struct EngineStats {
     pub refetched: u64,
     pub mem_cache_used: u64,
     pub window_unsupported: u32,
+    /// Pieces the playing stream's current schedule asks libtorrent for (0 with no stream).
+    pub scheduled: u32,
+    /// The player's HTTP reads in flight for that stream.
+    pub active_demands: u32,
+    /// Bytes the engine has served to the player since the stream opened.
+    pub delivered: u64,
+    /// The torrent's piece length: the unit the window evicts and the schedule requests.
+    pub piece_bytes: u64,
+    /// File-relative offset of the newest player read (the live playhead the schedule follows).
+    pub primary_demand_start: u64,
+    /// A second live read of the same file, when one exists.
+    pub secondary_demand_start: u64,
 }
 
 // The function-pointer table `sbe_get` returns. `#[repr(C)]` and the field order
@@ -584,29 +598,29 @@ pub fn limits(down_bps: u64, up_bps: u64) {
     }
 }
 
-/// Background ceiling while the player is not on screen: keep peers warm but
-/// stop the torrent saturating CPU and bandwidth under Home. 64 KiB/s down and
-/// up is enough to keep the swarm alive; the window already fetched stays
-/// resident, so a resume is instant once foreground limits are restored.
-pub const BACKGROUND_DOWN_BPS: u64 = 64 * 1024;
-pub const BACKGROUND_UP_BPS: u64 = 64 * 1024;
-
-/// Put the engine into background mode (player left). No-op when the engine is
-/// not bound; the cap is restored by [`resume_foreground`] on player entry and
-/// at the head of [`resolve_stream`].
-pub fn suspend_background() {
+/// Stop the engine when the player leaves: remove every torrent (the window
+/// payload goes with it) and forget the active hash.
+///
+/// A cap was the old answer, but a torrent left downloading at 64 KiB/s still
+/// stuttered Home and the sources screen. Removal is cheap and the `.resume`
+/// file survives, so the next play restores metadata and peers instead of a
+/// cold fetch. Clearing [`active_hash`] is what makes that safe: the shim's
+/// `cached_open_url` drops a cached engine URL when its torrent is no longer
+/// active, so a replay resolves again rather than opening a dead
+/// `/stream/<id>` (the 404 retry loop).
+pub fn stop_background() {
     if available() {
-        limits(BACKGROUND_DOWN_BPS, BACKGROUND_UP_BPS);
-        plx_base::eventlog::log("sbengine: background throttled to 64KiB/s (player left)");
+        remove_all();
+        *ACTIVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        plx_base::eventlog::log("sbengine: engine stopped (player left)");
     }
 }
 
-/// Restore foreground (unlimited down, default up): at the head of
-/// [`resolve_stream`] so a torrent opened from Home starts at full speed, and
-/// from the app loop when the player page appears. The second site matters
-/// because replaying the same source reuses the shim's cached engine URL, so no
-/// resolve runs and the background cap would otherwise stay on — a far seek
-/// then refetches outside the 32 MiB window at 64 KiB/s.
+/// Restore foreground (unlimited down, default up) at the head of
+/// [`resolve_stream`] and from the app loop when the player page appears.
+/// Leaving the player now removes the torrents (see [`stop_background`]), so
+/// this is a defensive reset: a torrent opened from Home must never inherit a
+/// limit set by anything else.
 pub fn resume_foreground() {
     if available() {
         limits(0, DEFAULT_UPLOAD_BPS);

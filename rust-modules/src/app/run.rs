@@ -275,9 +275,11 @@ pub(crate) unsafe fn run(app: &mut App) {
         // wash dithers on every frame.)
         fr.underlay_moving |= tree_report.underlay_moving;
         let playing = super::bridge::player(&app.pages).is_some();
-        // A replay reuses the shim's cached engine URL (no `resolve_stream`), so leaving the
-        // 64 KiB/s background cap on made every far seek refetch outside the window at that cap.
-        if was_player && !playing { restore_played_entry(app); plx_stremio::sbengine::suspend_background(); }
+        // Leaving the player stops the engine outright. A torrent left downloading under Home
+        // — even capped — stutters the UI; the kept resume file makes the next play restore
+        // metadata and peers, and clearing the active hash drops the shim's cached engine URL
+        // so a replay resolves again instead of opening a dead stream (404 retry loop).
+        if was_player && !playing { restore_played_entry(app); plx_stremio::sbengine::stop_background(); }
         else if !was_player && playing { plx_stremio::sbengine::resume_foreground(); }
 
         content_requests(app, fr);

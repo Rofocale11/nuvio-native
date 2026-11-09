@@ -270,19 +270,24 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   open and the swarm connected, so a resume behaves like a seek on a live torrent instead of
   paying the connection ramp. The detail/backdrop prefetch (`WarmDetail`) is a separate command
   and does not do this, so a card the viewer only scrolls past never warms a swarm.
-  While the player is not on screen the engine is throttled to a background ceiling
-  (`sbengine: background throttled`, 64 KiB/s down and up) so it does not saturate CPU or
-  bandwidth under Home; the wait for the 1 MiB prebuffer in `resolve_stream` counts only the new
+  While the player is not on screen the engine is stopped outright
+  (`sbengine: engine stopped (player left)`): every torrent is removed and the window payload
+  goes with it, because a torrent left downloading in the background — even at a 64 KiB/s cap —
+  stuttered Home and the sources screen. Removal is cheap and the `.resume` file survives, so
+  the next play restores metadata and peers instead of a cold fetch; `active_hash` is cleared
+  with the torrents, so the shim's cached engine URL is dropped rather than answered 404. The
+  engine can also drop a handle on its own (its disk-cache policy unloads an inactive warm
+  torrent), and the shim forgets that entry when it sees `NUVIO_ENGINE_EVENT_TORRENT_REMOVED`:
+  the next `open` re-adds the magnet and the kept resume restores it. Without that the shim's
+  entry outlived the handle, every resolve answered `torrent not found`, and the player retried
+  the source forever. The wait for the 1 MiB prebuffer in `resolve_stream` counts only the new
   torrent's bytes (baseline taken after the previous torrent is evicted, so a slow old swarm
   cannot inflate the delta) and holds the URL for at most 10 s, after which the engine's blocking
   reads let the probe and the player wait for pieces themselves. Each resolve logs its split
   (`sbengine: <hash> metadata …ms -> url …ms -> prebuffer … -> resolve …ms`) so a slow first play
   can be attributed to peer discovery, the gate, or the caller's deadline. Foreground limits
-  (`sbengine: foreground unlimited`) are restored both at the head of `resolve_stream` and when
-  the player page appears: replaying the same source reuses the shim's cached engine URL, so no
-  resolve runs, and restoring only on resolve left the 64 KiB/s cap on — every far seek then
-  refetched pieces outside the 32 MiB window at that cap and tripped the player's 3 s
-  seek-stuck watchdog into a reload.
+  (`sbengine: foreground unlimited`) are restored at the head of `resolve_stream` and when the
+  player page appears — a defensive reset, since leaving the player no longer lowers them.
   `libsbengine.so` links libstdc++/libgcc and OpenSSL 1.1.1 statically — the NDK's libstdc++
   would otherwise want three symbols the TV's lacks, and the firmware's `libssl` SONAME differs
   across releases (1.0.x, 1.1, 3) — so `tools/fwcompat.py` grades it OK on every release in its

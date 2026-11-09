@@ -507,10 +507,32 @@ pub fn parse(log: &str) -> Vec<Report> {
     parse_seeded(log, None)
 }
 
+/// The event log's wall-clock prefix (`2026-11-09T12:34:56.789Z `), stripped before a line's
+/// shape is checked.
+///
+/// Every Rust-written record carries it (the panic hook shares the event log's sink), while the
+/// C tracer writes its records bare. A stamp must therefore not decide whether a record is
+/// recognised — and it must not enter a panic's message hash, so the same panic hashes the same
+/// with and without one. Strict on purpose: exactly `dddd-dd-ddTdd:dd:dd.dddZ `, so ordinary
+/// text that happens to start with digits is not eaten.
+fn unstamped(l: &str) -> &str {
+    let b = l.as_bytes();
+    let stamp = b.len() > 24
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b[16] == b':'
+        && b[19] == b'.'
+        && b[23] == b'Z'
+        && b[24] == b' ';
+    if stamp { &l[25..] } else { l }
+}
+
 /// Parse records with the last image marker from the already-watermarked prefix.
 fn parse_seeded(log: &str, mut image: Option<ImageIdentity>) -> Vec<Report> {
     let mut out: Vec<Report> = Vec::new();
-    for l in log.lines() {
+    for l in log.lines().map(unstamped) {
         if l.starts_with("img: ") {
             // An explicit but unreadable marker is a process boundary too: clear rather than
             // attributing this process's later crash to the executable that ran before it.
@@ -1900,6 +1922,24 @@ mod tests {
         let bare = PanicReport { crash_time: None, ..p };
         let v: serde_json::Value = serde_json::from_slice(&panic_sentry_body(&bare, "e", None)).unwrap();
         assert!(v.get("timestamp").is_none());
+    }
+
+    /// The panic hook shares the event log's sink, so its `*** RUST PANIC` record carries the
+    /// UTC stamp in front. The stamp must not hide the record from the parser, nor enter the
+    /// message hash: the same panic hashes the same with and without one.
+    #[test]
+    fn a_stamped_panic_record_is_the_same_report_as_a_bare_one() {
+        let bare = "*** RUST PANIC [t] at src/a.rs:1: boom";
+        let stamped = format!("2026-11-09T12:34:56.789Z {bare}");
+        assert_eq!(unstamped(&stamped), bare);
+        let first = parse(bare).into_iter().next().expect("the bare record");
+        let second = parse(&stamped).into_iter().next().expect("the stamped record");
+        let (Report::Panic(a), Report::Panic(b)) = (first, second) else {
+            panic!("both are panic reports");
+        };
+        assert_eq!(a, b);
+        // A line that only looks stamped is not eaten: the shape is exact.
+        assert!(parse("2026-11-09 12:34:56 not a stamp").is_empty());
     }
 
     #[test]

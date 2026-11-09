@@ -15,6 +15,7 @@
 #include <cctype>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -336,6 +337,12 @@ struct LibtorrentStreamBridge::Impl {
         http::ByteRange range{};
         std::shared_ptr<DemandState> state;
         bool needs_data = true;
+        // Monotonic "last served" ordering. The schedule is built around the demand the player is
+        // reading NOW, which is the one whose last `read_piece` is newest — not the newest request
+        // and not whichever one happened to miss a piece. A request the player has abandoned (a
+        // closed seek, a probe) stops being served and must not drag the download with it.
+        std::uint64_t activity = 0;
+        bool served = false;
     };
 
     struct StreamAnchor {
@@ -889,12 +896,19 @@ struct LibtorrentStreamBridge::Impl {
                             command.route.piece_size
                         )
                     );
+                    // The anchor is where the reader is, and only a demand that is actually MISSING
+                    // data may move it (below). A request's opening position alone is not enough:
+                    // a probe or an abandoned seek opens one too, and pointing the fallback
+                    // schedule at it downloaded bytes far from the playhead that the window then
+                    // evicted and libtorrent fetched again.
                     active_demands.insert_or_assign(command.demand_id, ActiveDemand{
                         command.demand_id,
                         std::move(command.route),
                         command.range,
                         std::move(command.demand_state),
                         needs_data,
+                        ++next_activity,
+                        false,
                     });
                     changed_torrents.insert(id);
                 } else if (command.demand_state) {
@@ -914,6 +928,8 @@ struct LibtorrentStreamBridge::Impl {
                     demand != active_demands.end() && demand->second.state &&
                     !demand->second.state->cancelled.load()) {
                     demand->second.range = command.range;
+                    demand->second.activity = ++next_activity;
+                    demand->second.served = true;
                     changed_torrents.insert(demand->second.route.torrent_id);
                     process_piece_request(command, demand->second);
                 } else if (command.waiter) {
@@ -998,9 +1014,32 @@ struct LibtorrentStreamBridge::Impl {
         window_resident_bytes.store(resident_total, std::memory_order_relaxed);
     }
 
+    // Diagnostic only: the absolute position the window is anchored to, so a
+    // freed or refetched piece can be reported against the playhead (p2p log).
+    std::optional<std::uint64_t> playhead_for(
+        const std::string& id,
+        const StreamRoute& route
+    ) const {
+        std::optional<std::uint64_t> playhead;
+        const auto consider = [&](const std::uint64_t absolute) {
+            if (!playhead || absolute > *playhead) {
+                playhead = absolute;
+            }
+        };
+        for (const auto& [demand_id, demand] : active_demands) {
+            static_cast<void>(demand_id);
+            if (demand.route.torrent_id == id) {
+                consider(route.file_offset + demand.range.start);
+            }
+        }
+        if (const auto anchor = anchors.find(id); anchor != anchors.end()) {
+            consider(route.file_offset + anchor->second.range.start);
+        }
+        return playhead;
+    }
+
     // returns the bytes left resident for this torrent
-    std::uint64_t trim_route(const StreamRoute& route) {
-        const auto& id = route.torrent_id;
+    std::uint64_t trim_route(const StreamRoute& route) {        const auto& id = route.torrent_id;
         const auto resident = window_store->resident_pieces(route.window_key);
         const std::uint64_t piece_size = route.piece_size;
         if (piece_size == 0 || route.file_size == 0) {
@@ -1016,6 +1055,19 @@ struct LibtorrentStreamBridge::Impl {
             for (const auto piece : resident) {
                 if (freed->second.erase(piece) > 0) {
                     window_refetched_pieces.fetch_add(1, std::memory_order_relaxed);
+                    const auto at = static_cast<std::uint64_t>(piece) * piece_size;
+                    const auto playhead = playhead_for(id, route);
+                    const auto ahead = playhead
+                        ? (static_cast<std::int64_t>(*playhead) -
+                           static_cast<std::int64_t>(at)) / static_cast<std::int64_t>(mib)
+                        : 0;
+                    std::fprintf(
+                        stderr,
+                        "[p2p] window refetch piece=%u at=%lluMB playhead=%+lldMB\n",
+                        piece,
+                        static_cast<unsigned long long>(at / mib),
+                        static_cast<long long>(ahead)
+                    );
                 }
             }
         }
@@ -1034,9 +1086,15 @@ struct LibtorrentStreamBridge::Impl {
             return resident_bytes;
         }
         const auto target = window_low_water(window_bytes);
-        const auto behind = window_behind_bytes(window_bytes);
+        const auto piece_bytes = static_cast<std::uint64_t>(piece_size);
+        // Whole pieces are the unit of the schedule and of eviction. A cushion smaller than
+        // the pieces it protects frees the piece the reader has just left, so any re-read of
+        // it (container re-sync, a heal, a small step back) costs that whole piece over the
+        // swarm again: the refetch loop that kept the engine pulling while the player's queue
+        // sat full. Two pieces behind the playhead.
+        const auto behind = std::max(window_behind_bytes(window_bytes), 2 * piece_bytes);
         const auto ahead = window.critical_bytes + window.playback_bytes +
-            window.readahead_bytes + 2 * piece_size;
+            window.readahead_bytes + 2 * piece_bytes;
         const auto file_start = route.file_offset;
         const auto file_end = route.file_offset + route.file_size;
         const auto head_end = file_start + std::min(window_head_bytes(window_bytes), route.file_size);
@@ -1112,6 +1170,20 @@ struct LibtorrentStreamBridge::Impl {
             if (result == FreeResult::freed) {
                 resident_bytes -= piece_size;
                 committed_bytes -= piece_size;
+                const auto at = static_cast<std::uint64_t>(candidate.piece) * piece_size;
+                const auto playhead = playhead_for(id, route);
+                const auto behind = playhead
+                    ? (static_cast<std::int64_t>(*playhead) -
+                       static_cast<std::int64_t>(at)) / static_cast<std::int64_t>(mib)
+                    : 0;
+                std::fprintf(
+                    stderr,
+                    "[p2p] window free piece=%u at=%lluMB playhead=%+lldMB resident=%lluMB\n",
+                    candidate.piece,
+                    static_cast<unsigned long long>(at / mib),
+                    static_cast<long long>(behind),
+                    static_cast<unsigned long long>(resident_bytes / mib)
+                );
             }
         }
         return resident_bytes;
@@ -1149,7 +1221,33 @@ struct LibtorrentStreamBridge::Impl {
             window_unsupported_reason = error;
             return FreeResult::unsupported;
         }
-        // 3. libtorrent forgets it; a later demand downloads it again
+        // 3. libtorrent forgets it; a later demand downloads it again. The
+        // deadline and the explicit priority must go with the bytes: a
+        // time-critical piece is downloaded again because it is in libtorrent's
+        // time-critical list, not because a priority asks for it, and clearing
+        // "have" alone leaves the piece wanted. On the television that was the
+        // window evicting one piece far from the playhead over and over (the
+        // file header at 4 MB and the seek target): freed, fetched again at the
+        // swarm's pace, freed again. Every freed piece is outside the schedule
+        // and the trim's protected set, so dropping both wants is safe.
+        int priority = -1;
+        try {
+            priority = static_cast<int>(static_cast<std::uint8_t>(
+                route.handle.piece_priority(index)
+            ));
+            route.handle.reset_piece_deadline(index);
+            std::vector<std::pair<lt::piece_index_t, lt::download_priority_t>> none{
+                {index, lt::dont_download},
+            };
+            route.handle.prioritize_pieces(none);
+        } catch (...) {
+        }
+        std::fprintf(
+            stderr,
+            "[p2p] window drop piece=%u priority=%d\n",
+            piece,
+            priority
+        );
         try {
             route.handle.nuvio_drop_piece(index);
         } catch (...) {
@@ -1434,7 +1532,8 @@ struct LibtorrentStreamBridge::Impl {
         std::map<std::uint32_t, scheduler::PriorityClass> combined;
         std::optional<lt::torrent_handle> handle;
         std::vector<scheduler::StreamDemand> demands;
-        for (const auto& [demand_id, demand] : active_demands) {
+        for (const auto& entry : active_demands) {
+            const auto& demand = entry.second;
             if (demand.route.torrent_id != id || !demand.needs_data) {
                 continue;
             }
@@ -1443,8 +1542,12 @@ struct LibtorrentStreamBridge::Impl {
                 (demand.route.file_offset + demand.range.start) / demand.route.piece_size
             );
             const auto partial = partial_blocks.find(PieceKey{id, blocking_piece});
+            // `activity`, not `demand_id`: the plan focuses the demand that was SERVED most
+            // recently, and only that demand gets the read-ahead. A younger request that is
+            // missing data must not move the download away from the reader: its own blocking
+            // piece is still scheduled below.
             demands.push_back({
-                demand_id,
+                demand.served ? (demand.activity | (std::uint64_t{1} << 63)) : demand.activity,
                 demand.route.file_offset,
                 demand.route.file_size,
                 demand.route.piece_size,
@@ -1487,13 +1590,24 @@ struct LibtorrentStreamBridge::Impl {
         } catch (...) {
             return;
         }
-        if (const auto focused = active_demands.find(plan.focused_demand_id);
-            focused != active_demands.end()) {
-            anchors.insert_or_assign(id, StreamAnchor{
-                focused->second.route,
-                focused->second.range,
-                false,
-            });
+        // The anchor is the fallback schedule when nothing is missing data, so it must be the
+        // playhead and nothing else: the position of the MOST RECENTLY SERVED demand that is
+        // missing data. Taking the plan's focused demand instead let a younger request (a probe, an
+        // abandoned seek) keep the download pointed at its own offset, and every piece that was
+        // fetched there and evicted by the window came back over the swarm again.
+        const ActiveDemand* playhead = nullptr;
+        for (const auto& entry : active_demands) {
+            const auto& candidate = entry.second;
+            if (candidate.route.torrent_id != id || !candidate.needs_data ||
+                !candidate.served) {
+                continue;
+            }
+            if (playhead == nullptr || candidate.activity > playhead->activity) {
+                playhead = &candidate;
+            }
+        }
+        if (playhead != nullptr) {
+            anchors.insert_or_assign(id, StreamAnchor{playhead->route, playhead->range, false});
         }
         const auto previous = current_schedules.find(id);
         if (!handle.has_value() && previous != current_schedules.end()) {
@@ -1881,6 +1995,7 @@ struct LibtorrentStreamBridge::Impl {
         result.stream_id = route.stream_id;
         result.file_index = route.file_index;
         result.file_size = route.file_size;
+        result.piece_size = route.piece_size;
         result.delivered_bytes = route.counters->delivered_bytes.load(
             std::memory_order_relaxed
         );
@@ -2072,6 +2187,7 @@ struct LibtorrentStreamBridge::Impl {
     std::mutex commands_mutex;
     std::deque<HttpCommand> commands;
     std::atomic_uint64_t next_demand_id = 1;
+    std::uint64_t next_activity = 1;
     std::unordered_map<std::uint64_t, ActiveDemand> active_demands;
     std::unordered_map<std::string, StreamAnchor> anchors;
     std::unordered_map<std::string, CurrentSchedule> current_schedules;

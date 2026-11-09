@@ -131,8 +131,13 @@ mod panic_log_tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("SECRETTOKEN"), "{written}");
         assert!(!written.contains("192-168-1-50") && !written.contains("plex.direct"), "{written}");
-        assert!(written.starts_with("*** RUST PANIC [demux] at src/ff.rs:1204: "), "the record's shape survives: {written}");
-        assert!(written.ends_with('\n') && written.matches('\n').count() == 1, "one newline-terminated record");
+        // Every record carries the event log's UTC stamp (`<date>T<time>.<ms>Z `), so the shape
+        // check is on the text after it, not on the first byte of the file.
+        let record = written.strip_suffix('\n').expect("one newline-terminated record");
+        let (stamp, text) = record.split_once(' ').expect("the stamp precedes the text");
+        assert!(stamp.ends_with('Z') && stamp.len() == 24, "stamped: {stamp}");
+        assert!(text.starts_with("*** RUST PANIC [demux] at src/ff.rs:1204: "), "the record's shape survives: {written}");
+        assert!(!record.contains('\n'), "one newline-terminated record");
         // And the crash report parser still reads the scrubbed record.
         let reports = plx_telemetry::telemetry::crashreport::parse(&written);
         assert_eq!(reports.len(), 1, "{written}");
@@ -149,10 +154,13 @@ mod panic_log_tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
         record_panic_in_crash_log(&path, "*** RUST PANIC [t] at src/a.rs:1: boom").unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, 0o640);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "*** SIGNAL 11 earlier\n*** RUST PANIC [t] at src/a.rs:1: boom\n"
-        );
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with("*** SIGNAL 11 earlier\n"), "the earlier record is kept, unstamped: {written}");
+        assert_eq!(written.lines().count(), 2, "one appended record: {written}");
+        let appended = written.lines().nth(1).unwrap();
+        let (stamp, text) = appended.split_once(' ').expect("the stamp precedes the text");
+        assert!(stamp.ends_with('Z') && stamp.len() == 24, "stamped: {stamp}");
+        assert_eq!(text, "*** RUST PANIC [t] at src/a.rs:1: boom");
         let fresh = dir.join("fresh.log");
         record_panic_in_crash_log(&fresh, "*** RUST PANIC [t] at src/a.rs:1: boom").unwrap();
         assert_eq!(std::fs::metadata(&fresh).unwrap().mode() & 0o7777, 0o640);
@@ -718,15 +726,24 @@ pub(crate) fn start_sbengine() {
                     }
                     last = s.downloaded;
                     plx_base::eventlog::log(&format!(
-                        "sbengine: peers={} seeds={} down={}KB/s up={}KB/s got={}MB window={}MB mem={}MB refetch={}",
+                        "sbengine: peers={} seeds={} down={}KB/s up={}KB/s got={}MB delivered={}MB window={}MB resident={}MB scheduled={} demands={} at={}MB/{}MB piece={}KB mem={}MB refetch={} freed={} unsupported={}",
                         s.peers,
                         s.seeds,
                         s.down_bps / 1024,
                         s.up_bps / 1024,
                         s.downloaded >> 20,
+                        s.delivered >> 20,
                         s.window >> 20,
+                        s.resident >> 20,
+                        s.scheduled,
+                        s.active_demands,
+                        s.primary_demand_start >> 20,
+                        s.secondary_demand_start >> 20,
+                        s.piece_bytes >> 10,
                         s.mem_cache_used >> 20,
                         s.refetched,
+                        s.freed,
+                        s.window_unsupported,
                     ));
                 }
             });
