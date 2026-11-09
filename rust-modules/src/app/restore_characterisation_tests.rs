@@ -70,8 +70,8 @@ fn cells() -> Cells {
 const DEFAULTS: Cells = Cells {
     quality: PlaybackQuality::Original,
     direct_play: DirectPlayMode::Auto,
-    size: SubtitleSize::Medium,
-    position: SubtitlePosition::Low,
+    size: SubtitleSize::Large,
+    position: SubtitlePosition::Auto,
     next_episode: NextEpisodeMode::Countdown,
     skip: SkipInterval::Seconds10,
     deck_press: DeckPress::Details,
@@ -364,7 +364,7 @@ fn stored_boot_restores_the_seated_profiles_own_values() {
     let _serial = plx_base::testlock::serial();
     let stored = with_own_values(record("managed-kid", &["managed-other"]), "managed-kid", STORED);
     let _fixture = Fixture::new("a0c-stored-boot-own", &stored);
-    assert_eq!(session::peek().prefs.subtitle_size, SubtitleSize::Medium, "the legacy key chose nothing");
+    assert_eq!(session::peek().prefs.subtitle_size, SubtitleSize::Large, "the legacy key chose nothing");
 
     crate::app::boot::restore_player_preferences(&session::load(), false);
     assert_eq!(cells(), DEFAULTS, "process start is unseated: the fallback, here the defaults");
@@ -492,7 +492,7 @@ fn profile_picks_are_each_profiles_own_and_play_automatically_on_b_leaves_a_alon
     assert_eq!(stored_value::<SubtitleSizePref>("profile-a"), Some(SubtitleSize::Large));
     assert_eq!(stored_value::<DirectPlayModePref>("profile-a"), Some(DirectPlayMode::Forced));
     let a = session::load();
-    assert_eq!((a.subtitle_size(), a.direct_play_mode()), (SubtitleSize::Medium, DirectPlayMode::Auto),
+    assert_eq!((a.subtitle_size(), a.direct_play_mode()), (SubtitleSize::Large, DirectPlayMode::Auto),
         "A's picks are A's own: the legacy install-wide keys are untouched");
 
     // Profile B is seated and reads the fallback, not A's picks.
@@ -503,7 +503,7 @@ fn profile_picks_are_each_profiles_own_and_play_automatically_on_b_leaves_a_alon
     seat_globally("profile-b");
     assert_eq!(session::peek().user.uuid, "profile-b");
     assert_eq!(stored_value::<SubtitleSizePref>("profile-b"), None, "B has picked nothing");
-    assert_eq!(plx_media::route::subtitle_size(), SubtitleSize::Medium, "B reads Medium, not A's Large");
+    assert_eq!(plx_media::route::subtitle_size(), SubtitleSize::Large, "B reads Large, not A's pick");
     assert_eq!(plx_media::route::direct_play_mode(), DirectPlayMode::Auto, "B reads Auto, not A's Force");
 
     // B forces Direct Play itself, its playback fails under Force, and B presses Play Automatically.
@@ -866,7 +866,7 @@ fn size_picked_by_profile_a_is_not_seen_by_profile_b() {
     open_picker(&mut rig, &mut d, 2000);
     seat_globally("profile-b");
     pick(&mut rig, &mut d, 1, 3000);
-    assert_eq!(plx_media::route::subtitle_size(), SubtitleSize::Medium, "B reads the fallback, not A's Large");
+    assert_eq!(plx_media::route::subtitle_size(), SubtitleSize::Large, "B reads the fallback, not A's Large");
     assert_eq!(stored_value::<SubtitleSizePref>("profile-b"), None, "and has picked nothing");
 
     open_picker(&mut rig, &mut d, 4000);

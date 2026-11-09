@@ -2355,6 +2355,7 @@ pub fn subtitle_size_label(size: SubtitleSize) -> &'static str {
 pub fn subtitle_position_label(position: SubtitlePosition) -> &'static str {
     use plx_platform::i18n::msg;
     match position {
+        SubtitlePosition::Auto => msg::settings_playback_subtitle_position_auto(),
         SubtitlePosition::Low => msg::settings_playback_subtitle_position_low(),
         SubtitlePosition::Middle => msg::settings_playback_subtitle_position_middle(),
         SubtitlePosition::High => msg::settings_playback_subtitle_position_high(),

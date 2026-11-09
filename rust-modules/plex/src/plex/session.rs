@@ -1053,16 +1053,16 @@ impl SubtitleTone {
 /// The persisted subtitle text sizes, smallest first — one per PROFILE, like [`SubtitleTone`]: a
 /// legible caption size is as much about the viewer's eyes as the panel and the couch distance, and
 /// two people on one couch differ. A profile that has not picked reads the install's older key.
-/// Absence is `Medium`, which is the caption face every build before this
-/// preference drew (`appkit::player_hud`'s hardcoded `sz = 36`). Spelling on disk is explicit, like
-/// every other persisted ladder here.
+/// Absence is `Large`: the shipped default, one rung above the `Medium` face every build before
+/// this preference drew (`appkit::player_hud`'s hardcoded `sz = 36`). Spelling on disk is explicit,
+/// like every other persisted ladder here.
 #[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubtitleSize {
     #[serde(rename = "small")]
     Small,
-    #[default]
     #[serde(rename = "medium")]
     Medium,
+    #[default]
     #[serde(rename = "large")]
     Large,
     #[serde(rename = "extra_large")]
@@ -1085,25 +1085,32 @@ impl SubtitleSize {
         SubtitleSize::Huge,
     ];
 
-    /// An in-memory index back to a rung — out of range is `Medium`, never a neighbouring rung,
-    /// for the reason [`SubtitleTone::from_index`] gives: the ladder can grow or shrink.
+    /// An in-memory index back to a rung — out of range is `Large` (the default), never a
+    /// neighbouring rung, for the reason [`SubtitleTone::from_index`] gives: the ladder can grow
+    /// or shrink.
     pub fn from_index(i: u8) -> SubtitleSize {
-        Self::LADDER.get(i as usize).copied().unwrap_or(SubtitleSize::Medium)
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
     }
 
     pub fn index(self) -> u8 {
-        Self::LADDER.iter().position(|&s| s == self).unwrap_or(1) as u8
+        Self::LADDER.iter().position(|&s| s == self).map_or_else(|| SubtitleSize::default().index(), |i| i as u8)
     }
 }
 
-/// The persisted subtitle vertical placements, lowest first — one per profile, like [`SubtitleTone`].
-/// Absence is `Low`, which is where every build before this preference drew the caption
-/// (`media::player::text_style`'s fixed `SUB_BASE_Y`/`SUB_CEIL_Y` baseline). Only the plain-text caption draw
-/// moves with this; image (PGS/VobSub) captions and native ASS/SSA keep their own placement
+/// The persisted subtitle vertical placements — one per profile, like [`SubtitleTone`]. `Auto` is
+/// the shipped default: the caption rides just under the picture's own bottom edge (the letterbox
+/// bar of a wider-than-16:9 film), falling back to the `Low` line when the picture fills the frame.
+/// `Low` is where every build before this preference drew the caption (`media::player::text_style`'s
+/// fixed `SUB_BASE_Y`/`SUB_CEIL_Y` baseline). Only the plain-text caption draw moves with this;
+/// image (PGS/VobSub) captions and native ASS/SSA keep their own placement
 /// (`docs/ass-subtitles.md`).
 #[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubtitlePosition {
+    /// Just under the decoded picture's bottom edge, a small gap below it — computed per frame from
+    /// the published picture geometry, so a 2.39:1 film puts the caption in the lower black bar.
     #[default]
+    #[serde(rename = "auto")]
+    Auto,
     #[serde(rename = "low")]
     Low,
     #[serde(rename = "middle")]
@@ -1113,21 +1120,23 @@ pub enum SubtitlePosition {
 }
 
 impl SubtitlePosition {
-    /// Every rung, lowest first — the order the picker lists them in.
-    pub const LADDER: [SubtitlePosition; 3] = [
+    /// Every rung, the default first — the order the picker lists them in.
+    pub const LADDER: [SubtitlePosition; 4] = [
+        SubtitlePosition::Auto,
         SubtitlePosition::Low,
         SubtitlePosition::Middle,
         SubtitlePosition::High,
     ];
 
-    /// An in-memory index back to a rung — out of range is `Low`, never a neighbouring rung, for
-    /// the reason [`SubtitleTone::from_index`] gives: the ladder can grow or shrink.
+    /// An in-memory index back to a rung — out of range is `Auto` (the default), never a
+    /// neighbouring rung, for the reason [`SubtitleTone::from_index`] gives: the ladder can grow
+    /// or shrink.
     pub fn from_index(i: u8) -> SubtitlePosition {
-        Self::LADDER.get(i as usize).copied().unwrap_or(SubtitlePosition::Low)
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
     }
 
     pub fn index(self) -> u8 {
-        Self::LADDER.iter().position(|&p| p == self).unwrap_or(0) as u8
+        Self::LADDER.iter().position(|&p| p == self).map_or_else(|| SubtitlePosition::default().index(), |i| i as u8)
     }
 }
 

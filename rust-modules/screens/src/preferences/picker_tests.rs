@@ -193,8 +193,8 @@ fn the_subtitle_pickers_write_locally_and_pop_on_the_receipt() {
     let _serial = plx_base::testlock::serial();
     let _session = plx_plex::plex::session::TempSession::new("picker-subtitle-local");
     let (size, position) = (plx_media::route::subtitle_size(), plx_media::route::subtitle_position());
-    plx_media::route::restore_subtitle_size(plx_media::route::SubtitleSize::Medium);
-    plx_media::route::restore_subtitle_position(plx_media::route::SubtitlePosition::Low);
+    plx_media::route::restore_subtitle_size(plx_media::route::SubtitleSize::Large);
+    plx_media::route::restore_subtitle_position(plx_media::route::SubtitlePosition::Auto);
     for field in [PickerKind::SubtitleSize, PickerKind::SubtitlePosition] {
         let mut page = PickerPage::new(EntryId(0), field);
         let checked = page.state.checked;
@@ -264,9 +264,9 @@ fn ok_on_the_checked_size_after_a_failed_write_retries_the_write() {
     plx_media::route::restore_subtitle_position(position);
 }
 
-/// **A profile's own pick is durable (M4).** The seated profile's size is Large in its own record
-/// while the frozen legacy install-wide key still says Medium, and the restore put Large in the live
-/// cell. OK on the checked Large row is not a change: it pops without a write. Reading the legacy key
+/// **A profile's own pick is durable (M4).** The seated profile's size is Small in its own record
+/// while the frozen legacy install-wide key falls back to Large, and the restore put Small in the live
+/// cell. OK on the checked Small row is not a change: it pops without a write. Reading the legacy key
 /// for "stored" would call that pick unsaved and write it again on every OK.
 #[test]
 fn ok_on_checked_profile_size_pops() {
@@ -277,17 +277,17 @@ fn ok_on_checked_profile_size_pops() {
     let stamp = session.seated("kid", "picker-account");
     assert!(plx_plex::plex::session::update(|cur| {
         let mut next = cur.clone();
-        put_own::<SubtitleSizePref>(&mut next.prefs.profile_prefs, "kid", &stamp, plx_media::route::SubtitleSize::Large);
+        put_own::<SubtitleSizePref>(&mut next.prefs.profile_prefs, "kid", &stamp, plx_media::route::SubtitleSize::Small);
         Some(next)
     }));
-    assert_eq!(plx_plex::plex::session::peek().subtitle_size(), plx_media::route::SubtitleSize::Medium,
-        "the legacy key says Medium");
-    plx_media::route::restore_subtitle_size(plx_media::route::SubtitleSize::Large);
+    assert_eq!(plx_plex::plex::session::peek().subtitle_size(), plx_media::route::SubtitleSize::Large,
+        "the legacy key falls back to the default Large");
+    plx_media::route::restore_subtitle_size(plx_media::route::SubtitleSize::Small);
 
     let mut page = PickerPage::new(EntryId(0), PickerKind::SubtitleSize);
     let checked = page.state.checked;
     let emitted = drive(&mut page, ScreenEvent::Activate(checked), checked);
-    assert!(popped(&emitted), "the profile's own Large is stored: OK on it pops");
+    assert!(popped(&emitted), "the profile's own Small is stored: OK on it pops");
     assert_eq!(preference_commands(&emitted), 0, "and writes nothing");
     plx_media::route::restore_subtitle_size(size);
     plx_media::route::restore_subtitle_position(position);

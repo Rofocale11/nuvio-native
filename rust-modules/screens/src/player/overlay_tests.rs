@@ -26,6 +26,7 @@ use plx_ui::form::FormId;
 use plx_appkit::more_menu::{Action as MoreAction, MoreRow, MorePage};
 use plx_ui::page_stack::TITLE_KEY;
 use plx_appkit::track_menu::{StyleField, TrackPage, TrackRow};
+use plx_plex::plex::session::SubtitleSize;
 use plx_machine::machine::{
     Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, Host, InputEvent, InputKind,
     InputOwner, InstanceId, Machine, MachineId, NavOp, PressId, Source, Tick,
@@ -757,7 +758,14 @@ fn the_replay_canon_includes_the_page_path_and_return_ids() {
     open_row(&mut page, TrackRow::OpenField(StyleField::Size));
     let size = fp(&page);
     open_row(&mut page, TrackRow::Choice(StyleField::Size, 0)); // inert re-pick keeps the page
-    deliver(&mut page, ScreenEvent::FocusMoved { from: None, to: FocusKey { entry: ENTRY, elem: TrackRow::Choice(StyleField::Size, 2).key().0 }, by: By::Dir });
+    // Move to an option that is not the checked one: the checked row is whatever the live size
+    // picks, so name it from the page itself rather than a fixed index.
+    let Panel::Tracks(menu) = page.panel() else { panic!("Tracks panel") };
+    let TrackRow::Choice(StyleField::Size, at) = menu.selected_id().expect("the checked size row") else {
+        panic!("the size picker's checked row")
+    };
+    let other = (at + 1) % SubtitleSize::LADDER.len();
+    deliver(&mut page, ScreenEvent::FocusMoved { from: None, to: FocusKey { entry: ENTRY, elem: TrackRow::Choice(StyleField::Size, other).key().0 }, by: By::Dir });
     let moved = fp(&page);
     assert_ne!(moved, size, "the selected key is in the canon");
     press(&mut page, 0, WCODE_BACK, Edge::Down);

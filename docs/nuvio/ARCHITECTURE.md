@@ -245,9 +245,9 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   The shim's `open_url` tries `sbengine::resolve_stream` first and only uses Node's `POST
   /create` when the engine is unavailable; the engine serves the file itself on its own loopback
   `127.0.0.1` Range URL, so nothing goes through the Node HTTP dialect on the engine path.
-  The Settings server URL is therefore optional: `Shim::torrent_server` falls back to the
-  default loopback address when the field is empty and the engine is loaded, so torrents stay
-  offered.
+  The engine's address is therefore not a Settings row: `Shim::torrent_server` falls back to the
+  default loopback address when none was saved (an address saved by an older build is still read
+  back and honoured), so torrents stay offered.
   The engine keeps every opened torrent alive — downloading once a stream has prepared its
   file, connected-but-idle for a warmed one — until it is removed, so resolving a
   different hash removes the previous one (`sbengine: released previous torrent <hash>`), which
@@ -343,10 +343,10 @@ no longer spawned; when the C engine cannot load, torrents are unavailable.
   orphans the child, because `start_p2p_service` arms `PR_SET_PDEATHSIG(SIGTERM)` (with a
   `getppid()` race guard) so the kernel delivers SIGTERM to `node` when this process dies.
 - **Address and switch.** The session preference `p2p_server_url` defaults to
-  `http://127.0.0.1:11470` (`plx_plex::plex::session::DEFAULT_P2P_SERVER_URL`); an explicit value
-  overrides it. The shim is told the address and the switch at boot and after every save. The
-  server is spawned whatever the switch says — `p2p_enabled` only controls whether the Source
-  Picker offers torrent streams.
+  `http://127.0.0.1:11470` (`plx_plex::plex::session::DEFAULT_P2P_SERVER_URL`); a value saved by
+  an older build overrides it, but no Settings row writes it any more. The shim is told the
+  address and the switch at boot. The server is spawned whatever the switch says —
+  `p2p_enabled` only controls whether the Source Picker offers torrent streams.
 - **Failure is local.** A missing `libsbengine.so`, a failed `dlopen` or a failed `start_engine` is logged
   and leaves the app fully usable; torrent picks simply cannot play. Debrid-resolved HTTP links do
   not use this server.

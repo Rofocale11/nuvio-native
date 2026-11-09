@@ -25,8 +25,6 @@ use plx_ui::form::{Form, FormId, FormSection, FormTable, RowKey, RowKind};
 use plx_ui::frame::Budget;
 use plx_machine::machine::{Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId,
     Handled, InputEvent, InputKind, InstanceId, Key, LogicalState, Machine, MachineId};
-use plx_ui::text_buffer::TextBuffer;
-use plx_machine::machine::TextEdit;
 use plx_ui::screen::{DrawFrame, Enter, FocusSource, FocusTarget, HitSource, RenderStrategy,
     Screen, ScreenEvent};
 use plx_ui::table::Row;
@@ -97,7 +95,7 @@ impl Kind {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), HdrOverlay(HdrOverlayBrightness), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), DolbyVision(DolbyVisionMode), SkipInterval(SkipInterval), UiResolution(UiResolution), Language(String), Mode(i64), Forced(i64), P2pEnabled(bool), P2pServer(Option<String>) }
+enum Value { RatingSource(plx_plex::plex::session::RatingSource), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), HdrOverlay(HdrOverlayBrightness), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), DolbyVision(DolbyVisionMode), SkipInterval(SkipInterval), UiResolution(UiResolution), Language(String), Mode(i64), Forced(i64), P2pEnabled(bool) }
 
 /// The hashed half of a transaction: what the page shows while a load or save is in flight.
 struct Io { busy: bool, status: String }
@@ -269,11 +267,10 @@ impl Txn {
             // Install-wide, not a seated profile's live setting, so it has no `Choice`.
             Value::UiResolution(mode) => PreferenceCmd::UiResolution { mode, reply },
             // **FORK (nuvio):** the account file's own settings, which the media route's
-            // `Choice` does not carry — the ratings source and the two P2P rows. They write
+            // `Choice` does not carry — the ratings source and the P2P switch. They write
             // through the shim's live policy, not through a Plex preference.
             Value::RatingSource(source) => PreferenceCmd::RatingSource { source, reply },
             Value::P2pEnabled(on) => PreferenceCmd::P2pEnabled { on, reply },
-            Value::P2pServer(url) => PreferenceCmd::P2pServer { url, reply },
             _ => return,
         };
         self.pending = Some(Pending::Local(rx)); io.busy = true; self.saving = true;
@@ -333,7 +330,7 @@ impl Txn {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowId { Field(PickerKind), Retry, P2pToggle, P2pServer }
+enum RowId { Field(PickerKind), Retry, P2pToggle }
 impl FormId for RowId {
     /// Hand-assigned, per page: each field's position in ITS page's list (what its table index was
     /// before the page moved onto a form, so a recorded focus on a field row is unchanged), Retry
@@ -354,12 +351,11 @@ impl FormId for RowId {
             Self::Field(PickerKind::UiResolution) => 9,
             Self::Retry => 6,
             Self::P2pToggle => 9,
-            Self::P2pServer => 10,
         })
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action { Open, Retry, ToggleP2p, EditP2pServer }
+enum Action { Open, Retry, ToggleP2p }
 
 struct State {
     kind: Kind, selected: u32, io: Io,
@@ -395,12 +391,9 @@ pub struct PreferencesPage {
     /// Whose settings the list was last built for, with the profile publication it read that from
     /// (not canonical state, like `look`: the copy and the rows' dimming are not hashed either).
     whose: (u32, Whose),
-    /// The P2P switch and engine URL the rows were last built from (not canonical state, like
-    /// `look`), so a save landing elsewhere rebuilds the two P2P rows.
-    p2p: (bool, Option<String>),
-    /// The Server URL being typed, while the television's keyboard is up. A draft until OK commits
-    /// it; the row's read-out draws it, and the session holds nothing until then.
-    draft: Option<TextBuffer>,
+    /// The P2P switch the row was last built from (not canonical state, like `look`), so a save
+    /// landing elsewhere rebuilds the P2P row.
+    p2p: bool,
 }
 impl PreferencesPage {
     pub fn new(entry: EntryId, kind: Kind) -> Self {
@@ -412,7 +405,7 @@ impl PreferencesPage {
             next_episode: plx_media::route::next_episode_mode(), deck_press: plx_media::route::deck_press(),
             dolby_vision: plx_media::route::dolby_vision_mode(),
             skip_interval: plx_media::route::skip_interval(), whose: Whose::now(),
-            p2p: plx_plex::plex::nuvio::p2p(), draft: None };
+            p2p: plx_plex::plex::nuvio::p2p().0 };
         s.rebuild(None);
         s
     }
@@ -441,22 +434,20 @@ impl PreferencesPage {
         self.deck_press = plx_media::route::deck_press();
         self.dolby_vision = plx_media::route::dolby_vision_mode();
         self.skip_interval = plx_media::route::skip_interval();
-        self.p2p = plx_plex::plex::nuvio::p2p();
+        self.p2p = plx_plex::plex::nuvio::p2p().0;
         self.whose = Whose::now();
         self.copy = copy_text(Subject::Page(self.state.kind), &self.state.io.status, self.state.direct_play, &self.whose.1).into_owned();
-        let draft = self.draft.as_ref().map(|d| d.text().to_owned());
         let inputs = FieldListInputs {
             kind: self.state.kind, quality: self.state.quality, direct_play: self.state.direct_play,
             prefs: self.txn.prefs(), busy: self.state.io.busy, show_retry: !self.state.io.status.is_empty(),
             read_only: self.whose.1.read_only(self.state.kind),
-            p2p: self.p2p.clone(), p2p_draft: draft.as_deref(),
+            p2p: self.p2p,
         };
         self.state.values = fields_of(&inputs).iter()
             .map(|&f| field_readout(f, inputs.quality, inputs.direct_play, inputs.prefs)).collect();
         if self.state.kind == Kind::Playback {
-            self.state.values.push(if self.p2p.0 { plx_platform::i18n::msg::settings_playback_p2p_on() }
+            self.state.values.push(if self.p2p { plx_platform::i18n::msg::settings_playback_p2p_on() }
                 else { plx_platform::i18n::msg::settings_playback_p2p_off() }.into());
-            self.state.values.push(p2p_server_value(self.p2p.1.as_deref(), draft.as_deref()));
         }
         self.form.table.compact = false; self.form.table.header_ink = theme::TEXT_READING; self.form.table.list_focused = true;
         self.form.set(field_form(&inputs), keep.as_ref());
@@ -477,71 +468,10 @@ impl PreferencesPage {
             }
             Some(Action::Open) | None => {}
             Some(Action::ToggleP2p) => {
-                self.txn.save_local(&mut self.state.io, Value::P2pEnabled(!self.p2p.0), fx);
+                self.txn.save_local(&mut self.state.io, Value::P2pEnabled(!self.p2p), fx);
                 self.rebuild_keeping();
                 fx.invalidate(plx_machine::present::Provenance::Input);
             }
-            Some(Action::EditP2pServer) => self.begin_url_edit(fx),
-        }
-    }
-    /// Raise the television's keyboard on the saved Server URL. The text lives in `draft` until OK
-    /// commits it, so BACK leaves the session exactly as it was.
-    fn begin_url_edit(&mut self, fx: &mut Effects<'_, InnerHost>) {
-        let url = self.p2p.1.clone().unwrap_or_default();
-        self.draft = Some(TextBuffer::new(url.clone(), url.len()));
-        // Addressed to the page ITSELF, which is what `Effects` already knows: the sink is built
-        // per instance (`Effects::from_handle` in `settings::RouteSurface::deliver`), so `fx.from()`
-        // is this page's own `InstanceId` and no `instance` field has to be carried. The surface
-        // re-addresses it to its own id on the way out — see `RouteSurface::forward`.
-        fx.push(Fx::Deliver(fx.from(), Delivery::Keyboard { up: true }));
-        self.rebuild_keeping();
-        fx.invalidate(plx_machine::present::Provenance::Input);
-    }
-    /// Put the keyboard away and, when `commit`, save the draft: an empty field means "probe the
-    /// engine's default ports" (`None`), which is what a person clearing the row is asking for.
-    fn end_url_edit(&mut self, commit: bool, fx: &mut Effects<'_, InnerHost>) {
-        let Some(draft) = self.draft.take() else { return };
-        fx.push(Fx::Deliver(fx.from(), Delivery::Keyboard { up: false }));
-        let typed = draft.into_text();
-        let url = Some(typed.trim().to_owned()).filter(|u| !u.is_empty());
-        if commit && url != self.p2p.1 {
-            self.txn.save_local(&mut self.state.io, Value::P2pServer(url), fx);
-        }
-        self.rebuild_keeping();
-        fx.invalidate(plx_machine::present::Provenance::Input);
-    }
-    /// Apply one edit to the URL draft: the row's read-out IS the draft, so the form is rebuilt to
-    /// show the keystroke.
-    fn type_edit(&mut self, edit: &TextEdit, fx: &mut Effects<'_, InnerHost>) {
-        if let Some(draft) = &mut self.draft {
-            draft.edit(edit);
-            self.rebuild_keeping();
-            fx.invalidate(plx_machine::present::Provenance::Input);
-        }
-    }
-    /// The keyboard's events while the Server URL is being typed. OK commits, BACK cancels, and
-    /// Up/Down commit and then move the cursor as they always would.
-    fn url_input<K>(&mut self, kind: &InputKind<K>, fx: &mut Effects<'_, InnerHost>) -> Handled {
-        match kind {
-            InputKind::Text(edit) => { self.type_edit(edit, fx); Handled::Yes }
-            InputKind::SystemKeyboard(false) => { self.end_url_edit(true, fx); Handled::Yes }
-            InputKind::Key { key, sym, edge, .. } if *edge != Edge::Up => {
-                // The remote edits the text itself, as it does in Search: the television's
-                // keyboard sends whole commits, a physical backspace arrives as a key.
-                let edit = match (*key, *sym) {
-                    (Key::Left, _) => Some(TextEdit::Left), (Key::Right, _) => Some(TextEdit::Right),
-                    (_, plx_ui::consts::SDLK_BACKSPACE) => Some(TextEdit::Backspace),
-                    (_, plx_ui::consts::SDLK_CLEAR) => Some(TextEdit::Clear), _ => None,
-                };
-                if let Some(edit) = edit { self.type_edit(&edit, fx); return Handled::Yes; }
-                match key {
-                    Key::Back => { self.end_url_edit(false, fx); Handled::Yes }
-                    Key::Ok => { self.end_url_edit(true, fx); Handled::Yes }
-                    Key::Up | Key::Down => { self.end_url_edit(true, fx); Handled::No }
-                    _ => Handled::No,
-                }
-            }
-            _ => Handled::No,
         }
     }
 }
@@ -642,25 +572,12 @@ fn field_readout(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
 }
 
 /// The inputs [`field_form`] builds a `Kind`'s field list from, so the builder reads no global.
-fn p2p_server_readout(url: Option<&str>) -> String {
-    url.filter(|u| !u.trim().is_empty()).map_or_else(|| plx_platform::i18n::msg::settings_playback_p2p_default().into(), str::to_owned)
-}
-fn p2p_server_value(url: Option<&str>, draft: Option<&str>) -> String {
-    draft.map_or_else(|| p2p_server_readout(url), |d| format!("{d}|"))
-}
 fn p2p_section(inputs: &FieldListInputs<'_>) -> FormSection<RowId, Action, SettingsPage> {
-    let (on, ref url) = inputs.p2p;
-    let editing = inputs.p2p_draft.is_some();
-    let readout = p2p_server_value(url.as_deref(), inputs.p2p_draft);
     FormSection::new(plx_platform::i18n::msg::settings_playback_p2p())
         .item(RowId::P2pToggle, RowKind::Toggle, Action::ToggleP2p,
             Row::new(plx_platform::i18n::msg::settings_playback_p2p_enable())
                 .detail(plx_platform::i18n::msg::settings_playback_p2p_enable_detail())
-                .toggle(on).dim(inputs.busy))
-        .item(RowId::P2pServer, RowKind::Button, Action::EditP2pServer,
-            Row::new(plx_platform::i18n::msg::settings_playback_p2p_server())
-                .detail(plx_platform::i18n::msg::settings_playback_p2p_server_detail())
-                .value(&readout).chevron(!editing).dim(inputs.busy))
+                .toggle(inputs.p2p).dim(inputs.busy))
 }
 
 struct FieldListInputs<'a> {
@@ -674,8 +591,7 @@ struct FieldListInputs<'a> {
     show_retry: bool,
     /// The field rows are shown but cannot be opened: no profile is seated to own a pick.
     read_only: bool,
-    p2p: (bool, Option<String>),
-    p2p_draft: Option<&'a str>,
+    p2p: bool,
 }
 /// The page's field list as a [`Form`]: each field a `Nav` item onto its picker page, plus the
 /// Audio & Subtitles Retry button, built from [`FieldListInputs`] alone.
@@ -810,10 +726,7 @@ impl Machine<InnerHost> for PreferencesPage {
                 Handled::Yes
             }
             ScreenEvent::Activate(key) => { self.activate(*key, fx); Handled::Yes }
-            // The Server URL's keyboard owns the remote while it is up: its events must not reach
-            // the form, which would move the cursor out from under the field.
-            ScreenEvent::Input(input) if self.draft.is_some() => self.url_input(&input.kind, fx),
-            ScreenEvent::WillLeave(_) | ScreenEvent::Unmount => { self.end_url_edit(false, fx); Handled::No }
+            ScreenEvent::WillLeave(_) | ScreenEvent::Unmount => { Handled::No }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Right, at_edge: true, .. }, .. }) => {
                 if let Some(key) = cx.focus.current.and_then(|k| form_right_target(&self.form, k.elem)) {
                     self.activate(key, fx);
@@ -856,7 +769,7 @@ impl Screen<InnerHost> for PreferencesPage {
 pub fn nav_items_for_test(kind: Kind, prefs: Option<&AudioPreferences>) -> Vec<(u32, SettingsPage)> {
     let mut form: FormTable<RowId, Action, SettingsPage> = FormTable::new(BAND);
     form.set(field_form(&FieldListInputs { kind, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs, busy: false, show_retry: false, read_only: false, p2p: (false, None), p2p_draft: None }), None);
+        prefs, busy: false, show_retry: false, read_only: false, p2p: false }), None);
     (0..form.table.n_rows() as usize).filter_map(|i| match form.binding_at(i)?.kind.clone() {
         RowKind::Nav(dest) => Some((form.key_at(i)?.0, dest)),
         _ => None,

@@ -105,7 +105,7 @@ fn every_marker_names_its_own_field() {
     check_row::<QualityPref>(PlaybackQuality::P720);
     check_row::<DirectPlayModePref>(DirectPlayMode::Forced);
     check_row::<SubtitleTonePref>(SubtitleTone::Grey);
-    check_row::<SubtitleSizePref>(SubtitleSize::Large);
+    check_row::<SubtitleSizePref>(SubtitleSize::ExtraLarge);
     check_row::<SubtitlePositionPref>(SubtitlePosition::High);
     check_row::<HdrOverlayBrightnessPref>(HdrOverlayBrightness::Half);
     check_row::<NextEpisodeModePref>(NextEpisodeMode::Off);

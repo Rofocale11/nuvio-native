@@ -171,9 +171,12 @@ fn run(rows: Vec<Row>) {
 /// `--screen` boot, a restored view, or a script.
 fn open_collections(w: &mut World) { w.open_collections(); }
 
-/// The Library, settled, with the Collections page on top (its listing unanswered).
+/// The Library, settled, with the Collections page on top and its listing still LOADING: the
+/// fetch is held, because the rig's server is a closed port whose fetch otherwise fails at once
+/// and lands the page Failed on its Retry control instead of unseated (`hold_listing_for_test`).
 fn collections_page(w: &mut World) {
     w.open_library();
+    w.bridge.stores.browse.borrow_mut().hold_listing_for_test();
     w.open_collections();
 }
 

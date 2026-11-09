@@ -831,7 +831,7 @@ fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite
     let base = fixture();
     let session = Session {
         prefs: Preferences {
-            subtitle_size: SubtitleSize::Large,
+            subtitle_size: SubtitleSize::ExtraLarge,
             subtitle_position: SubtitlePosition::High,
             skip_interval: SkipInterval::Seconds30,
             ..base.prefs.clone()
@@ -840,7 +840,7 @@ fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite
     };
     commit_fresh(&session, &mut transport);
     let stored = stored_preferences(&mut transport);
-    assert_eq!(stored["subtitle_size"], "large");
+    assert_eq!(stored["subtitle_size"], "extra_large");
 
     let back = Session {
         prefs: Preferences {

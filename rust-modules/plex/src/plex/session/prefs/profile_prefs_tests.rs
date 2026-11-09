@@ -130,7 +130,7 @@ fn an_unknown_size_falls_back_and_huge_round_trips() {
     let p = prefs_with(json!([record("kid", STAMP, json!({ "subtitle_size": "gigantic" }))]));
     assert_eq!(effective::<SubtitleSizePref>(&legacy, own_prefs(&p.profile_prefs, "kid", STAMP)), SubtitleSize::Large);
     let install: Preferences = serde_json::from_value(json!({ "subtitle_size": "gigantic" })).unwrap();
-    assert_eq!(SubtitleSizePref::get(&install), SubtitleSize::Medium);
+    assert_eq!(SubtitleSizePref::get(&install), SubtitleSize::Large);
 
     let p = prefs_with(json!([record("kid", STAMP, json!({ "subtitle_size": "huge" }))]));
     assert_eq!(effective::<SubtitleSizePref>(&legacy, own_prefs(&p.profile_prefs, "kid", STAMP)), SubtitleSize::Huge);
@@ -162,7 +162,7 @@ fn a_malformed_record_costs_only_itself() {
 fn own_value_then_legacy_then_default() {
     let fresh = Session::default();
     let seat = Seat::Seated { user: "kid".into(), stamp: STAMP.into() };
-    assert_eq!(stored_effective::<SubtitleSizePref>(&fresh, &seat), SubtitleSize::Medium, "a fresh install reads the default");
+    assert_eq!(stored_effective::<SubtitleSizePref>(&fresh, &seat), SubtitleSize::Large, "a fresh install reads the default");
     assert_eq!(stored_effective::<QualityPref>(&fresh, &seat), PlaybackQuality::Original, "an absent quality is Original");
 
     let mut tv = Session::default();
@@ -171,7 +171,7 @@ fn own_value_then_legacy_then_default() {
 
     tv.prefs.profile_prefs = prefs_with(json!([record("kid", STAMP, json!({ "subtitle_size": "small" }))])).profile_prefs;
     assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &seat), SubtitleSize::Small, "its own value wins");
-    assert_eq!(stored_effective::<SubtitlePositionPref>(&tv, &seat), SubtitlePosition::Low, "an unpicked setting still falls back");
+    assert_eq!(stored_effective::<SubtitlePositionPref>(&tv, &seat), SubtitlePosition::Auto, "an unpicked setting still falls back");
     let other = Seat::Seated { user: "sibling".into(), stamp: STAMP.into() };
     assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &other), SubtitleSize::Large, "another profile's pick is not seen");
     assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &Seat::Unseated), SubtitleSize::Large,
@@ -192,10 +192,10 @@ fn a_record_is_visible_only_under_its_own_non_empty_stamp() {
     let owner = |stamp: &str| Seat::Seated { user: String::new(), stamp: stamp.into() };
     assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &owner(STAMP)), SubtitleSize::Small);
     assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &owner(OTHER_STAMP)), SubtitleSize::ExtraLarge);
-    assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &owner("0000000000000000")), SubtitleSize::Medium,
+    assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &owner("0000000000000000")), SubtitleSize::Large,
         "a stamp no record carries sees nothing");
     let kid = Seat::Seated { user: "kid".into(), stamp: String::new() };
-    assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &kid), SubtitleSize::Medium, "an unstamped seat reads no record");
+    assert_eq!(stored_effective::<SubtitleSizePref>(&tv, &kid), SubtitleSize::Large, "an unstamped seat reads no record");
 }
 
 // ---- writing ----------------------------------------------------------------------------------
@@ -461,7 +461,7 @@ fn relogin_without_clear_hides_and_prunes_profile_data() {
     let now = stored();
     assert_eq!(now.prefs.profile_prefs.len(), 1, "the old sign-in's record is still on disk");
     assert_eq!(now.prefs.profile_prefs[0].account, old_stamp);
-    assert_eq!(stored_effective::<SubtitleSizePref>(&now, &current_seat()), SubtitleSize::Medium,
+    assert_eq!(stored_effective::<SubtitleSizePref>(&now, &current_seat()), SubtitleSize::Large,
         "and invisible: the new sign-in reads the fallback, not the old pick");
 
     // The first write under the new stamp prunes it.
@@ -471,7 +471,7 @@ fn relogin_without_clear_hides_and_prunes_profile_data() {
     assert_eq!(after.len(), 1, "{after:?}");
     assert_eq!(after[0].account, new_stamp, "only the new sign-in's record is left");
     assert_eq!(own_prefs(&after, "kid", &old_stamp), None);
-    assert_eq!(stored_effective::<SubtitleSizePref>(&stored(), &current_seat()), SubtitleSize::Medium,
+    assert_eq!(stored_effective::<SubtitleSizePref>(&stored(), &current_seat()), SubtitleSize::Large,
         "and the old size did not come back with the new record");
 }
 

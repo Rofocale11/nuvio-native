@@ -1,6 +1,7 @@
 //! The look of a text subtitle, as numbers: the viewer's size and position picks mapped to the
 //! constants the synthesized ASS header (`text_ass::header`) and the screen's HUD lift are built
-//! from. Pure; nothing here touches libass, a font or the screen.
+//! from. Nothing here touches libass, a font or the screen; the `Auto` position reads only the
+//! picture geometry the player publishes for the current frame.
 //!
 //! Media cannot use appkit and the synthesized header needs these values, so the mapping lives
 //! here and appkit reads it (plan `libass-text-subs` §2.5). [`today_baseline`] and its companions
@@ -29,11 +30,12 @@ pub const CAPTION_MAX_W: f32 = SCR_W * 0.75;
 /// The caption line count the block is bottom-anchored at; the Timing capsule's y is fixed by it.
 pub const CAPTION_ANCHOR_LINES: usize = 3;
 
-/// The gap between the bottom of the frame and the bottom of the bespoke caption block at the Low
-/// position (`SCR_H - SUB_BASE_Y`), and, symmetrically, the gap between the top of the frame and the
-/// top of the first line of a top-aligned cue ([`TOP_MARGIN_V`]). It is the geometry of the block
-/// the appkit draw places, which the Timing capsule is cleared against, so it is NOT the libass
-/// `MarginV` of the Low position: libass sets the same line on a different box ([`INK_TRIM`]).
+/// The gap the historical Low baseline put between the bottom of the frame and the bottom of the
+/// bespoke caption block (`SCR_H - SUB_BASE_Y`), and, symmetrically, the gap between the top of the
+/// frame and the top of the first line of a top-aligned cue ([`TOP_MARGIN_V`]). The Low rung itself
+/// now sits nearer the edge ([`LOW_GAP`]). It is the geometry of the block the appkit draw places,
+/// which the Timing capsule is cleared against, so it is NOT the libass `MarginV` of the Low
+/// position: libass sets the same line on a different box ([`INK_TRIM`]).
 pub const BOTTOM_GAP: f32 = 100.0;
 
 /// How much nearer the frame's bottom libass's `MarginV` sits than [`BOTTOM_GAP`], so the ink
@@ -58,8 +60,10 @@ pub const HUD_CONTROLS_TOP_Y: f32 = SCR_H - 288.0;
 /// The `MarginV` of the top-aligned styles: independent of the Position setting.
 pub const TOP_MARGIN_V: f32 = BOTTOM_GAP;
 
-/// Where the caption block sits with the transport DOWN, and the ceiling it lifts to with the
-/// transport UP (clear of the scrubber, buttons and tabs), before the Position pick.
+/// The historical caption baseline with the transport DOWN — the line every build before the
+/// Position preference drew, and the zero [`position_lift`] is measured from — and the ceiling a
+/// caption lifts to with the transport UP (clear of the scrubber, buttons and tabs), before the
+/// Position pick. The Low rung sits [`LOW_LIFT`] below the former.
 pub const SUB_BASE_Y: f32 = SCR_H - BOTTOM_GAP;
 pub const SUB_CEIL_Y: f32 = SCR_H - 300.0;
 
@@ -99,14 +103,49 @@ pub fn size_scale(size: SubtitleSize) -> f32 {
     }
 }
 
-/// How far ABOVE the Low baseline the viewer's Position pick lifts the caption. Low is the
-/// baseline every build before the preference drew, so it lifts nothing.
+/// The gap between the frame's bottom edge and the block's bottom at the Low rung. The rung used
+/// to sit `BOTTOM_GAP` (100 px) up, which did not read as "low"; 60 px is the owner's Low.
+pub const LOW_GAP: f32 = 60.0;
+
+/// The Low rung's lift from [`SUB_BASE_Y`]: negative, because Low sits **below** the historical
+/// baseline, `BOTTOM_GAP - LOW_GAP` nearer the frame's bottom edge.
+pub const LOW_LIFT: f32 = LOW_GAP - BOTTOM_GAP;
+
+/// The High rung's lift. It stood at 320 px, which reads too high on a television; 160 keeps a
+/// clear step above Middle without crowding the top third.
+pub const HIGH_LIFT: f32 = 160.0;
+
+/// How far ABOVE [`SUB_BASE_Y`] the viewer's Position pick lifts the caption. Middle lifts 60 px,
+/// exactly the step the owner picked; Low is the lowest rung, [`LOW_LIFT`] below the historical
+/// baseline. `Auto` follows the picture's own bottom edge, computed from the geometry the player
+/// publishes for the current frame — see [`auto_lift`].
 pub fn position_lift(position: SubtitlePosition) -> f32 {
     match position {
-        SubtitlePosition::Low => 0.0,
+        SubtitlePosition::Auto => auto_lift(),
+        SubtitlePosition::Low => LOW_LIFT,
         SubtitlePosition::Middle => 60.0,
-        SubtitlePosition::High => 320.0,
+        SubtitlePosition::High => HIGH_LIFT,
     }
+}
+
+/// The gap between the decoded picture's bottom edge and the caption block's bottom in the `Auto`
+/// position: the caption ends this far ABOVE the picture, inside the image rather than in the
+/// black bar under it.
+pub const AUTO_GAP: f32 = 12.0;
+
+/// The `Auto` lift for a picture whose bottom edge is at `picture_bottom` (logical px, from the
+/// top): the block's bottom lands [`AUTO_GAP`] above that edge, never lower on the frame than the
+/// Low rung, so a picture that fills the height is exactly Low.
+pub fn auto_lift_for(picture_bottom: f32) -> f32 {
+    (SUB_BASE_Y + AUTO_GAP - picture_bottom).max(LOW_LIFT)
+}
+
+/// The `Auto` lift for the picture the player has published: the decoded aspect fitted into the
+/// full-screen window, including non-square pixels. Before the first metadata callback the
+/// viewport is the whole window, so the lift is the Low rung.
+pub fn auto_lift() -> f32 {
+    let vp = crate::player::video_viewport(SCR_W as i32, SCR_H as i32);
+    auto_lift_for((vp.y + vp.height) as f32)
 }
 
 /// The pixel width a caption line wraps at for the viewer's size `scale`.
@@ -153,7 +192,7 @@ pub struct TextStyle {
 
 impl Default for TextStyle {
     fn default() -> Self {
-        Self { size: SubtitleSize::Medium, position: SubtitlePosition::Low }
+        Self { size: SubtitleSize::default(), position: SubtitlePosition::default() }
     }
 }
 
@@ -168,9 +207,16 @@ impl TextStyle {
     }
 
     /// A number that differs for every distinct pair of picks, so a stored copy is stale exactly
-    /// when the header it was built for no longer matches.
+    /// when the header it was built for no longer matches. The `Auto` position also folds in the
+    /// lift its picture geometry yields, so a header synthesized before the first metadata callback
+    /// (a full-height viewport) is restyled once the film's real aspect lands.
     pub fn generation(&self) -> u32 {
-        self.size.index() as u32 * SubtitlePosition::LADDER.len() as u32 + self.position.index() as u32
+        let auto = if self.position == SubtitlePosition::Auto {
+            // The lift can be negative (a full-height picture is the Low rung), so fold it into a
+            // 10-bit unsigned window rather than casting a negative float.
+            (auto_lift().round().clamp(-512.0, 511.0) as i32 + 512) as u32
+        } else { 0 };
+        self.size.index() as u32 * 4096 + self.position.index() as u32 * 1024 + auto
     }
 }
 
@@ -188,9 +234,13 @@ pub struct TodayBaseline {
     pub floor: f32,
 }
 
-/// Port of `player_hud::caption_geometry(hud_up)` for a given `scale` and `position`.
+/// Port of `player_hud::caption_geometry(hud_up)` for a given `scale` and `position`. Only a lift
+/// ABOVE the historical baseline applies with the transport up: a rung below it (Low, or Auto on a
+/// full-height picture) must not push the caption under the scrubber, where the fit rule would
+/// shrink it to clear the floor.
 pub fn today_baseline(position: SubtitlePosition, scale: f32, hud_up: bool) -> TodayBaseline {
-    let baseline = (if hud_up { SUB_CEIL_Y } else { SUB_BASE_Y }) - position_lift(position);
+    let lift = position_lift(position);
+    let baseline = if hud_up { SUB_CEIL_Y - lift.max(0.0) } else { SUB_BASE_Y - lift };
     let floor = if hud_up { SUB_CEIL_Y } else { CAPTION_FLOOR_Y };
     TodayBaseline { scale, baseline, floor }
 }
@@ -289,10 +339,30 @@ mod tests {
     fn scales_and_lifts_are_todays() {
         let scales: Vec<f32> = SubtitleSize::LADDER.iter().map(|s| size_scale(*s)).collect();
         assert_eq!(scales, [0.78, 1.0, 1.25, 1.5, 1.8]);
-        let lifts: Vec<f32> = SubtitlePosition::LADDER.iter().map(|p| position_lift(*p)).collect();
-        assert_eq!(lifts, [0.0, 60.0, 320.0]);
+        // Auto is the picture-driven rung: with no published geometry the viewport is the whole
+        // window, so it rests on the Low rung (which now sits 40 px below the historical baseline).
+        assert_eq!(LOW_GAP, 60.0);
+        assert_eq!(LOW_LIFT, -40.0);
+        assert_eq!(position_lift(SubtitlePosition::Auto), LOW_LIFT);
+        assert_eq!(position_lift(SubtitlePosition::Low), LOW_LIFT);
+        assert_eq!(position_lift(SubtitlePosition::Middle), 60.0);
+        assert_eq!(position_lift(SubtitlePosition::High), 160.0);
         assert_eq!((SUB_BASE_Y, SUB_CEIL_Y, HUD_LIFT), (980.0, 780.0, 200.0));
         assert_eq!(CAPSULE_BOTTOM_Y, 836.0);
+    }
+
+    #[test]
+    fn auto_rides_just_above_the_picture_edge() {
+        // A 2.39:1 picture fitted into 1920x1080: 803 px tall, so its bottom edge is at 941.5.
+        // The block's bottom lands 12 px above it: 980 + 12 - 941.5.
+        assert!((auto_lift_for(941.5) - 50.5).abs() < 0.01);
+        // A picture that fills the height never pushes the block below the Low rung.
+        assert_eq!(auto_lift_for(SCR_H), LOW_LIFT);
+        // A pillarboxed 4:3 picture also fills the height.
+        assert_eq!(auto_lift_for(1080.0), LOW_LIFT);
+        assert_eq!(SubtitlePosition::LADDER[0], SubtitlePosition::Auto);
+        assert_eq!(SubtitlePosition::default(), SubtitlePosition::Auto);
+        assert_eq!(SubtitleSize::default(), SubtitleSize::Large);
     }
 
     #[test]
@@ -314,11 +384,16 @@ mod tests {
     #[test]
     fn bottom_anchor_follows_position() {
         // BOTTOM_GAP less INK_TRIM, plus the Position lift.
-        assert_eq!(bottom_margin_v(SubtitlePosition::Low), 97);
+        let auto = auto_lift();
+        assert_eq!(bottom_margin_v(SubtitlePosition::Auto), (97.0 + auto).round() as u32);
+        assert_eq!(bottom_margin_v(SubtitlePosition::Low), 57);
         assert_eq!(bottom_margin_v(SubtitlePosition::Middle), 157);
-        assert_eq!(bottom_margin_v(SubtitlePosition::High), 417);
-        assert_eq!(bottom_anchor_y(SubtitlePosition::Low), SUB_BASE_Y + INK_TRIM);
-        assert_eq!(bottom_anchor_y(SubtitlePosition::High), 663.0);
+        assert_eq!(bottom_margin_v(SubtitlePosition::High), 257);
+        assert_eq!(bottom_anchor_y(SubtitlePosition::Low), SUB_BASE_Y + INK_TRIM + 40.0);
+        assert_eq!(bottom_anchor_y(SubtitlePosition::High), 823.0);
+        // Low sits its 60 px gap above the frame's bottom edge; the block never reaches the floor.
+        assert_eq!(SCR_H - bottom_anchor_y(SubtitlePosition::Low), LOW_GAP - INK_TRIM);
+        assert!(bottom_anchor_y(SubtitlePosition::Low) < CAPTION_FLOOR_Y);
     }
 
     #[test]
@@ -328,22 +403,25 @@ mod tests {
             let down = today_baseline(position, 1.0, false);
             assert_eq!((down.baseline, down.floor), (980.0 - lift, 1026.0));
             let up = today_baseline(position, 1.0, true);
-            assert_eq!((up.baseline, up.floor), (780.0 - lift, 780.0));
-            // The HUD moves the baseline by the same 200 px at every position.
-            assert_eq!(down.baseline - up.baseline, HUD_LIFT);
+            // A rung below the historical baseline (Low) does not lower the caption under the
+            // scrubber; a rung above it lifts further, as it always has.
+            assert_eq!((up.baseline, up.floor), (780.0 - lift.max(0.0), 780.0));
+            let hud_motion = if lift >= 0.0 { HUD_LIFT } else { HUD_LIFT - lift };
+            assert_eq!(down.baseline - up.baseline, hud_motion);
         }
     }
 
     #[test]
     fn today_ink_baseline_sits_under_the_block_top() {
-        // 36 px face: line top 932, drawn at 936, baseline ceil(34.875) = 35 rows down.
-        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.0, false), 971.0);
-        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.0, true), 771.0);
-        assert_eq!(today_ink_baseline(SubtitlePosition::High, 1.0, false), 651.0);
+        // 36 px face: line top 932 (Low: 892, 40 px lower), drawn at 936, baseline ceil(34.875)
+        // = 35 rows down.
+        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.0, false), 1011.0);
+        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.0, true), 771.0, "the HUD ceiling is not lowered by a low rung");
+        assert_eq!(today_ink_baseline(SubtitlePosition::High, 1.0, false), 811.0);
         // 28 / 45 / 54 px faces, pitch 37.44 / 60 / 72.
-        assert!((today_ink_baseline(SubtitlePosition::Low, 0.78, false) - 974.56).abs() < 1e-3);
-        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.25, false), 968.0);
-        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.5, false), 965.0);
+        assert!((today_ink_baseline(SubtitlePosition::Low, 0.78, false) - 1014.56).abs() < 1e-3);
+        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.25, false), 1008.0);
+        assert_eq!(today_ink_baseline(SubtitlePosition::Low, 1.5, false), 1005.0);
     }
 
     #[test]
@@ -363,7 +441,7 @@ mod tests {
                 assert!(seen.insert(TextStyle { size, position }.generation()), "{size:?} {position:?}");
             }
         }
-        assert_eq!(seen.len(), 15);
-        assert_eq!(TextStyle::default().generation(), TextStyle { size: SubtitleSize::Medium, position: SubtitlePosition::Low }.generation());
+        assert_eq!(seen.len(), 20);
+        assert_eq!(TextStyle::default().generation(), TextStyle { size: SubtitleSize::Large, position: SubtitlePosition::Auto }.generation());
     }
 }

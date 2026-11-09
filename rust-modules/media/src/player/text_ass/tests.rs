@@ -443,14 +443,16 @@ fn style_lines(header: &str) -> Vec<&str> {
 
 #[test]
 fn header_matches_the_plan() {
-    let h = header(&TextStyle::default());
+    // The plan's numbers are the Medium face at the Low line; the shipped defaults moved to Large
+    // and Auto, so the picks are stated here rather than taken from the defaults.
+    let h = header(&TextStyle { size: SubtitleSize::Medium, position: SubtitlePosition::Low });
     assert!(h.starts_with("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 1\nScaledBorderAndShadow: yes\n"));
     assert!(h.ends_with("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"));
     let lines = style_lines(&h);
     assert_eq!(lines.len(), 9);
     assert_eq!(
         lines[0],
-        "Style: Default,PlxSubs,51.49,&H00FFFFFF,&H00FFFFFF,&H26000000,&HFF000000,0,0,0,0,100,100,0,0,1,2,0,2,580,580,97,-1"
+        "Style: Default,PlxSubs,51.49,&H00FFFFFF,&H00FFFFFF,&H26000000,&HFF000000,0,0,0,0,100,100,0,0,1,2,0,2,580,580,57,-1"
     );
     assert!(h.contains("Style: An8,PlxSubs,51.49,&H00FFFFFF,&H00FFFFFF,&H26000000,&HFF000000,0,0,0,0,100,100,0,0,1,2,0,8,580,580,100,-1"));
     assert!(h.contains(",0,0,1,2,0,5,580,580,0,-1\n"), "Middle ignores MarginV");
@@ -481,11 +483,11 @@ fn header_follows_the_viewers_size_and_position() {
     let h = header(&TextStyle { size: SubtitleSize::ExtraLarge, position: SubtitlePosition::High });
     let default = style_lines(&h)[0].trim_start_matches("Style: ").split(',').map(str::to_string).collect::<Vec<_>>();
     assert_eq!(default[2], "77.23", "36 * 1.5 * 1.4302");
-    assert_eq!((default[19].as_str(), default[20].as_str(), default[21].as_str()), ("390", "390", "417"));
+    assert_eq!((default[19].as_str(), default[20].as_str(), default[21].as_str()), ("390", "390", "257"));
     let an8 = h.lines().find(|l| l.starts_with("Style: An8,")).unwrap();
     assert!(an8.contains(",8,390,390,100,-1"), "the top margin is independent of Position: {an8}");
     let an1 = h.lines().find(|l| l.starts_with("Style: An1,")).unwrap();
-    assert!(an1.contains(",1,390,390,417,-1"), "{an1}");
+    assert!(an1.contains(",1,390,390,257,-1"), "{an1}");
     let small = header(&TextStyle { size: SubtitleSize::Small, position: SubtitlePosition::Middle });
     assert!(style_lines(&small)[0].contains(",40.16,"), "{}", style_lines(&small)[0]);
     assert!(style_lines(&small)[0].contains(",2,664,664,157,-1"));

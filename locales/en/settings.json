@@ -649,11 +649,11 @@
   },
   "settings.playback.subtitle_size.medium": {
     "value": "Medium",
-    "description": "Subtitle size picker option: the default client-rendered caption size."
+    "description": "Subtitle size picker option: a medium client-rendered caption size."
   },
   "settings.playback.subtitle_size.large": {
     "value": "Large",
-    "description": "Subtitle size picker option: a larger client-rendered caption size."
+    "description": "Subtitle size picker option: the default client-rendered caption size."
   },
   "settings.playback.subtitle_size.extra_large": {
     "value": "Extra Large",
@@ -663,9 +663,13 @@
     "value": "Subtitle position",
     "description": "Settings, consent or sign-in UI: how high above the bottom edge the client-rendered subtitle caption sits."
   },
+  "settings.playback.subtitle_position.auto": {
+    "value": "Auto",
+    "description": "Subtitle position picker option (the default): the caption sits just under the picture's own lower edge, in the black bar of a widescreen film."
+  },
   "settings.playback.subtitle_position.low": {
     "value": "Low",
-    "description": "Subtitle position picker option: the caption sits near the bottom edge (the default)."
+    "description": "Subtitle position picker option: the caption sits near the bottom edge."
   },
   "settings.playback.subtitle_position.middle": {
     "value": "Middle",
@@ -737,18 +741,6 @@
     "value": "Offer torrents in the Source Picker.",
     "description": "Settings > Playback: what the Enable P2P toggle does."
   },
-  "settings.playback.p2p_server": {
-    "value": "Server URL",
-    "description": "Settings > Playback: the address of the streaming server torrents play through."
-  },
-  "settings.playback.p2p_server.detail": {
-    "value": "Empty uses the local engine's ports.",
-    "description": "Settings > Playback: what the Server URL field is for."
-  },
-  "settings.playback.p2p_default": {
-    "value": "Default",
-    "description": "Settings > Playback Server URL read-out when no address is set: the local engine's default ports."
-  },
   "settings.playback.p2p_on": {
     "value": "On",
     "description": "Settings > Playback read-out for the P2P switch when it is on."
@@ -802,8 +794,8 @@
     "description": "Explanation under the title of the Subtitle size picker. Picture subtitles (PGS, VobSub) and styled (ASS/SSA) subtitles carry their own geometry, so the setting does not reach them; the same control is the Size row under Style on the Subtitles tab of the player's track menu."
   },
   "settings.playback.subtitle_position.copy": {
-    "value": "How high subtitles sit on the picture. Picture and styled subtitles keep their own position. Also under Style in the player's Subtitles menu.",
-    "description": "Explanation under the title of the Subtitle position picker. Picture subtitles (PGS, VobSub) and styled (ASS/SSA) subtitles carry their own geometry, so the setting does not reach them; the same control is the Position row under Style on the Subtitles tab of the player's track menu."
+    "value": "How high subtitles sit on the picture. Auto follows the picture's own edge, so a widescreen film puts them in the lower black bar. Picture and styled subtitles keep their own position. Also under Style in the player's Subtitles menu.",
+    "description": "Explanation under the title of the Subtitle position picker. Auto (the default) rides just under the decoded picture's bottom edge; Low, Middle and High are fixed heights. Picture subtitles (PGS, VobSub) and styled (ASS/SSA) subtitles carry their own geometry, so the setting does not reach them; the same control is the Position row under Style on the Subtitles tab of the player's track menu."
   },
   "settings.playback.next_episode.copy": {
     "value": "Up Next countdown shows a Next episode button when the credits start. After credits lets them play, then starts the next episode. Off closes the player instead.",

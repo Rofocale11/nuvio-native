@@ -531,6 +531,19 @@ change capability only; they do not bypass a profile's `Off`.
 
 ### Subtitles
 
+- Look: the viewer's Settings > Playback picks (and the player's Subtitles → Style page) set a text
+  caption's size and vertical position for the profile. The shipped defaults are **Large** and
+  **Auto**: at Auto the block's bottom ends 12 px ABOVE the decoded picture's own bottom edge
+  (`text_style::AUTO_GAP`), inside the image rather than in the black bar under it, so a 2.39:1
+  film keeps its captions just clear of the picture edge; a picture that fills the frame is exactly
+  Low. The fixed rungs: Low sits 60 px above the frame's bottom (`text_style::LOW_GAP`), Middle
+  lifts 60 px from the historical baseline, High 160 px. The picture edge comes from the published
+  geometry (`player::video_viewport`: ACB's `sourceInfo` raster and pixel aspect, else the coded
+  raster), and the synthesized ASS header's `MarginV` carries the same value, so libass text and
+  the fallback caption draw agree. The lift is part of `TextStyle::generation`, so a header built
+  before the first metadata callback is restyled once the real aspect lands. Image (PGS/VobSub)
+  captions and native ASS/SSA keep their authored placement. Black bars baked into a full-frame
+  encode are pixels, not geometry, so Auto reads such a picture as full-height and lands on Low.
 - Embedded (SRT/ASS/PGS/VOBSUB/mov_text/WebVTT in the container): drawn by the app from the
   demuxer; they only need correct `Stream(type 3)` rows in file order (the probe gives them).
 - External (addon subtitles, OpenSubtitles): give each a `Stream(type 3)` row with

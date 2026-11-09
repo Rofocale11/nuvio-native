@@ -192,26 +192,25 @@ fn every_field_reports_the_page_whose_list_shows_it() {
     let prefs = AudioPreferences::default();
     for kind in [Kind::Playback, Kind::AudioSubtitles] {
         let inputs = FieldListInputs { kind, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-            prefs: Some(&prefs), busy: false, show_retry: false, read_only: false, p2p: (false, None), p2p_draft: None };
+            prefs: Some(&prefs), busy: false, show_retry: false, read_only: false, p2p: false };
         for &field in fields_of(&inputs) {
             assert_eq!(field.kind(), Some(kind), "{field:?} is listed by {kind:?}");
         }
     }
     let audio = FieldListInputs { kind: Kind::AudioSubtitles, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs: Some(&prefs), busy: false, show_retry: false, read_only: false, p2p: (false, None), p2p_draft: None };
+        prefs: Some(&prefs), busy: false, show_retry: false, read_only: false, p2p: false };
     assert_eq!(fields_of(&audio), &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles]);
 }
 
-/// The Server URL row: the saved address while it is idle, else the local engine's default ports
-/// — an empty field is a choice, not a missing value. While a draft is live the row shows the
-/// draft plus a caret instead; that composition is [`p2p_server_value`], asserted below through
-/// the page's own state.
+/// The P2P section is the enable toggle alone: the engine's Server URL is no longer a Settings
+/// row. A previously saved address still reaches the engine through the session restore path.
 #[test]
-fn the_server_url_row_shows_the_saved_address_or_the_default() {
-    assert_eq!(p2p_server_readout(Some("http://10.0.0.2:2710")), "http://10.0.0.2:2710");
-    assert_eq!(p2p_server_readout(Some("   ")), plx_platform::i18n::msg::settings_playback_p2p_default());
-    assert_eq!(p2p_server_readout(None), plx_platform::i18n::msg::settings_playback_p2p_default());
-    assert_eq!(p2p_server_value(Some("http://10.0.0.2:2710"), Some("http://10.0.0.3:2710")), "http://10.0.0.3:2710|");
+fn the_playback_list_has_no_server_url_row() {
+    let _serial = plx_base::testlock::serial();
+    let _session = plx_plex::plex::session::TempSession::new("pref-p2p-rows");
+    let page = PreferencesPage::new(EntryId(0), Kind::Playback);
+    let toggle = page.form.index_of(&RowId::P2pToggle).expect("the Enable P2P toggle");
+    assert_eq!((toggle + 1) as i32, page.form.table.n_rows(), "the toggle is the P2P section's only row");
 }
 
 /// The Continue Watching row: shipped default is Open details, the picker lists the two options

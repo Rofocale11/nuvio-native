@@ -157,7 +157,10 @@ fn caption_geometry_for(
     hud_up: bool,
 ) -> (f32, f32, f32) {
     let scale = size_scale(size);
-    let baseline = (if hud_up { SUB_CEIL_Y } else { SUB_BASE_Y }) - position_lift(position);
+    // Only a lift ABOVE the historical baseline applies with the transport up: a rung below it
+    // (Low, or Auto on a full-height picture) must not push the caption under the scrubber.
+    let lift = position_lift(position);
+    let baseline = if hud_up { SUB_CEIL_Y - lift.max(0.0) } else { SUB_BASE_Y - lift };
     let floor = if hud_up { SUB_CEIL_Y } else { CAPTION_FLOOR_Y };
     (scale, baseline, floor)
 }
@@ -3606,7 +3609,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(n, 30);
+        assert_eq!(n, 40, "4 positions x 5 sizes x HUD up/down");
     }
 
     /// **A 1-3 line caption lays out exactly as it did before the fit rule**: 36 px at the

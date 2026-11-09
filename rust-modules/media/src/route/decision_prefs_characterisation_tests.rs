@@ -780,12 +780,17 @@ fn live_cell_indices_are_pinned() {
         restore_subtitle_size(size);
         assert_eq!(SUBTITLE_SIZE.raw(), index, "{size:?}");
     }
-    assert_eq!(SubtitleSize::from_index(250), SubtitleSize::Medium);
-    for (position, index) in [(SubtitlePosition::Low, 0), (SubtitlePosition::Middle, 1), (SubtitlePosition::High, 2)] {
+    assert_eq!(SubtitleSize::from_index(250), SubtitleSize::Large);
+    for (position, index) in [
+        (SubtitlePosition::Auto, 0),
+        (SubtitlePosition::Low, 1),
+        (SubtitlePosition::Middle, 2),
+        (SubtitlePosition::High, 3),
+    ] {
         restore_subtitle_position(position);
         assert_eq!(SUBTITLE_POSITION.raw(), index, "{position:?}");
     }
-    assert_eq!(SubtitlePosition::from_index(250), SubtitlePosition::Low);
+    assert_eq!(SubtitlePosition::from_index(250), SubtitlePosition::Auto);
 
     // quality: the index is the rung's position in QUALITY_LADDER (Auto first, Original second)
     for (q, index) in [
@@ -856,7 +861,7 @@ fn unrestored_cells_hold_their_seeds() {
     assert_eq!(NEXT_EPISODE_MODE.raw(), 0);
     assert_eq!(SKIP_INTERVAL.raw(), 1);
     assert_eq!(DECK_PRESS.raw(), 0);
-    assert_eq!(SUBTITLE_SIZE.raw(), 1);
+    assert_eq!(SUBTITLE_SIZE.raw(), 2);
     assert_eq!(SUBTITLE_POSITION.raw(), 0);
     assert_eq!(QUALITY.raw(), 1);
     assert_eq!(quality(), Quality::Original);
@@ -864,8 +869,8 @@ fn unrestored_cells_hold_their_seeds() {
     assert_eq!(next_episode_mode(), NextEpisodeMode::Countdown);
     assert_eq!(skip_interval(), SkipInterval::Seconds10);
     assert_eq!(deck_press(), DeckPress::Details);
-    assert_eq!(subtitle_size(), SubtitleSize::Medium);
-    assert_eq!(subtitle_position(), SubtitlePosition::Low);
+    assert_eq!(subtitle_size(), SubtitleSize::Large);
+    assert_eq!(subtitle_position(), SubtitlePosition::Auto);
     assert_eq!(crate::player::subtitle_tone(), SubtitleTone::White);
     assert_eq!(crate::player::audio_enhancements(), AudioEnhancements::NONE);
 }

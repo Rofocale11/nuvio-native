@@ -69,8 +69,9 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
 - Source picker groups streams by addon on both Detail and in-player menu; Plex quality ladder
   removed.
 - Seeder counts shown on the in-player source page and leading stream details.
-- P2P streaming toggle in Playback settings; the server URL is optional (the C engine needs
-  none) and empty uses the local engine's ports. One engine ships: the in-process C engine
+- P2P streaming toggle in Playback settings; there is no server-address row (the C engine needs
+  none — it probes its own default ports; an address saved by an older build is still read back).
+  One engine ships: the in-process C engine
   (`libsbengine.so`); the legacy Node streaming server (`js-service/server.js`) is retired
   and no longer spawned — when the C engine cannot load, torrents are unavailable instead.
 - Buffer tuning for low-RAM TVs (50 MiB video / 4 MiB audio), skip disk cache when
