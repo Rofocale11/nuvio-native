@@ -3798,11 +3798,10 @@ mod tests {
             e.caption
         );
         assert!(
-            e.panel.contains("no usable video transcode target"),
+            e.panel.contains("the addon library has no transcoder"),
             "{}",
             e.panel
         );
-        assert!(e.panel.contains("server has no Plex Pass"), "{}", e.panel);
         assert!(e.no_pass, "the read-out draws the capsule from this flag");
         // …and never as a cause — h264 encoding is free everywhere (audit row 1). The read-out
         // reason carries no Pass words at all: the capsule line states the fact separately.
@@ -4121,7 +4120,7 @@ mod tests {
         );
         assert!(e.no_pass, "so the read-out draws the capsule…");
         assert!(
-            e.panel.contains("server has no Plex Pass"),
+            e.panel.contains("the addon library has no transcoder"),
             "…and the panel states the fact: {}",
             e.panel
         );

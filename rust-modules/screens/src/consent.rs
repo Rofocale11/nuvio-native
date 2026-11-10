@@ -41,7 +41,7 @@ use super::registry::{alert_index, band_index, word, AppFx, ConsentCmd, LoopReq,
 
 // ---- the words -------------------------------------------------------------------------------
 
-use super::legal::CONTACT_EMAIL;
+use super::legal::CONTACT_URL;
 
 /// Should the app put the sign-in's question on screen?
 ///
@@ -1418,8 +1418,8 @@ fn preview() -> String {
 /// ever turned back on, so "off" really does mean the old handle is gone.
 fn analytics_id_document() -> String {
     match consent::current().and_then(|c| c.install_id).as_deref() {
-        Some(id) => plx_platform::i18n::msg::settings_consent_analytics_present(CONTACT_EMAIL, id),
-        None => plx_platform::i18n::msg::settings_consent_analytics_absent(CONTACT_EMAIL),
+        Some(id) => plx_platform::i18n::msg::settings_consent_analytics_present(CONTACT_URL, id),
+        None => plx_platform::i18n::msg::settings_consent_analytics_absent(CONTACT_URL),
     }
 }
 
@@ -1435,8 +1435,8 @@ fn analytics_id_document() -> String {
 /// owed the reason.
 fn errors_id_document() -> String {
     match consent::current().and_then(|c| c.errors_id).as_deref() {
-        Some(id) => plx_platform::i18n::msg::settings_consent_errors_present(CONTACT_EMAIL, id),
-        None => plx_platform::i18n::msg::settings_consent_errors_absent(CONTACT_EMAIL),
+        Some(id) => plx_platform::i18n::msg::settings_consent_errors_present(CONTACT_URL, id),
+        None => plx_platform::i18n::msg::settings_consent_errors_absent(CONTACT_URL),
     }
 }
 

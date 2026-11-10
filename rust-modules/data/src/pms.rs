@@ -2253,7 +2253,7 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope) -> HubBuild {
 //
 // The third only appears with a second server, and every piece of it was process-global before:
 // **a verdict belongs to a SOURCE, not to Home.** One `?` chain meant a dead share aborted the whole
-// build and nothing committed — on a cold boot, a whole-screen "Can't reach your Plex server" about
+// build and nothing committed — on a cold boot, a whole-screen "Can't reach Nuvio" about
 // a library that was answering perfectly well. One in-flight latch meant a share that takes eight
 // seconds to time out held the owned server's retry behind it. One backoff meant the ladder a dead
 // share had climbed to 30 s was the ladder every other source then waited on.

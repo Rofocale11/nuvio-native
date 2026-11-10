@@ -1096,7 +1096,7 @@ impl LogicalState for RootState {
 /// this is gathered and [`root_form`] for how it becomes a row.
 struct PlaintextRowInput {
     machine: ServerMachineId,
-    /// The server's own name, or the app's fallback ("Plex server") when none is known.
+    /// The server's own name, or the app's fallback ("server") when none is known.
     name: String,
     /// `name` is a real machine name (Server text, may elide); false when it is the app's own
     /// fallback string, which is App text and must never elide.

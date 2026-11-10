@@ -2713,9 +2713,11 @@ mod tests {
         }
     }
 
-    /// The old single line was 1222px wide for this real Belarusian message under the Unicode
+    /// The old single line was 1222px wide for the Belarusian sign-in failure under the Unicode
     /// fixture metrics: centred in an 884px column, its right edge landed at 1993, outside even
-    /// the 1920px canvas. The old 44px hit box also could not contain two BODY lines.
+    /// the 1920px canvas. **The copy changed with the fork** (the reasons name Nuvio now and are
+    /// shorter), so the premise is re-derived instead of quoted: at least one shipped reason must
+    /// still be wider than the QR column, or this guard would grade nothing.
     #[test]
     fn translated_waiting_status_wraps_completely_inside_the_qr_column() {
         use plx_platform::i18n::{LocaleContext, Preference};
@@ -2732,10 +2734,17 @@ mod tests {
         let measure = UnicodeMeasure;
         let route = RouteLayout::screen();
         let belarusian = LocaleContext::resolve(Preference::Be, None, None, None, None);
-        let old_text_w = measure.width(plx_platform::i18n::msg::settings_login_unreachable_c_in(&belarusian), theme::size::BODY, false);
-        let old_row_w = old_text_w + 30.0 + theme::space::SM;
-        assert!(route.content.cx() + old_row_w * 0.5 > Rect::FULL.w,
-            "the actual translated sentence reproduces the former off-canvas row");
+        let widest = [
+            plx_platform::i18n::msg::settings_login_unreachable_c_in(&belarusian),
+            plx_platform::i18n::msg::settings_login_unreachable_c_in(&plx_platform::i18n::LocaleContext::resolve(
+                plx_platform::i18n::Preference::Hu, None, None, None, None)),
+        ]
+        .into_iter()
+        .map(|m| measure.width(m, theme::size::BODY, false))
+        .fold(0.0f32, f32::max);
+        let column = qr_layout(route, plx_platform::i18n::msg::settings_login_unreachable_c_in(&belarusian), &measure).status.w;
+        assert!(widest > column,
+            "the widest shipped reason is {widest}px in a {column}px column: wrapping must still matter");
         for locale in plx_platform::i18n::SHIPPED
             .into_iter()
             .map(|p| LocaleContext::resolve(p, None, None, None, None))
@@ -3562,7 +3571,7 @@ mod tests {
     fn a_pending_incident_is_resolved_once_by_the_screen_that_shows_it() {
         let _serial = plx_base::testlock::serial();
         let mut failed = snapshot(Phase::Error, 0, "");
-        failed.error = Arc::from("Can’t reach Plex");
+        failed.error = Arc::from("Can’t reach Nuvio");
         failed.incident = Some(incident(auth::owner::IncidentState::Pending,
             plx_telemetry::telemetry::incident::IncidentKind::PinCreate));
         let mut s = LoginScreen::new(EntryId(0), failed.read());
@@ -3616,7 +3625,7 @@ mod tests {
 
     fn failed_with(state: auth::owner::IncidentState) -> auth::owner::SessionSnapshot {
         let mut failed = snapshot(Phase::Error, 0, "");
-        failed.error = Arc::from("Can’t reach Plex");
+        failed.error = Arc::from("Can’t reach Nuvio");
         failed.incident = Some(incident(state, plx_telemetry::telemetry::incident::IncidentKind::PinCreate));
         failed
     }
@@ -4033,7 +4042,7 @@ mod tests {
     fn screen_with(phase: Phase, state: auth::owner::IncidentState,
         kind: plx_telemetry::telemetry::incident::IncidentKind) -> LoginScreen {
         let mut s = bare_screen(phase, 0.0);
-        s.error = Arc::from("Can’t reach Plex");
+        s.error = Arc::from("Can’t reach Nuvio");
         s.report.offer = Some(incident(state, kind));
         s.report.support = CString::new("PlxNative 0 · webOS 0 · set · pin_create").unwrap();
         s

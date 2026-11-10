@@ -204,7 +204,7 @@
     "description": "browse home continue"
   },
   "browse.home.failed": {
-    "value": "Can’t reach your Plex server",
+    "value": "Can’t reach Nuvio",
     "description": "browse home failed"
   },
   "browse.home.empty": {
@@ -698,11 +698,11 @@
     "description": "Sign-in read-out reason when the account has no server: two sentences on two lines (the line break is deliberate and the read-out honours it); {account} is the signed-in account's name, shortened to fit the first line. Without a name the plain no_servers reason is used."
   },
   "browse.auth.refused": {
-    "value": "Your addon service refused the connection — check its network access settings.",
+    "value": "Nuvio refused the connection — check its network access settings.",
     "description": "browse auth refused"
   },
   "browse.auth.unreachable": {
-    "value": "Couldn't reach any addon service — check the connection.",
+    "value": "Couldn't reach Nuvio — check the connection.",
     "description": "browse auth unreachable"
   },
   "browse.auth.plex_unreachable": {
@@ -718,7 +718,7 @@
     "description": "browse auth offline_profile"
   },
   "browse.auth.insecure": {
-    "value": "Found your addons, but couldn’t connect securely over HTTPS. Check your connection.",
+    "value": "Found Nuvio, but couldn’t connect securely over HTTPS. Check your connection.",
     "description": "browse auth insecure"
   },
   "browse.auth.no_access": {
@@ -1610,12 +1610,12 @@
     "description": "Diagnostics panel: open http failed"
   },
   "browse.diagnostics.no_plex_pass": {
-    "value": "{version} · no Plex Pass",
+    "value": "{version} · direct play only",
     "args": {
       "version": "str"
     },
     "translate": false,
-    "description": "Diagnostics panel: no plex pass"
+    "description": "Diagnostics: the server's release, and that it reported no transcode capability, so only direct play is possible."
   },
   "browse.crew.director": {
     "value": "Director",
@@ -1675,7 +1675,7 @@
     "description": "browse auth signin_refused"
   },
   "browse.auth.servers_unreachable": {
-    "value": "Nuvio listed your servers, but none of them answered. Make sure your Nuvio addons is on and online, then try again.",
+    "value": "Nuvio listed your servers, but none of them answered. Make sure they are online, then try again.",
     "description": "Reason line when plex.tv listed the account's servers and none of them answered: on the sign-in read-out (no server reachable after sign-in), and on Who's watching when a picked profile found no server answering (and none refused it or presented a certificate this TV does not trust: those have no_source_access and tls_untrusted). Two-line read-out slot, and one centred line on the picker, so keep the whole sentence at 125 characters or fewer."
   },
   "browse.auth.plex_tls": {
@@ -1726,27 +1726,27 @@
     }
   },
   "browse.auth.plaintext_offer": {
-    "value": "Your addons is on this network but can’t be reached securely. Select Connect to connect without encryption.",
+    "value": "Nuvio is on this network but can’t be reached securely. Select Connect to connect without encryption.",
     "description": "browse auth plaintext_offer"
   },
   "browse.auth.plaintext_allowed": {
-    "value": "Your addons is on this network but can’t be reached securely. Select Try again to connect without encryption.",
+    "value": "Nuvio is on this network but can’t be reached securely. Select Try again to connect without encryption.",
     "description": "browse auth plaintext_allowed"
   },
   "browse.auth.plaintext_declined_signin": {
-    "value": "You chose not to connect to your addons without encryption. Select Try again to be asked again.",
+    "value": "You chose not to connect to Nuvio without encryption. Select Try again to be asked again.",
     "description": "browse auth plaintext_declined_signin"
   },
   "browse.auth.plaintext_revoked_signin": {
-    "value": "Unencrypted connections to your addons are off. Select Try again to be asked again.",
+    "value": "Unencrypted connections to Nuvio are off. Select Try again to be asked again.",
     "description": "browse auth plaintext_revoked_signin"
   },
   "browse.auth.plaintext_declined_signed_in": {
-    "value": "You chose not to connect to your addons without encryption. Allow it in Settings → Unencrypted connections.",
+    "value": "You chose not to connect to Nuvio without encryption. Allow it in Settings → Unencrypted connections.",
     "description": "browse auth plaintext_declined_signed_in"
   },
   "browse.auth.plaintext_revoked_signed_in": {
-    "value": "Unencrypted connections to your addons are off. Turn them on in Settings → Unencrypted connections.",
+    "value": "Unencrypted connections to Nuvio are off. Turn them on in Settings → Unencrypted connections.",
     "description": "browse auth plaintext_revoked_signed_in"
   },
   "browse.auth.plaintext_shared_offer": {
@@ -1792,7 +1792,7 @@
     }
   },
   "browse.auth.plaintext_remote": {
-    "value": "Your addons answered only without encryption, from outside this network. Check Remote Access in its settings.",
+    "value": "Nuvio answered only without encryption, from outside this network. Check its remote access settings.",
     "description": "browse auth plaintext_remote"
   },
   "browse.auth.plaintext_shared_remote": {
@@ -1814,19 +1814,19 @@
     "description": "Plex account preferences: stale error"
   },
   "browse.preferences.refused": {
-    "value": "Plex did not authorize this account request. Sign in again and retry.",
+    "value": "Nuvio did not authorize this account request. Sign in again and retry.",
     "description": "Plex account preferences: refused error"
   },
   "browse.preferences.timed_out": {
-    "value": "Plex took too long to respond. Please retry.",
+    "value": "Nuvio took too long to respond. Please retry.",
     "description": "Plex account preferences: timed out error"
   },
   "browse.preferences.unavailable": {
-    "value": "Could not reach Plex. Check your connection and retry.",
+    "value": "Could not reach Nuvio. Check your connection and retry.",
     "description": "Plex account preferences: unavailable error"
   },
   "browse.preferences.invalid_response": {
-    "value": "Plex returned an unexpected response. Please retry.",
+    "value": "Nuvio returned an unexpected response. Please retry.",
     "description": "Plex account preferences: invalid response error"
   },
   "browse.preferences.invalid_preference": {
@@ -2210,12 +2210,12 @@
     "description": "Diagnostics suffix: the measurement's uncertainty as a percentage. es and be put a no-break space before the percent sign."
   },
   "browse.diagnostics.plex_pass": {
-    "value": "{version} · Plex Pass",
+    "value": "{version} · transcode capable",
     "args": {
       "version": "str"
     },
     "translate": false,
-    "description": "Diagnostics: the server version, and that its owner has Plex Pass (a product name; keep it untranslated)."
+    "description": "Diagnostics: the server's release, and that it reported a transcode capability."
   },
   "browse.library.no_collections": {
     "value": "No collections in {library}",

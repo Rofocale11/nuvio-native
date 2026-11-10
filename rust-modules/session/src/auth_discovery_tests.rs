@@ -2317,7 +2317,7 @@ fn terminal_discovery_copy_names_the_target_cause_retry_and_action() {
         trigger: DiscoveryTrigger::Rediscover,
     }).unwrap().0;
     assert_eq!(servers,
-        "Nuvio listed your servers, but none of them answered. Make sure your Nuvio addons is on and online, then try again.");
+        "Nuvio listed your servers, but none of them answered. Make sure they are online, then try again.");
 }
 
 #[test]

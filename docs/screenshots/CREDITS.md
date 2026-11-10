@@ -1,7 +1,7 @@
 # Screenshot credits
 
-Every picture inside the documentation screenshots comes from an openly licensed or public-domain
-work. The library is `tests/demo_library/catalog.json`; the files, their pinned hashes and licences
+Every picture `make screenshots` writes comes from an openly licensed or public-domain work.
+The library is `tests/demo_library/catalog.json`; the files, their pinned hashes and licences
 are `tests/demo_library/assets.json`; `make screenshots` rebuilds the images from them
 (`.agents/skills/ui-sim/SKILL.md`, "Documentation screenshots"). Backdrops and posters are
 resized and cropped from the sources below; no other change was made to them. A film's clear
@@ -13,6 +13,12 @@ film) trimmed to its lettering, under its own licence. A performer's portrait is
 face from a photograph of them or a frame of the film, and resized; nothing else is changed.
 
 Written by `make screenshots` with the images; do not edit by hand.
+
+The `real-*.jpg` pictures beside these are **not** written by this command. They are captures
+of a signed-in Nuvio account on the desktop simulator, so the catalog shelves and the artwork
+in them are whatever that account's addons returned, and that artwork belongs to the rights
+holders of the titles it shows. `README.md` uses them; nothing regenerates or overwrites them,
+and the table below covers the generated pictures only.
 
 | Used as | Source | Licence | Author / attribution |
 | --- | --- | --- | --- |

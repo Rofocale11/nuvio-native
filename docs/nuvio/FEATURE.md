@@ -68,8 +68,11 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   Home hero play button and TV episode clicks route to the Streams picker instead of direct play —
   except a **Resume**: an item with a position to return to plays at once, and the shim re-selects
   the source that position last played (its remembered source per resume point).
-- Source picker groups streams by addon on both Detail and in-player menu; Plex quality ladder
-  removed.
+- Source picker groups streams by addon on both Detail and in-player menu; the quality ladder
+  removed from it.
+- Settings > Playback lists no `Quality` or `Direct Play` row: the shim has no transcoder, so a
+  bitrate ceiling and a direct-play policy would configure something this build cannot do. Both
+  values are still read from a per-profile file an older build wrote, so nothing regresses.
 - Seeder counts shown on the in-player source page and leading stream details.
 - P2P streaming toggle in Playback settings; there is no server-address row (the C engine needs
   none — it probes its own default ports; an address saved by an older build is still read back).
@@ -99,6 +102,14 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   with a key table for real catalog items; see `ID-MANAGEMENT.md`.
 - Infinite TMDB related drill-down with single-request optimization.
 - ClearLogo fetched via TMDB images on synthetic related rows; ClearArt transparent-margin auto-crop.
+- **Trailers on a title's page.** `/extras` lists every trailer the title's metadata names (TMDB
+  `videos`, else Cinemeta) as a clip row with a deterministic DASH Part key, so the shelf costs no
+  YouTube round-trip on the detail page's critical path. The player's first Part request resolves
+  the chosen clip's adaptive tracks through the Node child and serves them as a static DASH
+  manifest the app's own demuxer plays; the shelf's first tile is warmed in the background, and the
+  warm picks the tallest rendition the set's table allows. An age-restricted (red-band) trailer is
+  filtered out of the shelf once the child reports `login_required`, and the title's other
+  trailers/teasers are the rows that remain. See `PLAYBACK.md` §Trailer DASH.
 
 ## My List & watch progress (account sync)
 

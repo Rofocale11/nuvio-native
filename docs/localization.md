@@ -1,8 +1,13 @@
-# Help translate PlxNative
+# Help translate Nuvio Native
 
-PlxNative's interface is available in English, Spanish, French, Italian, European Portuguese, German, Hungarian and Belarusian
+Nuvio Native's interface is available in English, Spanish, French, Italian, European Portuguese, German, Hungarian and Belarusian
 (official Cyrillic orthography). Help improve a translation or contribute another language through a pull request
-at https://github.com/GLinnik21/plx-native.
+at https://github.com/Rofocale11/nuvio-native.
+
+**State of the shipped translations (v0.9.0).** The fork renamed the product and its account from Plex to
+Nuvio in every shipped language. The seven translations of the changed settings, consent and privacy text are
+AI-drafted and await a native reviewer for each language; a review that only corrects wording is a welcome pull
+request that needs no code change.
 
 ## Translate a message
 
@@ -121,7 +126,7 @@ requiring shaping or bidirectional layout need renderer work before being offere
 ## Runtime behavior
 
 Settings → Language defaults to the television's UI language. Explicit English, Spanish, French, Italian,
-Portuguese, German, Hungarian and Belarusian choices apply the next time the app starts. The running UI and Plex request language
+Portuguese, German, Hungarian and Belarusian choices apply the next time the app starts. The running UI and the request language
 remain unchanged until then; playback is not interrupted. The contribution action displays this
 guide's URL and QR code for opening on another device.
 
@@ -131,8 +136,8 @@ languages use English. Missing formatting settings use the resolved UI language'
 default. Numeric Gregorian dates and numbers use the formatting locale; playback clocks remain
 durations. Locale data and catalogs are bundled, so translating the UI requires no network.
 
-Plex requests carry the resolved UI language in `X-Plex-Language`. Servers may still return their
-own stored language. This preference does not change media audio/subtitle selection or library
+Requests to the in-process shim carry the resolved UI language in `X-Plex-Language` (the shim speaks
+the Plex dialect on loopback). The library may still answer in its own stored language. This preference does not change media audio/subtitle selection or library
 sorting. Launcher metadata follows webOS's system language independently of the app override.
 
 Controlled record/replay runs use the captured session's language preference; System resolves to
@@ -157,4 +162,4 @@ questions, disclosure scrolling and the contribution page. The QR code decoded t
 The device preference was restored to System default afterward.
 
 These checks cover localization and UI behavior. They do not replace decoder/playback tests,
-and a Plex server may still return metadata in its own stored language.
+and the library server may still return metadata in its own stored language.

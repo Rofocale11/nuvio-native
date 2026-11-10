@@ -4,11 +4,10 @@
 
 Report privately, **not** as a public issue:
 
-- **GitHub Security Advisories** — <https://github.com/GLinnik21/plx-native/security/advisories/new>
+- **GitHub Security Advisories** — <https://github.com/Rofocale11/nuvio-native/security/advisories/new>
   (preferred: it is private, it threads, and it produces a CVE if one is warranted)
-- or e-mail **support@plxnative.com** with `PlxNative security` in the subject.
 
-This is a one-person unpaid project, so the honest service level is: acknowledged within **7 days**,
+This is an unpaid project, so the honest service level is: acknowledged within **7 days**,
 an assessment within **30**. If you have not heard back in a week, assume the mail was lost and open
 a public issue saying only *"sent a security report on <date>, no reply"* — with no details.
 
@@ -31,7 +30,7 @@ looking at:
   beside it — is created 0640 (owner read/write, the app's own group read, never world-readable),
   so that a Developer Mode user can fetch it with webOS Dev Manager on a television that is not
   rooted. Every event-log line goes through `eventlog::scrub::scrub_local` before the write. A line
-  that reaches it carrying a credential, a Plex token, a `plex.direct` hostname, a household name or
+  that reaches it carrying a credential, an access token, a `plex.direct` hostname, a household name or
   anything about what is being watched is a valid report — see [PRIVACY.md](PRIVACY.md) for the
   contract that is meant to hold. The panic text the Rust panic hook appends to the crash log goes
   through the same scrubber. All three files are opened with `O_NOFOLLOW` as a regular file this app
@@ -98,7 +97,7 @@ looking at:
 ## What this app does not have
 
 No account of its own, no server, no payment path, and no user-generated content. It signs in to
-**your** Plex account and talks to **your** servers.
+**your** Nuvio account and talks to **your** addons.
 
 **It does have telemetry, and that hedge used to say it did not.** A release binary carries a Sentry
 DSN and a PostHog project key — both **write-only ingest credentials**, publishable by design, which

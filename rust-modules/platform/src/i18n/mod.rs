@@ -5,8 +5,10 @@ use icu_plurals::{PluralCategory, PluralRules};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::OnceLock;
 
+/// Where the in-app "help translate" QR points. This is the fork's own guide: the upstream copy
+/// describes upstream's catalogs and would send a translator to the wrong repository.
 pub const CONTRIBUTE_URL: &str =
-    "https://github.com/GLinnik21/plx-native/blob/main/docs/localization.md";
+    "https://github.com/Rofocale11/nuvio-native/blob/nuvio-native/docs/localization.md";
 
 // `Preference`, `Language`, `SHIPPED` and every table over them are generated from
 // `locales/languages.json` (see `platform/build_support/catalog.rs`); this file holds only the

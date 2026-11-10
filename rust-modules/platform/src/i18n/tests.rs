@@ -538,3 +538,40 @@ fn render_in_english_is_scoped_and_nests() {
     assert_eq!(inside, "3.5");
     assert_eq!(current().language(), Language::Be);
 }
+
+/// The Notice TMDB's terms require, word for word, in the application's About section.
+const TMDB_NOTICE: &str = "This product uses the TMDB API but is not endorsed or certified by TMDB.";
+
+/// The About body is one string per language, so "put the notice in About" is eight edits that
+/// nothing checked: a translation could be rewritten and drop the sentence with every test green,
+/// while `rust-modules/stremio/src/addons_tmdb.rs` kept calling `api.themoviedb.org`. This reads the
+/// shipped catalogs themselves and holds all eight to it, and to naming TMDB where the privacy
+/// notice lists who the app contacts.
+#[test]
+fn every_shipped_about_body_carries_the_tmdb_notice() {
+    let read = |tag: &str| -> serde_json::Value {
+        let path = format!("{}/../../locales/{tag}/settings.json", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
+            .expect("valid settings catalog")
+    };
+    // English keeps `{ "value": … }` (it also carries the translator description and the two args);
+    // a translation is the bare string.
+    let body = |d: &serde_json::Value, key: &str, tag: &str| -> String {
+        let entry = &d[key];
+        entry["value"].as_str().or_else(|| entry.as_str()).unwrap_or_else(|| {
+            panic!("{tag}: {key} is neither a string nor an object carrying one")
+        }).to_string()
+    };
+    for lang in Language::SHIPPED {
+        let tag = lang.tag();
+        let d = read(tag);
+        assert!(
+            body(&d, "settings.about.body", tag).contains(TMDB_NOTICE),
+            "{tag}: the About body no longer carries the TMDB notice the API's terms require"
+        );
+        assert!(
+            body(&d, "settings.legal.privacy.servers_body", tag).contains("TMDB"),
+            "{tag}: the privacy notice lists the services the app contacts and must name TMDB"
+        );
+    }
+}

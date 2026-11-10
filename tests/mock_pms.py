@@ -1357,16 +1357,25 @@ def demo_cache_dir():
 _DEMO_TOOL = []
 
 
-def demo_derived_file(assets, cache, key, rec, role):
-    """Where `tools/demo_library.py derive` put one derived file (`derived_file` there decides: the
-    name carries a hash of the recipe, so checkouts sharing a cache never overwrite each other)."""
+# Where a person's photograph lives in `CatalogLibrary.images`: above every item and collection key.
+PERSON_IMAGE_BASE = 9_000_000
+
+
+def demo_tool():
+    """`tools/demo_library.py`, loaded once by path."""
     if not _DEMO_TOOL:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "demo_library_tool", pathlib.Path(__file__).resolve().parent.parent / "tools" / "demo_library.py")
         _DEMO_TOOL.append(importlib.util.module_from_spec(spec))
         spec.loader.exec_module(_DEMO_TOOL[0])
-    return _DEMO_TOOL[0].derived_file(assets, cache, key, rec, role)
+    return _DEMO_TOOL[0]
+
+
+def demo_derived_file(assets, cache, key, rec, role):
+    """Where `tools/demo_library.py derive` put one derived file (`derived_file` there decides: the
+    name carries a hash of the recipe, so checkouts sharing a cache never overwrite each other)."""
+    return demo_tool().derived_file(assets, cache, key, rec, role)
 
 
 class CatalogLibrary(Library):
@@ -1880,19 +1889,25 @@ def plaintext_only_lan_resources(lib, ip, http_port, fail_port, access_token):
 # stand-in (`plxnative-discover`, or `plxnative-plextv`, which Discover follows) and requires this
 # line before it drives anything: a boot whose line says `base=real` would read
 # `discover.provider.plex.tv`, which no mock run may do.
-DISCOVER_STAND_IN_LINE = "discover: base=stand-in"
+#
+# Two words name a base that is NOT the real provider, and both pass:
+#   `stand-in` — the loopback service the harness armed (`DiscoverSource::Trigger` / `FollowsPlexTv`);
+#   `shim`     — the Nuvio build's in-process PMS shim (`local_discover`), which is this fork's
+#                stand-in: `discover()` returns it and answers the person and Watchlist reads from
+#                the shim, never from the provider.
+DISCOVER_SAFE_BASES = ("discover: base=stand-in", "discover: base=shim")
 
 
 def discover_stand_in_problem(log_text):
-    """`None` when the event log shows every Discover base this boot resolved is the loopback
-    stand-in; otherwise the reason a run against this mock must stop. Fails closed: a log with no
-    `discover: base=` line at all (a release build, a boot that never got that far) is a refusal, as is
-    any line that says `base=real`."""
+    """`None` when the event log shows every Discover base this boot resolved is a loopback stand-in;
+    otherwise the reason a run against this mock must stop. Fails closed: a log with no
+    `discover: base=` line at all (a release build, a boot that never got that far) is a refusal, as
+    is any line that says `base=real`."""
     lines = [ln.strip() for ln in log_text.splitlines() if "discover: base=" in ln]
     if not lines:
         return ("the boot logged no `discover: base=` line: the app is not a devtriggers build or never "
                 "reached boot, so nothing proves its Discover reads reach the mock")
-    real = [ln for ln in lines if DISCOVER_STAND_IN_LINE not in ln]
+    real = [ln for ln in lines if not any(safe in ln for safe in DISCOVER_SAFE_BASES)]
     if real:
         return (f"Discover is not the mock's stand-in (`{real[0]}`): arm plxnative-discover (or "
                 f"plxnative-plextv) at the mock before booting, or the boot reads discover.provider.plex.tv")

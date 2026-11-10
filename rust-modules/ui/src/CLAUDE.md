@@ -263,7 +263,7 @@ on the QR allocation.
 handles, profile names, titles) may. `ui::table` types that at the call site with
 `Origin { App, Server }` per text slot, defaulting to App; `Row::server_label`/`server_detail`/
 `server_value` and `Section::server_header`/`server_accessory` mark a slot Server. There is no
-string classifier — a fallback the app itself invents ("Plex server") is App and must not be
+string classifier — a fallback the app itself invents ("server") is App and must not be
 marked. What a row does when its text does not fit is decided by its role:
 
 | role | app text that doesn't fit | server text |

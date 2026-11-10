@@ -81,7 +81,7 @@ fn every_settings_row_fits_its_column_in_every_language() {
             overflowing_root(&format!("{tag} language={language_pref:?}"),
                 &RootInputs { language: language_pref, ..base_root_inputs() }, &mut out);
         }
-        // A machine name is server text (exempt); the fallback "Plex server" and the detail and
+        // A machine name is server text (exempt); the fallback "server" and the detail and
         // toggle word beside either are app text.
         for named in [true, false] {
             for on in [true, false] {

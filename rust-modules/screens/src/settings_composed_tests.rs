@@ -511,39 +511,6 @@ fn a_real_push_seats_the_new_page_fresh_and_a_pop_restores_the_row_that_opened_i
     );
 }
 
-/// Parent and picker share the surface entry and table group. A remembered parent row must not
-/// replace the saved option when entering, and a remembered option must not replace the parent
-/// row on return. Drive the real engine: checking TableView::sel before its Enter effect runs
-/// cannot observe either leak.
-#[test]
-fn playback_picker_seats_the_saved_option_and_restores_its_parent_row() {
-    let _g = plx_base::testlock::serial();
-    let _sess = seated_scratch_session("composed-playback-picker-seat");
-    let previous_quality = plx_media::route::quality();
-    let previous_mode = plx_media::route::direct_play_mode();
-    plx_media::route::restore_quality(plx_media::route::Quality::P480);
-    plx_media::route::restore_direct_play_mode(plx_media::route::DirectPlayMode::Auto);
-    for back in [Key::Back, Key::Left] {
-        let (mut d, mut rig, id) = consent_opened(SettingsPage::Playback);
-        // A real DOWN/UP gives the engine an explicit parent cursor at Default quality.
-        frame(&mut d, &mut rig, 32, vec![key(Key::Down, tick(32))]);
-        frame(&mut d, &mut rig, 48, vec![key(Key::Up, tick(48))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 0 }));
-        frame(&mut d, &mut rig, 64, vec![key(Key::Ok, tick(64))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 6 }),
-            "the quality picker opens at saved P480, not the parent's remembered row 0");
-        frame(&mut d, &mut rig, 80, vec![]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 6 }));
-        frame(&mut d, &mut rig, 96, vec![key(back, tick(96))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 0 }),
-            "{back:?} restores Default quality, not the picker's remembered row 6");
-        assert_eq!(d.nav.input_owner(), Some(InputOwner::Entry(id)));
-        assert_eq!(plx_media::route::quality(), plx_media::route::Quality::P480,
-            "leaving the picker does not change the saved preference");
-    }
-    plx_media::route::restore_quality(previous_quality);
-    plx_media::route::restore_direct_play_mode(previous_mode);
-}
 
 
 /// A receipt is a real async table landing: the mount had no focusable rows. The first OK after
@@ -616,54 +583,52 @@ fn account_preference_landing_seats_the_first_rows_and_retry_landing() {
             "the list is back on the row that opened the picker");
     }
 }
-
-/// The warning uses engine-owned Control presses, not bare table activation. A complete OK
-/// down/up pair must confirm its focused answer, after entering through the real table flow.
+/// Parent and picker share the surface entry and table group. A remembered parent row must not
+/// replace the saved option when entering, and a remembered option must not replace the parent
+/// row on return. Drive the real engine: checking TableView::sel before its Enter effect runs
+/// cannot observe either leak.
+///
+/// **FORK (nuvio): driven through Skip interval.** The two rows this test used to drive —
+/// Default quality and Direct Play — are no longer listed (they configured a transcoder the shim
+/// does not have), so the same parent/picker contract is exercised on a row that still exists.
 #[test]
-fn force_warning_engine_focus_confirms_only_the_chosen_answer() {
-    use plx_machine::machine::{Edge, InputKind};
+fn playback_picker_seats_the_saved_option_and_restores_its_parent_row() {
     let _g = plx_base::testlock::serial();
-    let _sess = seated_scratch_session("composed-force-warning");
-    let previous = plx_media::route::direct_play_mode();
-    plx_media::route::restore_direct_play_mode(plx_media::route::DirectPlayMode::Auto);
-    let ok = |ms| {
-        let down = key(Key::Ok, tick(ms));
-        let mut up = down.clone();
-        if let InputKind::Key { edge, .. } = &mut up.kind { *edge = Edge::Up; }
-        vec![down, up]
-    };
-    for confirm in [false, true] {
+    let _sess = seated_scratch_session("composed-playback-picker-seat");
+    let previous = plx_media::route::skip_interval();
+    let saved = *plx_media::route::SkipInterval::LADDER.last().unwrap();
+    plx_media::route::restore_skip_interval(saved);
+    let saved_row = (plx_media::route::SkipInterval::LADDER.len() - 1) as u32;
+    for back in [Key::Back, Key::Left] {
         let (mut d, mut rig, id) = consent_opened(SettingsPage::Playback);
+        // A real DOWN/UP gives the engine an explicit parent cursor at the first row.
         frame(&mut d, &mut rig, 32, vec![key(Key::Down, tick(32))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 1 }));
-        frame(&mut d, &mut rig, 48, ok(48));
-        assert!(path(&d, id).contains("picker DirectPlay"), "{}", path(&d, id));
-        frame(&mut d, &mut rig, 64, vec![key(Key::Down, tick(64))]);
-        frame(&mut d, &mut rig, 80, ok(80));
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: registry::ALERT }),
-            "opening Force always seats Cancel and consumes the picker input");
-        assert!(rig.preference_commands.is_empty());
-        if confirm {
-            frame(&mut d, &mut rig, 96, vec![key(Key::Right, tick(96))]);
-            assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: registry::ALERT + 1 }));
+        frame(&mut d, &mut rig, 48, vec![key(Key::Up, tick(48))]);
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 2 }), "Subtitle size is the first row");
+        // Walk down the page's seven rows to Skip interval, the last one.
+        let mut ms = 64;
+        for _ in 0..6 {
+            frame(&mut d, &mut rig, ms, vec![key(Key::Down, tick(ms))]);
+            ms += 16;
         }
-        frame(&mut d, &mut rig, 112, ok(112));
-        // A Control's pressed animation may defer its commit until it has reached its dip.
-        for ms in (128..=448).step_by(16) { frame(&mut d, &mut rig, ms, vec![]); }
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 1 }), "the picker's Forced option");
-        assert!(!path(&d, id).contains("confirm=true"), "the chosen answer closes the warning");
-        if confirm {
-            assert!(matches!(rig.preference_commands.pop(), Some(registry::PreferenceCmd::Choose(
-                plx_media::route::Choice::DirectPlay(plx_media::route::DirectPlayMode::Forced), _)
-            )), "Enable Force emits the admitted persistence request");
-        } else {
-            assert!(rig.preference_commands.is_empty(), "Cancel must never request persistence");
-        }
-        assert_eq!(plx_media::route::direct_play_mode(), plx_media::route::DirectPlayMode::Auto,
-            "the composed fixture executes no live persistence");
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 5 }), "Skip interval is the last row");
+        frame(&mut d, &mut rig, ms, vec![key(Key::Ok, tick(ms))]);
+        ms += 16;
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: saved_row }),
+            "the picker opens at the saved option, not the parent's remembered row");
+        frame(&mut d, &mut rig, ms, vec![]);
+        ms += 16;
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: saved_row }));
+        frame(&mut d, &mut rig, ms, vec![key(back, tick(ms))]);
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 5 }),
+            "{back:?} restores the Skip interval row, not the picker's remembered row");
+        assert_eq!(d.nav.input_owner(), Some(InputOwner::Entry(id)));
+        assert_eq!(plx_media::route::skip_interval(), saved,
+            "leaving the picker does not change the saved preference");
     }
-    plx_media::route::restore_direct_play_mode(previous);
+    plx_media::route::restore_skip_interval(previous);
 }
+
 
 /// Owner report: entering Audio & Subtitles from the Settings root landed focus on the LAST row
 /// of the loaded table. The page mounts empty (its rows arrive with the account receipt), so the

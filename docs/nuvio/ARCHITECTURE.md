@@ -64,7 +64,10 @@ server" below.
   reach plex.tv — which has no Nuvio credential behind this app. The numeric synthetic key on
   `Role[].id` still opens `/library/people/{personId}/media`, the page's two shelves. The television
   sees the same shapes a real PMS + Discover pair used to send, so the ported person/filmography
-  screens run unmodified.
+  screens run unmodified. **The resolution is announced once, at boot, before the first read**
+  (`discover: base=shim reads=…`, `plex::account::announce_discover`), so an event log says up front
+  whether that boot could reach the real provider; the screenshot, site-video and Watchlist harnesses
+  refuse to drive a boot whose line is missing or says `base=real` (`tests/mock_pms.py`).
 - **A Library section's Type menu is a catalog selector, not a movie/show switch.** The section
   already fixes the content type, so `includeMeta=1` returns one `MediaContainer.Meta.Type[]` entry
   per browseable catalog of that type. Each entry carries the shim extension `catalogKey`, the
@@ -87,7 +90,7 @@ server" below.
   first twelve of every home catalog) and, when the requested window is not covered, starts ONE
   background fill and waits at most `Config::catalog_wait` (3 s) for it. The addon's page budget is
   30 s and the app's plaintext loopback read deadline is 15 s, so a slow catalog used to hold the
-  HTTP response past that deadline and be reported as "Can't reach your Plex server". Now the
+  HTTP response past that deadline and be reported as "Can't reach Nuvio". Now the
   response is bounded: the cached page comes back at once, and a cold or slow catalog answers a
   short page (or an empty one) instead. The fill keeps fetching after the answer and bumps
   `Shim::catalog_generation()`; the app compares that counter once a frame and queues
@@ -153,10 +156,14 @@ server" below.
 - **The player's Source page carries no quality ladder.** Under the shim a playback's quality is a
   property of the STREAM picked — the shim resolves a concrete file and the route plays it — so a
   list of bitrate ceilings beside the stream list would be a second answer to the same question.
-  The ladder exists only in Settings > Playback, where it is a policy for ordinary Plex servers.
-  (It was drawn in the player popover until 2026-10-26.) The failure read-out's `Change Source`
-  button opens this picker and is offered under Force Direct Play too: Force overrides every
-  quality RUNG, not which file plays.
+  (It was drawn in the player popover until 2026-10-26.) **In this build the ladder has no UI at
+  all:** the Settings > Playback rows that used to configure it (`Quality` and `Direct Play`) are
+  not listed, because the shim has no transcoder to cap (`PLAYBACK.md`), and
+  `preferences::fields_of` is where the two rows are withheld. The preference itself is still
+  stored and restored per profile and still read by the route, so a value an older build wrote
+  keeps working; the failure read-out's `Change Source` button opens the stream picker, which a
+  `Direct Play` value of Force (again, only reachable from an older build's file) does not change:
+  Force overrides every quality RUNG, not which file plays.
 - The stream pick itself is `/nuvio/select?index=` on the shim's own ranked index, then a fresh
   resolve of the same item; the Media list a `/decision` returns is selected-first and must not be
   confused with it.

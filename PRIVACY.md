@@ -1,41 +1,42 @@
-# PlxNative Privacy Policy
+# Nuvio Native Privacy Policy
 
-Applies to PlxNative 0.6.0. Last updated 4 September 2026.
+Applies to Nuvio Native 0.9.0. Last updated 10 November 2026.
 
-## Who is responsible for PlxNative data
+## Who is responsible for Nuvio Native data
 
-Gleb Linnik is responsible only for data PlxNative stores locally and for optional reports you
-choose to share. Contact: `support@plxnative.com`.
+The Nuvio Native maintainers are responsible only for data Nuvio Native stores locally and for
+optional reports you choose to share. Contact: <https://github.com/Rofocale11/nuvio-native>.
 
-## Plex services
+## Nuvio services
 
-PlxNative is an independent client for Plex. To sign you in, discover servers and provide Plex
-account features, the app communicates directly with Plex services. Plex processes information
-received by those services under [Plex’s own Privacy
-Policy](https://www.plex.tv/about/privacy-legal/). PlxNative’s developer does not receive that
-information.
+Nuvio Native is an independent client for Nuvio and for the Stremio addons you install. To sign
+you in and provide account features, the app communicates directly with Nuvio’s services. Nuvio
+handles information received by those services under its own privacy terms, published at
+<https://nuvio.tv>. The Nuvio Native maintainers do not receive that information.
 
-## Plex Media Servers
+## Addons you install
 
-To browse and play media, update watch progress and use server features, PlxNative communicates
-directly with the Plex Media Servers you select. Those requests are handled by the selected server
-and its operator. PlxNative’s developer does not receive them.
+To browse and play media, and to update watch progress and My List, Nuvio Native communicates
+directly with Nuvio and with the addons you have installed. Those requests are handled by those
+services and by whoever operates them. The Nuvio Native maintainers do not receive them. The app’s
+local library server is in-process on this television and is not operated by anyone else.
 
 ## Data stored on this television
 
-PlxNative has a developer-only input/frame recorder used to reproduce and test bugs. It is not
+Nuvio Native has a developer-only input/frame recorder used to reproduce and test bugs. It is not
 part of the app you installed: a release build has the developer-trigger inputs, including the
 recorder, compiled out — there is no code path in a release binary that can open, write or read a
 recording, on this television or off it. The unconditional `plxnative-*.log` files are create-only
 diagnostics, not trigger inputs. The recorder exists only in development builds used to build and
-test PlxNative itself, is started only by explicitly arming it on that build, and its recordings
+test Nuvio Native itself, is started only by explicitly arming it on that build, and its recordings
 never leave the device it was made on.
 
-PlxNative stores your Plex account token and a separate token for each server you use. For every
-profile on your account you have switched to on this television, it also keeps that profile's own
-server access token(s), so a later switch still works with no internet, and, for a PIN-protected
+Nuvio Native stores your Nuvio session and the addons you installed, including any credentials
+embedded in an addon’s URL. For every
+profile on your account you have switched to on this television, it also keeps that profile’s own
+access so a later switch still works with no internet, and, for a PIN-protected
 profile, a one-way check computed from that PIN rather than the PIN itself. It also keeps the
-addresses and identifiers of those servers, the profile names and pictures on your account —
+addresses and identifiers of your addons, the profile names and pictures on your account —
 pictures and other downloaded artwork (posters, backdrops and cast images) are cached as
 bounded files for reuse across restarts — your
 Home library choices, your recent searches, your playback quality preference, and local technical
@@ -45,19 +46,19 @@ to the two optional-reporting questions, the random Crash report ID if you turne
 the random Analytics ID if you turned product analytics on, any report waiting to be sent, a
 marker recording how much of the crash log has already been read, and — for a server you were
 asked about — whether you allowed it to be reached without encryption on your home network (the
-answer only, for the Plex account that gave it: the permission itself is never stored, and ends
+answer only, for the Nuvio account that gave it: the permission itself is never stored, and ends
 when a fresh check of the server no longer reaches the same address, at a sign-in or sign-out, at
 a profile switch unless the new profile reaches that server at the same address, or when the app
 returns from the background).
-It keeps no bookmark of its own for where you stopped watching: playback position is held by your
-Plex Media Server. The Settings screen can sign out and remove PlxNative data from this television.
+It keeps no bookmark of its own for where you stopped watching: playback position and My List are
+held by your Nuvio account. The Settings screen can sign out and remove Nuvio Native data from this television.
 
 Those lifetimes differ. Signing out removes the sign-in, the servers registered with it and their
 tokens, every profile's own cached server access token(s) and PIN check, the cached profile
 pictures and other downloaded artwork, your answers about unencrypted connections — and with them your optional-reporting
 answers, both identifiers and any queued report,
 because those choices were made by the person who signed in and say nothing about whoever signs
-in next: the next sign-in is asked afresh. Switching between the profiles of one Plex account is
+in next: the next sign-in is asked afresh. Switching between the profiles of one Nuvio account is
 not a sign-out and keeps all of it, including the server access token(s) and PIN check cached for
 a profile you are not currently using, so that profile can be switched to again with no internet.
 A queued report is deleted once sent, or at the moment you switch
@@ -65,11 +66,11 @@ its category off or sign out. The event log and the error-output log are emptied
 kept until the television restarts (the television clears its temporary storage then), and the storage
 snapshot is replaced when its bounded status changes. **webOS gives an application no way to run code as it
 is removed**, so the sign-in and the reporting answers can survive an uninstall — use Delete all
-local data before uninstalling if you want nothing of PlxNative left on the television.
+local data before uninstalling if you want nothing of Nuvio Native left on the television.
 
 ## Optional crash reports
 
-Crash reporting is off until you choose to share it. If enabled, PlxNative sends technical crash
+Crash reporting is off until you choose to share it. If enabled, Nuvio Native sends technical crash
 details to Sentry in Germany. A report may include the signal, code addresses, thread information,
 internal component labels, app and webOS versions, television model and hardware compatibility
 details needed to reproduce and symbolicate the failure.
@@ -88,11 +89,11 @@ They are collected only while crash reporting is enabled and accompany a crash r
 sent as usage events. Disabling crash reports removes the local trace.
 
 When the television's own crash reporter leaves nothing for a crash that was a native fault (a
-signal such as a segmentation fault), PlxNative sends a simpler report built from its own crash
+signal such as a segmentation fault), Nuvio Native sends a simpler report built from its own crash
 log instead. It carries the same kernel name and release, webOS and hardware compatibility
 details as a native report (plus the same `probe` fact described for playback-error reports
 below), and the file name (never the folder) and build identifier of each
-library (a library of the television's firmware or one bundled with PlxNative) the faulting
+library (a library of the television's firmware or one bundled with Nuvio Native) the faulting
 address and the return address were in, with the library's load address and size. A library that
 has no build identifier (the television's own C library has none) is still named, with its load
 address and size and an all-zero placeholder identifier, as the native report lists it. It carries the
@@ -105,7 +106,7 @@ folder or other file content is sent.
 
 When the crash was a Rust panic rather than a fault, the fallback report is smaller still: the
 source file and line of the panic, a hash of the panic message (the message itself is never sent),
-the app version and build identifier of PlxNative, the `environment` label of the build (`production`
+the app version and build identifier of Nuvio Native, the `environment` label of the build (`production`
 or `development`), the time of the panic (read and bounded as above), the same kernel name and release,
 webOS and hardware compatibility details (including the `probe` fact) that the fault fallback report carries, and
 the Crash report ID below. It carries none of the library details above.
@@ -114,7 +115,7 @@ Every crash and error report carries a **Crash report ID**: a random identifier 
 television when you turn crash reports on, sent as the report's `user.id`. It exists so that
 repeated crashes under one Crash report ID are counted once rather than once each — Sentry's
 "users affected" figure is the number of distinct Crash report IDs an issue has reached — which is
-what tells a problem that hit many people apart from one television that hit it many times. It is not derived from your Plex
+what tells a problem that hit many people apart from one television that hit it many times. It is not derived from your Nuvio
 account, your television or anything about you, and it is never sent with product analytics.
 Settings shows it while crash reports are on. Turning crash reports off, or signing out, deletes
 the local identifier; enabling them later creates a new one. Reports already sent keep the old
@@ -175,8 +176,8 @@ up to eight failed storage-candidate errno numbers. It carries no candidate path
 When a server was found but answered only over an unencrypted connection, it also carries a fixed
 outcome class (`absent`, `timeout`, `dns`, `tls`, `refused` and the like) for each secure route to
 that server — `https_lan`, `https_public`, `https_custom` and `https_relay` — and, about the
-unencrypted answer, only fixed facts: whether plex.tv marked that connection local
-(`plaintext_local`), whether plex.tv saw this television behind the server's own network address
+unencrypted answer, only fixed facts: whether Nuvio marked that connection local
+(`plaintext_local`), whether Nuvio saw this television behind the server's own network address
 (`public_address_matches`), whether the server is `owned` by the signed-in account, whether it
 requires secure connections (`https_required`), the kind of address it was (`plaintext_scope`:
 private, link-local, unique-local, loopback, public or a name) and its family
@@ -186,9 +187,9 @@ https_required, not_local, not_same_network, not_private_address, identity_unver
 https_unsettled or https_answered) and, when it asked, what became of the question
 (`plaintext_consent`: offered, accepted, declined or revoked) — never the address itself, the
 server or whose it is. When the account has no
-server, it carries how many other devices plex.tv listed (`resources`, bucketed) and whether that
+server, it carries how many other devices Nuvio listed (`resources`, bucketed) and whether that
 happened right after signing in or on a retry (`discovery_trigger`). For unreachable discovery it
-also says whether the failed target was plex.tv or the listed servers (`discovery_target`).
+also says whether the failed target was Nuvio or the listed servers (`discovery_target`).
 It also carries whether the report was `consent`ed to as a standing choice or as a one-off, the app version and when it
 happened. It never includes your account name, tokens, PIN, sign-in code or network addresses. With
 crash reports on, it is sent automatically, carries the Crash report ID, and the sign-in screen
@@ -201,7 +202,7 @@ automatically.
 ## Optional product analytics
 
 Product analytics is a separate choice and is off until you choose to share it. If enabled,
-PlxNative sends typed screen and feature events and broad sign-in and playback outcome classes to
+Nuvio Native sends typed screen and feature events and broad sign-in and playback outcome classes to
 PostHog in Germany. Reports carry a random Analytics ID created when you turn product analytics on
 and may include the app version, webOS version, television model and SoC, and whether the selected
 server is local, remote or relayed. Turning product analytics off, or signing out, deletes the
@@ -219,7 +220,7 @@ Every product analytics event also carries this bounded compatibility and connec
 
 | property | value |
 |---|---|
-| `app_version` | the PlxNative package version |
+| `app_version` | the Nuvio Native package version |
 | `webos_release` | the webOS release reported by nyx |
 | `webos_api` | the webOS API version reported by nyx |
 | `webos_codename` | the webOS firmware family reported by nyx |
@@ -251,8 +252,8 @@ Every product analytics event also carries this bounded compatibility and connec
 
 ## Never included in optional reports
 
-Optional reports have no fields for media titles, Plex accounts or profile names, searches, server
-names or addresses, access tokens, subtitle text, or exact viewing history.
+Optional reports have no fields for media titles, Nuvio accounts or profile names, searches, addon
+or server names and addresses, access tokens, subtitle text, or exact viewing history.
 
 ## Your choices
 
@@ -271,8 +272,8 @@ report is sent only when you press Send report; quote the Report ID it showed to
 
 ## Contact and non-affiliation
 
-Privacy questions may be sent to `support@plxnative.com`. Security vulnerabilities may be reported
-privately through GitHub Security Advisories for `GLinnik21/plx-native`.
+Privacy questions and security reports: <https://github.com/Rofocale11/nuvio-native> — security
+advisories there can be filed privately.
 
-PlxNative is an independent, unofficial application. It is not produced by, endorsed by, or
-affiliated with Plex, Inc. or LG Electronics Inc.
+Nuvio Native is an independent, unofficial application. It is not produced by, endorsed by, or
+affiliated with Plex, Inc., LG Electronics Inc., Nuvio or Stremio.

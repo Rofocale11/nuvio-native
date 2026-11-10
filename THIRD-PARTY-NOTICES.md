@@ -1,10 +1,11 @@
 # Third-party notices
 
-This file accompanies the **PlxNative** application package (`com.beb.plxnative`), an unofficial
-native Plex client for LG webOS 4.x televisions. PlxNative itself is Copyright (c) 2026 Gleb
-Linnik and is distributed under GPL-3.0-or-later (see `LICENSE`; the brand reservation and the
-non-affiliation statements are in `TRADEMARKS.md`, alongside it in both the repository and this
-package).
+This file accompanies the **Nuvio Native** application package (`com.nuvionative.app`), a native
+client for Stremio and Nuvio addons on LG webOS televisions. Nuvio Native is a fork of
+**PlxNative**, which is Copyright (c) 2026 Gleb Linnik; both are distributed under GPL-3.0-or-later
+(see `LICENSE`; the brand reservation and the non-affiliation statements are in `TRADEMARKS.md`,
+alongside it in both the repository and this package). Nuvio Native is **not a Plex client**: it has
+no plex.tv credential and no Plex Media Server, and its only server is a shim in its own process.
 
 The file is organised by **relationship**. Both the applicable license and the actual
 relationship affect obligations; dynamic linking is not a blanket exemption:
@@ -28,7 +29,7 @@ Two different situations, and the difference matters for what we owe you.
 
 ### 1.1 FFmpeg — **redistributed inside this package**
 
-PlxNative **ships its own build of FFmpeg**. Earlier releases linked against the television's copy;
+Nuvio Native **ships its own build of FFmpeg**. Earlier releases linked against the television's copy;
 they no longer do, because the TV's version moves with the firmware (libavformat 55, 57, 58, 59 and
 60 across webOS 2 to 11) and the components compiled into it cannot be determined from outside.
 
@@ -41,7 +42,7 @@ complete copy of that licence is supplied with this package at `licenses/LGPL-2.
 
 **Complete corresponding source.** The exact upstream tarball these were built from —
 `ffmpeg-9.0.2.tar.xz`, sha256 `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e`,
-from <https://ffmpeg.org/releases/> — is attached to every PlxNative release alongside the `.ipk`.
+from <https://ffmpeg.org/releases/> — is attached to every Nuvio Native release alongside the `.ipk`.
 When that host is unreachable the build falls back to the official GitHub tag archive of the same
 release (`n9.0.2.tar.gz`, <https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.2.tar.gz>),
 published under the normalized name `ffmpeg-9.0.2.tar.gz`. That archive is a different container,
@@ -50,7 +51,7 @@ so it carries its own separately pinned sha256 in `ci/build-ffmpeg.sh`
 <https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.2.tar.gz>); an archive that does not
 match its pin is refused, never used. The sources are **unmodified**: no patches are applied. The
 complete configure invocation that produced them, including every enabled component, is
-`ci/build-ffmpeg.sh` in the PlxNative repository, which is also attached to each release. The
+`ci/build-ffmpeg.sh` in this repository, which is also attached to each release. The
 attached script takes the version, the digest and the tarball from its environment, so it needs no
 network and none of the manifest tooling: from a checkout of the release's tag (or its source
 bundle), with the attached tarball,
@@ -73,7 +74,7 @@ section 3), which the Matroska demuxer needs to inflate compressed subtitle trac
 **You may modify and replace them.** They are ordinary shared libraries, loaded at run time by
 `dlopen` from the application's own directory; no FFmpeg code is linked into the `plxnative`
 executable. Build your own from the source above and put it in the app directory under the same
-file name, and PlxNative will load yours instead, with no change to the application. The `-plx`
+file name, and the application will load yours instead, with no change to the application. The `-plx`
 suffix in the file names exists so these cannot be confused with — or accidentally replace — the
 television's own FFmpeg; it denotes nothing about their content, which is stock upstream.
 
@@ -84,7 +85,7 @@ built from a different release will be declined rather than misread.
 
 ### 1.2 Native ASS rendering — redistributed inside this package
 
-`libass-plx.so.0` contains the PlxNative facade and this pinned, statically linked stack.
+`libass-plx.so.0` contains the application's facade and this pinned, statically linked stack.
 The macOS simulator uses the same sources in `libass-plx.0.dylib`; the Linux simulator
 uses `libass-plx-host.so.0`.
 
@@ -107,7 +108,7 @@ verbatim. The library is used unaltered.
 libass and HarfBuzz copyright notices are retained in their licence files above.
 
 The exact upstream archives, checksums and licences are recorded in
-`ci/dependencies.json`. Each versioned PlxNative source release contains all
+`ci/dependencies.json`. Each versioned Nuvio Native source release contains all
 five archives, the facade (`src/ass.c`, `src/ass_fonts.c`, `src/ass_internal.h`,
 `include/ass.h`), its complete build recipe (`ci/build-libass.sh`, `ci/build-libass.py`) and the
 one local patch to libass. **libass carries that local patch; every other archive is unmodified.**
@@ -123,14 +124,14 @@ HarfBuzz uses FreeType and its built-in Unicode data, without ICU or platform sh
 
 You may modify and rebuild the complete library, including FriBidi, using the
 matching source release, then replace `libass-plx.so.0` in the app directory. The
-application loads that file by absolute path and checks the PlxNative facade ABI.
+application loads that file by absolute path and checks the facade ABI.
 This distribution supplies source for the entire combined library, including the
 GPL-3.0-or-later facade, so recipients can rebuild and relink it. No library in this
 stack is taken from, or installed into, the television's firmware.
 
 ### 1.3 Libraries provided by your television
 
-PlxNative also links dynamically against the following libraries (glibc/GLib are
+Nuvio Native also links dynamically against the following libraries (glibc/GLib are
 **LGPL-2.1-or-later**; libcurl is **curl** licensed), which are
 part of your television's own system software and are **not** distributed by us:
 
@@ -141,10 +142,10 @@ part of your television's own system software and are **not** distributed by us:
 | libcurl | 7.x | `libcurl.so.4` or `libcurl.so.5` (whichever the firmware provides) |
 
 libcurl uses the curl license, not LGPL; its distinct grant is listed in section 3.
-For these libraries, PlxNative uses the ordinary shared-library mechanism (LGPL-2.1 §6(b)): no code from
+For these libraries, Nuvio Native uses the ordinary shared-library mechanism (LGPL-2.1 §6(b)): no code from
 them is copied into the executable, and the dynamic loader resolves them at run time against the
 television's own `/usr/lib`. To use your own build, install an interface-compatible library under
-the same SONAME. The GPL-3.0-or-later terms under which PlxNative is distributed permit modification of the
+the same SONAME. The GPL-3.0-or-later terms under which Nuvio Native is distributed permit modification of the
 application for your own use and reverse engineering for debugging such modifications.
 
 One further disclosure: small fragments of glibc's own startup and compatibility code **are**
@@ -232,8 +233,8 @@ rename and the family name "Noto Sans CJK KR" is retained. The font also carries
 trademark statement "Source is a trademark of Adobe in the United States and/or other countries."
 
 *Why it ships:* it is the second link of the application's font fallback chain. Inter covers no
-Hangul, Kana or Han, so without this face every Korean, Japanese and Chinese title in a Plex
-library renders as empty boxes. See `rust-modules/gfx/src/text.rs` for the chain and
+Hangul, Kana or Han, so without this face every Korean, Japanese and Chinese title in your
+catalogs renders as empty boxes. See `rust-modules/gfx/src/text.rs` for the chain and
 `rust-modules/src/fontcov.rs` for the coverage each face is required to have.
 
 **Noto Sans <script> Bold** — `fonts/subs/NotoSans<Script>-Bold.ttf` (source: `pkg/fonts/subs/`),
@@ -483,14 +484,14 @@ enable it) — verified absent from the binary. `rustc-literal-escaper`, `proc_m
   text is supplied as `licenses/GCC-exception-3.1.txt`. Like the glibc startup objects, these are
   part of the NDK's compiler and C runtime (webosbrew native-toolchain) and are System Libraries
   under GPL section 1.
-- **PlxNative auxv compatibility seam** (`src/compat/getauxval.c`), GPL-3.0-or-later. It supplies a bounded immutable process snapshot for the Rust runtime. Project-local linker guards exclude the old NDK `libglibc_polyfills.a` from every newly built ELF.
+- **Nuvio Native's auxv compatibility seam** (`src/compat/getauxval.c`), GPL-3.0-or-later. It supplies a bounded immutable process snapshot for the Rust runtime. Project-local linker guards exclude the old NDK `libglibc_polyfills.a` from every newly built ELF.
 
 ### 2.6 Native crash capture
 
 **Sentry Native 0.17.4** — Copyright (c) 2019 Sentry and individual contributors. Licence:
 **MIT** (`licenses/MIT.txt`). Its client library is statically linked into `plxnative`; the
 out-of-process `sentry-crash` handler is shipped beside it. The handler is built with its HTTP
-transport disabled: it writes a crash envelope for PlxNative's consent-aware sender to deliver on
+transport disabled: it writes a crash envelope for Nuvio Native's consent-aware sender to deliver on
 the next launch. The source is patched for webOS's glibc 2.12 syscall surface and the 32-bit ARM
 APCS frame layout; the pinned source hash is in `ci/dependencies.json` and the complete patch is
 `ci/patches/sentry-native-0001-webos-arm32.patch`.
@@ -508,15 +509,21 @@ They carry no copyright licence of their own; they are published by their issuer
 use, to be installed in trust stores. Each certificate's SHA-256 fingerprint is in the file's own
 header comments.
 
-*Why it ships:* a Plex Media Server's `*.plex.direct` certificate is issued by Let's Encrypt, and
-a television whose trust store predates the 2025 roots cannot verify a chain that ends in
-ISRG Root YR or YE. For a `*.plex.direct` host whose verification against the television's own
-store failed for that reason, the application retries once against this file, with the
-certificate chain, its dates and the host name all still checked. It is offered for no other host
-name, and only after the television's own store has said no (for ten minutes after it has verified a
-host, a request to that host starts there instead of repeating the handshake the store failed). A
-redirect is a request of its own, verified against the television's own store, and is offered this
-file only if its target is itself a `*.plex.direct` name that fails the same way.
+*Why it ships:* the HTTP layer retries a `*.plex.direct` host once against this file, such a name
+being issued by Let's Encrypt, because a television whose trust store predates the 2025 roots cannot
+verify a chain that ends in ISRG Root YR or YE. For a `*.plex.direct` host whose verification
+against the television's own store failed for that reason, the retry once more checks the
+certificate chain, its dates and the host name; it is offered for no other host name, and only
+after the television's own store has said no (for ten minutes after it has verified a host, a
+request to that host starts there instead of repeating the handshake the store failed). A redirect
+is a request of its own, verified against the television's own store, and is offered this file only
+if its target is itself a `*.plex.direct` name that fails the same way.
+
+Nuvio Native has no Plex Media Server and its only server is a loopback shim, so no such host is
+contacted in normal use. The bundle is carried because the inherited HTTP layer still implements
+that retry; its cost is four public certificates, and its absence would not affect addon or account
+traffic, which is verified against the television's own store and, where that store lacks the
+issuer, against `public-roots.pem`.
 
 ### 2.8 The P2P torrent engine (`libsbengine.so`)
 
@@ -542,7 +549,7 @@ particular version. libtorrent and Boost are used unmodified.
 ## 3. Dynamically linked, not redistributed
 
 The libraries below are part of your television's software. This package contains no copy of
-them; PlxNative loads them at run time. Their upstream terms and the applicable GPL linking basis must be assessed separately; absence
+them; the application loads them at run time. Their upstream terms and the applicable GPL linking basis must be assessed separately; absence
 of a bundled copy alone does not establish that no obligation applies.
 
 | Library | Version on this build | Licence | Note |
@@ -557,7 +564,7 @@ of a bundled copy alone does not establish that no obligation applies.
 | libwayland-client | 0.3.0 | MIT | Copyright © 2008-2012 Kristian Høgsberg; © 2010-2012 Intel Corporation; © 2011 Benjamin Franzke; © 2012 Collabora, Ltd. The licence of *this LG build specifically* was not read off the device |
 | luna-service2 | 3.21.2 | Apache-2.0 | Licence taken from the webOS OSE upstream project; not read off this LG build |
 | libgcc_s | the television's own | GPL-3.0-or-later WITH GCC-exception-3.1 | Version not determined; its exported symbol versions stop at `GCC_4.7.0`. Exact source and applicable Runtime Library Exception require audit |
-| FreeType | libtool 6.16.0, i.e. release 2.9.0 (inferred from the so-version, not read from the binary) | FTL OR GPL-2.0-or-later | **Not** linked by PlxNative — reached only inside the television's own SDL2_ttf. Credit given voluntarily: *Portions of this software are copyright © The FreeType Project (www.freetype.org). All rights reserved.* |
+| FreeType | libtool 6.16.0, i.e. release 2.9.0 (inferred from the so-version, not read from the binary) | FTL OR GPL-2.0-or-later | **Not** linked by Nuvio Native — reached only inside the television's own SDL2_ttf. Credit given voluntarily: *Portions of this software are copyright © The FreeType Project (www.freetype.org). All rights reserved.* |
 
 ---
 
@@ -569,21 +576,29 @@ decline to guess one:
 - `libGLESv2.so.2` — the television's OpenGL ES 2.0 implementation (an LG shim over the ARM Mali
   driver). Proprietary; no published licence located.
 - `libAcbAPI.so.1`, `libplayerAPIs.so.1` (StarfishMediaAPIs), `libpf-1.0.so.1` — LG proprietary
-  media components of webOS. No published licence located. PlxNative uses locally declared
+  media components of webOS. No published licence located. Nuvio Native uses locally declared
   interoperability interfaces; the owner has closed the review of their provenance and GPL/platform
   basis, treating them as GPL-3.0 section 1 System Libraries never redistributed with the
   application.
 **Historical NDK archive:** pre-migration builds included `libglibc_polyfills.a`, whose licence was not established. It is excluded from new linker inputs. This does not grant permission for previously distributed copies.
 
-**Non-affiliation.** PlxNative is an independent, unofficial application. It is not affiliated
+**Non-affiliation.** Nuvio Native is an independent, unofficial application. It is not affiliated
 with, endorsed by, or sponsored by LG Electronics, Plex GmbH, Fandango Media (Rotten Tomatoes),
-IMDb.com, or The Movie Database. "webOS", "LG", "Plex", "Rotten Tomatoes", "IMDb", "TMDB" and all
+IMDb.com, The Movie Database, Nuvio or Stremio. "webOS", "LG", "Plex", "Rotten Tomatoes", "IMDb", "TMDB" and all
 other trademarks are the property of their respective owners. Where those names appear in the
 application, they identify whose review score is being shown and nothing more.
 
+**The Movie Database.** Some pages take title metadata and artwork from the TMDB API. This product
+uses the TMDB API but is not endorsed or certified by TMDB. Poster artwork shown by the application
+is fetched from the service that answered — an addon or TMDB — and remains the property of the
+title's rights holder.
+
+Nuvio Native is distributed free of charge under GPL-3.0-or-later, and its use of the TMDB API is
+non-commercial: the application is not sold, carries no advertising and no paid build is offered.
+
 **Third-party brands in the interface (not a licence matter).** Review scores fetched from the
-user's own Plex Media Server are labelled with the name of the service that published them, set
-as ordinary text. No third-party logo, wordmark or brand colour is reproduced: the only glyphs
+addons you install (Cinemeta and the like) and from The Movie Database are labelled with the name of
+the service that published them, set as ordinary text. No third-party logo, wordmark or brand colour is reproduced: the only glyphs
 beside a score are two original drawings — a tomato and a group of people — that indicate the
 verdict, not the vendor. Nothing here is owed under any licence in this file.
 
@@ -636,8 +651,9 @@ the GPL-3.0-or-later election. Also retain `licenses/GCC-exception-3.1.txt` and
 
 ## 6. Deliberately not listed
 
-Two third-party components exist in the PlxNative source repository but are **not** part of this
-package, and therefore carry no obligation discharged here: **libjpeg-turbo**
+Two third-party components exist in the Nuvio Native source repository, inherited from PlxNative,
+but are **not** part of this package, and therefore carry no obligation discharged here:
+**libjpeg-turbo**
 (`libturbojpeg.so.0`, copied to developer televisions by the development deploy step only) and
 **jsmpeg** (a host-side development tool; `tools/stream-screen.py` downloads it at the upstream commit
 `ci/dependencies.json` pins, so no copy of it is in the repository; its licence is `licenses/jsmpeg.txt`). Neither is present in the installed application.

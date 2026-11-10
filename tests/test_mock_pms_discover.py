@@ -278,6 +278,14 @@ class DiscoverMock(unittest.TestCase):
         self.assertIn("base=real", discover_stand_in_problem(
             "discover: base=stand-in\ndiscover: base=real\n"), "any real line fails the run")
 
+    def test_the_nuvio_build_names_its_own_shim_as_the_stand_in(self):
+        # FORK: in this build the in-process PMS shim IS the Discover base (`local_discover`), and
+        # `announce_discover` words it `base=shim`. That is the same property the checker exists to
+        # prove — the reads go to a loopback stand-in, not the real provider — so it passes.
+        self.assertIsNone(discover_stand_in_problem("[0.1] boot\n[0.2] discover: base=shim reads=open\n"))
+        self.assertIn("base=real", discover_stand_in_problem("discover: base=shim\ndiscover: base=real\n"),
+                      "a real line beside a shim line still fails the run")
+
     def test_the_pms_people_media_route_is_not_the_stand_ins(self):
         pms = make()
         who, held = self._credited(pms)

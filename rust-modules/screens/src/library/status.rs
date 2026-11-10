@@ -79,8 +79,8 @@ impl LibraryScreen {
                 let source = directory.source().map(|(_, source)| source);
                 let name = source.map(|source| source.name.as_str()).filter(|name| !name.is_empty()).unwrap_or(plx_platform::i18n::msg::browse_library_server());
                 let owner = source.map(|source| source.handle.as_str()).filter(|owner| !owner.is_empty());
-                // Your own server is "your Plex server", the words Home uses for the same fault;
-                // a borrowed one is named, since "your" would be untrue of it.
+                // Your own server gets the same fault words Home uses; a borrowed one is named,
+                // since "your" would be untrue of it.
                 let caption = match owner {
                     None => plx_platform::i18n::msg::browse_home_failed().to_string(),
                     Some(_) => plx_platform::i18n::msg::browse_library_unreachable(name),

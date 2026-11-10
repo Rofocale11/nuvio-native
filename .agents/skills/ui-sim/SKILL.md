@@ -287,7 +287,7 @@ sign-in may legitimately have advanced by the time the app is foregrounded again
 
 ## Documentation screenshots
 
-`make screenshots` regenerates every image under `docs/screenshots/`, and the website's close-up
+`make screenshots` regenerates the documentation images the scene manifest names, and the website's close-up
 stills (the Features "look" panels use `closeup-glass` and `closeup-tiles`) and link-preview card under `site/media/`, from a committed scene manifest, against the
 mock server's demo library — no Plex account, no television, no gitignored file:
 
@@ -321,6 +321,13 @@ make screenshots SHOT_HERO_VARIANTS=1 # also home-hero-<film>.jpg for each hero 
   must agree within the scene's `max_delta`, the first capture is adopted. `python3 tools/site_stills.py files`
   lists them; `files --manual` is empty today (only the TV photograph `navblur-transition.jpg` is by hand). A Mac
   render is a preview of what the bot commits (the two differ by renderer noise, not by content).
+- **Six figures are manual captures and the command never writes them.** `real-home.jpg`,
+  `real-library.jpg`, `real-catalogs.jpg`, `real-detail.jpg`, `real-search.jpg` and
+  `real-account-menu.jpg` under `docs/screenshots/` come from the simulator signed in to a Nuvio
+  account, not from the demo library: the scene triggers reach the state and the `shot` token
+  writes the frame (`PLXNATIVE_SHOT`, beside `PLXNATIVE_RUNTIME_DIR`'s session). The `real-` prefix
+  is the point — a regeneration cannot silently replace them, and their artwork is the rights
+  holders' of the titles they show, which is why they are not in `CREDITS.md`'s table.
 - **The site's copies follow the render.** After re-rendering the `site-*` scenes, run
   `python3 tools/render-site-variants.py` (the WebP of every close-up and the phone copies of
   tiles and player) and then `python3 tools/render-site-glows.py`; both read the rendered JPEGs.

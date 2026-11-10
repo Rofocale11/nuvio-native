@@ -477,9 +477,17 @@ impl PreferencesPage {
 }
 
 /// Which fields `kind`'s list shows: Audio & Subtitles has none until a snapshot has loaded.
+///
+/// **FORK (nuvio): no quality or Direct Play rows.** Both configured the Plex server's transcoder
+/// — `Quality` asks the server to re-encode a file that does not fit, `Direct Play` chooses
+/// whether to ask — and this build's only server is the in-process shim, which has no transcoder
+/// (`docs/nuvio/PLAYBACK.md`: the Nuvio route plans Original quality for that reason). A row whose
+/// pick makes the shim refuse the stream is worse than no row, so neither is listed. The picker
+/// machinery and their strings stay: `State`'s `quality`/`direct_play` fields are part of
+/// `SHAPE`, and changing it would make the committed replay fixtures unloadable.
 fn fields_of(inputs: &FieldListInputs<'_>) -> &'static [PickerKind] {
     match inputs.kind {
-        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::DolbyVision, PickerKind::SkipInterval],
+        Kind::Playback => &[PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::DolbyVision, PickerKind::SkipInterval],
         Kind::AudioSubtitles if inputs.prefs.is_some() => &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles],
         _ => &[],
     }

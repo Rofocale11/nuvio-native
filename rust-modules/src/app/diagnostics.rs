@@ -1649,12 +1649,12 @@ fn chain(src: String, sent: String, payload: &str) -> String {
     }
 }
 
-/// The Server row's value: "<release> · Plex Pass" / "<release> · no Plex Pass", or
+/// The Server row's value: "<release> · transcode capable" / "<release> · direct play only", or
 /// "not yet queried" while the `GET /` worker has not landed (an empty version IS that state —
 /// `serverinfo` stores the two fields together).
 ///
 /// A server that answered but never named its subscription (a PMS predating the field) shows its
-/// release alone: the row must not claim a Pass state the server did not state. Pure so every arm
+/// release alone: the row must not claim a capability the server did not state. Pure so every arm
 /// is host-testable without touching the process-global store.
 fn server_line(version: &str, sub: plx_plex::plex::serverinfo::Subscription) -> String {
     use plx_plex::plex::serverinfo::Subscription as S;
@@ -3279,19 +3279,20 @@ mod tests {
         assert_eq!(chain(String::new(), String::new(), "—"), "— → —");
     }
 
-    /// The Server row's three arms (issue #22's blind spot made visible). A free server is a FACT
-    /// the row states plainly — the fault-tone assertion lives with the row builder test below —
-    /// and a server that never named its subscription must not be assigned one either way.
+    /// The Server row's three arms (issue #22's blind spot made visible). A server that states no
+    /// transcode capability is a FACT the row states plainly — the fault-tone assertion lives with
+    /// the row builder test below — and a server that never named its subscription must not be
+    /// assigned one either way.
     #[test]
     fn the_server_row_states_the_pass_tristate_without_guessing() {
         use plx_plex::plex::serverinfo::Subscription as S;
         assert_eq!(
             server_line("1.43.3.10861-cd85035e7", S::Yes),
-            "1.43.3 · Plex Pass"
+            "1.43.3 · transcode capable"
         );
         assert_eq!(
             server_line("1.43.3.10861-cd85035e7", S::No),
-            "1.43.3 · no Plex Pass"
+            "1.43.3 · direct play only"
         );
         // fetch never landed: version and subscription are stored together, so empty = unqueried
         assert_eq!(server_line("", S::Unknown), "not yet queried");
@@ -3309,8 +3310,9 @@ mod tests {
         assert_eq!(short_version("1.43-beta.2.1"), "1.43");
     }
 
-    /// A free server reads as a fact, never a fault: the danger tint is reserved for rows that say
-    /// "something broke", and `no Plex Pass` is the server working exactly as sold. (The value
+    /// A server with no transcode capability reads as a fact, never a fault: the danger tint is
+    /// reserved for rows that say "something broke", and `direct play only` is the server working
+    /// exactly as sold. (The value
     /// itself depends on the process-global store this test deliberately does not touch — the
     /// tone is a property of the ROW, fixed at build time, so it is assertable regardless.)
     #[test]

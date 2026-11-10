@@ -109,7 +109,7 @@ fn every_field_row_pushes_its_picker_and_nothing_else() {
     let mut playback = PreferencesPage::new(EntryId(0), Kind::Playback);
     let mut audio = loaded_audio_page(&account);
     for (page, fields) in [
-        (&mut playback, vec![PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::DolbyVision, PickerKind::SkipInterval]),
+        (&mut playback, vec![PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::DolbyVision, PickerKind::SkipInterval]),
         (&mut audio, vec![PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles]),
     ] {
         for field in fields {
@@ -144,20 +144,22 @@ fn the_field_list_shows_the_value_a_picker_committed_after_the_pop() {
         "the list's readout is the committed value, with no reload");
 }
 
-/// The local fields have no snapshot to publish: the list re-reads the session values on its tick.
+/// The local fields have no snapshot to publish: the list re-reads the session values on its
+/// tick. Driven through Skip interval — the Playback list no longer carries Quality or Direct
+/// Play, whose rows configured a transcoder this build's shim does not have.
 #[test]
 fn the_field_list_rereads_a_local_value_a_picker_committed() {
     let _serial = plx_base::testlock::serial();
     let _session = plx_plex::plex::session::TempSession::new("pref-parent-local");
-    let previous = plx_media::route::quality();
-    plx_media::route::restore_quality(Quality::Original);
+    let previous = plx_media::route::skip_interval();
+    plx_media::route::restore_skip_interval(plx_media::route::SkipInterval::Seconds10);
     let mut parent = PreferencesPage::new(EntryId(0), Kind::Playback);
-    let before = parent.state.values[0].clone();
-    plx_media::route::restore_quality(Quality::P480);
+    let row = parent.form.index_of(&RowId::Field(PickerKind::SkipInterval)).expect("the skip-interval row is listed");
+    let before = parent.state.values[row].clone();
+    plx_media::route::restore_skip_interval(plx_media::route::SkipInterval::Seconds30);
     drive(&mut parent, tick(), 0);
-    assert_ne!(parent.state.values[0], before);
-    assert_eq!(parent.state.values[0], Quality::P480.label());
-    plx_media::route::restore_quality(previous);
+    assert_ne!(parent.state.values[row], before);
+    plx_media::route::restore_skip_interval(previous);
 }
 
 /// A Size/Position pick made anywhere (the player's Style pages publish the live value before
@@ -273,7 +275,7 @@ fn playback_rows_are_read_only_while_no_profile_is_seated() {
     let _session = plx_plex::plex::session::TempSession::new("pref-read-only-unseated");
     let mut page = PreferencesPage::new(EntryId(0), Kind::Playback);
     assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_unseated(), "the page says to choose a profile");
-    for field in [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition,
+    for field in [PickerKind::SubtitleSize, PickerKind::SubtitlePosition,
         PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::DolbyVision, PickerKind::SkipInterval] {
         let key = RowId::Field(field).key().0;
         let row = page.form.index_of(&RowId::Field(field)).expect("the row is still listed");
@@ -304,8 +306,8 @@ fn the_playback_page_names_the_seated_profile_and_follows_the_seat() {
     drive(&mut page, tick(), 0);
     assert_eq!(page.copy, plx_platform::i18n::msg::settings_playback_copy_profile("Maya"));
     assert!(page.copy.contains("Maya"));
-    let key = RowId::Field(PickerKind::Quality).key().0;
-    assert_eq!(pushed(&drive(&mut page, ScreenEvent::Activate(key), key)), vec![SettingsPage::Picker(PickerKind::Quality)],
+    let key = RowId::Field(PickerKind::SubtitleSize).key().0;
+    assert_eq!(pushed(&drive(&mut page, ScreenEvent::Activate(key), key)), vec![SettingsPage::Picker(PickerKind::SubtitleSize)],
         "a seated profile's rows open");
 
     seat_named(&session, "noah", "Noah");

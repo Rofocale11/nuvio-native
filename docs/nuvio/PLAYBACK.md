@@ -60,9 +60,10 @@ bundled `mov` demuxer. The bundled FFmpeg has no `dash` demuxer, so `.mpd` never
 the progressive open. `ff_probe` still cannot probe `.mpd` directly — it validates a video
 track URL, not a manifest — so trailer metadata comes from the manifest/decode path, not the
 probe. 1080p H.264 trailers are verified on the dev set (`dash: manifest video=video/mp4
-1920x1080`, ten `trailer: dash pair served to its end` lines, no throttle refusal); a 2160p
-VP9/AV1 trailer has been resolved on the set but not yet played to its end, so that rung stays
-unclaimed until a log shows it.
+1920x1080`, ten `trailer: dash pair served to its end` lines, no throttle refusal), and so is the
+2160p VP9/AV1 rung: a 2160p trailer was played to its end on that set while v0.9.0 was prepared,
+which is the observation the ceiling was built for. Any other trailer rung is unclaimed rather
+than known broken.
 
 BaseURL origin — **which client is granted the whole track.** The DASH pair is resolved by the
 Node child (`trailer-decipher.js`) with YouTube's `VISIONOS` client (`clientVersion 1.02`) plus a

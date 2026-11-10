@@ -21,10 +21,12 @@ use super::registry::word;
 
 
 
-/// **The one contact address the application prints.**
-/// `every_document_prints_only_the_one_contact_address` scans the documents for stray `@`s;
-/// `screens::consent` imports it.
-pub const CONTACT_EMAIL: &str = "support@plxnative.com";
+/// **The one contact the application prints.** This build is the fork's, so the contact is the
+/// fork's own repository: upstream's `support@plxnative.com` reaches a developer who does not
+/// publish this build. `every_document_prints_only_the_one_contact_address` scans the documents
+/// for stray `@`s (no e-mail address is published at all now); `screens::consent` imports it into
+/// the `{contact}` placeholder of the identifier documents.
+pub const CONTACT_URL: &str = "https://github.com/Rofocale11/nuvio-native";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -577,25 +579,19 @@ mod tests {
         }
     }
 
-    /// **No document may print an address other than [`CONTACT_EMAIL`].** Written against the
-    /// personal address these pages used to carry: a support address that reaches only some of
-    /// the screens is worse than none, because the reader cannot tell which one is current. The
-    /// scan is for `@` rather than for the old address, so the NEXT stray address fails too.
+    /// **No document may print an e-mail address.** Written against the personal address these
+    /// pages used to carry: a support address that reaches only some of the screens is worse than
+    /// none, because the reader cannot tell which one is current. [`CONTACT_URL`] is the fork's
+    /// repository URL, so the rule is now simply that no `@` appears anywhere — the scan catches
+    /// the NEXT stray address too, whichever page it lands on.
     #[test]
     fn every_document_prints_only_the_one_contact_address() {
         for page in Page::ALL {
-            let local_len = CONTACT_EMAIL.find('@').expect("CONTACT_EMAIL has a local part");
-            for (i, _) in page.body().match_indices('@') {
-                let tail = i
-                    .checked_sub(local_len)
-                    .map(|start| &page.body()[start..])
-                    .unwrap_or("");
-                assert!(
-                    tail.starts_with(CONTACT_EMAIL),
-                    "{:?} prints an address that is not CONTACT_EMAIL",
-                    page.title()
-                );
-            }
+            assert!(
+                !page.body().contains('@'),
+                "{:?} prints an e-mail address; the one contact is CONTACT_URL",
+                page.title()
+            );
         }
     }
 
@@ -657,7 +653,7 @@ mod tests {
         assert!(p.contains("signing out removes them with it"));
         // Every profile switched to on this television keeps its own offline access: a server
         // token and, for a PIN-protected profile, a one-way check of the PIN — never the PIN.
-        assert!(p.contains("server access token"), "the policy never mentions per-profile offline access");
+        assert!(p.contains("server access"), "the policy never mentions per-profile offline access");
         assert!(p.contains("PIN"), "the policy never mentions the PIN check");
     }
 
@@ -702,12 +698,17 @@ mod tests {
         );
     }
 
+    /// **The boundary between this app and the account service it talks to.** The page used to
+    /// describe Plex's services; this build's account is Nuvio's, so the assertion pins the
+    /// sentence that says who processes that information (Nuvio, under its own terms) and the
+    /// non-affiliation line that keeps the app from implying a relationship it does not have.
     #[test]
-    fn plex_boundary_is_explicit() {
+    fn the_account_boundary_is_explicit() {
         assert!(PRIVACY.contains(
-            "Plex processes information received by those services under Plex’s own Privacy Policy"
+            "Nuvio handles that information under its own privacy terms"
         ));
-        assert!(PRIVACY.contains("https://www.plex.tv/about/privacy-legal/"));
+        assert!(PRIVACY.contains("https://nuvio.tv"));
+        assert!(TRADEMARKS.contains("not produced by, endorsed by, or affiliated with"));
         assert!(!TRADEMARKS.contains("used under licence"));
     }
 

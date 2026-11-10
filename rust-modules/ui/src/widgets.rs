@@ -4481,7 +4481,7 @@ impl<'a> StatusOverlay<'a> {
     /// **A reason with a deliberate line break** (`\n` in the message) as its lines: at most two,
     /// each trimmed and non-empty. `None` for a reason without one, which keeps wrapping freely
     /// inside the slot. A forced break is the message's own presentation (the sign-in failure's
-    /// "Signed in as …." over "This Plex account has no server yet."), so each line stands on a
+    /// "Signed in as …." over "This Nuvio account has no server yet."), so each line stands on a
     /// row of its own and is never joined to its neighbour or wrapped onto a third. `TextView`
     /// collapses `\n` like any whitespace, which is why the split happens here, the same way
     /// `ui::qr` presents an address broken at a path separator.

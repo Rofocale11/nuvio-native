@@ -955,7 +955,7 @@ pub(crate) unsafe fn construct(
     // the first thing a desktop shows, so the two builds spell it differently: the device keeps
     // the process-shaped name every log, `pidof` recipe and skill already uses.
     #[cfg(feature = "hostsim")]
-    let title = c"PlxNative";
+    let title = c"Nuvio Native";
     #[cfg(not(feature = "hostsim"))]
     let title = c"plxnative";
     // A frame dump's drawable is exactly the window's size in points: ALLOW_HIGHDPI (0x2000) would
@@ -1056,6 +1056,14 @@ pub(crate) unsafe fn construct(
     if initial.is_none() {
         super::nuvio::boot();
     }
+    // FORK (upstream called this from `run.rs`, a path this app no longer boots through): state which
+    // Discover base this boot resolved BEFORE the first read, so an event log can say whether a dev
+    // build could reach the real provider. It runs after `nuvio::boot()` on purpose — that is what
+    // installs the in-process shim, and the shim IS this build's Discover base (`local_discover`), so
+    // the line names `shim`; without the shim it names the `plxnative-discover`/`plxnative-plextv`
+    // stand-in, and `stand-in` matches. `tests/mock_pms.py` refuses a run whose line is absent or says
+    // `real`. Silent unless the `devtriggers` feature is on.
+    plx_plex::plex::account::announce_discover();
     // Drain whatever the LAST session left behind, on a worker — and **after `global_init`,
     // which is the whole reason this line is here and not beside `telemetry::boot()` 170 lines
     // up.** It was there first, and the end-to-end run showed why that was wrong: the worker

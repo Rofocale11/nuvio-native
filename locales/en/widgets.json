@@ -479,7 +479,7 @@
     }
   },
   "widgets.reason.jail_help": {
-    "value": "Repair requires a rooted TV and Homebrew Channel access. See plxnative.com/troubleshooting/#playback-reports-jail_missing_rtkmem for help.",
+    "value": "Repair requires a rooted TV and Homebrew Channel access. See github.com/Rofocale11/nuvio-native for help.",
     "description": "reason jail_help"
   },
   "widgets.tracks.empty": {
@@ -518,7 +518,7 @@
     }
   },
   "widgets.panel.jail": {
-    "value": "this install's sandbox blocks access to /dev/rtkmem; PlxNative can offer a confirmed repair through rooted Homebrew Channel access",
+    "value": "this install’s sandbox blocks access to /dev/rtkmem; Nuvio Native can offer a confirmed repair through rooted Homebrew Channel access",
     "translate": false,
     "description": "panel jail"
   },
@@ -528,7 +528,7 @@
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
   "widgets.panel.audio_only_no_pass": {
-    "value": "server sent audio only — it found no usable video transcode target (server has no Plex Pass)",
+    "value": "played the audio track only — the video was not decodable here (the addon library has no transcoder)",
     "translate": false,
     "description": "Player diagnostic reason; preserve technical device paths and protocol endpoints."
   },
@@ -593,11 +593,11 @@
     "description": "reason forced_playback_help"
   },
   "widgets.repair.question": {
-    "value": "Repair PlxNative’s sandbox?",
+    "value": "Repair Nuvio Native’s sandbox?",
     "description": "repair question"
   },
   "widgets.repair.body": {
-    "value": "Use Homebrew Channel’s root access to update PlxNative’s sandbox with LG’s native profile. This requires a rooted TV. Close and reopen PlxNative afterward.",
+    "value": "Use Homebrew Channel’s root access to update Nuvio Native’s sandbox with LG’s native profile. This requires a rooted TV. Close and reopen Nuvio Native afterward.",
     "description": "repair body"
   },
   "widgets.repair.action": {
@@ -617,7 +617,7 @@
     "description": "repair completed"
   },
   "widgets.repair.reopen": {
-    "value": "Close and reopen PlxNative before playing video.",
+    "value": "Close and reopen Nuvio Native before playing video.",
     "description": "repair reopen"
   },
   "widgets.repair.failed": {
@@ -625,7 +625,7 @@
     "description": "repair failed"
   },
   "widgets.repair.start_failed": {
-    "value": "Could not start the repair. Close and reopen PlxNative to try again.",
+    "value": "Could not start the repair. Close and reopen Nuvio Native to try again.",
     "description": "repair start_failed"
   },
   "widgets.repair.hbc_unavailable": {
@@ -669,11 +669,11 @@
     "description": "Issue #266/M7. One-line note under the ENABLED Boost dialog / Normalize loudness rows when the subtitle on screen is an external file the app draws itself — reassures the viewer that turning the toggle on leaves it untouched. No jargon: never say sidecar/remux/burn."
   },
   "widgets.tracks.enh_note_burn": {
-    "value": "Subtitles stay on. Your Plex server will rework the video to keep them, so the picture may look a little softer.",
+    "value": "Subtitles stay on. The video is played as the addon provides it, so the picture may look a little softer.",
     "description": "Issue #266/M7. One-line note under the ENABLED Boost dialog / Normalize loudness rows when the subtitle on screen is embedded in the file — turning the toggle on makes the server re-encode the video to keep it in view. No jargon: never say burn/re-encode/transcode."
   },
   "widgets.tracks.enh_reason_not_analyzed": {
-    "value": "Not ready for this video yet. Your Plex server needs to scan its sound first.",
+    "value": "Not ready for this video yet. Nuvio Native needs to read its sound first.",
     "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows when the carried audio track has no canNormalizeLoudness fact yet."
   },
   "widgets.tracks.enh_reason_dv_unusable": {
@@ -689,16 +689,16 @@
     "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows when the live route is not Direct/Remux (a fixed quality rung, HLS, a relay) or no Original candidate exists."
   },
   "widgets.tracks.enh_reason_refused": {
-    "value": "Your Plex server couldn't turn this on for this video.",
+    "value": "This can’t be turned on for this video.",
     "description": "Issue #266/M7. One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows after this playback's server already refused or ignored the params once."
   },
   "widgets.tracks.sub_burn_audio": {
-    "value": "Drawn by your server while it converts the audio.",
-    "description": "Subtitles tab of the player's track selector. One-line reason under the DIMMED Timing and Style rows while the subtitle on screen is drawn into the picture by the server because it is converting the audio (a remux, or the audio enhancement's own burn): the text is already in the video, so neither control can reach it. No jargon: never say burn/remux/transcode."
+    "value": "Drawn into the video while its audio is converted.",
+    "description": "Subtitles tab of the player's track selector. One-line reason under the DIMMED Timing and Style rows while the subtitle on screen is drawn into the picture while the audio is converted (the audio enhancement): the text is already in the video, so neither control can reach it. No jargon: never say burn/remux/transcode."
   },
   "widgets.tracks.sub_burn_quality": {
-    "value": "Drawn by your server at this quality.",
-    "description": "Subtitles tab of the player's track selector. One-line reason under the DIMMED Timing and Style rows while the subtitle on screen is drawn into the picture by the server for any reason other than converting the audio (a quality-limited re-encode, a picture subtitle that must be burned): the text is already in the video, so neither control can reach it. No jargon: never say burn/remux/transcode."
+    "value": "Drawn into the video at this quality.",
+    "description": "Subtitles tab of the player's track selector. One-line reason under the DIMMED Timing and Style rows while the subtitle on screen is drawn into the picture while the picture is limited (never by this build: the library has no transcoder): the text is already in the video, so neither control can reach it. No jargon: never say burn/remux/transcode."
   },
   "widgets.tracks.style": {
     "value": "Style",
@@ -1100,7 +1100,7 @@
     "description": "Second part of the player More menu's Quality row value ('Original · Converted'): Original is picked but the video playing is not the original file because the server is converting the picture. A short value, never a sentence; the picked choice stays checked."
   },
   "widgets.menu.quality_converted_note": {
-    "value": "Your Plex server is converting this video.",
+    "value": "This video is being converted.",
     "description": "One-line sub-label under the checked entry of the player's Quality page when the Quality row reports a conversion the viewer did not pick by name ('Original · Converted', 'Auto · 720p'). Always the same neutral sentence; it names no cause."
   },
   "widgets.tracks.forced_only": {
@@ -1112,7 +1112,7 @@
     "description": "Group header in the Library panel's +N list over the libraries other people share with this account. Their owner's handle stands on each row. A header line, no wrap: keep it short."
   },
   "widgets.tracks.enh_reason_converting": {
-    "value": "Not available while your Plex server converts this video.",
+    "value": "Not available while this video is converted.",
     "description": "One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows whenever the Quality row reads 'Original · Converted' (Original picked, the server converting the video). Same fact as that row."
   },
   "widgets.tracks.enh_reason_forced": {
@@ -1120,7 +1120,7 @@
     "description": "One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows when Settings > Force Direct Play is on, so the server never gets to change the sound."
   },
   "widgets.tracks.enh_reason_not_copyable": {
-    "value": "Your Plex server can't add this to this video right now.",
+    "value": "This can’t be added to this video right now.",
     "description": "One-line reason under the DISABLED (dim) Boost dialog / Normalize loudness rows when Original quality is in force (or cannot be reached by picking it) but the video cannot be offered the enhancement as it plays: a relay link, a video the server must convert, a track pick the Original route could not follow. Deliberately generic: the viewer cannot act on the differences."
   },
   "widgets.tracks.sub_remembered_note": {

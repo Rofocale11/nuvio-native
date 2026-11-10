@@ -19,6 +19,7 @@
 | [`nuvio/TMDB.md`](nuvio/TMDB.md) | detail enrichment, person pages, collections |
 | [`nuvio/WATCH-PROGRESS.md`](nuvio/WATCH-PROGRESS.md) | My List, watch state, account mirror |
 | [`nuvio/DETAIL-LATENCY.md`](nuvio/DETAIL-LATENCY.md) | detail round trips, prefetch and caching |
+| [`nuvio/RELEASE-NOTES-v0.9.0.md`](nuvio/RELEASE-NOTES-v0.9.0.md) | the proposed note for the first fork release |
 | [`agent-reference.md`](agent-reference.md) | build, deploy, portability, test tiers |
 | [`building.md`](building.md) | host and ARM build steps |
 | [`pms-api.md`](pms-api.md) | the Plex dialect the shim answers |

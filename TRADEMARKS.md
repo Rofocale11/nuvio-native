@@ -9,20 +9,23 @@ is stated in `LICENSING.md`; this trademark guidance remains separate.
 
 ## Trademarks and brand assets
 
-The name **PlxNative** and the PLX logo and splash artwork — `assets/logo-master.png`,
-`assets/splash-master.png`, and the `pkg/icon*.png` / `pkg/largeIcon.png` / `pkg/splash.png` cut
-from them — identify this project. They are **not** licensed for use as the identity of a derived
-or redistributed work.
+The name **Nuvio Native** and the icons cut for it — `pkg/icon.png`, `pkg/icon160.png`,
+`pkg/largeIcon.png` — identify this fork.
 
-You may fork and redistribute this software under the GPL-3.0-or-later terms; please do so under your own name
+The name **PlxNative** and the PLX logo and splash artwork — `assets/logo-master.png`,
+`assets/splash-master.png` — identify the upstream project this fork is built on. They are **not**
+licensed for use as the identity of a derived or redistributed work, and this fork does not use them
+as its own: it ships under its own name and mark, as upstream asks.
+
+You may fork and redistribute the software under the GPL-3.0-or-later terms; please do so under your own name
 and mark, so that users can tell the two apart. This is the usual reservation made by projects that
 ship an identity along with their code, and it restricts nothing else.
 
-This reservation rests on **trademark** — on the marks identifying the origin of this application —
-and is deliberately not framed as a copyright claim. The master images were produced with a
-generative image model, and the extent of copyright in such output is unsettled and, in some
-jurisdictions, nil. That affects a copyright claim; it does not affect the marks, whose protection
-comes from use in commerce rather than from authorship.
+That reservation is upstream's, and rests on **trademark** — on the marks identifying the origin of
+the application — and is deliberately not framed as a copyright claim. The PLX master images were
+produced with a generative image model, and the extent of copyright in such output is unsettled
+and, in some jurisdictions, nil. That affects a copyright claim; it does not affect the marks,
+whose protection comes from use in commerce rather than from authorship.
 
 ## Third-party components
 
@@ -43,3 +46,12 @@ software interoperates with.
 IMDb.com; "TMDB" of The Movie Database. None of those companies is affiliated with this project.
 Where their names appear in the application, they identify whose service or review score is being
 shown, and nothing more.
+
+"Nuvio" names the account service this application is a client for, and "Stremio" names the addon
+ecosystem it speaks to. Nuvio Native is not affiliated with, endorsed by, or sponsored by either of
+them; their names appear only to describe what this software works with.
+
+The application also calls the TMDB API for some title metadata and artwork. The notice that use
+requires appears in the application's About screen and in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md); Nuvio Native is distributed free of charge under
+GPL-3.0-or-later, so that use is non-commercial.

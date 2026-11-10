@@ -121,8 +121,7 @@ fn every_playback_field_pushes_its_picker() {
     let _sess = seated_scratch_session("nav-structure-playback");
     let items = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
     assert_eq!(items.iter().map(|(_, d)| *d).collect::<Vec<_>>(),
-        [SettingsPage::Picker(PickerKind::Quality), SettingsPage::Picker(PickerKind::DirectPlay),
-         SettingsPage::Picker(PickerKind::SubtitleSize), SettingsPage::Picker(PickerKind::SubtitlePosition),
+        [SettingsPage::Picker(PickerKind::SubtitleSize), SettingsPage::Picker(PickerKind::SubtitlePosition),
          SettingsPage::Picker(PickerKind::HdrOverlay), SettingsPage::Picker(PickerKind::NextEpisode), SettingsPage::Picker(PickerKind::DeckPress),
          SettingsPage::Picker(PickerKind::DolbyVision), SettingsPage::Picker(PickerKind::SkipInterval)]);
     assert_every_nav_item_pushes_exactly_its_dest("playback", &items, &|| consent_opened(SettingsPage::Playback));
@@ -327,7 +326,7 @@ fn every_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row() {
         other => panic!("{other:?} is not a Playback picker"),
     };
     let playback = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
-    assert_eq!(playback.len(), 9, "every Playback picker is in the table: {playback:?}");
+    assert_eq!(playback.len(), 7, "every Playback picker is in the table: {playback:?}");
     for &(row, dest) in &playback {
         let SettingsPage::Picker(kind) = dest else { panic!("a Playback row pushes a picker: {dest:?}") };
         assert_a_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row(

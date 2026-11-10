@@ -56,7 +56,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.trailers.detail"
   },
   "settings.about.title": {
-    "value": "About PlxNative",
+    "value": "About Nuvio Native",
     "description": "Settings, account, onboarding or privacy UI: settings.about.title"
   },
   "settings.about.section": {
@@ -68,7 +68,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.about.detail"
   },
   "settings.root.copy": {
-    "value": "Manage this television and your Plex profile. Audio and subtitle language preferences sync with your Plex account; playback defaults and the app language apply to this television.",
+    "value": "Manage this television and your Nuvio profile. Audio and subtitle language preferences sync with your Nuvio account; playback defaults and the app language apply to this television.",
     "description": "Settings, account, onboarding or privacy UI: settings.root.copy"
   },
   "settings.libraries.count": {
@@ -168,7 +168,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.language.title"
   },
   "settings.language.detail": {
-    "value": "Choose the language used by PlxNative.",
+    "value": "Choose the language used by Nuvio Native.",
     "description": "Settings, account, onboarding or privacy UI: settings.language.detail"
   },
   "settings.language.system": {
@@ -176,15 +176,15 @@
     "description": "Settings, account, onboarding or privacy UI: settings.language.system"
   },
   "settings.language.copy": {
-    "value": "Choose the app language for everyone on this television. Changes apply after restarting PlxNative.",
+    "value": "Choose the app language for everyone on this television. Changes apply after restarting Nuvio Native.",
     "description": "Settings, account, onboarding or privacy UI: settings.language.copy"
   },
   "settings.language.pending": {
-    "value": "Restart PlxNative to apply this change.",
+    "value": "Restart Nuvio Native to apply this change.",
     "description": "Settings, account, onboarding or privacy UI: settings.language.pending"
   },
   "settings.language.restart_hint": {
-    "value": "Hold {key} to close PlxNative, then open it again.",
+    "value": "Hold {key} to close Nuvio Native, then open it again.",
     "description": "Complete sentence under the Language page's explanation, telling people how to restart the app: holding the remote's BACK button closes it (many LG remotes have no EXIT button). {key} is the BACK button rendered as a keycap; keep exactly one occurrence. Must fit one line of the Settings narrative column at CAPTION size.",
     "args": {
       "key": "str"
@@ -219,11 +219,11 @@
     "description": "Settings, account, onboarding or privacy UI: settings.consent.product.title"
   },
   "settings.consent.crash.body": {
-    "value": "If PlxNative crashes, or signing in fails, it can send technical details that help find and fix the problem. Reports may include the signal, code addresses, thread information and device compatibility details, or which sign-in step failed and how the connection answered, plus a random crash report identifier, created when you turn this on and deleted when you turn it off or sign out, so that repeated crashes under one crash report identifier are counted once rather than once each. They never include titles, Plex accounts, searches, server names or addresses, tokens, subtitle text, or the product analytics identifier.",
+    "value": "If Nuvio Native crashes, or signing in fails, it can send technical details that help find and fix the problem: the signal, code addresses, thread information and device compatibility details, or which sign-in step failed and how the connection answered. Each report carries a random crash report identifier, created when you turn this on and deleted when you turn it off or sign out. Reports never include titles, your Nuvio account, searches, addon names or addresses, tokens, subtitle text, or the product analytics identifier.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.crash.body"
   },
   "settings.consent.product.body": {
-    "value": "PlxNative can share which screens and features are used and broad sign-in and playback outcomes. Reports carry a random Analytics ID, created when you turn this on and deleted when you turn it off or sign out, and can include the app version, webOS version, television model and SoC, and whether a selected server is local, remote or relayed. They never include titles, Plex accounts, searches, server names or addresses, tokens, subtitle text, or exact viewing history.",
+    "value": "Nuvio Native can share which screens and features are used and broad sign-in and playback outcomes. Reports carry a random Analytics ID, created when you turn this on and deleted when you turn it off or sign out, and can include the app version, webOS version, television model and SoC, and whether a selected addon is local or remote. They never include titles, your Nuvio account, searches, addon names or addresses, tokens, subtitle text, or exact viewing history.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.product.body"
   },
   "settings.consent.crash.row": {
@@ -271,11 +271,11 @@
     "description": "Settings, account, onboarding or privacy UI: settings.consent.delete"
   },
   "settings.consent.delete_scope": {
-    "value": "This signs out and removes PlxNative data stored on this television. It does not delete data already sent to Plex, your Plex Media Servers, Sentry or PostHog.",
+    "value": "This signs out and removes Nuvio Native data stored on this television. It does not delete data already sent to Nuvio, to the addons you use, to Sentry or to PostHog.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.delete_scope"
   },
   "settings.consent.settings_copy": {
-    "value": "Control optional reporting, review exactly what may be shared, and manage data stored by PlxNative on this television.",
+    "value": "Control optional reporting, review exactly what may be shared, and manage data stored by Nuvio Native on this television.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.settings_copy"
   },
   "settings.consent.reporting": {
@@ -299,7 +299,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.consent.preview_usage"
   },
   "settings.consent.preview_policy": {
-    "value": "The complete PlxNative privacy policy for this build.",
+    "value": "The complete Nuvio Native privacy policy for this build.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.preview_policy"
   },
   "settings.consent.preview_errors_id": {
@@ -311,7 +311,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.consent.preview_analytics_id"
   },
   "settings.consent.delete_detail": {
-    "value": "Sign out and remove PlxNative data from this TV.",
+    "value": "Sign out and remove Nuvio Native data from this TV.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.delete_detail"
   },
   "settings.consent.errors_subtitle": {
@@ -323,7 +323,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.consent.analytics_subtitle"
   },
   "settings.consent.policy_subtitle": {
-    "value": "How PlxNative handles local data, Plex services and optional reporting.",
+    "value": "How Nuvio Native handles local data, Nuvio services and optional reporting.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.policy_subtitle"
   },
   "settings.consent.crash_subtitle": {
@@ -371,7 +371,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.ffmpeg.title"
   },
   "settings.legal.source.title": {
-    "value": "PlxNative source code",
+    "value": "Nuvio Native source code",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.source.title"
   },
   "settings.legal.trademarks.title": {
@@ -383,7 +383,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.contact.title"
   },
   "settings.legal.privacy.subtitle": {
-    "value": "How PlxNative handles local data and optional reports.",
+    "value": "How Nuvio Native handles local data and optional reports.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.subtitle"
   },
   "settings.legal.opensource.subtitle": {
@@ -411,7 +411,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.section"
   },
   "settings.legal.copy": {
-    "value": "Read the notices that apply to this build, its open-source components and its relationship with Plex and LG.",
+    "value": "Read the notices that apply to this build, its open-source components and its relationship with LG and the services it uses.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.copy"
   },
   "settings.about.subtitle": {
@@ -419,31 +419,31 @@
     "description": "Settings, account, onboarding or privacy UI: settings.about.subtitle"
   },
   "settings.legal.privacy.responsible": {
-    "value": "RESPONSIBLE FOR PLXNATIVE DATA",
+    "value": "WHO IS RESPONSIBLE",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.responsible"
   },
   "settings.legal.privacy.responsible_body": {
-    "value": "Gleb Linnik is responsible only for data PlxNative stores locally and for optional reports you choose to share.",
+    "value": "The Nuvio Native maintainers are responsible only for data Nuvio Native stores locally and for optional reports you choose to share.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.responsible_body"
   },
   "settings.legal.privacy.plex": {
-    "value": "PLEX SERVICES",
+    "value": "NUVIO SERVICES",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.plex"
   },
   "settings.legal.privacy.plex_body": {
-    "value": "PlxNative is an independent client for Plex. To sign you in, discover servers and provide Plex account features, the app communicates directly with Plex services. Plex processes information received by those services under Plex’s own Privacy Policy. PlxNative’s developer does not receive that information.",
+    "value": "Nuvio Native is an independent client for Nuvio and the Stremio addons you install. To sign you in and provide account features, the app communicates directly with Nuvio’s services. Nuvio handles that information under its own privacy terms, and the Nuvio Native maintainers do not receive it.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.plex_body"
   },
   "settings.legal.privacy.plex_link": {
-    "value": "Plex Privacy Policy: https://www.plex.tv/about/privacy-legal/",
+    "value": "Nuvio account data: https://nuvio.tv",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.plex_link"
   },
   "settings.legal.privacy.servers": {
-    "value": "PLEX MEDIA SERVERS",
+    "value": "ADDONS YOU INSTALL",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.servers"
   },
   "settings.legal.privacy.servers_body": {
-    "value": "To browse and play media, update watch progress and use server features, PlxNative communicates directly with the Plex Media Servers you select. Those requests are handled by the selected server and its operator. PlxNative’s developer does not receive them.",
+    "value": "Some pages also ask The Movie Database (TMDB) for title details and artwork. To browse and play media, update watch progress and use account features, Nuvio Native talks directly to Nuvio and to the addons you have installed. Those services handle the requests; the Nuvio Native maintainers do not receive them.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.servers_body"
   },
   "settings.legal.privacy.local": {
@@ -451,7 +451,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.local"
   },
   "settings.legal.privacy.local_body": {
-    "value": "PlxNative stores your Plex account token and a separate token for each server you use. For every profile you have switched to on this television, it also keeps that profile's own server access token(s) and, for a PIN-protected profile, a one-way check computed from that PIN rather than the PIN itself. It also keeps the addresses and identifiers of those servers, the profile names and pictures on your account (pictures and other downloaded artwork are cached as bounded files for reuse across restarts), your Home library choices, your recent searches, your playback quality, Direct Play and app language preferences, and local technical logs: an event log and an error-output log, each emptied every time the app launches, a crash log that is kept until the television restarts, and a bounded storage status snapshot. It also stores your answers to the two optional-reporting questions, the random Crash report ID if you turned crash reports on, the random Analytics ID if you turned product analytics on, any report waiting to be sent, and a marker recording how much of the crash log has already been read. It keeps no bookmark of its own for where you stopped watching: playback position is held by your Plex Media Server. Delete all local data in Settings signs out and removes PlxNative data from this television.",
+    "value": "Nuvio Native stores your Nuvio sign-in, the addons you installed, and the profile names and pictures on your account (pictures and other downloaded artwork are cached as bounded files for reuse across restarts). It also keeps your Home choices, your recent searches, playback and subtitle preferences, the app language, and local technical logs: an event log and an error-output log, each emptied every time the app launches, a crash log kept until the television restarts, and a bounded storage status snapshot. It stores your answers to the two optional-reporting questions, the random Crash report ID or Analytics ID they create, and any report waiting to be sent. Watch progress and My List belong to your Nuvio account, not to this television. Delete all local data in Settings signs out and removes Nuvio Native data from this television.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.local_body"
   },
   "settings.legal.privacy.crashes": {
@@ -459,7 +459,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.crashes"
   },
   "settings.legal.privacy.crashes_body": {
-    "value": "If enabled, technical crash details are sent to Sentry in Germany. They can include the signal, code addresses, thread information and device compatibility details. Each report carries a random Crash report ID created on this television when you turned crash reports on, so that repeated crashes under one Crash report ID are counted once rather than once each. It is not derived from your Plex account, your television or anything about you, and it is never sent with product analytics. Settings shows it as your Crash report ID while crash reports are on.",
+    "value": "If enabled, technical crash details are sent to Sentry in Germany. They can include the signal, code addresses, thread information and device compatibility details. Each report carries a random Crash report ID created on this television when you turned crash reports on, so that repeated crashes under one Crash report ID are counted once. It is not derived from your Nuvio account, your television or anything about you, and it is never sent with product analytics. Settings shows it as your Crash report ID while crash reports are on.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.crashes_body"
   },
   "settings.legal.privacy.analytics": {
@@ -475,7 +475,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.excluded"
   },
   "settings.legal.privacy.excluded_body": {
-    "value": "Titles, Plex accounts, searches, server names or addresses, tokens, subtitle text and exact viewing history are not included in either optional report type. Both choices are independent and can be changed at any time in Settings.",
+    "value": "Titles, your Nuvio account, searches, addon names or addresses, tokens, subtitle text and exact viewing history are not included in either optional report type. Both choices are independent and can be changed at any time in Settings.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.excluded_body"
   },
   "settings.legal.privacy.retention": {
@@ -483,7 +483,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.retention"
   },
   "settings.legal.privacy.retention_body": {
-    "value": "Different things here have different lifetimes, so this is stated for each. Your sign-in, the servers registered with it and their tokens, every profile's own cached server access token(s) and PIN check, cached profile pictures and other downloaded artwork, and your answers about unencrypted connections, are removed when you sign out. Your answers to the two optional-reporting questions, and the Crash report ID and Analytics ID if they exist, belong to that sign-in: signing out removes them with it, and whoever signs in next is asked afresh. Switching between the profiles of one Plex account is not a sign-out and keeps all of it, including the server access token(s) and PIN check cached for a profile you are not currently using, so that profile can be switched to again with no internet. A report waiting to be sent is deleted once it is sent, and a queued report of a category you switch off, or that you sign out of, is deleted at that moment; one report that the sender had already picked up at that moment may still be sent, and no further report is picked up after it. The event log and the error-output log are emptied every time the app launches, the crash log is kept until the television restarts (the television clears its temporary storage then), and the storage snapshot is replaced when its bounded status changes. Delete all local data removes all of it. A report that has already been sent is held by the service that received it, under that service’s own retention schedule; write to the contact below to ask what those periods currently are. The app language preference belongs to this television and is kept when you sign out; Delete all local data resets it.",
+    "value": "Your sign-in, the addons and server access registered with it, cached profile pictures and other downloaded artwork, and your answers about unencrypted connections are removed when you sign out. Your answers to the two optional-reporting questions, and the Crash report ID and Analytics ID they create, belong to that sign-in, and signing out removes them with it; whoever signs in next is asked afresh. Switching between the profiles of one Nuvio account is not a sign-out and keeps all of it, so a profile can be switched back to with no internet. A report waiting to be sent is deleted once it is sent, and a queued report you switch off, or that you sign out of, is deleted at that moment; one the sender had already picked up may still be sent. The event log and the error-output log are emptied at every launch, the crash log is kept until the television restarts, and the storage snapshot is replaced when its bounded status changes. Delete all local data removes all of it. A report already sent is held by the service that received it under that service’s own retention schedule; use the contact below to ask what those periods currently are. The app language preference belongs to this television and is kept when you sign out; Delete all local data resets it.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.retention_body"
   },
   "settings.legal.privacy.choices": {
@@ -491,7 +491,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.choices"
   },
   "settings.legal.privacy.choices_body": {
-    "value": "Both optional reports are off until you turn them on, and either can be turned off again at any time in Settings. A one-off sign-in problem report is sent only when you press Send report. Delete all local data removes what PlxNative stored on this television; it does not reach anything already sent. To ask what crash reports or product analytics hold for your installation, or to have them deleted, write to the contact below and quote your Crash report ID or Analytics ID from Settings, or the Report ID shown after a one-off report. Each identifier is the only handle its reports carry. Turning a category off deletes its identifier from this television, and so does signing out; reports already sent keep the old one, so copy it down first if you intend to ask for their deletion.",
+    "value": "Both optional reports are off until you turn them on, and either can be turned off again at any time in Settings. A one-off sign-in problem report is sent only when you press Send report. Delete all local data removes what Nuvio Native stored on this television; it does not reach anything already sent. To ask what crash reports or product analytics hold for your installation, or to have them deleted, use the contact below and quote your Crash report ID or Analytics ID from Settings, or the Report ID shown after a one-off report. Each identifier is the only handle its reports carry. Turning a category off deletes its identifier from this television, and so does signing out; reports already sent keep the old one, so copy it down first if you intend to ask for their deletion.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.choices_body"
   },
   "settings.legal.privacy.processing": {
@@ -499,7 +499,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.processing"
   },
   "settings.legal.privacy.processing_body": {
-    "value": "Optional crash reports are processed by Sentry in Germany and optional product analytics by PostHog in Germany. Plex processes what its own services receive under Plex’s Privacy Policy. A Plex Media Server you connect to may be located anywhere and is operated by whoever runs it, not by PlxNative’s developer.",
+    "value": "Optional crash reports are processed by Sentry in Germany and optional product analytics by PostHog in Germany. Nuvio handles what its own services receive under its own privacy terms. An addon you install is operated by whoever publishes it, and may be located anywhere; the Nuvio Native maintainers do not operate it.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.processing_body"
   },
   "settings.legal.privacy.uninstall": {
@@ -507,7 +507,7 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.uninstall"
   },
   "settings.legal.privacy.uninstall_body": {
-    "value": "Removing PlxNative removes the application, but webOS gives an application no way to run code as it is removed, so anything kept outside the application’s own directory can survive. Your sign-in is deliberately kept there so that reinstalling does not sign you out. Your optional-reporting answers and their Crash report ID and Analytics ID are kept with that sign-in, so that a decision you have already made is not put to you again after a reinstall. Your app language preference is also kept there. Use Delete all local data BEFORE uninstalling if you want nothing of PlxNative left on this television.",
+    "value": "Removing Nuvio Native removes the application, but webOS gives an application no way to run code as it is removed, so anything kept outside the application’s own directory can survive. Your sign-in is deliberately kept there so that reinstalling does not sign you out. Your optional-reporting answers and their Crash report ID and Analytics ID are kept with that sign-in, so that a decision you have already made is not put to you again after a reinstall. Your app language preference is also kept there. Use Delete all local data BEFORE uninstalling if you want nothing of Nuvio Native left on this television.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.uninstall_body"
   },
   "settings.legal.privacy.contact": {
@@ -515,34 +515,34 @@
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.contact"
   },
   "settings.legal.privacy.contact_body": {
-    "value": "Privacy questions: support@plxnative.com",
+    "value": "Privacy questions: https://github.com/Rofocale11/nuvio-native",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.privacy.contact_body"
   },
   "settings.legal.ffmpeg.body": {
-    "value": "This software uses libraries from the FFmpeg project under the LGPLv2.1. FFmpeg is copyright (c) the FFmpeg developers; PlxNative does not own FFmpeg.\n\nThe FFmpeg libraries are unmodified and loaded dynamically, and may be replaced with an interface-compatible build. The complete corresponding FFmpeg 9.0 source, exact configure line and build script are published with every PlxNative release.",
+    "value": "This software uses libraries from the FFmpeg project under the LGPLv2.1. FFmpeg is copyright (c) the FFmpeg developers; Nuvio Native does not own FFmpeg.\n\nThe FFmpeg libraries are unmodified and loaded dynamically, and may be replaced with an interface-compatible build. The complete corresponding FFmpeg 9.0 source, exact configure line and build script are published with every Nuvio Native release.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.ffmpeg.body"
   },
   "settings.legal.trademarks.body": {
-    "value": "Plex, the Plex logo and Plex Media Server are trademarks of Plex, Inc.\n\nLG and webOS are trademarks of LG Electronics Inc.\n\nPlxNative is an independent, unofficial application. It is not produced by, endorsed by, or affiliated with Plex, Inc. or LG Electronics Inc.",
+    "value": "Plex, the Plex logo and Plex Media Server are trademarks of Plex, Inc.\n\nLG and webOS are trademarks of LG Electronics Inc.\n\nNuvio Native is an independent, unofficial application. It is not produced by, endorsed by, or affiliated with Plex, Inc., LG Electronics Inc., Nuvio or Stremio.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.trademarks.body"
   },
   "settings.legal.contact.body": {
-    "value": "Privacy questions may be sent to support@plxnative.com.\n\nSecurity vulnerabilities may be reported privately through GitHub Security Advisories for GLinnik21/plx-native. Please do not include Plex tokens, server addresses or personal media information in a report.",
+    "value": "Privacy questions and security reports: https://github.com/Rofocale11/nuvio-native — security advisories there can be filed privately. Please do not include tokens, addon addresses or personal media information in a report.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.contact.body"
   },
   "settings.legal.opensource.body": {
-    "value": "PlxNative is open-source software licensed under GPL-3.0-or-later. Copyright (c) 2026 Gleb Linnik and contributors. You may modify and redistribute it under these terms. There is no warranty, to the extent permitted by law.\n\nThird-party components retain their own licences. The package includes THIRD-PARTY-NOTICES.md and licence texts for the Rust runtime and crates, FFmpeg, Sentry Native, libunwind, NanoSVG, fonts and icons. Platform libraries have separate terms.",
+    "value": "Nuvio Native is open-source software licensed under GPL-3.0-or-later, and is a fork of PlxNative by Gleb Linnik. Copyright (c) 2026 Gleb Linnik and contributors. You may modify and redistribute it under these terms. There is no warranty, to the extent permitted by law.\n\nThird-party components retain their own licences. The package includes THIRD-PARTY-NOTICES.md and licence texts for the Rust runtime and crates, FFmpeg, Sentry Native, libunwind, NanoSVG, fonts and icons. Platform libraries have separate terms.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.opensource.body"
   },
   "settings.legal.source.body": {
-    "value": "Source for build {build}:\n\nhttps://github.com/GLinnik21/plx-native/tree/{build}\n\nLocal migration candidates may contain unpublished changes. Their matching source snapshot is provided with the candidate evidence. A published binary must be accompanied by its version-specific complete source bundle and build instructions; a moving branch is not the corresponding-source record. See LICENSING.md in the package.",
+    "value": "Source for build {build}:\n\nhttps://github.com/Rofocale11/nuvio-native/tree/{build}\n\nLocal migration candidates may contain unpublished changes. Their matching source snapshot is provided with the candidate evidence. A published binary must be accompanied by its version-specific complete source bundle and build instructions; a moving branch is not the corresponding-source record. See LICENSING.md in the package.",
     "description": "Settings, account, onboarding or privacy UI: settings.legal.source.body",
     "args": {
       "build": "str"
     }
   },
   "settings.about.body": {
-    "value": "Version {version}\nBuild {build}\n\nDeveloped by Gleb Linnik\n© 2026 Gleb Linnik\n\nOpen source under GPL-3.0-or-later\ngithub.com/GLinnik21/plx-native\n\nPlxNative is an independent, unofficial application. It is not produced by, endorsed by, or affiliated with Plex, Inc. or LG Electronics Inc.",
+    "value": "Version {version}\nBuild {build}\n\nNuvio Native is a fork of PlxNative by Gleb Linnik\n© 2026 Gleb Linnik and contributors\n\nOpen source under GPL-3.0-or-later\ngithub.com/Rofocale11/nuvio-native\n\nNuvio Native is an independent, unofficial application. It is not produced by, endorsed by, or affiliated with Plex, Inc., LG Electronics Inc., Nuvio or Stremio.\n\nMetadata and artwork come from the addons you install and, on some pages, from The Movie Database (TMDB).\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.",
     "description": "Settings, account, onboarding or privacy UI: settings.about.body",
     "args": {
       "build": "str",
@@ -577,7 +577,7 @@
     }
   },
   "settings.consent.analytics.present": {
-    "value": "YOUR ANALYTICS ID\n\n{id}\n\nWHAT IT IS\n\nA random identifier created on this television when you turned product analytics on. It is attached to analytics events so they can be counted as coming from one Analytics ID: one uninterrupted opt-in on one television. It is not derived from your Plex account, your television or anything about you, and it is never sent with crash reports, which carry a separate Crash report ID of their own.\n\nHOW TO HAVE THESE EVENTS DELETED\n\nWrite to {contact} and quote the identifier above. It is the only handle these events carry, so a request without it cannot be matched to anything.\n\nHOW IT ENDS\n\nTurning product analytics off deletes this identifier, and turning analytics on again creates a different one. Signing out removes it as well, and the next person to sign in is asked afresh; so does Delete all local data. Events already sent keep the old identifier, which is why it is worth copying down before you turn analytics off if you intend to ask for their deletion.",
+    "value": "YOUR ANALYTICS ID\n\n{id}\n\nWHAT IT IS\n\nA random identifier created on this television when you turned product analytics on. It is attached to analytics events so they can be counted as coming from one Analytics ID: one uninterrupted opt-in on one television. It is not derived from your Nuvio account, your television or anything about you, and it is never sent with crash reports, which carry a separate Crash report ID of their own.\n\nHOW TO HAVE THESE EVENTS DELETED\n\nUse {contact} and quote the identifier above. It is the only handle these events carry, so a request without it cannot be matched to anything.\n\nHOW IT ENDS\n\nTurning product analytics off deletes this identifier, and turning analytics on again creates a different one. Signing out removes it as well, and the next person to sign in is asked afresh; so does Delete all local data. Events already sent keep the old identifier, which is why it is worth copying down before you turn analytics off if you intend to ask for their deletion.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.analytics.present",
     "args": {
       "contact": "str",
@@ -592,7 +592,7 @@
     }
   },
   "settings.consent.errors.present": {
-    "value": "YOUR CRASH REPORT ID\n\n{id}\n\nWHAT IT IS\n\nA random identifier created on this television when you turned crash reports on. It is attached to every crash and error report so that repeated crashes under one Crash report ID are counted once, which is what tells a problem that hit many people apart from one television that hit it many times. It is not derived from your Plex account, your television or anything about you, and it is never sent with product analytics, which has a separate Analytics ID of its own.\n\nHOW TO HAVE THESE REPORTS DELETED\n\nWrite to {contact} and quote the identifier above. It is the only handle these reports carry, so a request without it cannot be matched to anything.\n\nHOW IT ENDS\n\nTurning crash reports off deletes this identifier, and turning them on again creates a different one. Signing out removes it as well, and the next person to sign in is asked afresh; so does Delete all local data. Reports already sent keep the old identifier, which is why it is worth copying down before you turn crash reports off if you intend to ask for their deletion.",
+    "value": "YOUR CRASH REPORT ID\n\n{id}\n\nWHAT IT IS\n\nA random identifier created on this television when you turned crash reports on. It is attached to every crash and error report so that repeated crashes under one Crash report ID are counted once, which is what tells a problem that hit many people apart from one television that hit it many times. It is not derived from your Nuvio account, your television or anything about you, and it is never sent with product analytics, which has a separate Analytics ID of its own.\n\nHOW TO HAVE THESE REPORTS DELETED\n\nUse {contact} and quote the identifier above. It is the only handle these reports carry, so a request without it cannot be matched to anything.\n\nHOW IT ENDS\n\nTurning crash reports off deletes this identifier, and turning them on again creates a different one. Signing out removes it as well, and the next person to sign in is asked afresh; so does Delete all local data. Reports already sent keep the old identifier, which is why it is worth copying down before you turn crash reports off if you intend to ask for their deletion.",
     "description": "Settings, account, onboarding or privacy UI: settings.consent.errors.present",
     "args": {
       "contact": "str",
@@ -620,7 +620,7 @@
     "description": "Settings, consent or sign-in UI: settings.playback.title"
   },
   "settings.playback.detail": {
-    "value": "Default quality and Direct Play.",
+    "value": "Subtitles, HDR and playback.",
     "description": "Settings, consent or sign-in UI: settings.playback.detail"
   },
   "settings.audio.title": {
@@ -628,7 +628,7 @@
     "description": "Settings, consent or sign-in UI: settings.audio.title"
   },
   "settings.audio.detail": {
-    "value": "Language preferences synced with your Plex account.",
+    "value": "Language preferences synced with your Nuvio account.",
     "description": "Settings, consent or sign-in UI: settings.audio.detail"
   },
   "settings.playback.quality": {
@@ -766,7 +766,7 @@
     "description": "Settings, consent or sign-in UI: settings.audio.forced_subtitles"
   },
   "settings.playback.force_body": {
-    "value": "Bypasses playback compatibility checks and always uses original quality. Playback may have no sound, display incorrectly, freeze, or crash the app. PlxNative will not automatically switch to compatible playback and may not recover gracefully.\n\nEnable this only if you understand these risks and know how to restart the app and return Direct Play to Auto.",
+    "value": "Bypasses playback compatibility checks and always plays the original stream. Playback may have no sound, display incorrectly, freeze, or crash the app. Nuvio Native will not automatically switch to compatible playback and may not recover gracefully.\n\nEnable this only if you understand these risks and know how to restart the app.",
     "description": "Settings, consent or sign-in UI: settings.playback.force_body"
   },
   "settings.playback.force_note": {
@@ -774,7 +774,7 @@
     "description": "Settings, consent or sign-in UI: settings.playback.force_note"
   },
   "settings.audio.account_note": {
-    "value": "Saved to this Plex profile and shared with your other Plex apps. Changes may take time to affect playback; selections already made for an item still take priority.",
+    "value": "Saved to this Nuvio profile and shared with your other Nuvio apps. Changes may take time to affect playback; selections already made for an item still take priority.",
     "description": "Settings, consent or sign-in UI: settings.audio.account_note"
   },
   "settings.playback.copy": {
@@ -782,11 +782,11 @@
     "description": "Explanation under the title of the Video & playback page itself. Each picker opened from it has its own explanation (settings.playback.<field>.copy), so this one is about the page as a whole, not about any single setting."
   },
   "settings.playback.quality.copy": {
-    "value": "The highest quality a video plays at. Larger files are converted by your Plex server to fit. Also available in the player's More menu.",
+    "value": "Nuvio Native plays the original stream and cannot convert video. Addons deliver the file as it is.",
     "description": "Explanation under the title of the Default quality picker (Settings, Video & playback). Describes the ceiling and says the same control is in the player's More menu (the More menu drops its Quality section only under Forced Direct Play, where this text is replaced by the Force note)."
   },
   "settings.playback.direct_play.copy": {
-    "value": "Auto plays the original file when this television can; otherwise your Plex server converts it. Disabled always converts. Force skips every check: for troubleshooting only.",
+    "value": "Direct Play is always used: Nuvio Native plays the original stream and cannot convert video.",
     "description": "Explanation under the title of the Direct Play picker. Names its three modes in order: Auto, Disabled and Force (the picker's third option, 'Force Direct Play (advanced)'). While Force is on the Force note replaces it."
   },
   "settings.playback.subtitle_size.copy": {
@@ -822,11 +822,11 @@
     "description": "Settings, consent or sign-in UI: settings.playback.force_question"
   },
   "settings.audio.saving": {
-    "value": "Saving to your Plex account…",
+    "value": "Saving to your Nuvio account…",
     "description": "Settings, consent or sign-in UI: settings.audio.saving"
   },
   "settings.audio.loading": {
-    "value": "Loading your Plex account preferences…",
+    "value": "Loading your Nuvio account preferences…",
     "description": "Settings, consent or sign-in UI: settings.audio.loading"
   },
   "settings.playback.saving": {
@@ -910,7 +910,7 @@
     "description": "Settings, consent or sign-in UI: settings.audio.retry_detail"
   },
   "settings.audio.sign_in_again": {
-    "value": "Sign in to this Plex profile again to edit its account preferences.",
+    "value": "Sign in to this Nuvio profile again to edit its account preferences.",
     "description": "Settings, consent or sign-in UI: settings.audio.sign_in_again"
   },
   "settings.playback.save_failed": {
@@ -946,7 +946,7 @@
     "description": "Settings, consent or sign-in UI: settings.plaintext.question"
   },
   "settings.plaintext.body": {
-    "value": "Your Plex sign-in will travel without encryption over this network, to this server only.",
+    "value": "Your Nuvio sign-in will travel without encryption, to the app’s own library server.",
     "description": "Settings, consent or sign-in UI: settings.plaintext.body"
   },
   "settings.plaintext.section": {
@@ -954,7 +954,7 @@
     "description": "Settings, consent or sign-in UI: settings.plaintext.section"
   },
   "settings.plaintext.server": {
-    "value": "Plex server",
+    "value": "Library server",
     "description": "Settings, consent or sign-in UI: settings.plaintext.server"
   },
   "settings.plaintext.denied": {
@@ -994,7 +994,7 @@
     "description": "Settings, consent or sign-in UI: settings.login.report_body"
   },
   "settings.login.unreachable": {
-    "value": "Can’t reach Plex. Check your TV’s internet connection.",
+    "value": "Can’t reach Nuvio. Check your TV’s internet connection.",
     "description": "Settings, consent or sign-in UI: settings.login.unreachable"
   },
   "settings.login.report_sending": {
@@ -1051,7 +1051,7 @@
   },
   "settings.legal.privacy.plaintext_body": {
     "description": "In-app privacy disclosure, aligned with PRIVACY.md.",
-    "value": "For a server you were asked about, PlxNative also keeps whether you allowed an unencrypted connection on your home network, for the Plex account that answered. Only the answer is stored. The permission itself is never stored and ends when a fresh check no longer reaches the same server address, at sign-in or sign-out, at a profile switch unless the new profile reaches that server at the same address, or when the app returns from the background."
+    "value": "For an addon server you were asked about, Nuvio Native also keeps whether you allowed an unencrypted connection on your home network. Only the answer is stored; the permission itself ends when a fresh check no longer reaches the same address, at sign-in or sign-out, at a profile switch, or when the app returns from the background."
   },
   "settings.legal.privacy.signin_body": {
     "description": "In-app privacy disclosure, aligned with PRIVACY.md.",

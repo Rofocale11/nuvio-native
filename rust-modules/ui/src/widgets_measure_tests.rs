@@ -223,7 +223,7 @@ fn the_librarys_real_ceiling_shrinks_the_glyph_to_a_size_that_rasterizes_1to1() 
     let icon = crate::icons::Icon::ServerBadgeMinus;
     let natural_top = StatusOverlay::FULL_ANCHOR_TOP - StatusOverlay::GLYPH_GAP - StatusOverlay::GLYPH_SIZE;
     let ceiling = natural_top + 38.0;
-    let overlay = StatusOverlay::new(Rect::FULL, c"Can\u{2019}t reach your Plex server", StatusKind::Failed)
+    let overlay = StatusOverlay::new(Rect::FULL, c"Can\u{2019}t reach Nuvio", StatusKind::Failed)
         .page(icon).glyph_ceiling(ceiling);
     let rect = overlay.glyph_frame().expect("this ceiling leaves room for a shrunk glyph");
     let size = rect.w;
@@ -420,10 +420,10 @@ fn translated_glyph_hint_keeps_the_physical_arrow_and_catalog_punctuation() {
 /// slot and therefore the row do not depend on the words. `TextView` alone would join them.
 #[test]
 fn a_forced_break_reason_is_split_into_at_most_two_lines() {
-    let two = "Signed in as alexandra.\nThis Plex account has no server yet.";
+    let two = "Signed in as alexandra.\nThis Nuvio account has no server yet.";
     assert_eq!(
         StatusOverlay::reason_segments(two),
-        Some(vec!["Signed in as alexandra.", "This Plex account has no server yet."])
+        Some(vec!["Signed in as alexandra.", "This Nuvio account has no server yet."])
     );
     assert_eq!(StatusOverlay::reason_segments("a\n\n b \nc"), Some(vec!["a", "b"]), "at most two, blanks dropped");
     assert_eq!(StatusOverlay::reason_segments("one line"), None);
@@ -435,7 +435,7 @@ fn a_forced_break_reason_is_split_into_at_most_two_lines() {
 #[test]
 fn a_failed_reason_drops_the_row_by_one_fixed_amount() {
     let failed = || StatusOverlay::new(Rect::FULL, c"x", StatusKind::Failed).action(c"Retry");
-    for reason in [c"one line", c"Signed in as a.\nThis Plex account has no server yet."] {
+    for reason in [c"one line", c"Signed in as a.\nThis Nuvio account has no server yet."] {
         assert_eq!(failed().reason(reason).row_drop(), REASON_ROW_DROP);
     }
     assert_eq!(failed().row_drop(), 0.0, "no reason, no drop");

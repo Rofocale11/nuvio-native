@@ -3102,7 +3102,7 @@ impl Shim {
     /// caller takes what has landed by the deadline. So the copy Home already warmed is served
     /// immediately, and a slow addon costs a partial first page rather than holding the HTTP
     /// response for its own 30 s budget — which is what made the app's 15 s loopback read report
-    /// "Can't reach your Plex server". The fill continues after the answer and bumps
+    /// "Can't reach Nuvio". The fill continues after the answer and bumps
     /// [`Shim::catalog_generation`]; the library re-lists a page that still has holes.
     fn catalog_range(
         self: &Arc<Self>,
