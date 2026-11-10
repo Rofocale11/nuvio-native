@@ -58,9 +58,15 @@ the desktop simulator are valuable but cannot prove every device behaviour.
 - **Preserve unrelated changes and generated artifacts.** Never clean or reset a dirty tree to
   make a task easier.
 - **No workspace-wide `cargo fmt` or `cargo fix`.** Format only the files you are editing.
-- **A gate result is evidence about the exact tree it ran on.** Once the owner approves a
-  commit, run the gates on the committed tree, confirm `git status --short` is empty, and report
-  the `test result:` line itself rather than a summary.
+- **A gate result is evidence about the exact tree it ran on — so gate ONCE, before the commit,
+  and never again after it.** `make check` is not a step an agent takes on its own initiative: it
+  runs when the owner asks for a commit. Run it on the working tree; if it passes, commit, push,
+  and stop. A second full run after the commit is not allowed — it is the same suite over the same
+  code, and the only thing the commit can add is the generated numbers `.githooks/pre-commit`
+  stages, which `./tools/ai-docs-refresh.sh check` validates in seconds (`make check` runs that
+  same check). After the push, confirm `git status --short` is empty and report the `test result:`
+  line itself rather than a summary. Run the suite again only if the owner asks, or if the commit
+  changed CODE after the run that graded it (an amend that edits source).
 
 ## The fork's constraints
 
@@ -130,8 +136,10 @@ for this product.
   gitignored `rust-modules/target-hostsim` with a fresh runtime dir. Example:
   `make test-hostsim C=plx_media T=<filter>`. Do not hand-write a cargo invocation with a target
   dir outside the checkout.
-- **Outer loop:** `make check` (the host unit suite, lint and the `ci/` gates, ~5 minutes) is not
-  a required step before a push; run it deliberately when a change needs the whole suite.
+- **Outer loop:** `make check` (the host unit suite, lint and the `ci/` gates, ~4 minutes) is the
+  gate for a commit the owner asked for — once, on the working tree, before that commit. It is
+  never a step an agent adds on its own initiative, and never repeated after the commit: see the
+  gate-order rule above.
 - **ARM caveat:** `make`, `make deploy` and `make ipk` need the webOS NDK. A host-only green
   result proves nothing about the target; never report an ARM result you did not run. The release
   artifact is built by CI (`.github/workflows/build-ipk.yml`).

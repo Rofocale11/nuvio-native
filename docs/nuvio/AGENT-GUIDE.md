@@ -63,9 +63,13 @@ it. Raw `ssh` and `tools/nv-tv.py` are forbidden.
 4. Update the owning document in the same commit. If the change makes a sentence elsewhere
    false, fix that sentence too.
 5. Pick the verification tier with `which-tier`. A host-only green result is not a device result.
-6. Commit. The pre-commit hook regenerates the derived counts and stages them with the change, so
-   there is nothing to run by hand and no second docs-only commit. If it aborts, you have unstaged
-   edits in `AGENTS.md`/`docs/nuvio/UPSTREAM.md`: `git add` them and commit again.
+6. **When the owner asks for a commit, run `make check` ONCE on the working tree** — it is the
+   commit gate, not a step of its own and not a step to repeat. If it passes, commit and push.
+   The commit may then differ from the graded tree only by the derived counts
+   `.githooks/pre-commit` stages, and `./tools/ai-docs-refresh.sh check` (seconds; already part of
+   `make check`) is what confirms those: **do not re-run the suite after committing.** If the hook
+   aborts, you have unstaged edits in `AGENTS.md`/`docs/nuvio/UPSTREAM.md`: `git add` them and
+   commit again.
 7. Report the `test result:` line itself, not a summary, and say which tier you actually ran.
 
 ## Orchestration

@@ -20,6 +20,15 @@
 # commit kept the numbers of the tree it replaced. pre-commit runs before that snapshot, and its
 # staging lands.
 #
+# THE GATE ORDER THIS IMPLIES
+# ---------------------------
+# Because this hook can add the derived counts to the commit, the tree that was graded and the
+# tree that is committed are not byte-identical. `AGENTS.md` therefore fixes the order: `make
+# check` runs ONCE, on the working tree, BEFORE the commit the owner asked for — and never again
+# after it. The only difference this hook can introduce is the numbers staged here, and
+# `ai-docs-refresh.sh check` (seconds, already inside `make check`) validates exactly those.
+# Re-running the whole suite after committing grades identical code twice.
+#
 # INSTALL (once per repository — worktrees share the config; `git config core.hooksPath` is what
 # makes git look here instead of .git/hooks):
 #   git config core.hooksPath .githooks
