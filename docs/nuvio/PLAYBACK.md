@@ -356,6 +356,12 @@ answer, which is usually one addon's partial list — so the player's Sources li
 addons reply. The ranked subtitle sidecars ride the same answer and are appended to the playing
 item's track list as they land (the same ids, `/library/streams/{id}` keys and pick behaviour a
 detail-page play carries), instead of being frozen at whatever `/decision` had when it landed.
+A late sidecar the answer marks `selected` also turns **on** when nothing is showing yet — direct
+play, or a plain remux the app may draw over, never a burn — which is what lets a **Resume that
+skips the detail page pick the same subtitle a detail-page play does**: that play's plan snapshot
+was taken before the subtitle addons answered, so this drain
+(`playback::drain_ranked_subs`) is the frame that restores the pick, logged as
+`late server-selected sidecar <id> restored on resume`.
 The answer's `subtitlesComplete` flag is separate from the streams' `complete` on purpose: subtitle
 addons routinely answer after the last stream (the streams unblock the play, the subtitles do not),
 so the poll keeps going until both are done.
@@ -577,17 +583,29 @@ change capability only; they do not bypass a profile's `Off`.
   `<key>?encoding=utf-8`, `<key>`, over the control plane, which does **not** follow redirects —
   the shim must fetch the addon URL itself and answer **200 with UTF-8 text** (gunzip, transcode
   cp1252/etc. to UTF-8). SRT and WebVTT both parse; ASS goes to libass.
-- Auto-selection: the shim marks the sidecar whose language matches the account's
-  `defaultSubtitleLanguage` as `selected` (`shim_media::apply_subtitle_preference`), so the app's
-  `restore_server_selection` enables it on direct play. An exact tag (`pt-BR`) outranks a folded
+- Auto-selection: when the account's `autoSelectSubtitle` mode is not Manual (`0`), the shim
+  marks the sidecar whose language matches the account's `defaultSubtitleLanguage` as
+  `selected` (`shim_media::apply_subtitle_preference`, gated in `ranked()`), so the app's
+  `player::sidecar::restore_selection` enables it at a direct-play landing, and
+  `/nuvio/streams` carries `selected` per subtitle so a play that landed before the subtitle
+  addons answered can restore the same pick (the play-start poll below). **The pick is
+  release-matched**: among language candidates it prefers language+source+resolution, then
+  language+source, then language+resolution, then language only — a `movie1.1080.bluray.mkv`
+  video picks the `movie1.1080.bluray.*.srt` sidecar over a bare one, and a WEBRip video
+  prefers a WEBRip subtitle (WEB-DL is a distinct source). The BluRay family (`BluRay`,
+  `BluRay REMUX`, `BDRip`, `BRRip`) folds together; every other source label stands on its
+  own, so `HDTV` never source-matches a `DVDRip` subtitle. A source or resolution that either
+  side does not name cannot match, so a torrent whose filename is not known yet ranks every
+  candidate equal and falls back to language and file order. An exact tag (`pt-BR`) outranks a folded
   one (`pt`). 639-2/B and /T spellings (`ind`, `spa`, `ger`) and display names (`Indonesian`,
   `Bahasa Indonesia`) fold to the picker's code through a curated table — **never by truncating to
   two letters**, which mapped Kannada (`kan`) onto Georgian (`ka`) and Spanish (`spa`) onto `sp`.
-  With no preference set the first sidecar is selected; a preference that matches nothing claims
+  Manual mode (`0`) clears the pick entirely, preference or not. In a non-Manual mode with no
+  preference set the first sidecar is selected; a preference that matches nothing claims
   nothing, so the file's own order stands. Forced tracks cannot be ranked: Stremio subtitle objects
   carry no forced flag, and `defaultSubtitleForced` is a mode, not a per-track attribute. The
   decision waits (up to the 2.5 s stream grace) for subtitle addons to report before publishing the
-  part, but only when a preferred language is set; a slow or absent addon never blocks playback and
+  part, but only when auto mode is on and a preferred language is set; a slow or absent addon never blocks playback and
   an empty result is handled without panicking.
 - Search on demand: the player's Subtitles → Search page reads
   `GET /library/metadata/{rk}/subtitles?language=<2-letter>`, answered by the **builtin**

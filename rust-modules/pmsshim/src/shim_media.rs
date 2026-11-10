@@ -144,21 +144,116 @@ pub struct SubRef {
 /// at all the first sidecar is selected (a signed-out install still shows subtitles); a preference
 /// that matches nothing claims nothing, leaving the file's own order alone.
 ///
+/// When `video` is present and `mode != 0` (`autoSelectSubtitle`: 1=when needed, 2=always),
+/// language candidates are re-ranked release-first: language+source+resolution, then
+/// language+source, then language+resolution, then language only. Source families fold
+/// `BluRay`, `BluRay REMUX`, `BDRip`, `BRRip` together and keep `WEB-DL` and `WEBRip`
+/// distinct; unknown tokens on either side are neutral (never a mismatch), so a torrent
+/// whose filename is not yet known falls back to language only.
+///
 /// Forced tracks cannot be ranked on: Stremio subtitle objects carry no forced flag and [`SubRef`]
 /// has nowhere to keep one. `defaultSubtitleForced` is a mode, not a per-track attribute.
 pub fn apply_subtitle_preference(subs: &mut [SubRef], pref: Option<&str>) {
+    apply_subtitle_preference_mode(subs, pref, None, 2)
+}
+
+/// Release-matched auto window with explicit mode and optional video. `mode` is
+/// `autoSelectSubtitle` (`0`=Manual: clear all `selected`). The free function above calls this
+/// with `mode=2` (today's shim behavior: an account language always auto-selects).
+pub fn apply_subtitle_preference_mode(subs: &mut [SubRef], pref: Option<&str>, video: Option<&StreamInfo>, mode: i64) {
+    // Manual mode clears the pick outright — even with a language set, nothing starts ON.
+    if mode == 0 {
+        for s in subs.iter_mut() {
+            s.selected = false;
+        }
+        return;
+    }
     let hit = match pref.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(p) => subs
-            .iter()
-            .position(|s| s.lang.trim().eq_ignore_ascii_case(p))
-            .or_else(|| {
-                let want = lang_key(p);
-                subs.iter().position(|s| !want.is_empty() && lang_key(&s.lang) == want)
-            }),
+        Some(p) => pick_index(subs, p, video),
         None => (!subs.is_empty()).then_some(0),
     };
     for (i, s) in subs.iter_mut().enumerate() {
         s.selected = hit == Some(i);
+    }
+}
+
+/// Ranked pick: cohort first by language (exact > folded), then by release match when a video
+/// is known.
+fn pick_index(subs: &[SubRef], p: &str, video: Option<&StreamInfo>) -> Option<usize> {
+    // Language cohort: exact tag beats folded; both beat non-language.
+    let mut cohort: Vec<usize> = Vec::new();
+    for (i, s) in subs.iter().enumerate() {
+        if s.lang.trim().eq_ignore_ascii_case(p) {
+            cohort.push(i);
+        }
+    }
+    if cohort.is_empty() {
+        let want = lang_key(p);
+        if !want.is_empty() {
+            for (i, s) in subs.iter().enumerate() {
+                if lang_key(&s.lang) == want {
+                    cohort.push(i);
+                }
+            }
+        }
+    }
+    if cohort.is_empty() {
+        return None;
+    }
+    // Release ranking within the cohort, best first; ties keep file order.
+    let mut ranked: Vec<(u8, usize)> = cohort
+        .iter()
+        .map(|&i| (release_tier(&subs[i].title, video), i))
+        .collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    ranked.first().map(|(_, i)| *i)
+}
+
+/// Release tier for one subtitle title against the chosen video. Lower is better; all language
+/// candidates funnel here so tiers 1–4 are relative. Returns 0 when no video is known or the
+/// subtitle names no release at all (title empty — falls back to file order within cohort).
+fn release_tier(sub_title: &str, video: Option<&StreamInfo>) -> u8 {
+    let Some(v) = video else { return 0 };
+    if sub_title.trim().is_empty() {
+        return 0;
+    }
+    let v_src = v.source.as_deref().map(source_family);
+    // The video filename may carry a source/resolution its parsed fields missed (or the parsed
+    // fields may come from a different label); fall back to reading the filename itself.
+    let v_name = v.filename.as_deref().unwrap_or("");
+    let v_src = v_src.or_else(|| plx_stremio::classify::source_from_text(v_name).map(source_family));
+    let v_res = v.height.or_else(|| plx_stremio::classify::resolution_from_text(v_name));
+    let s_src = plx_stremio::classify::source_from_text(sub_title).map(source_family);
+    let s_res = plx_stremio::classify::resolution_from_text(sub_title);
+    let src_match = match (v_src, s_src) {
+        (Some(a), Some(b)) => a == b,
+        // Either side unknown is neutral — never a mismatch.
+        _ => false,
+    };
+    let res_match = match (v_res, s_res) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    match (src_match, res_match) {
+        (true, true) => 1,
+        (true, false) => 2,
+        (false, true) => 3,
+        (false, false) => 4,
+    }
+}
+
+/// Source identity for release matching. The BluRay family folds `BluRay`, `BluRay REMUX`,
+/// `BDRip` and `BRRip`; `WEB-DL` and `WEBRip` stay distinct (a WEBRip video prefers a WEBRip
+/// subtitle, not a WEB-DL one). Anything else keeps its own label, so an unfolded source
+/// (`HDRip`, `DVDRip`, `HDTV`, `CAM`, …) matches its own name and nothing else — two different
+/// unfolded sources are never read as a match, and an unfamilar one on either side fails the
+/// comparison rather than claiming a tier-1 pairing.
+fn source_family(label: &str) -> &str {
+    match label {
+        "BluRay" | "BluRay REMUX" => "bluray",
+        "WEB-DL" => "webdl",
+        "WEBRip" => "webrip",
+        _ => label,
     }
 }
 
@@ -529,5 +624,94 @@ mod tests {
             playable_url_with(&s, Some("http://127.0.0.1:11470"), true).as_deref(),
             Some("https://example.invalid/movie.mkv")
         );
+    }
+
+    /// **Release-matched auto-selection**: language + source + resolution beats language only.
+    /// `movie1.1080.bluray.mkv` must pick `movie1.1080.bluray....srt` over a bare `movie1.srt`.
+    #[test]
+    fn release_match_t1_beats_language_only() {
+        let video = StreamInfo {
+            height: Some(1080),
+            source: Some("BluRay".into()),
+            filename: Some("movie1.1080.bluray.mkv".into()),
+            ..Default::default()
+        };
+        let mut subs = [
+            SubRef { id: 1, lang: "ind".into(), title: "movie1".into(), selected: false },
+            SubRef { id: 2, lang: "ind".into(), title: "movie1.1080.bluray.abc".into(), selected: false },
+        ];
+        apply_subtitle_preference_mode(&mut subs, Some("ind"), Some(&video), 2);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);
+        // Unknown filename (torrent not yet resolved) is neutral: falls back to language order.
+        let unknown = StreamInfo { height: None, source: None, filename: None, ..Default::default() };
+        apply_subtitle_preference_mode(&mut subs, Some("ind"), Some(&unknown), 2);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false]);
+    }
+
+    /// **Tier 2 (language+source) beats Tier 3 (language+resolution).**
+    #[test]
+    fn language_source_beats_language_resolution() {
+        let video = StreamInfo {
+            height: Some(1080),
+            source: Some("BluRay".into()),
+            filename: Some("movie1.1080.bluray.mkv".into()),
+            ..Default::default()
+        };
+        let mut subs = [
+            SubRef { id: 1, lang: "id".into(), title: "movie1.1080.webrip".into(), selected: false }, // T3 for a BluRay video
+            SubRef { id: 2, lang: "id".into(), title: "movie1.bluray.xyz".into(), selected: false }, // T2
+        ];
+        apply_subtitle_preference_mode(&mut subs, Some("id"), Some(&video), 2);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);
+    }
+
+    /// **A WEBRip video prefers a WEBRip subtitle** (WEB-DL is a different source family).
+    #[test]
+    fn webrip_video_prefers_webrip_subtitle() {
+        let video = StreamInfo {
+            height: Some(1080),
+            source: Some("WEBRip".into()),
+            filename: Some("movie1.1080.webrip.mkv".into()),
+            ..Default::default()
+        };
+        let mut subs = [
+            SubRef { id: 1, lang: "id".into(), title: "movie1.1080.web-dl".into(), selected: false },
+            SubRef { id: 2, lang: "id".into(), title: "movie1.1080.webrip".into(), selected: false },
+        ];
+        apply_subtitle_preference_mode(&mut subs, Some("ind"), Some(&video), 2);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);
+    }
+
+    /// **Two different unfolded sources are never a source match.** Only the BluRay family and the
+    /// two WEB labels fold; beside an `HDTV` video a `DVDRip` subtitle is a different source, so
+    /// the same-name subtitle takes tier 1 even though the other one comes first in the file.
+    #[test]
+    fn unfolded_sources_do_not_match_each_other() {
+        let video = StreamInfo {
+            height: Some(720),
+            source: Some("HDTV".into()),
+            filename: Some("movie1.720.hdtv.mkv".into()),
+            ..Default::default()
+        };
+        let mut subs = [
+            SubRef { id: 1, lang: "id".into(), title: "movie1.720.dvdrip".into(), selected: false },
+            SubRef { id: 2, lang: "id".into(), title: "movie1.720.hdtv".into(), selected: false },
+        ];
+        apply_subtitle_preference_mode(&mut subs, Some("ind"), Some(&video), 2);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, true]);
+    }
+
+    /// **`ind`/`id` folding picks the Indonesian track** (`ind` ⇔ `id`), and **mode 0 (Manual)
+    /// clears the pick entirely**.
+    #[test]
+    fn ind_id_folds_and_manual_clears() {
+        let mut subs = [
+            SubRef { id: 1, lang: "id".into(), title: String::new(), selected: false },
+            SubRef { id: 2, lang: "eng".into(), title: String::new(), selected: false },
+        ];
+        apply_subtitle_preference_mode(&mut subs, Some("ind"), None, 2);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [true, false]);
+        apply_subtitle_preference_mode(&mut subs, Some("ind"), None, 0);
+        assert_eq!(subs.iter().map(|s| s.selected).collect::<Vec<_>>(), [false, false]);
     }
 }

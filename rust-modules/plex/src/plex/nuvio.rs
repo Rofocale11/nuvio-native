@@ -28,6 +28,9 @@ pub struct SubChoice {
     pub id: i64,
     pub lang: String,
     pub title: String,
+    /// The shim's auto pick for the stream that plays (release-matched language pick);
+    /// `false` when nothing is auto-selected (Manual mode, or no language match).
+    pub selected: bool,
 }
 
 #[derive(Default, serde::Deserialize)]

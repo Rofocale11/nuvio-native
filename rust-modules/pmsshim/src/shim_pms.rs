@@ -3583,9 +3583,12 @@ impl Shim {
         let mut st = slot.state.lock().unwrap_or_else(|e| e.into_inner());
         let ts_owned = self.torrent_server();
         let ts = ts_owned.as_deref();
-        // Only block playback on subtitle addons when the viewer actually has a preferred
-        // subtitle language; otherwise there is nothing to auto-enable, so return streams at once.
-        let wait_for_subs = self.account.subtitle_language().is_some();
+        // Only block playback on subtitle addons when the viewer has auto-selection on AND a
+        // language to rank against; otherwise there is nothing to auto-enable, so return streams
+        // at once. Manual mode (0) never waits for subtitles.
+        let mode = self.account.subtitle_auto_mode();
+        let lang = self.account.subtitle_language();
+        let wait_for_subs = mode != 0 && lang.is_some();
         let mut first_playable: Option<Instant> = None;
         loop {
             if st.done && (!wait_for_subs || st.subs_done) {
@@ -3636,14 +3639,10 @@ impl Shim {
             }
             s.id = id;
         }
-        // The viewer's account language decides which sidecar starts ON, once per slot: the
-        // tracks are cloned below for every Part, so the mark has to live on the slot's own list.
-        let pref = self.account.subtitle_language();
-        shim_media::apply_subtitle_preference(&mut st.subs, pref.as_deref());
-        // Subtitles the viewer installed from the Search page ride beside the addons' own, and the
-        // newest install is the server's pick — exactly what a real PMS does with an installed
-        // sidecar (`docs/pms-api.md` §8). They outlive the slot, so they come from the shim, not
-        // from the addon threads that filled it.
+        // Subtitles the viewer installed from the Search page ride beside the addons' own. They
+        // outlive the slot, so they come from the shim, not from the addon threads that filled
+        // it. The auto rank against the stream that plays happens below; an install still
+        // overrides that pick.
         let installed = self
             .installed_subs
             .lock()
@@ -3651,20 +3650,14 @@ impl Shim {
             .get(&rk)
             .cloned()
             .unwrap_or_default();
-        if let Some(newest) = installed.last() {
-            for s in &installed {
-                if !st.subs.iter().any(|x| x.id == s.id) {
-                    st.subs.push(SubRef {
-                        id: s.id,
-                        lang: s.lang.clone(),
-                        title: s.title.clone(),
-                        selected: false,
-                    });
-                }
-            }
-            let newest = newest.id;
-            for s in st.subs.iter_mut() {
-                s.selected = s.id == newest;
+        for s in &installed {
+            if !st.subs.iter().any(|x| x.id == s.id) {
+                st.subs.push(SubRef {
+                    id: s.id,
+                    lang: s.lang.clone(),
+                    title: s.title.clone(),
+                    selected: false,
+                });
             }
         }
         let subs: Vec<SubRef> = st
@@ -3674,7 +3667,7 @@ impl Shim {
                 id: s.id,
                 lang: s.lang.clone(),
                 title: s.title.clone(),
-                selected: s.selected,
+                selected: false,
             })
             .collect();
         let indexed: Vec<Stream> = st.streams.clone();
@@ -3711,6 +3704,23 @@ impl Shim {
         if selected.is_none() {
             let last = self.watch.get(rk).last_stream;
             Self::promote_last_stream(&mut out, last.as_ref(), false);
+        }
+        // The auto pick is ranked against the stream that actually plays (`out[0]` after
+        // rank/pick/promote): a `movie1.1080.bluray.mkv` video prefers the
+        // `movie1.1080.bluray.*.srt` sidecar over a bare one. The slot's own list is re-marked
+        // (and cloned into every Media), so detail rows, `/decision` and `/nuvio/streams` agree.
+        // No streams yet → no video, language-only rank (file order).
+        let mut subs = subs;
+        {
+            let video = out.first().map(|(_, c)| &c.info);
+            shim_media::apply_subtitle_preference_mode(&mut subs, lang.as_deref(), video, mode);
+        }
+        // Search-page installs still override the auto pick: the newest install IS the pick.
+        if let Some(newest) = installed.last() {
+            let newest_id = newest.id;
+            for s in subs.iter_mut() {
+                s.selected = s.id == newest_id;
+            }
         }
         (out, subs, done, subs_done)
     }
@@ -6937,7 +6947,7 @@ impl Shim {
                     "subtitlesComplete": subs_done,
                     "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>(),
                     "subtitles": subs.iter().map(|s| json!({
-                        "id": s.id, "lang": s.lang, "title": s.title
+                        "id": s.id, "lang": s.lang, "title": s.title, "selected": s.selected
                     })).collect::<Vec<_>>()}))
             }
             (_, ["nuvio", "select"]) => {

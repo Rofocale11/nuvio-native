@@ -65,17 +65,19 @@ pub fn streams_rev() -> u32 {
 }
 
 /// The addon subtitle sidecars the play-start poll has seen, with the item they belong to:
-/// `(sid, rk, [(stream id, language, title)])`. A play planned before the subtitle addons finished
-/// snapshots only the sidecars `/decision` already had; this is what lets the player's track list
-/// gain the late ones afterwards. Write it ONLY through [`set_ranked_subs`], which bumps
-/// [`RANKED_SUBS_REV`].
-pub static RANKED_SUBS: Mutex<Option<(ServerId, String, Vec<(i64, String, String)>)>> = Mutex::new(None);
+/// `(sid, rk, [(stream id, language, title, selected)])`. A play planned before the subtitle
+/// addons finished snapshots only the sidecars `/decision` already had; this is what lets the
+/// player's track list gain the late ones afterwards. `selected` is the shim's auto pick for
+/// the stream that plays — a straight-to-player press (Home Resume) lands before the sub
+/// addons answer, so the pick has to arrive through this poll, not the plan snapshot. Write
+/// it ONLY through [`set_ranked_subs`], which bumps [`RANKED_SUBS_REV`].
+pub static RANKED_SUBS: Mutex<Option<(ServerId, String, Vec<(i64, String, String, bool)>)>> = Mutex::new(None);
 
 /// Bumped on every [`set_ranked_subs`]: the app drains the list on a change, not every frame.
 static RANKED_SUBS_REV: AtomicU32 = AtomicU32::new(0);
 
 /// Publish the ranked sidecar list (the shim's `/nuvio/streams` answer) for the item being played.
-pub fn set_ranked_subs(sid: ServerId, rk: String, list: Vec<(i64, String, String)>) {
+pub fn set_ranked_subs(sid: ServerId, rk: String, list: Vec<(i64, String, String, bool)>) {
     *RANKED_SUBS.lock().unwrap_or_else(|e| e.into_inner()) = Some((sid, rk, list));
     RANKED_SUBS_REV.fetch_add(1, Ordering::Relaxed);
 }
@@ -86,7 +88,7 @@ pub fn ranked_subs_rev() -> u32 {
 }
 
 /// A copy of the published sidecars — read only on a revision change, like [`available_streams`].
-pub fn ranked_subs() -> Option<(ServerId, String, Vec<(i64, String, String)>)> {
+pub fn ranked_subs() -> Option<(ServerId, String, Vec<(i64, String, String, bool)>)> {
     RANKED_SUBS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 

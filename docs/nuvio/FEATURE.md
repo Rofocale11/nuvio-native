@@ -83,7 +83,9 @@ on top of upstream; companion docs (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB
   not a Nuvio session is signed in, through one atomic writer; they survive a cold boot and are
   wiped on sign-out. Playback reads that same file — for a Nuvio profile it is the only account
   surface — so the first launch of the day starts on the saved language without a network round
-  trip.
+  trip. `autoSelectSubtitle` gates release-matched subtitle auto-selection (`0`=Manual clears
+  the pick, `1`/`2` rank language+source+resolution first, then language+source, then
+  language+resolution, then language only).
 
 ## TMDB enrichment & discovery
 

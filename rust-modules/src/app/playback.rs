@@ -277,7 +277,12 @@ static STREAM_FETCH_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 /// the new ones to the playing item exactly like the Subtitles → Search page's download does. A
 /// publication for an item that is not playing is dropped, and re-tried next frame until the plan
 /// that installs the playing item has landed — the poll can beat it.
-pub(crate) fn drain_ranked_subs(meta: &mut plx_data::stores::metadata::MetadataStore) -> bool {
+///
+/// If the shim marks one of those late sidecars `selected` (its auto pick for the stream that
+/// plays) and nothing renders yet, restore it the same way the landing's
+/// `sidecar::restore_selection` does — that is what makes Home Resume (which never opens a
+/// Detail page for the shim to warm) auto-choose the same subtitle a Detail-opened play does.
+pub(crate) fn drain_ranked_subs(meta: &mut plx_data::stores::metadata::MetadataStore, ps: &mut plx_media::route::PlaybackSession) -> bool {
     static APPLIED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let rev = plx_media::route::ranked_subs_rev();
     if rev == APPLIED.load(Relaxed) {
@@ -292,21 +297,38 @@ pub(crate) fn drain_ranked_subs(meta: &mut plx_data::stores::metadata::MetadataS
         return false;
     }
     APPLIED.store(rev, Relaxed);
-    for (id, lang, title) in subs {
+    let mut want_selected: Option<(i64, String, String)> = None;
+    for (id, lang, title, selected) in &subs {
         meta.run(plx_data::stores::metadata::MetadataCmd::AppendPlayingSub {
             sid,
             rk: rk.clone(),
             stream: plx_data::metadata::Stream {
-                id,
+                id: *id,
                 codec: "srt".into(),
                 lang: lang.clone(),
                 lang_code: lang.to_lowercase(),
-                title,
+                title: title.clone(),
                 external: true,
                 key: format!("/library/streams/{id}.srt"),
+                selected: *selected,
                 ..Default::default()
             },
         });
+        if *selected {
+            want_selected = Some((*id, format!("/library/streams/{id}.srt"), "srt".into()));
+        }
+    }
+    // Nothing already renders: turn the late pick ON, on the same gate the landing uses
+    // (direct play, or a plain remux the app may draw over). A burn keeps the server's choice.
+    if let Some((id, key, codec)) = want_selected {
+        if plx_media::route::cur_sub_sid(ps) == 0
+            && !plx_media::player::sidecar::selected()
+            && !plx_media::route::is_transcoding(ps)
+        {
+            plx_media::player::sidecar::select(sid, id, key, codec);
+            plx_media::route::set_subtitle(ps, id);
+            plx_base::eventlog::log(&format!("nuvio: late server-selected sidecar {id} restored on resume (rk={rk})"));
+        }
     }
     true
 }
@@ -448,7 +470,7 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
             let Some(client) = plx_plex::plex::client_for(fetch_sid) else { return };
             if !client.is_nuvio() { return; }
             let mut streams: Vec<(usize, String, String, Option<u32>)> = Vec::new();
-            let mut subs: Vec<(i64, String, String)> = Vec::new();
+            let mut subs: Vec<(i64, String, String, bool)> = Vec::new();
             // 90 × 500 ms bounds an abandoned title by the shim's own stream deadline (45 s); a
             // play that supersedes this one stops it at the next tick (`STREAM_FETCH_GEN`).
             for _attempt in 0..90 {
@@ -463,7 +485,7 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
                         plx_machine::idle::invalidate(); // <--- THIS TRIGGERS THE LIVE UPDATE!
                     }
                     let late: Vec<_> = list.subtitles.iter()
-                        .map(|s| (s.id, s.lang.clone(), s.title.clone()))
+                        .map(|s| (s.id, s.lang.clone(), s.title.clone(), s.selected))
                         .collect();
                     if late != subs {
                         plx_base::eventlog::log(&format!(
@@ -1840,21 +1862,48 @@ mod ranked_subs_tests {
             playing_item(sid, "10058")
         ))));
 
-        plx_media::route::set_ranked_subs(sid, "other-rk".into(), vec![(7, "fr".into(), "Other".into())]);
-        assert!(!drain_ranked_subs(&mut store), "a sidecar for another item is not appended");
+        plx_media::route::set_ranked_subs(sid, "other-rk".into(), vec![(7, "fr".into(), "Other".into(), false)]);
+        assert!(!drain_ranked_subs(&mut store, &mut plx_media::route::PlaybackSession::default()), "a sidecar for another item is not appended");
         assert!(store.view().playing().is_some_and(|p| p.subs.is_empty()));
 
-        plx_media::route::set_ranked_subs(sid, "10058".into(), vec![(900000043, "en".into(), "A Release".into())]);
-        assert!(drain_ranked_subs(&mut store));
+        plx_media::route::set_ranked_subs(sid, "10058".into(), vec![(900000043, "en".into(), "A Release".into(), false)]);
+        assert!(drain_ranked_subs(&mut store, &mut plx_media::route::PlaybackSession::default()));
         let subs = store.view().playing().unwrap().subs.clone();
         assert_eq!(subs.len(), 1);
         assert_eq!((subs[0].id, subs[0].lang_code.as_str(), subs[0].external), (900000043, "en", true));
         assert_eq!(subs[0].key, "/library/streams/900000043.srt");
 
-        plx_media::route::set_ranked_subs(sid, "10058".into(), vec![(900000043, "en".into(), "A Release".into())]);
-        assert!(drain_ranked_subs(&mut store));
+        plx_media::route::set_ranked_subs(sid, "10058".into(), vec![(900000043, "en".into(), "A Release".into(), false)]);
+        assert!(drain_ranked_subs(&mut store, &mut plx_media::route::PlaybackSession::default()));
         assert_eq!(store.view().playing().unwrap().subs.len(), 1, "the same sidecar is listed once");
 
         store.run(plx_data::stores::metadata::MetadataCmd::RetirePlaying);
+    }
+
+    /// **A late server-selected sidecar turns ON — that is the Resume path.** A straight-to-player
+    /// press lands before the sub addons answer, so the plan snapshot has no pick; the poll's late
+    /// `selected` sidecar is restored the same way the landing's `restore_selection` restores it.
+    /// `PlaybackSession::default()` is a direct play (no transcode session), so the gate passes.
+    #[test]
+    fn a_late_server_selected_sidecar_is_restored_on_resume() {
+        let _guard = plx_base::testlock::serial();
+        let sid = plx_plex::plex::ServerId::from_raw(0);
+        let mut store = plx_data::stores::metadata::MetadataStore::default();
+        assert!(store.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(
+            playing_item(sid, "10058")
+        ))));
+        let mut ps = plx_media::route::PlaybackSession::default();
+        // The late poll answer: one sidecar, marked the shim's auto pick.
+        plx_media::route::set_ranked_subs(sid, "10058".into(), vec![(900000043, "id".into(), "movie1.1080.bluray.abc".into(), true)]);
+        assert!(drain_ranked_subs(&mut store, &mut ps));
+        let subs = store.view().playing().unwrap().subs.clone();
+        assert_eq!(subs.len(), 1);
+        assert!(subs[0].selected, "the late pick is appended as server-selected");
+        // The route's subtitle identity now names it — what `facts` and the track menu read.
+        assert_eq!(plx_media::route::cur_sub_sid(&ps), 900000043, "the late pick is the live subtitle");
+        assert!(plx_media::player::sidecar::selected(), "the renderer was turned on for it");
+
+        store.run(plx_data::stores::metadata::MetadataCmd::RetirePlaying);
+        plx_media::player::sidecar::reset();
     }
 }

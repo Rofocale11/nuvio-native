@@ -147,6 +147,16 @@ impl Account {
             .map(str::to_string)
     }
 
+    /// The Subtitles mode at Settings (`autoSelectSubtitle`: 0=Manual, 1=When Needed, 2=Always;
+    /// missing → `0`). Manual clears any auto pick; 1 and 2 both rank language candidates,
+    /// release-matched first. There is no per-stream audio-lane test in the shim, so 1 and 2
+    /// share the rank path.
+    pub fn subtitle_auto_mode(&self) -> i64 {
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let v = prefs.get("autoSelectSubtitle").and_then(Value::as_i64).unwrap_or(0);
+        if (0..=2).contains(&v) { v } else { 0 }
+    }
+
     /// Local (session-scoped) enable/disable override for an addon, keyed by transport URL.
     pub fn addon_enabled_override(&self, key: &str) -> Option<bool> {
         let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
