@@ -119,16 +119,16 @@ command is right when this file disagrees.
 <!-- BEGIN docs-fresh:cost-stats -->
 | | |
 |---|---|
-| files this fork changed | 736 |
+| files this fork changed | 737 |
 | files the reference branch changed | 875 |
 | **contested** — changed on **both** sides | 311 |
 | of those, under `rust-modules/screens` or `rust-modules/media` | 66 |
-| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 266 |
+| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 267 |
 | upstream-owned source **added** (the fork's own crates) | 44 |
 <!-- END docs-fresh:cost-stats -->
 
 Added files cannot conflict: they did not exist upstream. The
-<!-- docs-fresh:edited -->266<!-- /docs-fresh:edited --> edited files are the seam, and
+<!-- docs-fresh:edited -->267<!-- /docs-fresh:edited --> edited files are the seam, and
 it is concentrated where the Plex coupling had to be cut — `screens`, `media`, `appkit`, `plex`,
 `platform`, `data`, `src`. Two entries in the raw churn are not hand-written code and are tagged as
 such by the script: `js-service/server.js` (~102k lines, vendored Stremio server) and

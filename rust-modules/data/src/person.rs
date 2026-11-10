@@ -2421,15 +2421,14 @@ mod tests {
         assert!(!owner.current().unwrap().credited);
     }
 
-    /// A loopback port with nothing listening, so a forged server's dial is REFUSED at once. A
+    /// A loopback port with nothing listening, so a forged server's dial is REFUSED at once — and
+    /// one no sibling fixture can take mid-test ([`plx_base::testnet::dead_port`]: a bound-then-
+    /// closed `:0` port goes back to the host's pool, where a neighbour's mock could answer it). A
     /// hard-coded low port is not portable: this WSL host silently drops connects to `:1` instead
     /// of resetting them, and the fan-out test's four workers then stalled against the connect
     /// deadline and never reached the rest of the roster.
     fn refused_port() -> i32 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().unwrap().port() as i32;
-        drop(listener);
-        port
+        plx_base::testnet::dead_port() as i32
     }
 
     /// **A person page over forty servers asks all forty and never has more than four out at once.**

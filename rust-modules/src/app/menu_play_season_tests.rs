@@ -62,15 +62,16 @@ impl Drop for Pms {
     }
 }
 
-/// A loopback port with nothing listening, so a connect is REFUSED at once. A hard-coded low
-/// port is not portable: on this WSL host a connect to `:1` is silently dropped and waits out
-/// the whole fetch deadline instead of resetting, which turned the "refused" fixture into a
-/// 5 s hang that never settled.
+/// A loopback port with nothing listening, so a connect is REFUSED at once — and one that no
+/// sibling fixture can take while this process lives. [`plx_base::testnet::dead_port`] holds the
+/// port with a socket that never listens: binding `:0` and closing it, which this used to do,
+/// hands the number back to the host's pool, and a neighbouring test's mock server can then be
+/// handed it and ANSWER the fetch this fixture exists to fail (see that function's doc for the
+/// failure that cost). A hard-coded low port is not portable either: on this WSL host a connect
+/// to `:1` is silently dropped and waits out the whole fetch deadline instead of resetting, which
+/// turned the "refused" fixture into a 5 s hang that never settled.
 fn refused_port() -> i32 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port() as i32;
-    drop(listener);
-    port
+    plx_base::testnet::dead_port() as i32
 }
 
 struct Rig {

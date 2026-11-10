@@ -101,15 +101,15 @@ fn connect_to_a_black_hole_gives_up_on_the_deadline() {
     );
 }
 
-/// A loopback port with nothing listening, so a connect is REFUSED by the kernel at once. A
-/// hard-coded low port is not portable: this WSL host silently drops connects to `:1` instead
-/// of resetting them, so the "refused" fixture sat out the full connect deadline and this
-/// suite's slowest run (33 dials) took minutes rather than milliseconds.
+/// A loopback port with nothing listening, so a connect is REFUSED by the kernel at once — and one
+/// no sibling fixture can take mid-test ([`plx_base::testnet::dead_port`]: a bound-then-closed `:0`
+/// port goes back to the host's pool, where a neighbour's mock server could answer it, and the
+/// assertion below would then grade a connection that SUCCEEDED). A hard-coded low port is not
+/// portable: this WSL host silently drops connects to `:1` instead of resetting them, so the
+/// "refused" fixture sat out the full connect deadline and this suite's slowest run (33 dials) took
+/// minutes rather than milliseconds.
 fn refused_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+    plx_base::testnet::dead_port()
 }
 
 /// A refused connection must be reported immediately, not waited out: a loopback port with no

@@ -108,15 +108,14 @@ pub(super) fn hold_off(owner: &mut Owner) {
     owner.state.armed = false;
 }
 
-/// A loopback port with nothing listening, so a forged server's dial is REFUSED at once. A
-/// hard-coded low port is not portable: this WSL host silently drops connects to `:1` instead
-/// of resetting them, so the forty-server fan-out test (which does dial) stalled its four
-/// workers against the connect deadline and never reached the rest of the roster.
+/// A loopback port with nothing listening, so a forged server's dial is REFUSED at once — and one
+/// no sibling fixture can take mid-test ([`plx_base::testnet::dead_port`]: a bound-then-closed `:0`
+/// port goes back to the host's pool, where a neighbour's mock could answer it). A hard-coded low
+/// port is not portable: this WSL host silently drops connects to `:1` instead of resetting them,
+/// so the forty-server fan-out test (which does dial) stalled its four workers against the connect
+/// deadline and never reached the rest of the roster.
 pub(super) fn refused_port() -> i32 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().unwrap().port() as i32;
-    drop(listener);
-    port
+    plx_base::testnet::dead_port() as i32
 }
 
 /// A registered loopback slot. The port answers nothing, so a dial fails at once (see
