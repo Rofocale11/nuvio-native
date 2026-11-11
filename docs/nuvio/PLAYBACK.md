@@ -45,6 +45,10 @@ resolve also waited on the 300 ms decipher gate. `/library/metadata/{rk}/trailer
 the *resolved* first row. A title whose meta and TMDB `videos` name no YouTube id at all (and
 whose IMDb fallback finds none) answers empty `Metadata:[]`, never a 404.
 
+The hero autoplay Load bypasses the foreground player's five-second startup buffer gate: it starts
+as soon as advancing video data is accepted by Starfish. Later preview primes retain their existing
+behavior.
+
 **Where the ids come from.** TMDB `videos` is now part of `append_to_response` on both
 `/movie/{id}` and `/tv/{id}`, so a detail open pays no extra request and the shelf has the full
 list: trailers before teasers, then the ids Cinemeta names. This is also what gives a **related

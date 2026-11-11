@@ -227,9 +227,11 @@ pub struct Engine {
     // gap is what makes video "fast-forward" to catch the audio clock on resume). feed_stream
     // fires Play once max_fed_pts reaches PRIME_NS.
     pub prime_play: bool,
-    /// Fresh (non-seek) playback arms a longer initial prime so the player waits for a
-    /// buffer before starting. Seek/reload primes stay on [`PRIME_NS`].
+    /// Fresh foreground playback arms a longer initial prime. Hero previews start on accepted
+    /// video data; later preview primes retain normal behavior.
     pub fresh_prime: bool,
+    /// Hero autoplay's initial Load skips foreground buffering until its first accepted Play.
+    pub preview_start: bool,
     // Two-lane feed (Kodi m_messageQueueVideo/Audio): the demuxer routes es=1 video to aq_video
     // and es=2 audio to aq_audio; each lane is fed independently so a video BufferFull can't stall
     // the audio lane (the audioSync master clock). Both are allocated for a stream. (None only
@@ -257,13 +259,26 @@ impl Engine {
     pub fn uses_stream_queues(&self) -> bool {
         matches!(self.source, Source::Stream)
     }
-    /// Video prime depth for this session: a longer initial buffer for fresh playback.
+    /// Video prime depth: zero for hero previews, longer for fresh foreground playback, otherwise
+    /// [`PRIME_NS`].
     pub fn prime_video_target(&self) -> i64 {
-        if self.fresh_prime { INITIAL_PRIME_NS } else { PRIME_NS }
+        if self.preview_start {
+            0
+        } else if self.fresh_prime {
+            INITIAL_PRIME_NS
+        } else {
+            PRIME_NS
+        }
     }
     /// Audio prime depth for this session.
     pub fn prime_audio_target(&self) -> i64 {
-        if self.fresh_prime { INITIAL_PRIME_AUDIO_NS } else { PRIME_AUDIO_NS }
+        if self.preview_start {
+            0
+        } else if self.fresh_prime {
+            INITIAL_PRIME_AUDIO_NS
+        } else {
+            PRIME_AUDIO_NS
+        }
     }
 }
 
@@ -2285,6 +2300,8 @@ fn start_bufferfeed_inner(
         seek_base_pts: 0,
         prime_play: true,
         fresh_prime: true,
+        preview_start: crate::route::preview_request(ps)
+            && SHARED.seek_to_ns.load(Ordering::Relaxed) < 0,
         aq_video: aqv_box,
         aq_audio: aqa_box,
         hs,
@@ -2977,8 +2994,8 @@ const PRIME_NS: i64 = 700_000_000;
 // start anyway once video buffers PRIME_VIDEO_MAX_NS without audio (audioless / briefly starved),
 // so a genuinely audioless region can't hang.
 const PRIME_AUDIO_NS: i64 = 300_000_000;
-/// Initial (fresh, non-seek) playback waits for this much buffer before starting, so a slow
-/// torrent/HLS source does not stutter on the first seconds. Seek/reload primes stay on
+/// Initial foreground playback waits for this much buffer before starting, so a slow source does
+/// not stutter in its first seconds. Hero previews bypass this prime; seek/reload primes use
 /// [`PRIME_NS`].
 pub(crate) const INITIAL_PRIME_NS: i64 = 5_000_000_000;
 pub(crate) const INITIAL_PRIME_AUDIO_NS: i64 = 5_000_000_000;
@@ -3380,7 +3397,9 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
     // applies, so the audioSync master clock never starts on an empty audio lane.
     let video_sink_full =
         eng.pending_video.is_some() && SHARED.dg_feed_state.load(Ordering::Relaxed) == 2 && accepted_vbuf > 0;
-    let decoder_ready = if audio_expected {
+    let decoder_ready = if eng.preview_start {
+        accepted_vbuf > 0
+    } else if audio_expected {
         (accepted_vbuf >= eng.prime_video_target() || video_sink_full) && accepted_abuf >= eng.prime_audio_target()
     } else {
         accepted_vbuf >= PRIME_VIDEO_MAX_NS || video_sink_full
@@ -3432,6 +3451,7 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
                     super::acb_mirror_playstate_at(mt, eng.stage, true);
                 }
                 eng.prime_play = false;
+                eng.preview_start = false;
                 SHARED.seeking.store(false, Ordering::Relaxed); // playback resumed at the new position → HUD spinner off
                 if prime_kind == HlsPrimeKind::Rebuffer {
                     log(&format!(
@@ -4918,6 +4938,7 @@ mod prime_livelock_tests {
             seek_base_pts: 0,
             prime_play: true,
             fresh_prime: false,
+            preview_start: false,
             aq_video: Some(crate::aq::aq_new(AQ_VIDEO_BYTES)),
             aq_audio: Some(crate::aq::aq_new(AQ_AUDIO_BYTES)),
             hs: plx_net::stream::http_stream_boxed(),
@@ -5090,6 +5111,65 @@ mod prime_livelock_tests {
             eng.max_fed_video_pts - eng.seek_base_pts >= PRIME_NS
                 && eng.max_fed_audio_pts - eng.seek_base_pts >= PRIME_AUDIO_NS,
             "Play started without both lanes primed"
+        );
+    }
+
+    #[test]
+    fn a_preview_starts_on_its_first_accepted_video_data() {
+        let _serial = plx_base::testlock::serial();
+        struct Restore {
+            runway: i64,
+            audio_expected: bool,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                SHARED
+                    .hls_prime_runway_ms
+                    .store(self.runway, Ordering::Relaxed);
+                SHARED
+                    .hls_audio_expected
+                    .store(self.audio_expected, Ordering::Relaxed);
+                crate::player::ffi_host::force_clocksink_for_test(false);
+            }
+        }
+        crate::player::ffi_host::force_clocksink_for_test(true);
+        let _restore = Restore {
+            runway: SHARED.hls_prime_runway_ms.swap(0, Ordering::Relaxed),
+            audio_expected: SHARED.hls_audio_expected.swap(false, Ordering::Relaxed),
+        };
+        SHARED.pres_fed.store(PRES_NONE, Ordering::Relaxed);
+        SHARED.seek_to_ns.store(-1, Ordering::Relaxed);
+
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut eng = engine_after_reload();
+        eng.preview_start = true;
+        let au = [0u8; 64];
+        let qv = &mut **eng.aq_video.as_mut().unwrap() as *mut crate::aq::AuQueue;
+        for i in 0..2 {
+            crate::aq::aq_push(
+                qv,
+                au.as_ptr(),
+                au.len() as c_int,
+                i * V_STEP_NS,
+                c_int::from(i == 0),
+                1,
+            );
+        }
+        tick(&mt, &mut eng);
+
+        let vbuf = eng.max_fed_video_pts - eng.seek_base_pts;
+        assert!(vbuf > 0, "the host feed seam must accept preview video data");
+        assert!(
+            !eng.prime_play,
+            "a trailer preview must not wait for the foreground playback buffer"
+        );
+        assert!(
+            !eng.preview_start,
+            "the preview fast-start applies only to its first successful Play"
+        );
+        assert!(
+            vbuf <= 2 * V_STEP_NS,
+            "preview waited for {vbuf}ns of video instead of starting on its first data"
         );
     }
 
