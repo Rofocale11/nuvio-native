@@ -1974,7 +1974,7 @@
     "description": "Row label in the playback diagnostics read-out, torrent swarm block (payload bytes resident and bytes freed). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
   },
   "browse.diagnostics.field.refetch": {
-    "value": "Pieces",
+    "value": "Refetch",
     "translate": false,
     "description": "Row label in the playback diagnostics read-out, torrent swarm block (how many pieces the engine had to download again after eviction). Right-aligned into a narrow gutter; keep it short (about 12 characters)."
   },

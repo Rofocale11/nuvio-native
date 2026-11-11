@@ -92,9 +92,19 @@ void StreamingWindowStore::note_write(const int storage, const std::uint32_t pie
         return;
     }
     auto& torrent = torrents_[found->second];
-    // the piece is being downloaded again: its bytes are real from now on
+    // the piece is being downloaded again: it is no longer freed. Its bytes are
+    // not counted as resident yet — only note_verified does that, once the hash
+    // passes — so an in-flight partial piece cannot inflate the window.
     torrent.freed.erase(piece);
-    torrent.resident.insert(piece);
+}
+
+void StreamingWindowStore::note_verified(const int storage, const std::uint32_t piece) {
+    std::lock_guard lock(mutex_);
+    const auto found = storages_.find(storage);
+    if (found == storages_.end()) {
+        return;
+    }
+    torrents_[found->second].resident.insert(piece);
 }
 
 std::vector<std::uint32_t> StreamingWindowStore::resident_pieces(
@@ -364,6 +374,22 @@ public:
                 handler(p, h, to_torrent(error, *origin));
             };
         }
+        // Only verified pieces count toward the resident window: an in-flight
+        // partial cannot be freed (punching it would corrupt the file), so
+        // counting it inflated resident far past the cap during fast downloads.
+        const auto store = store_;
+        const auto storage_index = static_cast<int>(storage);
+        const auto piece_index = static_cast<std::uint32_t>(static_cast<int>(piece));
+        handler = [store, storage_index, piece_index, handler = std::move(handler)](
+            lt::piece_index_t p,
+            const lt::sha1_hash& h,
+            const lt::storage_error& error
+        ) mutable {
+            if (!error) {
+                store->note_verified(storage_index, piece_index);
+            }
+            handler(p, h, error);
+        };
         inner_->async_hash(storage, piece, v2, flags, std::move(handler));
     }
 

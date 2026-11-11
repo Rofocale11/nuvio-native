@@ -249,7 +249,8 @@ was re-downloaded. The cushion is now at least two pieces (`trim_route`), so a r
 pieces behind the playhead is served from RAM. The forward schedule and the head/tail keep the
 window above its byte cap for large pieces, which is intentional: the cap bounds small-piece
 torrents, and the Diagnostics Window row reports the cap while Cache resident reports what the
-whole-piece floor actually holds. `nuvio_engine_streaming_window_resync_test` pins the cushion
+whole-piece floor actually holds (verified pieces only — in-flight partials no longer count, so
+a fast download can no longer inflate it past the cap). `nuvio_engine_streaming_window_resync_test` pins the cushion
 with 16 MiB pieces. The same set then played a 162-minute film with the fixed engine: `got`
 stopped at 126 MB once the window plus the player's 46 MB queue were full, `down` fell from
 5.8 MB/s to 3 KB/s while the picture kept playing at 48 fps, and `refetch` stayed at 1 — the

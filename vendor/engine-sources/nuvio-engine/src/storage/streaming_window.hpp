@@ -59,7 +59,13 @@ public:
     );
     void detach(int storage);
     [[nodiscard]] bool is_freed(int storage, std::uint32_t piece) const;
+    // a block is being written: the piece is no longer freed (it is being
+    // re-downloaded). Does NOT mark it resident yet — only verified pieces
+    // count, so in-flight partials cannot inflate the window past its cap.
     void note_write(int storage, std::uint32_t piece);
+    // the piece hashed cleanly: it is now verified payload and counts toward
+    // the resident window, so the trim can free it once it leaves the playhead.
+    void note_verified(int storage, std::uint32_t piece);
 
     // bridge side
     [[nodiscard]] std::vector<std::uint32_t> resident_pieces(const std::string& torrent_id) const;
