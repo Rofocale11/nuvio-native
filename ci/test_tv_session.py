@@ -510,7 +510,7 @@ class HeartbeatWords(unittest.TestCase):
         # under test is the script's own -- a stub that just echoed the heartbeat back would
         # bypass the very expression this is about and pass for the wrong reason.
         with tempfile.TemporaryDirectory() as directory:
-            log = pathlib.Path(directory) / "plxnative-events.log"
+            log = pathlib.Path(directory) / "nuvionative-events.log"
             log.write_text(f"loop=60 {heartbeat} fps=0\n", encoding="utf-8")
             body = textwrap.dedent(
                 f"""\

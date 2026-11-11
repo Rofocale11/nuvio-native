@@ -68,7 +68,7 @@
   "widgets.hint.return": "A visszatéréshez nyomja meg: {key}",
   "widgets.hint.scroll": "Görgetés",
   "widgets.hint.hold_options": "Az opciókhoz tartsa nyomva: {key}",
-  "widgets.failure.no_pass": "Ennek a szervernek nincs {subscription} előfizetése",
+  "widgets.failure.no_pass": "Ez az addonkönyvtár nem tud videót konvertálni",
   "widgets.tracks.playing": "lejátszás alatt",
   "widgets.tracks.forced": "Kényszerített",
   "widgets.tracks.external": "Külső",

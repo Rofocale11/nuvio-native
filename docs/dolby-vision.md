@@ -275,7 +275,7 @@ descends from an instrument that could not see its own subject.
 3. **`GST_DEBUG=dualsequencer:6` does NOT perturb.** The reputation is real but belongs to level
    **9**. Calibrated by measuring the same scene both ways: **123 LUT misses uninstrumented, 122
    traced**. It is the only per-frame cadence instrument this project has, and it was avoided for
-   months. Armed via `/tmp/plxnative-gstlog`, written to `plxnative-gst.log` in the runtime dir.
+   months. Armed via `/tmp/plxnative-gstlog`, written to `nuvionative-gst.log` in the runtime dir.
 
 Also useful: `/tmp/plxnative-dvnonode` drops the payload node while keeping direct play (the fine
 bisect — the picture is then deliberately WRONG, for judging cadence not colour); `/tmp/plxnative-nodv`

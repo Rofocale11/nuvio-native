@@ -106,11 +106,11 @@ this note assumed.
 `GL_QUERY_COUNTER_BITS_EXT = 64`. The extension string and the entry points are present in
 `/usr/lib/libmali.so.0.1`; the app resolves them and collects results with no disjoint intervals
 across thousands of samples. Put one exact phase name in `/tmp/plxnative-profile` (empty selects
-`frame.ui`) and retrieve `/tmp/plxnative-gputime.jsonl`:
+`frame.ui`) and retrieve `/tmp/nuvionative-gputime.jsonl`:
 
 ```sh
 make fetch-profile
-tools/analyze-gputime.py pkg/plxnative-gputime.jsonl --phase blur.up --discard 60
+tools/analyze-gputime.py pkg/nuvionative-gputime.jsonl --phase blur.up --discard 60
 ```
 
 **The limit: it can only see work rendered into an FBO, never work rendered into framebuffer 0.**
@@ -170,11 +170,11 @@ split it forces on the tiler, and the full-resolution `fs_glass` and frost quads
 ### HWCNT is the attribution instrument, and its unit is CYCLES
 
 Put one exact phase name in `/tmp/plxnative-hwcnt`, launch the same warmed scene, retrieve
-`/tmp/plxnative-hwcnt.jsonl`. Never arm both triggers in one run — `app.rs` refuses if both are
+`/tmp/nuvionative-hwcnt.jsonl`. Never arm both triggers in one run — `app.rs` refuses if both are
 present.
 
 ```sh
-tools/analyze-hwcnt.py pkg/plxnative-hwcnt.jsonl --phase blur.copy --discard 10
+tools/analyze-hwcnt.py pkg/nuvionative-hwcnt.jsonl --phase blur.copy --discard 10
 ```
 
 The reader is validated independently by `tools/mali-hwcnt-probe.c` (`make mali-hwcnt-probe`); its
@@ -520,11 +520,11 @@ nothing else. The harness's `fps=` is not a pacing number in these runs (a profi
 
 `--save-logs` keeps the two files a leg is read from, in `DIR/<leg>/`: the event log
 `fps-home-recent-paging-held.log` (the `OVERDRAW` lines) and the GPU counters
-`fps-home-recent-paging-held.plxnative-hwcnt.jsonl` (the `frame.ui` samples), copied off the set
+`fps-home-recent-paging-held.nuvionative-hwcnt.jsonl` (the `frame.ui` samples), copied off the set
 after the scene's app run, before the next scene's trigger wipe and the harness's teardown delete
 them (`tests/run.py`, `save_profiler_files`). It does so for any FPS scene that arms a profiler, by
 `--extra-trigger` or otherwise, and keeps the file of the trigger it armed: `plxnative-hwcnt` leaves
-`plxnative-hwcnt.jsonl`, `plxnative-profile` (the GL timer) `plxnative-gputime.jsonl`. Read each leg's `OVERDRAW drawmask=0x... skipping:` line first. A leg
+`nuvionative-hwcnt.jsonl`, `plxnative-profile` (the GL timer) `nuvionative-gputime.jsonl`. Read each leg's `OVERDRAW drawmask=0x... skipping:` line first. A leg
 whose run prints `profiler: plxnative-hwcnt was armed but the set holds no ...` has no counters and
 is not a leg: run it again.
 

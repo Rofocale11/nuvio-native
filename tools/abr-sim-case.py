@@ -129,7 +129,7 @@ def main():
     finally:
         srv.shutdown()
 
-    log = os.path.join(root, "plxnative-events.log")
+    log = os.path.join(root, "nuvionative-events.log")
     if not os.path.exists(log):
         print("no event log — the simulator did not boot", file=sys.stderr)
         return 1

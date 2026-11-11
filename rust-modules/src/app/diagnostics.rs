@@ -48,7 +48,7 @@
 //! prompted it was reported from hardware we cannot buy — and **every other diagnostic surface in
 //! this codebase is compiled out of the build a user installs**: the ~40 `/tmp/plxnative-*`
 //! triggers, the remote FIFO and the capture stream all sit behind the `devtriggers` feature, which
-//! `RELEASE=1` drops. What is left is "ssh in as root and send us `/tmp/plxnative-events.log`",
+//! `RELEASE=1` drops. What is left is "ssh in as root and send us `/tmp/nuvionative-events.log`",
 //! which asks a stranger for shell access to their own television.
 //!
 //! A panel they can open with the remote and photograph with a phone needs none of that. So this

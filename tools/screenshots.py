@@ -199,7 +199,7 @@ def capture(binary, scene, defaults, hero, keep):
         finally:
             out.close()
         secs = time.monotonic() - t0
-        log_path = rt / "plxnative-events.log"
+        log_path = rt / "nuvionative-events.log"
         log = log_path.read_text(errors="replace") if log_path.exists() else ""
         problems = []
         if rc is None:

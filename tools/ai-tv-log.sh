@@ -12,9 +12,9 @@ SSH_CMD="ssh -i ~/.ssh/id_ed25519 root@$TV_IP"
 # shows the stable install's stale session while a debug build runs beside it, so every mode here
 # globs both. `tail`/`grep` print a `==> file <==` header when more than one match exists, which
 # is also how a caller tells which install a line came from.
-EVENTS="/tmp/plxnative-events.log /tmp/*/plxnative-events.log"
-STDERR="/tmp/plxnative-stderr.log /tmp/*/plxnative-stderr.log"
-CRASH="/tmp/plxnative-crash.log /tmp/*/plxnative-crash.log"
+EVENTS="/tmp/nuvionative-events.log /tmp/*/nuvionative-events.log"
+STDERR="/tmp/nuvionative-stderr.log /tmp/*/nuvionative-stderr.log"
+CRASH="/tmp/nuvionative-crash.log /tmp/*/nuvionative-crash.log"
 
 if [ "$1" == "grep" ]; then
     $SSH_CMD "grep -a -E '$2' $EVENTS $STDERR | tail -n 200" 2>/dev/null

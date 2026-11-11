@@ -15,7 +15,7 @@
 //! * [`scrub`] may return [`Scrubbed::Refuse`] — drop the line and count it. Correct for anything
 //!   crossing the network, where a line that cannot be made safe must not be sent.
 //! * [`scrub_local`] **rewrites only and never drops.** It is what the on-disk event log gets. A
-//!   line silently vanishing from `plxnative-events.log` is strictly worse for debugging than a
+//!   line silently vanishing from `nuvionative-events.log` is strictly worse for debugging than a
 //!   leaky one — that file is what `make run`, `tests/run.py`'s assertions and `crash-triage` all
 //!   read, and `docs/agent-reference.md` calls it "the primary debugging surface".
 //!
@@ -69,7 +69,7 @@ pub fn scrub(line: &str) -> Scrubbed {
 ///
 /// Same rewrites as [`scrub`], with one difference that is the entire reason it exists: it
 /// **never drops a line**. [`scrub`]'s `Refuse` arm is correct for the network, where a record
-/// that cannot be made safe must not be sent; it is wrong for `plxnative-events.log`, which is
+/// that cannot be made safe must not be sent; it is wrong for `nuvionative-events.log`, which is
 /// what `make run`, `tests/run.py`'s assertions and `crash-triage` read. A line that silently
 /// vanishes from that file is worse for debugging than a leaky one — you cannot grep for the
 /// absence of something you never knew was written.
@@ -625,7 +625,7 @@ mod tests {
     /// **The device leak** (found on a real TV, `stream.rs:947`): a DNS resolution failure logs
     /// `host=<fqdn>` with no `scheme://` in front of it, so [`scrub_authority`] — the pass that
     /// catches every OTHER host in this file — never sees it. A real multi-label private hostname
-    /// reached `plxnative-events.log` unredacted this way. Reproduces the exact shape.
+    /// reached `nuvionative-events.log` unredacted this way. Reproduces the exact shape.
     #[test]
     fn a_dns_failure_does_not_leak_the_bare_hostname() {
         let out = kept("stream: GET /identity DNS FAILED host=plex.main.example.net");
@@ -838,7 +838,7 @@ mod tests {
 
     /// **The LOCAL exit may never drop a line** — the one behavioural difference between the two
     /// exits, and the reason `scrub_local` exists at all. A record the remote exit refuses outright
-    /// still reaches `plxnative-events.log`, rewritten as far as the passes can manage.
+    /// still reaches `nuvionative-events.log`, rewritten as far as the passes can manage.
     ///
     /// Not a duplicate of the remote `Refuse` test in `lab::snapshot`: that one asserts the line is
     /// dropped AND counted; this one asserts the same input survives locally. A line silently

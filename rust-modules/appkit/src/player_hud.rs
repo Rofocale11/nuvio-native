@@ -833,8 +833,8 @@ pub fn slot(ps: &plx_media::route::PlaybackSession, meta: plx_data::metadata::Me
         dur_ns: plx_media::player::duration_ns(),
     };
     // Server marker first; the synthesized tail only exists where credits DETECTION does not
-    // (a Plex Pass server feature) — see `metadata::synthesized_tail_marker` — and only to feed
-    // the Up Next countdown, so it is not even computed in the other modes.
+    // — see `metadata::synthesized_tail_marker` — and only to feed the Up Next countdown, so it
+    // is not even computed in the other modes.
     let m = meta.active_marker(head).or_else(|| {
         (mode == plx_media::route::NextEpisodeMode::Countdown)
             .then(|| meta.synthesized_tail_marker(head, has_next))
@@ -1147,10 +1147,6 @@ pub fn draw_readout(
 //  * the support facts (version · firmware · set · failure code) — one dim footer line at the
 //    foot of the screen, always; there is no *Details* control.
 
-/// The subscription's name in the one note that states it ("This server has no Plex Pass"). A
-/// product name, so it is not translated.
-const PLEX_PASS: &str = "Plex Pass";
-
 /// The support line's cap top this far above the canvas bottom — inside the safe area's
 /// bottom margin band's upper edge, clear of the row by construction, and
 /// `the_diagnostics_footer_sits_below_the_row_inside_the_safe_bottom_band` fails if a taller row or
@@ -1238,8 +1234,14 @@ impl FailureReadout {
         use plx_media::player::FailureKind;
         let policy = e.kind == FailureKind::PlaybackPolicy && !e.detail.is_empty();
         let reason: &str = if policy { &e.detail } else { e.readout };
+        // The one note this read-out adds states the FACT behind an audio-only failure — the
+        // library that sent it cannot convert video. It used to name a subscription ("This server
+        // has no Plex Pass"), which this app has no standing to assert: there is no plex.tv
+        // credential, the one server is the in-process shim, and its universal-start endpoint
+        // answers "no transcoder: streams play direct". The flag says the library reported no
+        // subscription; the sentence says what that means here.
         let note: Option<String> = if e.no_pass {
-            Some(plx_platform::i18n::msg::widgets_failure_no_pass(PLEX_PASS))
+            Some(plx_platform::i18n::msg::widgets_failure_no_pass().to_string())
         } else if policy || e.detail.is_empty() {
             None
         } else {
@@ -3227,6 +3229,32 @@ mod tests {
         let texts: Vec<Rect> = log.iter().filter(|(tag, _)| *tag == 100).map(|(_, r)| *r).collect();
         assert!(texts.iter().any(|t| (t.y - FOOTER_TOP).abs() < theme::size::CAPTION as f32 * 2.0),
             "the footer line is drawn at the foot of the screen: {texts:?}");
+    }
+
+    /// **The one note the failure read-out adds never names a Plex product.** An audio-only
+    /// failure on a library that reports no subscription draws a note stating that fact; the note
+    /// used to say "This server has no Plex Pass", which was both a product claim about a service
+    /// this app has no relationship with and a cause it cannot assert (h264 encoding is free
+    /// everywhere — the audit's row 1). Graded at runtime over every shipped catalogue, like
+    /// `enh_locale_values_never_mention_plex_pass`: a source grep would pass on a translation.
+    #[test]
+    fn the_no_transcoder_note_names_no_plex_product_in_any_language() {
+        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        let e = plx_media::player::failtest_audio_only_no_pass_shape_for_test();
+        assert!(e.no_pass, "the arm under test is the one that draws the note");
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            let r = readout_of(&e);
+            let note = r.note().expect("a library with no transcoder states the fact");
+            assert!(
+                !note.to_lowercase().contains("plex"),
+                "{language:?}: {note:?} names a Plex product"
+            );
+            assert!(
+                !note.contains('{'),
+                "{language:?}: {note:?} still carries a placeholder"
+            );
+        }
     }
 
     /// The read-out's row, note and footer stack top to bottom inside the safe band, and the

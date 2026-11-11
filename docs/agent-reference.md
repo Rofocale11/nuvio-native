@@ -1462,11 +1462,11 @@ every thin back-edge with `file:line` (the work list for breaking it up); `--dot
   `make check` can compile and RUN it on the Mac — `ci/crashfmt-test.c`, which is where the parsing
   bugs of this tracer have historically been, and which on being written by watching it fail
   disproved a justification `main.c` had carried since the tracer existed. Two logs, both in the
-  install's runtime root (`/tmp`, or `/tmp/<app id>` for a flavoured install): `plxnative-events.log`
-  is truncated each launch; **`plxnative-crash.log` is append-only and survives the relaunch** — read it
+  install's runtime root (`/tmp`, or `/tmp/<app id>` for a flavoured install): `nuvionative-events.log`
+  is truncated each launch; **`nuvionative-crash.log` is append-only and survives the relaunch** — read it
   after a crash+restart. Note pmlog's wall clock is ~3h skewed on this TV, so correlate by **monotonic
   `SDL_GetTicks`** timestamps (and the SAM `exit_status`), not pmlog time.
-- **Storage diagnostics:** every flavour publishes `plxnative-diag.log` in its runtime root.
+- **Storage diagnostics:** every flavour publishes `nuvionative-diag.log` in its runtime root.
   This is a schema-versioned, at-most-16-KiB snapshot, atomically replaced at mode **0640**;
   events, crash and stderr are **0640** too (owner rw, the app's group r, never world-readable —
   `src/main.c`'s `open_fd_log` and `eventlog::open_log_append`; they were 0600 until 2026-10-04, and
@@ -1559,7 +1559,7 @@ you its own numbers are wrong.
 > * **Keep the broken run's log.** It is the only thing that can answer "would this test have
 >   caught it", and that question cannot be asked of a fixed build at all. Replaying a case's real
 >   assertions over a saved failing log costs seconds (`run.evaluate(case, lines)` off a saved
->   `plxnative-events.log`) and is the cheapest audit in this repo.
+>   `nuvionative-events.log`) and is the cheapest audit in this repo.
 >
 > The host simulator makes the whole loop cheap and takes no television: `tools/abr-scenario.sh`
 > builds and runs one scenario end to end, so an A/B of two builds over one scenario is minutes,
@@ -1875,11 +1875,11 @@ five `route` fields itself, so `metadata → plan → apply_plan` is bypassed an
 passes it green. It also reaches no resume, marker, Up Next, timeline, track-SELECTION or transcode
 path. Never run only this one before a release. `tests/README.md` has the tier table.
 
-- **Event log:** the app writes `plxnative-events.log` in its runtime root on the TV (LS2/ACB/
+- **Event log:** the app writes `nuvionative-events.log` in its runtime root on the TV (LS2/ACB/
   Starfish replies, feed stats, seek/bind steps, key raw bytes, crash tracer) — `/tmp` for the
   stable install, `/tmp/<app id>` for a flavoured one; `make -s print-eventlog FLAVOR=<f>` resolves
   it. `make run` fetches it automatically; it's the primary debugging surface. stderr goes to
-  `plxnative-stderr.log` beside it. **Its FIRST line names the install** —
+  `nuvionative-stderr.log` beside it. **Its FIRST line names the install** —
   `install: id=… flavour=… runtime=… features=dev|release APPID_env=…` (with `appdir:` on the
   next line, from `app_dir()`'s own provenance-carrying log), written before
   anything can fail. It is the only witness that says which of two binaries *both named
@@ -2243,9 +2243,9 @@ path. Never run only this one before a release. `tests/README.md` has the tier t
   interrupted-transfer, and native-pipeline reasons; `jail` forces the missing-`/dev/rtkmem`
   read-out regardless of the real device probe, since most dev machines are not an affected SoC;
   pair `audio` with
-  `/tmp/plxnative-nopass` for the PLEX PASS capsule line. Every arm but `jail` feeds the real
-  `player::error_shape` (`jail` is the one `ErrorShape` `error_shape` never produces, so it calls
-  the sibling `jail_error_shape` directly instead), and forces the STATE only at
+  `/tmp/plxnative-nopass` for the read-out's no-transcoder note. Every arm but `jail` feeds the
+  real `player::error_shape` (`jail` is the one `ErrorShape` `error_shape` never produces, so it
+  calls the sibling `jail_error_shape` directly instead), and forces the STATE only at
   `appkit::player_hud::busy` — never at `player::state()`, which the pump acts on),
   `/tmp/plxnative-testpat=<spec>` — **replace the page's picture with a SYNTHETIC ground**
   (`flat:<L*>`, `ramp`, `edge`, `checker:<px>`, `lines:<px>`, `hbars:<px>`, `hue[:L*]`, `rainbow[:L*]`,

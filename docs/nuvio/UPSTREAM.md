@@ -119,16 +119,16 @@ command is right when this file disagrees.
 <!-- BEGIN docs-fresh:cost-stats -->
 | | |
 |---|---|
-| files this fork changed | 761 |
+| files this fork changed | 793 |
 | files the reference branch changed | 875 |
-| **contested** — changed on **both** sides | 318 |
-| of those, under `rust-modules/screens` or `rust-modules/media` | 67 |
-| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 277 |
+| **contested** — changed on **both** sides | 328 |
+| of those, under `rust-modules/screens` or `rust-modules/media` | 68 |
+| upstream-owned source **edited** (`rust-modules/`, `src/`, `Makefile`, `Cargo.*`, `ipkroot/`) | 285 |
 | upstream-owned source **added** (the fork's own crates) | 44 |
 <!-- END docs-fresh:cost-stats -->
 
 Added files cannot conflict: they did not exist upstream. The
-<!-- docs-fresh:edited -->277<!-- /docs-fresh:edited --> edited files are the seam, and
+<!-- docs-fresh:edited -->285<!-- /docs-fresh:edited --> edited files are the seam, and
 it is concentrated where the Plex coupling had to be cut — `screens`, `media`, `appkit`, `plex`,
 `platform`, `data`, `src`. Two entries in the raw churn are not hand-written code and are tagged as
 such by the script: `js-service/server.js` (~102k lines, vendored Stremio server) and
@@ -153,8 +153,8 @@ Nuvio backend is ours. There is no third kind of change.**
   take a fix is to restore a PMS assumption, the fix does not apply here.
 - Verify at the tier the change can reach (`which-tier`): host tests for addon/shim code,
   captures for UI, the television for playback.
-  <!-- docs-fresh:contested-screens -->67<!-- /docs-fresh:contested-screens --> of the
-  <!-- docs-fresh:contested -->318<!-- /docs-fresh:contested --> contested files are
+  <!-- docs-fresh:contested-screens -->68<!-- /docs-fresh:contested-screens --> of the
+  <!-- docs-fresh:contested -->328<!-- /docs-fresh:contested --> contested files are
   `screens`/`media`, so a pick there is a UI or playback change.
 
 ### Taking a fix, in order

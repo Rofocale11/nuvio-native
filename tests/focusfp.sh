@@ -130,7 +130,7 @@ run_flow() {
   PLXNATIVE_RUNTIME_DIR="$d" PLXNATIVE_APP_DIR="$ROOT/pkg" PLXNATIVE_WIN=1920x1080 \
     "$SIM_BIN" "$PMS_HOST" "$PMS_PORT" > "$d/sim.out" 2>&1 &
   SIM_PID=$!
-  local log="$d/plxnative-events.log"
+  local log="$d/nuvionative-events.log"
   local ok_boot=0
   for _ in $(seq 1 $((BOOT_WAIT * 5))); do
     if [ -f "$log" ] && grep -qE "$marker" "$log"; then ok_boot=1; break; fi

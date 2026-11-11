@@ -45,7 +45,7 @@
 //!
 //! # Sending twice is worse than not sending
 //!
-//! `plxnative-crash.log` is append-only and survives relaunch **by design** — `docs/agent-reference.md` calls it the
+//! `nuvionative-crash.log` is append-only and survives relaunch **by design** — `docs/agent-reference.md` calls it the
 //! thing to read after a crash-and-restart, and `tools/crash-report.sh` parses it. So this module
 //! may not truncate it. Instead it records how many bytes it has already reported and skips them,
 //! which means a human and this module can both read the file without either disturbing the other.
@@ -1138,7 +1138,7 @@ fn prefix_hash_from(seed: u64, bytes: &[u8]) -> u64 {
 fn log_path() -> std::path::PathBuf {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(root) = TEST_ROOT.lock().unwrap().as_ref() {
-        return root.join("plxnative-crash.log");
+        return root.join("nuvionative-crash.log");
     }
     plx_base::paths::in_runtime_dir(plx_base::paths::runtime_file::CRASH)
 }
@@ -2806,7 +2806,7 @@ mod tests {
             .join(format!("plxnative-crashreport-nodsn-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let log = dir.join("plxnative-crash.log");
+        let log = dir.join("nuvionative-crash.log");
         std::fs::write(&log, REC).unwrap();
         let spool_file = dir.join("spool.bin");
         spool::set_test_path(Some(spool_file.clone()));

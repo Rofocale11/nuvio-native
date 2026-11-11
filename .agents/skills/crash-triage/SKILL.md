@@ -139,10 +139,10 @@ a path typed from memory reads the wrong app's log without erroring.
 
 | Log | Lifetime |
 |---|---|
-| `<rundir>/plxnative-crash.log` | **append-only, survives the relaunch** — read this after a crash+restart |
-| `<rundir>/plxnative-events.log` | truncated at every launch — after a relaunch it is already gone |
-| `<rundir>/plxnative-stderr.log` | where Rust panics print |
-| `<rundir>/plxnative-diag.log` | atomically replaced storage-stage snapshot, 0640, at most 16 KiB; no account data or paths |
+| `<rundir>/nuvionative-crash.log` | **append-only, survives the relaunch** — read this after a crash+restart |
+| `<rundir>/nuvionative-events.log` | truncated at every launch — after a relaunch it is already gone |
+| `<rundir>/nuvionative-stderr.log` | where Rust panics print |
+| `<rundir>/nuvionative-diag.log` | atomically replaced storage-stage snapshot, 0640, at most 16 KiB; no account data or paths |
 
 Events, crash and stderr are 0640 as well (they were 0600 until 2026-10-04), so a Dev Mode user can
 fetch them with webOS Dev Manager. The storage snapshot is group-readable for a shell sharing
@@ -177,7 +177,7 @@ and it is worse than none, for the reason in the gotchas below.
   (must be `0`) and the CPU arch tag (must be `v7`); a stale hand-built staticlib is the
   usual cause. No log will tell you this.
 - **SIGABRT / SIGTRAP (6 / 5)** — usually a **Rust panic** crossing the FFI boundary. The
-  PC is inside `abort()` and is worthless; the evidence is `<rundir>/plxnative-stderr.log`.
+  PC is inside `abort()` and is worthless; the evidence is `<rundir>/nuvionative-stderr.log`.
 - **SIGFPE / SIGSYS (8 / 31)** — arithmetic trap or a rejected system call. They are uncommon,
   but both Sentry and the local tracer cover them so an internal daemon write failure still leaves
   a bounded record.
@@ -203,7 +203,7 @@ own — hence the `touch`. Verified output after that: `plex_run at rust-modules
 
 ## Prove the tracer works before reading its silence
 
-An empty `plxnative-crash.log` means one of two things and they are opposite: nothing crashed, or
+An empty `nuvionative-crash.log` means one of two things and they are opposite: nothing crashed, or
 the recorder is broken. **Two of the three ways this recorder can be broken have actually happened**
 — it spent seven weeks re-raising nothing, and before that it `_exit(3)`d — and in both cases the
 log looked entirely normal. So when a crash is suspected and the log is empty, fault the app on

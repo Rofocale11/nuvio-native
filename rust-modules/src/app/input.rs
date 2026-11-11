@@ -1210,10 +1210,26 @@ pub(crate) fn remove_or_prove_absent(path: &std::path::Path) -> std::io::Result<
 
 fn erase_runtime_logs(root: &std::path::Path) -> Vec<String> {
     let mut failures = Vec::new();
+    // Current logs
     for name in plx_base::paths::runtime_file::LOGS {
         if name == plx_platform::storage::diagnostics::NAME {
             continue;
         }
+        if let Err(error) = remove_local_file(&root.join(name)) {
+            failures.push(error);
+        }
+    }
+    // Legacy logs from a pre-rename install (they shared /tmp and are not swept by an upgrade)
+    for name in [
+        "plxnative-events.log",
+        "plxnative-crash.log",
+        "plxnative-stderr.log",
+        "plxnative-diag.log",
+        "plxnative-anim.log",
+        "plxnative-gst.log",
+        "plxnative-gputime.jsonl",
+        "plxnative-hwcnt.jsonl",
+    ] {
         if let Err(error) = remove_local_file(&root.join(name)) {
             failures.push(error);
         }
@@ -1343,7 +1359,21 @@ mod delete_all_tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir(&root).unwrap();
+        // Current logs
         for name in plx_base::paths::runtime_file::LOGS {
+            std::fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+        // Legacy logs from a pre-rename install
+        for name in [
+            "plxnative-events.log",
+            "plxnative-crash.log",
+            "plxnative-stderr.log",
+            "plxnative-diag.log",
+            "plxnative-anim.log",
+            "plxnative-gst.log",
+            "plxnative-gputime.jsonl",
+            "plxnative-hwcnt.jsonl",
+        ] {
             std::fs::write(root.join(name), name.as_bytes()).unwrap();
         }
         let event = root.join(plx_base::paths::runtime_file::EVENTS);
@@ -1355,6 +1385,15 @@ mod delete_all_tests {
         assert!(plx_base::paths::runtime_file::LOGS
             .iter()
             .all(|name| !root.join(name).exists()));
+        // Legacy logs also gone
+        assert!(!root.join("plxnative-events.log").exists());
+        assert!(!root.join("plxnative-crash.log").exists());
+        assert!(!root.join("plxnative-stderr.log").exists());
+        assert!(!root.join("plxnative-diag.log").exists());
+        assert!(!root.join("plxnative-anim.log").exists());
+        assert!(!root.join("plxnative-gst.log").exists());
+        assert!(!root.join("plxnative-gputime.jsonl").exists());
+        assert!(!root.join("plxnative-hwcnt.jsonl").exists());
         assert!(!event.exists());
         assert!(!diagnostics.exists());
 

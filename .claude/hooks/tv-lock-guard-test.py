@@ -44,11 +44,11 @@ CASES = [
     (BLOCK, "tools/tv-session.sh sound on"),
     (BLOCK, "tools/tv-session.sh sound status"),
     (BLOCK, "tools/capture-screen.sh out.png DISPLAY"),
-    (BLOCK, "ssh root@192.0.2.10 'cat /tmp/plxnative-events.log'"),
+    (BLOCK, "ssh root@192.0.2.10 'cat /tmp/nuvionative-events.log'"),
     (BLOCK, "sshpass -p alpine scp pkg/plxnative root@192.0.2.10:/tmp/"),
     # tools/tv-ssh is the shared key-first ssh/scp wrapper every TV caller goes through; it spells
     # the television as the literal word `tv` (no `root@<ip>`), so the raw-ssh pattern cannot see it.
-    (BLOCK, "tools/tv-ssh ssh tv 'cat /tmp/plxnative-events.log'"),
+    (BLOCK, "tools/tv-ssh ssh tv 'cat /tmp/nuvionative-events.log'"),
     (BLOCK, "tools/tv-ssh scp pkg/plxnative tv:/tmp/"),
     (BLOCK, "./tools/tv-ssh ssh tv true"),
     (BLOCK, "tools/tv-sched-trace.sh --secs 20 --out /tmp/t.gz"),

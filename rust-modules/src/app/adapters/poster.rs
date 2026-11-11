@@ -697,7 +697,7 @@ fn transcode_request(c: &plx_plex::plex::Client, path: &str, w: c_int, h: c_int,
 /// A refused key logs ONCE per process, with both ceilings and the length that missed them.
 ///
 /// The latch is the whole design. This is a per-tile, per-frame path and the memo means a refusal
-/// REPEATS every frame, so an unlatched log would bury `/tmp/plxnative-events.log` — but silence
+/// REPEATS every frame, so an unlatched log would bury `/tmp/nuvionative-events.log` — but silence
 /// is the failure `paths.rs` was fixed for (a font fell through to DroidSans while `init_text`
 /// still logged `ok=1`), and a silent refusal here is a tile that is a skeleton forever with
 /// nothing in the one file an issue report is asked for. Once is enough to name the cause.
@@ -760,7 +760,7 @@ fn interval_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bo
 ///
 /// Throttled for the reason [`warn_key_refused`] gives for its own latch: `unresident` and the
 /// re-arm branch are both per-tile, per-frame paths, and a fast scroll evicts dozens of keys a
-/// second, so a line per transition would bury `/tmp/plxnative-events.log`. Unlike that latch this
+/// second, so a line per transition would bury `/tmp/nuvionative-events.log`. Unlike that latch this
 /// does not go silent after one line — a long session should keep producing fresh readings — so it
 /// is a minimum-interval throttle (about one second, monotonic so a skewed wall clock never lies
 /// about it) rather than a one-shot. The first call in a process is let through unthrottled, so a
@@ -1727,7 +1727,7 @@ enum ArtFail {
 
 impl ArtFail {
     /// The half of the log line that names the cause. Prose rather than a code, because the reader
-    /// is whoever opened `/tmp/plxnative-events.log` after being told artwork does not load.
+    /// is whoever opened `/tmp/nuvionative-events.log` after being told artwork does not load.
     fn why(self) -> &'static str {
         match self {
             ArtFail::NoServer => {

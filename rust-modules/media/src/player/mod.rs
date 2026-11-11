@@ -863,12 +863,13 @@ fn support_line_of(i: &plx_platform::tv::device::Info, hw: &plx_platform::tv::de
 /// wrappers below feed it the globals (main thread only — `route::is_transcoding` reads
 /// main-thread state).
 ///
-/// `sub` is `plex::serverinfo`'s Plex Pass tristate, an explicit parameter for the same purity.
-/// It sharpens the WORDING of the transcode arm and nothing more — and on a KNOWN-free server it
-/// appends the subscription as a support FACT, never as the cause. The distinction is the
-/// codebase's own audit: docs/plex-pass-audit.md row 1 says h264 encoding is free everywhere,
-/// and the profile's target chain ends in h264 precisely so a free server always HAS a usable
-/// video target — so reaching this arm on one means something ELSE failed (a source the server's
+/// `sub` is `plex::serverinfo`'s subscription tristate, an explicit parameter for the same purity.
+/// It sharpens the WORDING of the transcode arm and nothing more — and on a library that reports
+/// no subscription it states that library's own limit as a support FACT, never as the cause.
+/// The distinction is the codebase's own audit: docs/plex-pass-audit.md row 1 says h264 encoding
+/// is free everywhere, and the profile's target chain ends in h264 precisely so a free server
+/// always HAS a usable video target — so reaching this arm on one means something ELSE failed (a
+/// source the server's
 /// ffmpeg cannot decode, transcoding disabled server-side), and "it cannot encode video without
 /// Plex Pass" was asserting a cause the profile had already ruled out, pointing the user at a
 /// purchase that would fix nothing. Known-true or unknown keeps the neutral wording alone: a
@@ -882,9 +883,8 @@ fn support_line_of(i: &plx_platform::tv::device::Info, hw: &plx_platform::tv::de
 /// One error, three surfaces — the HUD caption, the diagnostics panel's verdict line, and the
 /// full-screen read-out (`Player Screen.dc.html`, the spec that superseded the retired
 /// `Plex Pass Awareness.dc.html` for this screen) — shaped in ONE place so
-/// they can never disagree about what happened. `no_pass` is the read-out's cue to draw the
-/// filled PLEX PASS capsule: a support FACT beside the reason, never the cause (see the arm
-/// comment above).
+/// they can never disagree about what happened. `no_pass` is the read-out's cue to add its one
+/// note: a support FACT beside the reason, never the cause (see the arm comment above).
 /// **Why a playback failed, as a closed set.** Drives the wording below AND the telemetry code, so
 /// the two are one decision.
 ///
@@ -1076,7 +1076,7 @@ pub struct ErrorShape {
     /// subscription fact in words because the panel is plain text
     pub panel: &'static str,
     /// the read-out's reason line — sentence case, subscription fact NOT baked in (the
-    /// read-out states it as its own line, with the capsule)
+    /// read-out states it as its own note line)
     pub readout: &'static str,
     /// Additional reason and recovery instructions for the viewer. A PMS verdict is preserved
     /// verbatim; local policy failures and Force recovery copy are authored by the app.
@@ -1088,8 +1088,10 @@ pub struct ErrorShape {
     /// server and the shared support surface names only what the app decided; the asymmetry is
     /// the redaction rule, not an oversight.
     pub detail: std::borrow::Cow<'static, str>,
-    /// true only when the failure is the audio-only transcode AND the server is known to have
-    /// no Plex Pass — the one case the capsule appears
+    /// true only when the failure is the audio-only transcode AND the playing item's library
+    /// reported no subscription (`serverinfo::Subscription::No`) — the one case the read-out adds
+    /// its note. It is a fact about what the library says, never a claim about a product: the note
+    /// it drives states what the library cannot do.
     pub no_pass: bool,
 }
 
@@ -1177,11 +1179,11 @@ fn error_shape(
     // it produces are different KINDS of sentence — ours states what happened, mapped from the
     // decision CODE; the server's is quoted verbatim beneath it.
     //
-    // `no_pass` is FALSE on this arm on purpose, and it stays false on a server we KNOW has no Plex
-    // Pass and even when the encoder the server names happens to be HEVC. The server told us the
-    // cause; naming a subscription beside it would be exactly the speculation the tristate rule
-    // forbids — and it would be wrong twice over, since the arm is reachable for any source the
-    // server's own ffmpeg cannot decode, which no subscription changes.
+    // `no_pass` is FALSE on this arm on purpose, and it stays false on a library we KNOW reports
+    // no subscription and even when the encoder the server names happens to be HEVC. The server
+    // told us the cause; naming a subscription beside it would be exactly the speculation the
+    // tristate rule forbids — and it would be wrong twice over, since the arm is reachable for any
+    // source the server's own ffmpeg cannot decode, which no subscription changes.
     if let Some(v) = verdict {
         return ErrorShape {
             kind: FailureKind::DecisionRefused,
@@ -1278,16 +1280,16 @@ fn error_shape(
         },
     }
 }
-/// The Plex Pass claim that applies to THIS failure: the subscription of the server the PLAYING
+/// The subscription fact that applies to THIS failure: the subscription of the library the PLAYING
 /// item came from.
 ///
 /// **Never `serverinfo::subscription()`**, which answers for whichever server is *current* — and
 /// `current` stays pinned to the primary while a borrowed film plays (`plex::servers`' own rule:
 /// browsing a share does not re-point it). Both polarities are wrong and both are silent: a film
-/// borrowed from a Pass-less share loses the "(server has no Plex Pass)" clause and the read-out's
-/// capsule, which is exactly the support fact issue #22 was reported without; and our own Pass-less
-/// server would put that capsule on a failure that came from a friend's Pass'd machine, asserting a
-/// fact about a server that has nothing to do with it. `serverinfo::subscription_of` exists for
+/// borrowed from a share that reports no subscription loses the read-out's note, which is exactly
+/// the support fact issue #22 was reported without; and our own library, which reports none, would
+/// put that note on a failure that came from a friend's server, asserting a fact about a library
+/// that has nothing to do with it. `serverinfo::subscription_of` exists for
 /// this, and `route::cur_sid` is the playing item's own server — captured once at `request_play`
 /// and installed by `apply_plan`, which runs before either signal that can flip the state to
 /// `Error` (the plan's own refusal and the engine it would otherwise have started).
@@ -1374,7 +1376,7 @@ const FAILTEST_VERDICT: &str =
 /// audience. So the arms are selectable, and there is no other way to grade them on a panel.
 ///
 /// Arms: `verdict` (the pre-flight refusal, with the server's own sentence quoted), `audio` (the
-/// audio-only transcode — pair with `/tmp/plxnative-nopass` for the PLEX PASS capsule), `novideo`
+/// audio-only transcode — pair with `/tmp/plxnative-nopass` for the read-out's note), `novideo`
 /// (an audio-only file that direct-played), `stream` (no usable media), `connection` (an interrupted
 /// transfer), `tv` (the native pipeline refused Load), `jail` (this device's jail is missing
 /// `/dev/rtkmem` — forces [`jail_error_shape`] regardless of the real device probe, since most
@@ -1385,7 +1387,7 @@ const FAILTEST_VERDICT: &str =
 ///
 /// The subscription comes from [`playing_subscription`], the same reader the real path uses, so the
 /// arm being photographed is the real resolver on real state. `/tmp/plxnative-nopass` is what makes
-/// the capsule reachable and it applies to EVERY server, so the pairing `docs/agent-reference.md`
+/// the note reachable and it applies to EVERY server, so the pairing `docs/agent-reference.md`
 /// documents is unaffected — but note the arm still has to be looked at from the player route,
 /// i.e. after a play, which is when `route::cur_sid` names a server at all.
 fn failtest_arm(ps: &crate::route::PlaybackSession) -> Option<ErrorShape> {
@@ -2296,10 +2298,11 @@ fn clamp_subtitle_offset_ms(offset_ms: i64) -> i32 {
     offset_ms.clamp(earliest, latest) as i32
 }
 
-/// The viewer's Plex Pass audio-DSP preference (issue #266: dialog boost, loudness normalization),
-/// as two bits — a PREFERENCE, like [`SUBTITLE_TONE`], so it outlives a playback. Only the
-/// resolve's `ResolveEnv::snapshot` reads it, on the main thread, and it reaches the wire only
-/// through `route::desired_audio`: with no Plex Pass (or an unknown one) nothing reads it at all.
+/// The viewer's subscription-gated audio-DSP preference (issue #266: dialog boost, loudness
+/// normalization), as two bits — a PREFERENCE, like [`SUBTITLE_TONE`], so it outlives a playback.
+/// Only the resolve's `ResolveEnv::snapshot` reads it, on the main thread, and it reaches the wire
+/// only through `route::desired_audio`: on a library that reports no subscription (or one we never
+/// heard from) nothing reads it at all.
 /// Restored by `route::restore_profile_rows` (the seated profile's own pair, else the install's
 /// older one); written through the one write door (`route::choose`), which saves it as the seated
 /// profile's own.
@@ -2834,6 +2837,19 @@ pub extern "C" fn acb_on_event(ev: c_long, reply: *const c_char) {
         };
         log(&format!("acb_cb ev={ev} reply={r}"));
     }));
+}
+
+/// The shape an audio-only transcode builds on a library that reports no subscription — the one
+/// arm whose `no_pass` flag makes the read-out add its note. For tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub fn failtest_audio_only_no_pass_shape_for_test() -> ErrorShape {
+    error_shape(
+        true,
+        true,
+        plx_plex::plex::serverinfo::Subscription::No,
+        None,
+        RuntimeFailure::Unknown,
+    )
 }
 
 /// The shape the `failtest=policy` arm builds, for tests outside this module.
@@ -3774,20 +3790,20 @@ mod tests {
     }
 
     /// Issue #22: the error must NAME an audio-only stream, and name the right party. On a
-    /// transcode it is the server's doing — and on a KNOWN-free server the reason appends the
-    /// subscription as a FACT, never as the cause: the audit's row 1 says h264 encoding is free
-    /// everywhere and the profile's target chain ends in h264, so a missing Pass cannot be WHY
-    /// the video is gone, and asserting it would point the user at a purchase that fixes nothing
-    /// (the confident wrong answer this arm exists to prevent). Known-true or UNKNOWN keeps the
-    /// neutral wording alone: a subscription the app cannot prove absent is never even named.
-    /// Direct-played, the fault is the file's whatever the subscription says. Drives the pure
-    /// shape only, so no globals move and nothing here can race the HUD test that reads the real
-    /// (default-false) flags.
+    /// transcode it is the server's doing — and on a library that reports no subscription the
+    /// panel states the addon library's own limit as a FACT, never as the cause: the audit's row 1
+    /// says h264 encoding is free everywhere and the profile's target chain ends in h264, so a
+    /// subscription cannot be WHY the video is gone, and asserting it would point the user at a
+    /// purchase that fixes nothing (the confident wrong answer this arm exists to prevent).
+    /// Known-true or UNKNOWN keeps the neutral wording alone: a subscription the app cannot prove
+    /// absent is never even named. Direct-played, the fault is the file's whatever the
+    /// subscription says. Drives the pure shape only, so no globals move and nothing here can race
+    /// the HUD test that reads the real (default-false) flags.
     #[test]
     fn an_audio_only_stream_is_blamed_on_whoever_sent_it() {
         use plx_plex::plex::serverinfo::Subscription as Sub;
-        // transcode on a known-free server: the Pass appears as a parenthetical fact on the
-        // panel, as the capsule flag for the read-out…
+        // transcode on a library that reports no subscription: the addon library's missing
+        // transcoder appears as a parenthetical fact on the panel, and the read-out's note flag…
         let e = error_shape(true, true, Sub::No, None, RuntimeFailure::Unknown);
         assert!(
             e.caption
@@ -3802,24 +3818,26 @@ mod tests {
             "{}",
             e.panel
         );
-        assert!(e.no_pass, "the read-out draws the capsule from this flag");
-        // …and never as a cause — h264 encoding is free everywhere (audit row 1). The read-out
-        // reason carries no Pass words at all: the capsule line states the fact separately.
+        assert!(e.no_pass, "the read-out draws its note from this flag");
+        // …and never as a cause — h264 encoding is free everywhere (audit row 1). No sentence
+        // this arm builds names a subscription product: the note states the limit as a fact.
         assert!(
             !e.panel.contains("cannot encode"),
             "causation may not be asserted: {}",
             e.panel
         );
         assert!(
-            !e.readout.contains("Plex Pass"),
-            "the capsule, not prose, names the Pass: {}",
-            e.readout
+            !e.readout.contains("Plex Pass") && !e.panel.contains("Plex Pass"),
+            "no sentence names the product: {} / {}",
+            e.readout,
+            e.panel
         );
         assert!(
             e.detail.is_empty(),
             "only the server's own verdict fills the detail line"
         );
-        // known-Pass'd or never-heard-from: today's wording, and no Pass blame anywhere in it
+        // a library that reports a subscription, or one we never heard from: the neutral wording,
+        // and no subscription blame anywhere in it
         for sub in [Sub::Yes, Sub::Unknown] {
             let e = error_shape(true, true, sub, None, RuntimeFailure::Unknown);
             assert!(
@@ -3841,7 +3859,7 @@ mod tests {
             );
             assert!(
                 !e.no_pass,
-                "the capsule may not appear on an unproven subscription ({sub:?})"
+                "the note may not appear on an unproven subscription ({sub:?})"
             );
         }
         for sub in [Sub::Unknown, Sub::No, Sub::Yes] {
@@ -3993,11 +4011,11 @@ mod tests {
     /// is the SERVER's and not our inference. Three things are asserted and each was a way to get
     /// this wrong. (1) The reason line is ours and fixed, while the detail is the server's sentence
     /// **verbatim** — not sentence-cased, not re-worded, because its wording is not ours and it is
-    /// the line a maintainer photographs. (2) The capsule NEVER appears here, on any subscription
-    /// state, including a proven-free server and including a verdict that names HEVC — the server
-    /// named the cause, so naming a subscription beside it is the speculation the tristate rule
-    /// forbids. (3) The arm OUTRANKS the demux-derived ones: nothing was ever demuxed, so a stale
-    /// `no_video` from a previous session must not re-word a refusal.
+    /// the line a maintainer photographs. (2) The read-out's note NEVER appears here, on any
+    /// subscription state, including a library proven to report none and including a verdict that
+    /// names HEVC — the server named the cause, so naming a subscription beside it is the
+    /// speculation the tristate rule forbids. (3) The arm OUTRANKS the demux-derived ones: nothing
+    /// was ever demuxed, so a stale `no_video` from a previous session must not re-word a refusal.
     #[test]
     fn a_refused_decision_quotes_the_server_and_never_names_a_subscription() {
         use plx_plex::plex::serverinfo::Subscription as Sub;
@@ -4022,7 +4040,7 @@ mod tests {
             );
             assert!(
                 !e.no_pass,
-                "no capsule on this arm, ever — the server named the cause ({sub:?})"
+                "no note on this arm, ever — the server named the cause ({sub:?})"
             );
             assert!(
                 !e.readout.contains("Plex Pass") && !e.panel.contains("Plex Pass"),
@@ -4034,7 +4052,8 @@ mod tests {
                 e.caption
             );
         }
-        // an HEVC verdict on a server PROVEN to have no Pass is the temptation, and still no capsule
+        // an HEVC verdict on a library PROVEN to report no subscription is the temptation, and
+        // still no note
         let e = error_shape(
             false,
             true,
@@ -4065,11 +4084,11 @@ mod tests {
     /// The two are routinely different: `plex::servers` keeps `current` pinned to the primary while
     /// a borrowed film plays, so `serverinfo::subscription()` here answered for OUR server on every
     /// failure of a share's item. Both polarities are silent and wrong. A film borrowed from a
-    /// Pass-less share dropped the "(server has no Plex Pass)" clause and the read-out's capsule —
-    /// the exact support fact issue #22 was reported without, on the exact configuration (someone
-    /// else's free server) that produced it. And with the primary free and the share Pass'd, the
-    /// capsule appeared on a failure nothing about a subscription explains, which is the confident
-    /// wrong answer `error_shape`'s tristate rule exists to prevent.
+    /// share that reports no subscription dropped the read-out's note — the exact support fact
+    /// issue #22 was reported without, on the exact configuration (someone else's library) that
+    /// produced it. And with the primary reporting none and the share reporting one, the note
+    /// appeared on a failure nothing about a subscription explains, which is the confident wrong
+    /// answer `error_shape`'s tristate rule exists to prevent.
     ///
     /// Registry and subscription slots are still crate globals, so this holds `testlock::serial()`
     /// and puts them back on the way OUT — the discipline `serverinfo`'s own multi-server tests
@@ -4099,7 +4118,7 @@ mod tests {
         // the slot arrays outlive `reset_servers_for_test` — start from the boot state explicitly
         store_for_test(ours, Sub::Unknown, "");
         store_for_test(theirs, Sub::Unknown, "");
-        // our own server has a Plex Pass; the friend's share does not
+        // our own library reports a subscription; the friend's share reports none
         store_for_test(ours, Sub::Yes, "1.43.3.10861-cd85035e7");
         store_for_test(theirs, Sub::No, "1.32.0.6918-free");
         // …and browsing a share does NOT re-point `current`, which is the whole trap
@@ -4118,14 +4137,15 @@ mod tests {
             None,
             RuntimeFailure::Unknown,
         );
-        assert!(e.no_pass, "so the read-out draws the capsule…");
+        assert!(e.no_pass, "so the read-out adds its note…");
         assert!(
             e.panel.contains("the addon library has no transcoder"),
             "…and the panel states the fact: {}",
             e.panel
         );
 
-        // the inverse polarity: playing from OUR Pass'd server while `current` sits on the share
+        // the inverse polarity: playing from OUR subscribed library while `current` sits on the
+        // share
         assert!(plx_plex::plex::set_current(theirs));
         crate::route::swap_cur_sid_for_test(&mut ps, ours);
         assert_eq!(
@@ -4142,7 +4162,7 @@ mod tests {
                 RuntimeFailure::Unknown
             )
             .no_pass,
-            "no capsule may be invented"
+            "no note may be invented"
         );
 
         // before the first play there is no playing server, and "we have not heard" is the honest

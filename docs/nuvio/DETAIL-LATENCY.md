@@ -358,7 +358,7 @@ focus (cold).
   exec 3<> "$D/plxnative-remote"; printf 'down ok ' >&3
   # cold: stop, boot straight to a detail with an empty shim cache, then remove the trigger
   printf '10066' > "$D/plxnative-detail"             # any ratingKey from keys.tsv
-  rg "detail:" "$D/plxnative-events.log"             # warm lines, the split, and `ms=`
+  rg "detail:" "$D/nuvionative-events.log"             # warm lines, the split, and `ms=`
   ```
 - **TV:** acquire the `tv-lock`, deploy a debug build, and measure the `detail:` pair:
   1. cold: relaunch, open a card immediately → `ms=` and the shim's `meta_ms/streams_ms/tmdb_ms`;

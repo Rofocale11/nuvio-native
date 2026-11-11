@@ -63,7 +63,7 @@ make -s print-flavor   FLAVOR=debug     # debug
 make -s print-appid    FLAVOR=debug     # com.beb.plxnative.debug
 make -s print-appdir   FLAVOR=debug     # /media/developer/apps/usr/palm/applications/com.beb.plxnative.debug
 make -s print-rundir   FLAVOR=debug     # /tmp/com.beb.plxnative.debug
-make -s print-eventlog FLAVOR=debug     # /tmp/com.beb.plxnative.debug/plxnative-events.log
+make -s print-eventlog FLAVOR=debug     # /tmp/com.beb.plxnative.debug/nuvionative-events.log
 make -s print-appport  FLAVOR=debug     # 8911  (the capture listener's port — §3.1)
 make -s print-tv                        # the television's address, expanded
 ```
@@ -177,8 +177,8 @@ inside a bullet already claiming to be separate. It is written out in full below
   surface already composes on `paths::in_runtime_dir`, moving the root separated all of them at
   once and left every name unchanged — all but the last of these, which composed on nothing and had
   to be moved by hand:
-  - the three logs — `plxnative-events.log` (truncated per launch), `plxnative-crash.log`
-    (append-only), `plxnative-stderr.log`;
+  - the three logs — `nuvionative-events.log` (truncated per launch), `nuvionative-crash.log`
+    (append-only), `nuvionative-stderr.log`;
   - all ~40 `plxnative-*` dev triggers, `dev::DIAG` and `dev::any_trigger_present`'s scan;
   - the `plxnative-remote` FIFO;
   - the capture listener's file trigger (`plxnative-capture`) and the two profiler JSONLs;

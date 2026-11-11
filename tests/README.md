@@ -2,7 +2,7 @@
 
 Headless regression tests for the native webOS Plex player. Nothing on the host decodes a frame or
 talks to Starfish/ACB, so every test here drives the **real app on the real TV** via the
-`plxnative-*` dev triggers and asserts on the on-device event log (`plxnative-events.log`) — both
+`plxnative-*` dev triggers and asserts on the on-device event log (`nuvionative-events.log`) — both
 of them inside that install's **runtime root**, which is `/tmp` for the stable install and
 `/tmp/<app id>` for a flavoured one. See *Which install it drives*, below: it decides every path
 on this page, and the default is the **debug** build.
@@ -743,7 +743,7 @@ pieces make that reproducible:
 3. Create the runtime root (`mkdir` + `chmod 1777`), clear every `plxnative-*` trigger in it,
    then write only the ones this case needs.
 4. `make run TV=<tv> RUN_SECS=<n> FLAVOR=<f>` — relaunch, wait, and cat that install's
-   `plxnative-events.log` back.
+   `nuvionative-events.log` back.
 5. Filter the `smp_cb type=43 num=0 str=` flood and evaluate the assertions.
 
 ## The `plxnative-play=<rk>` trigger (added for this harness)

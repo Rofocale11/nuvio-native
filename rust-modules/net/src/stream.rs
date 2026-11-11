@@ -193,7 +193,7 @@ impl HttpStream {
 /// `X-Plex-Token=…` to what it is given, and the poster store's paths arrive with one already in
 /// them (`Client::fetch_built`, where the built path *is* the LRU key, so the key and the request
 /// have to be the same bytes). The event log is this app's support channel: a user is asked to paste
-/// `/tmp/plxnative-events.log` into a public issue thread, so a line carrying a query string is a
+/// `/tmp/nuvionative-events.log` into a public issue thread, so a line carrying a query string is a
 /// credential leak rather than a possible one — the same rule, for the same reason, that
 /// `app::diagnostics` applies to the diagnostics panel. The endpoint on its own is what makes a line
 /// diagnosable ("which request failed") and it carries no secret.

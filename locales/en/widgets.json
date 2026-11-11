@@ -334,11 +334,8 @@
     }
   },
   "widgets.failure.no_pass": {
-    "value": "This server has no {subscription}",
-    "description": "Player error caption or supporting subscription fact.",
-    "args": {
-      "subscription": "str"
-    }
+    "value": "This addon library can’t convert video",
+    "description": "Player error note: the addon library cannot convert video, stated as a fact. It names no product and no subscription."
   },
   "widgets.tracks.playing": {
     "value": "playing",

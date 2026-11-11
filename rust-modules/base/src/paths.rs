@@ -491,14 +491,14 @@ pub unsafe extern "C" fn plx_runtime_path(
 /// test below extracts the C boot shim's sinks too, so adding one cannot leave Delete all local
 /// data with a stale second list.
 pub mod runtime_file {
-    pub const EVENTS: &str = "plxnative-events.log";
-    pub const CRASH: &str = "plxnative-crash.log";
-    pub const STDERR: &str = "plxnative-stderr.log";
-    pub const STORAGE_DIAGNOSTICS: &str = "plxnative-diag.log";
-    pub const ANIMATION: &str = "plxnative-anim.log";
-    pub const GST: &str = "plxnative-gst.log";
-    pub const GPU_TIME: &str = "plxnative-gputime.jsonl";
-    pub const HARDWARE_COUNTERS: &str = "plxnative-hwcnt.jsonl";
+    pub const EVENTS: &str = "nuvionative-events.log";
+    pub const CRASH: &str = "nuvionative-crash.log";
+    pub const STDERR: &str = "nuvionative-stderr.log";
+    pub const STORAGE_DIAGNOSTICS: &str = "nuvionative-diag.log";
+    pub const ANIMATION: &str = "nuvionative-anim.log";
+    pub const GST: &str = "nuvionative-gst.log";
+    pub const GPU_TIME: &str = "nuvionative-gputime.jsonl";
+    pub const HARDWARE_COUNTERS: &str = "nuvionative-hwcnt.jsonl";
 
     pub const LOGS: [&str; 8] = [
         EVENTS,
@@ -539,7 +539,7 @@ pub fn in_runtime_dir(name: &str) -> PathBuf {
 /// (Dev Mode, no ssh) signed in successfully and then hit `session: could not persist to ANY
 /// candidate path` — none of `/media/developer`, `/media/internal` or the app dir accepted the
 /// write on that jail. But the app's own event log was reaching
-/// `/tmp/<app id>/plxnative-events.log` on that same television: `/tmp` is `mount rw, mode 1777`
+/// `/tmp/<app id>/nuvionative-events.log` on that same television: `/tmp` is `mount rw, mode 1777`
 /// in both jail profiles and the per-install runtime root under it is app-owned (see
 /// [`runtime_dir`]), so it is the one thing this jail class guarantees is writable. It is offered
 /// last, never first, because `/tmp` is swept on reboot — a save that lands only here is NOT
@@ -718,7 +718,7 @@ pub fn telemetry_spool_candidates() -> Vec<PathBuf> {
 /// How much of the append-only crash log has already been reported, beside the spool.
 ///
 /// **A watermark rather than a truncation, and that is the whole reason this file exists.**
-/// `plxnative-crash.log` is append-only and survives a relaunch BY DESIGN — `docs/agent-reference.md` names it the
+/// `nuvionative-crash.log` is append-only and survives a relaunch BY DESIGN — `docs/agent-reference.md` names it the
 /// thing to read after a crash-and-restart and `tools/crash-report.sh` parses it — so the telemetry
 /// reader may not consume it. Recording a byte offset lets a human and this module read the same
 /// file without either disturbing the other.
@@ -1000,12 +1000,12 @@ mod tests {
         assert_eq!(debug, std::path::Path::new("/tmp/com.nuvionative.app.debug"));
         assert_eq!(nightly, std::path::Path::new("/tmp/com.nuvionative.app.nightly"));
         assert_ne!(
-            stable.join("plxnative-events.log"),
-            debug.join("plxnative-events.log")
+            stable.join("nuvionative-events.log"),
+            debug.join("nuvionative-events.log")
         );
         assert_ne!(
-            debug.join("plxnative-events.log"),
-            nightly.join("plxnative-events.log")
+            debug.join("nuvionative-events.log"),
+            nightly.join("nuvionative-events.log")
         );
         for flavoured in [&debug, &nightly] {
             let name = flavoured.file_name().unwrap().to_string_lossy().into_owned();

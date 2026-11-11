@@ -574,6 +574,6 @@ once gated `#[link]` directives out of `cfg(test)` to keep the pure logic host-t
 everything on `dynlib!` those are gone, so a test that actually calls FFmpeg now fails by taking
 `dlopen`'s `None` branch on Darwin rather than by failing to link), and the host is Darwin while the TV is
 Linux, which is why `tools/sockprobe.c` exists. So anything about *playback behaviour* is only
-observable on device: deploy and read `/tmp/plxnative-events.log` (feed stats, bind steps,
+observable on device: deploy and read `/tmp/nuvionative-events.log` (feed stats, bind steps,
 seek/rebase, `RECEIVE_GOOD_VIDEO`). The `tests/` harness drives real playback per case — see the root
 `docs/agent-reference.md` testing section (run as GUEST by default; never run two harness jobs at once).

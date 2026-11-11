@@ -217,7 +217,7 @@ below stays literally true for the app users get. A flavoured install puts its t
 unchanged — only the directory moved**, so read each `/tmp/plxnative-…` path here as
 `$(make -s print-rundir FLAVOR=…)/plxnative-…`.
 
-`plxnative-diag.log` is the storage worker's allowlisted snapshot on every flavour (0640,
+`nuvionative-diag.log` is the storage worker's allowlisted snapshot on every flavour (0640,
 at most 16 KiB). It records build/uid/gid, fixed-label write probes, activation and helper stages;
 it contains no session data or resolved paths. Events, crash and stderr are 0640 too (they were
 0600 until 2026-10-04; group read is what lets a Dev Mode user fetch them). The diagnostics

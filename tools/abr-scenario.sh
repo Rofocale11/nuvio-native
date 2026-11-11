@@ -45,7 +45,7 @@ RUN_SECS="${RUN_SECS:-180}"
 
 PROXY_PORT="${PROXY_PORT:-32499}"
 DIR="/tmp/abr-sim-$NAME"
-LOG="$DIR/plxnative-events.log"
+LOG="$DIR/nuvionative-events.log"
 MODEFILE="/tmp/netcond-$NAME.mode"
 # Ask the Makefile where it put the binary rather than restating the path: `SIM_TDIR` is
 # overridable (agents running several simulators keep separate target dirs) and a literal copy

@@ -68,7 +68,7 @@
   "widgets.hint.return": "Prima {key} para voltar",
   "widgets.hint.scroll": "Deslocar",
   "widgets.hint.hold_options": "Mantenha {key} para opções",
-  "widgets.failure.no_pass": "Este servidor não tem {subscription}",
+  "widgets.failure.no_pass": "Esta biblioteca de addons não pode converter vídeo",
   "widgets.tracks.playing": "em reprodução",
   "widgets.tracks.forced": "Forçadas",
   "widgets.tracks.external": "Externa",

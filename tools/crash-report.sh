@@ -23,13 +23,13 @@
 # the only thing in the repo that does that arithmetic.
 #
 # TWO LOGS, and the difference matters after a relaunch:
-#   <runtime root>/plxnative-crash.log   append-only, SURVIVES the relaunch  <- read this one
-#   <runtime root>/plxnative-events.log  truncated at every launch           <- already gone
+#   <runtime root>/nuvionative-crash.log   append-only, SURVIVES the relaunch  <- read this one
+#   <runtime root>/nuvionative-events.log  truncated at every launch           <- already gone
 # The NAMES are the same for both installs; only the root differs — `/tmp` for the stable
 # install, `/tmp/<app id>` for a flavoured one. Ask for the one you mean with
 # `make -s print-rundir FLAVOR=<f>`; this script derives CRASHLOG/STDERRLOG from it below.
 # Do not carry an absolute path out of here into a by-hand `cat`: at the default flavour
-# `/tmp/plxnative-crash.log` is the OTHER install's log, it exists, it is append-only, and it
+# `/tmp/nuvionative-crash.log` is the OTHER install's log, it exists, it is append-only, and it
 # will hand you a perfectly plausible crash that has nothing to do with the build you are
 # triaging.
 #
@@ -74,8 +74,8 @@ set -- ${_argv[@]+"${_argv[@]}"}
 [ -n "${RUNDIR:-}" ] || { echo "cannot resolve the flavour above from $REPO/Makefile" >&2; exit 2; }
 # These two have no `print-` target of their own, and want none: the log NAMES are unchanged
 # across flavours — only the directory they sit in moved — so the runtime root is the whole story.
-CRASHLOG="$RUNDIR/plxnative-crash.log"
-STDERRLOG="$RUNDIR/plxnative-stderr.log"
+CRASHLOG="$RUNDIR/nuvionative-crash.log"
+STDERRLOG="$RUNDIR/nuvionative-stderr.log"
 
 : "${WEBOS_SDK:=$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}"
 ADDR2LINE="$WEBOS_SDK/bin/arm-webos-linux-gnueabi-addr2line"

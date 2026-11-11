@@ -153,7 +153,7 @@ SERVICEDIR   = /media/developer/apps/usr/palm/services/$(APPID).storage
 # `plxnative-` and a sibling directory matching that prefix would silently suppress the OTHER
 # install's who's-watching picker.
 RUNDIR       = $(if $(filter stable,$(FLAVOR)),/tmp,/tmp/$(APPID))
-EVENTLOG     = $(RUNDIR)/plxnative-events.log
+EVENTLOG     = $(RUNDIR)/nuvionative-events.log
 
 # Machine-readable answers, so no tool has to restate any of the above. `make -s print-appdir
 # FLAVOR=debug` and every tool in tools/ and tests/ asks this way — which also means the flavour a
@@ -1423,7 +1423,7 @@ CLOSE_SH = (luna-send -i "luna://com.webos.applicationManager/closeByAppId" "{\"
 	  fuser -k $(APPDIR)/plxnative 2>/dev/null;
 BOOT_SH = $(CLOSE_SH) \
 	  mkdir -p $(RUNDIR) && chmod 1777 $(RUNDIR); \
-	  rm -f $(EVENTLOG) $(RUNDIR)/plxnative-gputime.jsonl $(RUNDIR)/plxnative-hwcnt.jsonl; \
+	  rm -f $(EVENTLOG) $(RUNDIR)/nuvionative-gputime.jsonl $(RUNDIR)/nuvionative-hwcnt.jsonl; \
 	  luna-send -i "luna://com.webos.applicationManager/launch" "{\"id\":\"$(APPID)\"}" >/dev/null 2>&1 & LP=$$!;
 
 run: tv-lock-require
@@ -1548,7 +1548,7 @@ check:
 # that actually calls into FFmpeg or GL fails to link by design. --lib keeps it to the crate's own
 # `#[cfg(test)] mod tests` blocks (there are no integration tests in tests/ — that directory is the
 # on-device Python harness, a different thing entirely).
-# NB the suite APPENDS to `/tmp/plxnative-events.log` on the dev Mac, and deliberately cannot be
+# NB the suite APPENDS to `/tmp/nuvionative-events.log` on the dev Mac, and deliberately cannot be
 # pointed elsewhere. Since 2026-08-15 enough of the tree logs its failures (stream, posters, img,
 # account, remote) that host tests exercising those paths write real lines. `PLXNATIVE_RUNTIME_DIR`
 # does NOT help: `paths::ENV_STEERABLE` is `cfg!(feature = "hostsim")`, off here, and widening it to
@@ -2517,13 +2517,13 @@ sim-macos-play: sim-macos
 	@test -n "$(SIM_SAMPLE)" || { echo "SIM_SAMPLE=<file.h264> is required — an Annex-B elementary stream WITH access-unit delimiters, e.g."; \
 	  echo "  ffmpeg -i clip.ts -c:v copy -an -bsf:v h264_metadata=aud=insert -f h264 /tmp/sample.h264"; exit 1; }
 	@mkdir -p $(SIM_DIR)
-	@rm -f $(SIM_DIR)/plxnative-playurl $(SIM_DIR)/plxnative-events.log
+	@rm -f $(SIM_DIR)/plxnative-playurl $(SIM_DIR)/nuvionative-events.log
 	@cp $(SIM_SAMPLE) $(SIM_DIR)/sample.h264
 	@touch $(SIM_DIR)/plxnative-clocksink $(SIM_DIR)/plxnative-autoplay $(SIM_DIR)/plxnative-stats
 	$(SIM_ENV) PLXNATIVE_SHOT=$(SIM_SHOT) PLXNATIVE_SHOT_FRAME=$$(( $(SIM_SECS) * 60 )) \
 	  PLXNATIVE_SHOT_EXIT=1 $(SIM_MACOS_BIN) 127.0.0.1 32400 || true
-	@echo "--- $(SIM_DIR)/plxnative-events.log ---"
-	@grep -E 'clocksink|bf_split|SMP |vplane|route=player' $(SIM_DIR)/plxnative-events.log | head -20
+	@echo "--- $(SIM_DIR)/nuvionative-events.log ---"
+	@grep -E 'clocksink|bf_split|SMP |vplane|route=player' $(SIM_DIR)/nuvionative-events.log | head -20
 
 sim-clean: sim-macos-clean
 sim-macos-clean:
@@ -2602,8 +2602,8 @@ fixtures-pipeline:
 # because both lines are `-` prefixed the miss was swallowed — so a profiling run that produced
 # exactly the data asked for reported "no profiler output on the TV".
 fetch-profile:
-	-$(SCP) tv:$(RUNDIR)/plxnative-gputime.jsonl pkg/plxnative-gputime.jsonl
-	-$(SCP) tv:$(RUNDIR)/plxnative-hwcnt.jsonl pkg/plxnative-hwcnt.jsonl
+	-$(SCP) tv:$(RUNDIR)/nuvionative-gputime.jsonl pkg/nuvionative-gputime.jsonl
+	-$(SCP) tv:$(RUNDIR)/nuvionative-hwcnt.jsonl pkg/nuvionative-hwcnt.jsonl
 	@ls -l pkg/plxnative-*.jsonl 2>/dev/null || echo "no profiler output in $(RUNDIR) on the TV ($(APPID))"
 
 .PHONY: libass libass-host screenshots screenshots-sim demo-library disk symbols symbols-libs sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile \

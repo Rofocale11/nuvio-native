@@ -97,14 +97,14 @@ def main() -> int:
         scp = [TV_SSH, "scp", str(LOCAL_HELPER), f"root@{tv}:{remote}.new"]
         subprocess.run(scp, cwd=ROOT, check=True)
         ssh(tv, f"chmod 700 {remote}.new && mv {remote}.new {remote}")
-        start_lines_text = ssh(tv, f"wc -l < {rundir}/plxnative-events.log 2>/dev/null || echo 0",
+        start_lines_text = ssh(tv, f"wc -l < {rundir}/nuvionative-events.log 2>/dev/null || echo 0",
                                check=False).stdout.strip()
         start_lines = int(start_lines_text or "0")
         samples = max(2, math.ceil(args.seconds * 10.0) + 1)
         raw = ssh(tv, f"{remote} {samples} 100", check=False)
         if not raw.stdout:
             raise SystemExit(raw.stderr.strip() or "Mali IRQ sampler produced no data")
-        log = ssh(tv, f"tail -n +{start_lines + 1} {rundir}/plxnative-events.log 2>/dev/null",
+        log = ssh(tv, f"tail -n +{start_lines + 1} {rundir}/nuvionative-events.log 2>/dev/null",
                   check=False).stdout
     finally:
         ssh(tv, f"rm -f {remote} {remote}.new", check=False)

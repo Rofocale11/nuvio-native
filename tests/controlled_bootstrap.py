@@ -107,7 +107,7 @@ def main():
         before = snapshot(root)
         process = launch(root, True)
         code = process.wait(timeout=45)
-        lines = (root / 'plxnative-events.log').read_text(errors='replace').splitlines()
+        lines = (root / 'nuvionative-events.log').read_text(errors='replace').splitlines()
         assert not any(line.startswith('ff:') for line in lines), name + ': ambient playback probe/resource boot'
         summaries = [line for line in lines if line.startswith('replay: done ')]
         refused = any(line.startswith(('replay: REFUSED', 'rec: REFUSED')) for line in lines)
@@ -153,7 +153,7 @@ def main():
         normal.mkdir()
         (normal / 'plxnative-token').write_text('synthetic-token')
         process = launch(normal)
-        wait_marker(process, normal / 'plxnative-events.log', 'hubs: landed')
+        wait_marker(process, normal / 'nuvionative-events.log', 'hubs: landed')
         assert (normal / 'auth.json').is_file(), 'normal boot still mints/persists its own identity'
         stop(process)
         publish({'case': 'normal-live', 'home_landed': True, 'identity_persisted': True})
@@ -180,8 +180,8 @@ def main():
                     if name == 'recorder-open-failure':
                         assert (capture_dir / 'manifest.json').read_text() == 'existing synthetic capture sentinel'
                 else:
-                    wait_marker(process, root / 'plxnative-events.log', 'hubs: landed')
-                    lines = (root / 'plxnative-events.log').read_text().splitlines()
+                    wait_marker(process, root / 'nuvionative-events.log', 'hubs: landed')
+                    lines = (root / 'nuvionative-events.log').read_text().splitlines()
                     assert lines.index('bootstrap: captured pre-effect initial state') < lines.index('bootstrap: captured session persistence applied')
                     assert (root / 'auth.json').is_file()
                     if name == 'plaintext-natural':
@@ -204,7 +204,7 @@ def main():
         for flag in ('rec', 'focus', 'noidle'):
             (record / ('plxnative-' + flag)).touch()
         process = launch(record)
-        wait_marker(process, record / 'plxnative-events.log', 'hubs: landed')
+        wait_marker(process, record / 'nuvionative-events.log', 'hubs: landed')
         time.sleep(2)
         fd = os.open(record / 'plxnative-remote', os.O_RDWR | os.O_NONBLOCK)
         try:
@@ -229,7 +229,7 @@ def main():
         assert not any(row['t'] == 'eff' and 'unsupported' in row.get('payload', {}) for row in rows)
         assert sum(row['t'] == 'eff' and isinstance(row.get('payload', {}).get('delivery'), dict)
                    and row['payload']['delivery'].get('event') == 'input' for row in rows) == 10
-        record_lines = (record / 'plxnative-events.log').read_text(errors='replace').splitlines()
+        record_lines = (record / 'nuvionative-events.log').read_text(errors='replace').splitlines()
         capture = next(i for i, line in enumerate(record_lines) if line == 'bootstrap: captured pre-effect initial state')
         assert all(i > capture for i, line in enumerate(record_lines) if line.startswith(('hubs: source', 'browse: roster', 'plex: server slot')))
         assert recording.stat().st_mode & 0o777 == 0o700

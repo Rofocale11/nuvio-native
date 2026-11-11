@@ -3,7 +3,7 @@
 //! LG Cloud Test Lab rents physical sets on webOS/SoC combinations we do not own. It gives a
 //! picture and a virtual remote, and **no console, no ssh, no stdout and no way to download a
 //! file**. So a bug can be reproduced on a k8hpp webOS 10 set, watched happening, and the agent
-//! fixing it cannot see one line of `plxnative-events.log`. Every other diagnostic surface in this
+//! fixing it cannot see one line of `nuvionative-events.log`. Every other diagnostic surface in this
 //! repository assumes ssh (`crate::dev`'s ~44 `/tmp` triggers, the remote FIFO, the capture
 //! listener, `make -s print-eventlog`) and is therefore unreachable there.
 //!

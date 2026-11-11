@@ -9470,7 +9470,7 @@ pub(super) fn commit_retranscode(
         .unwrap_or_default();
     // NEVER log the URL. `transcode_start_url` ends in `X-Plex-Token=…`, and this line is reached
     // by an ordinary audio-track switch — so the app's own support channel ("send us
-    // /tmp/plxnative-events.log") was asking users to paste a live PMS credential into a public
+    // /tmp/nuvionative-events.log") was asking users to paste a live PMS credential into a public
     // issue thread. The rk, the track ids and the offset are the whole diagnostic value here; the
     // URL added nothing that is not derivable from them.
     crate::player::log(&format!(

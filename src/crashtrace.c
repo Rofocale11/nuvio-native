@@ -94,8 +94,8 @@ static const char *signame(int sig) {
  *
  * `sig_atomic_t` because they are read from signal context; -1 means "not open", and every write
  * below checks. */
-static volatile sig_atomic_t crash_fd = -1;   /* plxnative-crash.log — append-only, survives a relaunch */
-static volatile sig_atomic_t event_fd = -1;   /* plxnative-events.log — this session only */
+static volatile sig_atomic_t crash_fd = -1;   /* nuvionative-crash.log — append-only, survives a relaunch */
+static volatile sig_atomic_t event_fd = -1;   /* nuvionative-events.log — this session only */
 
 /* write(2) until it is all out, or until it stops making progress. Partial writes are real on a
  * file that hit a full filesystem, which is a state a television reaches. */

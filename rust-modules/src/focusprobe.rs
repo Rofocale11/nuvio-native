@@ -58,7 +58,7 @@
 //! # Arming it
 //!
 //! `touch /tmp/plxnative-focus` on the television (or in `PLXNATIVE_RUNTIME_DIR` under the
-//! simulator), then read `focus ` lines out of `/tmp/plxnative-events.log`. The trigger is listed
+//! simulator), then read `focus ` lines out of `/tmp/nuvionative-events.log`. The trigger is listed
 //! in [`crate::dev`]'s `DIAG` set, so arming the observer does not also change which screen the app
 //! boots to — the same reasoning `plxnative-noidle` carries, and it matters more here: a harness
 //! that wants to characterize the who's-watching picker must not lose the picker by watching it.

@@ -266,7 +266,7 @@ class FocusFpAccounting(unittest.TestCase):
             script = ('#!/bin/sh\nroot="$PLXNATIVE_RUNTIME_DIR"\n'
                       'test "$(sed -n 1p "$root/plxnative-recplay")" = v1 || exit 3\n'
                       f'test "$(sed -n 2p "$root/plxnative-recplay")" = {expected} || exit 3\n'
-                      f'printf "hubs: landed\\n{summary}\\n" > "$root/plxnative-events.log"\n')
+                      f'printf "hubs: landed\\n{summary}\\n" > "$root/nuvionative-events.log"\n')
             result = self._run_isolated_focusfp(script, '--only', '1', mode=mode)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for pair in (('--rec', '--replay'), ('--targets', '--resolve'), ('--resolve', '--replay'),
@@ -278,7 +278,7 @@ class FocusFpAccounting(unittest.TestCase):
             for bad in (summary.replace(field + '=0', field + '=1'),
                         summary.replace(' ' + field + '=0', '')):
                 script = ('#!/bin/sh\nroot="$PLXNATIVE_RUNTIME_DIR"\n'
-                          f'printf "hubs: landed\\n{bad}\\n" > "$root/plxnative-events.log"\n')
+                          f'printf "hubs: landed\\n{bad}\\n" > "$root/nuvionative-events.log"\n')
                 result = self._run_isolated_focusfp(script, '--only', '1', mode='--resolve')
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
@@ -328,7 +328,7 @@ elif [ -e "$root/plxnative-filmography" ]; then
 else
     marker='hubs: landed'
 fi
-printf '%s\\nreplay: done frames=1 graded=1 diverged=0 present_diffs=0 input_diffs=0 result_diffs=0 land_diffs=0 effect_diffs=0 focus_diffs=0 hit_diffs=0 verdict=SAME\\n' "$marker" > "$root/plxnative-events.log"
+printf '%s\\nreplay: done frames=1 graded=1 diverged=0 present_diffs=0 input_diffs=0 result_diffs=0 land_diffs=0 effect_diffs=0 focus_diffs=0 hit_diffs=0 verdict=SAME\\n' "$marker" > "$root/nuvionative-events.log"
 exit 0
 """
         result = self._run_isolated_focusfp(script)
@@ -339,7 +339,7 @@ exit 0
     def test_only_counts_a_failed_simulator_and_the_tv_root_as_selected_outcomes(self):
         script = """#!/bin/sh
 root="$PLXNATIVE_RUNTIME_DIR"
-printf 'hubs: landed\\n' > "$root/plxnative-events.log"
+printf 'hubs: landed\\n' > "$root/nuvionative-events.log"
 exit 0
 """
         result = self._run_isolated_focusfp(script, "--only", "1,10")
@@ -870,7 +870,7 @@ class ReplayFixtures(unittest.TestCase):
 
 class TeardownProcessTable(unittest.TestCase):
     def test_non_utf8_argv_cannot_hide_or_crash_a_run_stream_pid(self):
-        marker = "/tmp/com.nuvionative.app.debug/plxnative-events.log"
+        marker = "/tmp/com.nuvionative.app.debug/nuvionative-events.log"
         raw = b"431 ssh " + marker.encode("ascii") + b" \xdflegacy\n"
         fake = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=raw))
         with mock.patch.object(run, "RUN_STREAM_MARK", marker):
@@ -1950,7 +1950,7 @@ class ResolutionSpike(unittest.TestCase):
             with mock.patch.object(run, "ssh") as ssh:
                 run.apply_triggers("192.0.2.20", [("plxnative-gstlog", "GST_EVENT:6")])
             command = ssh.call_args.args[1]
-            self.assertIn("rm -f /tmp/com.nuvionative.app.debug/plxnative-gst.log", command)
+            self.assertIn("rm -f /tmp/com.nuvionative.app.debug/nuvionative-gst.log", command)
             self.assertIn("plxnative-gstlog", command)
         finally:
             run.RUNDIR = saved
@@ -7788,7 +7788,7 @@ class FpsMock(unittest.TestCase):
             return run.run_fps_scene(scene, cfg, "tok", extra_triggers=extra_triggers, capture=capture)
 
     # --- --save-logs keeps the GPU counters, which the harness otherwise wipes ----------
-    # `plxnative-hwcnt.jsonl` lives in the runtime root that every scene's trigger wipe and the
+    # `nuvionative-hwcnt.jsonl` lives in the runtime root that every scene's trigger wipe and the
     # harness's teardown empty, and `save_case_log` keeps only the event log: a card-attribution leg
     # (`--extra-trigger plxnative-hwcnt=frame.ui`) used to lose the one file that holds its answer.
     HWCNT_ARMED = (("plxnative-hwcnt", "frame.ui"),)
@@ -7819,33 +7819,33 @@ class FpsMock(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             # the GL-timer file is on the set too: a leg that armed hwcnt is not asked for it
             events, out, kept = self._run_saving(
-                tmp, on_tv={"plxnative-hwcnt.jsonl": '{"phase":"frame.ui"}\n', "plxnative-gputime.jsonl": "g\n"})
-            self.assertEqual(events, ["kill", "wipe", "run", "pull plxnative-hwcnt.jsonl"])
-            self.assertEqual(kept, ["fps-library-switch.plxnative-hwcnt.jsonl"])
+                tmp, on_tv={"nuvionative-hwcnt.jsonl": '{"phase":"frame.ui"}\n', "nuvionative-gputime.jsonl": "g\n"})
+            self.assertEqual(events, ["kill", "wipe", "run", "pull nuvionative-hwcnt.jsonl"])
+            self.assertEqual(kept, ["fps-library-switch.nuvionative-hwcnt.jsonl"])
             with open(os.path.join(tmp, "legs", kept[0])) as fh:
                 self.assertEqual(fh.read(), '{"phase":"frame.ui"}\n')
-            self.assertIn("kept fps-library-switch.plxnative-hwcnt.jsonl", out)
+            self.assertIn("kept fps-library-switch.nuvionative-hwcnt.jsonl", out)
 
     def test_save_logs_keeps_the_gputime_jsonl_of_a_plxnative_profile_leg(self):
-        # `plxnative-profile` (the GL timer) writes plxnative-gputime.jsonl and never the hwcnt file
+        # `plxnative-profile` (the GL timer) writes nuvionative-gputime.jsonl and never the hwcnt file
         with tempfile.TemporaryDirectory() as tmp:
             events, out, kept = self._run_saving(
-                tmp, armed=self.PROFILE_ARMED, on_tv={"plxnative-hwcnt.jsonl": "h\n", "plxnative-gputime.jsonl": "g\n"})
-            self.assertEqual(events, ["kill", "wipe", "run", "pull plxnative-gputime.jsonl"])
-            self.assertEqual(kept, ["fps-library-switch.plxnative-gputime.jsonl"])
+                tmp, armed=self.PROFILE_ARMED, on_tv={"nuvionative-hwcnt.jsonl": "h\n", "nuvionative-gputime.jsonl": "g\n"})
+            self.assertEqual(events, ["kill", "wipe", "run", "pull nuvionative-gputime.jsonl"])
+            self.assertEqual(kept, ["fps-library-switch.nuvionative-gputime.jsonl"])
             with open(os.path.join(tmp, "legs", kept[0])) as fh:
                 self.assertEqual(fh.read(), "g\n")
-            self.assertIn("kept fps-library-switch.plxnative-gputime.jsonl", out)
+            self.assertIn("kept fps-library-switch.nuvionative-gputime.jsonl", out)
 
     def test_save_logs_says_so_when_an_armed_leg_left_no_counters(self):
-        for armed, fname in ((self.HWCNT_ARMED, "plxnative-hwcnt.jsonl"), (self.PROFILE_ARMED, "plxnative-gputime.jsonl")):
+        for armed, fname in ((self.HWCNT_ARMED, "nuvionative-hwcnt.jsonl"), (self.PROFILE_ARMED, "nuvionative-gputime.jsonl")):
             with tempfile.TemporaryDirectory() as tmp:
                 _, out, kept = self._run_saving(tmp, armed=armed)
                 self.assertEqual(kept, [])
                 self.assertIn(f"{armed[0][0]} was armed but the set holds no {fname}", out)
 
     def test_save_logs_leaves_the_set_alone_unless_a_profiler_is_armed_and_logs_are_wanted(self):
-        on_tv = {"plxnative-hwcnt.jsonl": "h\n", "plxnative-gputime.jsonl": "g\n"}
+        on_tv = {"nuvionative-hwcnt.jsonl": "h\n", "nuvionative-gputime.jsonl": "g\n"}
         for leg in ({"armed": ()}, {"save": False}):
             with tempfile.TemporaryDirectory() as tmp:
                 events, out, kept = self._run_saving(tmp, on_tv=on_tv, **leg)
@@ -7857,10 +7857,10 @@ class FpsMock(unittest.TestCase):
         for save in (True, False):
             with tempfile.TemporaryDirectory() as tmp:
                 capture = {}
-                events, _, kept = self._run_saving(tmp, save=save, capture=capture, on_tv={"plxnative-hwcnt.jsonl": "h\n"})
-                self.assertEqual(events, ["kill", "wipe", "run", "pull plxnative-hwcnt.jsonl"], f"save={save}")
+                events, _, kept = self._run_saving(tmp, save=save, capture=capture, on_tv={"nuvionative-hwcnt.jsonl": "h\n"})
+                self.assertEqual(events, ["kill", "wipe", "run", "pull nuvionative-hwcnt.jsonl"], f"save={save}")
                 self.assertEqual(capture["profiler"], {"plxnative-hwcnt": "h\n"})
-                self.assertEqual(kept, ["fps-library-switch.plxnative-hwcnt.jsonl"] if save else [])
+                self.assertEqual(kept, ["fps-library-switch.nuvionative-hwcnt.jsonl"] if save else [])
 
     def test_the_graphics_profile_bundles_the_hwcnt_leg_it_was_handed_and_pulls_nothing_itself(self):
         legs = []
@@ -7881,7 +7881,7 @@ class FpsMock(unittest.TestCase):
                 mock.patch.object(run.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")):
             bundle = os.path.join(tmp, "bundle")
             self.assertEqual(run.run_graphics_profile({"name": "library-switch"}, {"tv": "tv.invalid"}, "tok", "frame.ui", output=bundle), 0)
-            with open(os.path.join(bundle, "plxnative-hwcnt.jsonl")) as fh:
+            with open(os.path.join(bundle, "nuvionative-hwcnt.jsonl")) as fh:
                 self.assertEqual(fh.read(), "h\n")
         self.assertEqual(legs, [(), (("plxnative-hwcnt", "frame.ui"),)])
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Is the `frame.ui` phase GPU-bound, or waiting with the GPU idle?
 
-  analyze-hwcnt-wait.py plxnative-hwcnt.jsonl [--phase frame.ui] [--discard 60]
+  analyze-hwcnt-wait.py nuvionative-hwcnt.jsonl [--phase frame.ui] [--discard 60]
   analyze-hwcnt-wait.py --self-test
 
 Each JSONL `phase` row is one frame's phase bracketed by two glFinish calls, with the Mali

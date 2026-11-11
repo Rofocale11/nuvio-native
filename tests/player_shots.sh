@@ -58,7 +58,7 @@ PLXNATIVE_RUNTIME_DIR="$D" PLXNATIVE_APP_DIR="$ROOT/pkg" PLXNATIVE_WIN=1920x1080
   "$SIM_BIN" 127.0.0.1 "$PMS_PORT" > "$D/sim.out" 2>&1 &
 SIM_PID=$!
 
-LOG="$D/plxnative-events.log"
+LOG="$D/nuvionative-events.log"
 for _ in $(seq 1 200); do
   [ -f "$LOG" ] && grep -q 'route=player' "$LOG" && break
   kill -0 "$SIM_PID" 2>/dev/null || break

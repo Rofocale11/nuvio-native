@@ -68,7 +68,7 @@
   "widgets.hint.return": "Premi {key} per tornare indietro",
   "widgets.hint.scroll": "Scorri",
   "widgets.hint.hold_options": "Tieni premuto {key} per le opzioni",
-  "widgets.failure.no_pass": "Questo server non ha {subscription}",
+  "widgets.failure.no_pass": "Questa libreria di addon non può convertire il video",
   "widgets.tracks.playing": "in riproduzione",
   "widgets.tracks.forced": "Forzati",
   "widgets.tracks.external": "Esterna",

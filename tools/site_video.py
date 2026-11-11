@@ -1497,7 +1497,7 @@ def sign_in_demo_profile(sim_bin, runtime, port, say=print, timeout=90, base=Non
         del env[k]
     log = open(runtime / "prep.out", "w")
     sim = subprocess.Popen([str(sim_bin), "127.0.0.1", str(port)], stdout=log, stderr=subprocess.STDOUT, env=env)
-    events = runtime / "plxnative-events.log"
+    events = runtime / "nuvionative-events.log"
     try:
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
@@ -1515,7 +1515,7 @@ def sign_in_demo_profile(sim_bin, runtime, port, say=print, timeout=90, base=Non
         log.close()
     if not (runtime / "state" / "session.json").is_file():
         raise Failure("the demo sign-in left no state/session.json")
-    for name in ("plxnative-login", "plxnative-events.log", "plxnative-diag.log", "plxnative-remote"):
+    for name in ("plxnative-login", "nuvionative-events.log", "nuvionative-diag.log", "plxnative-remote"):
         (runtime / name).unlink(missing_ok=True)
     say("site_video: the simulator is signed in to the mock's Demo account (the profile chip reads Demo)")
 
@@ -1890,7 +1890,7 @@ def run_render(sim_bin, out_dir, ffmpeg, frames, preroll=DEFAULT_PREROLL, hero=N
             storyboard["rest"] = rest_metrics(ffmpeg, out_dir / "master.mkv", plan["beats"])
             if plan["loop"]:
                 storyboard["loop"] = loop_metrics(ffmpeg, out_dir / "master.mkv", frames)
-        events = runtime / "plxnative-events.log"
+        events = runtime / "nuvionative-events.log"
         facts = film_facts(pms, hero, json.loads(pathlib.Path(CATALOG).read_text()),
                            events.read_text(errors="replace") if events.exists() else "",
                            hero_ok=hero_report_passes())

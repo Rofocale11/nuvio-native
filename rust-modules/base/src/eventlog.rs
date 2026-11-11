@@ -1,4 +1,4 @@
-//! **The event log** — `/tmp/plxnative-events.log` on the television, the app's one support channel.
+//! **The event log** — `/tmp/nuvionative-events.log` on the television, the app's one support channel.
 //!
 //! [`log`] is the ONE sink every module writes through; [`redact_tokens`] and [`scrub`] are the
 //! guards every line passes on the way, and [`ring`] is the lab's tap. It lives in the base layer
@@ -22,7 +22,7 @@ pub mod ring;
 /// **This is a backstop, not the policy.** The policy is that no call site formats a URL into a log
 /// line at all — but that policy was violated for months by one `-> {url}` in `route::retranscode`,
 /// reached by an ordinary audio-track switch, and the app's whole support channel is "send us
-/// `/tmp/plxnative-events.log`". So the class is closed HERE, where every line passes, rather than
+/// `/tmp/nuvionative-events.log`". So the class is closed HERE, where every line passes, rather than
 /// at the call sites, where the next one is one `format!` away from re-opening it.
 ///
 /// Matches the parameter name rather than the value: the token is a short unstructured alphanumeric
@@ -68,7 +68,7 @@ pub fn events_log() -> std::path::PathBuf {
 /// when `f` panics).
 ///
 /// **A host test that reads the log back must not read the shared one.** A host test run resolves the
-/// log to the bare `/tmp/plxnative-events.log` (only the `hostsim` feature lets
+/// log to the bare `/tmp/nuvionative-events.log` (only the `hostsim` feature lets
 /// `PLXNATIVE_RUNTIME_DIR` steer it, [`crate::paths::ENV_STEERABLE`]), and that file is one for the
 /// whole machine: every test binary of this `make check`, and of any other checkout's, appends to
 /// it. `serial()` is one process's lock. With two `make check` runs side by side,
@@ -150,14 +150,14 @@ mod private_log_tests {
     }
 }
 
-/// The mode of the event log and its two siblings (`plxnative-crash.log`, `plxnative-stderr.log`,
+/// The mode of the event log and its two siblings (`nuvionative-crash.log`, `nuvionative-stderr.log`,
 /// which `src/main.c`'s `open_fd_log` opens at the same mode): owner read/write, the app's own
 /// group (gid 5000 on the television) read, nothing for anyone else.
 ///
 /// **Group read, not 0600, so a Developer Mode user can fetch it.** A television that is not
 /// rooted gives its owner one tool, webOS Dev Manager, and it reads files as an unprivileged user
 /// that is in the app's group but is not the app's uid; at 0600 the logs were unreadable to the one
-/// person who needs them. `plxnative-diag.log` has always shipped 0640 for the same reason.
+/// person who needs them. `nuvionative-diag.log` has always shipped 0640 for the same reason.
 ///
 /// **Why that is acceptable where 0644 in the shared, mode-1777 `/tmp` was not** (the 2026-08-29
 /// closed entry in `docs/distribution.md`): "other" still gets nothing, and the content is no
@@ -276,7 +276,7 @@ pub fn append_record(path: &std::path::Path, line: &str) -> std::io::Result<()> 
     write_log_line(&mut open_log_append(path)?, line)
 }
 
-/// Append one line to the on-device event log (`/tmp/plxnative-events.log`) — the primary debugging
+/// Append one line to the on-device event log (`/tmp/nuvionative-events.log`) — the primary debugging
 /// surface (`make run` fetches it). The ONE shared sink; modules bring it in as `use crate::eventlog::log;`.
 ///
 /// Every line goes through [`redact_tokens`] first — see its doc for why the guard lives here.
@@ -462,7 +462,7 @@ mod log_sink_tests {
     /// restrictive umask here would silently change the mode of every file another test creates
     /// during the window.
     ///
-    /// The contract is the one `plxnative-diag.log` already ships: **0640** whatever the creating
+    /// The contract is the one `nuvionative-diag.log` already ships: **0640** whatever the creating
     /// process's umask says — group read, so a Dev Mode user (whose only tool is webOS Dev Manager,
     /// reading as an unprivileged user in the app's group) can download the file, and nothing at
     /// all for anyone outside that group. Three starting states, because each reaches the mode by

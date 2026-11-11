@@ -75,7 +75,7 @@ def sign_in(sim, runtime, port, timeout=90):
     log = open(runtime / "prep.out", "w")
     proc = subprocess.Popen([str(sim), "127.0.0.1", str(port)], stdout=log, stderr=subprocess.STDOUT,
                             env=sim_env(runtime))
-    events = runtime / "plxnative-events.log"
+    events = runtime / "nuvionative-events.log"
     try:
         t0 = time.monotonic()
         while True:
@@ -94,7 +94,7 @@ def sign_in(sim, runtime, port, timeout=90):
         log.close()
     if not (runtime / "state" / "session.json").is_file():
         raise Failure("the mock sign-in left no state/session.json")
-    for name in ("plxnative-login", "plxnative-events.log", "plxnative-diag.log", "plxnative-remote"):
+    for name in ("plxnative-login", "nuvionative-events.log", "nuvionative-diag.log", "plxnative-remote"):
         (runtime / name).unlink(missing_ok=True)
 
 
@@ -121,7 +121,7 @@ def capture(sim, spec, scenario, out_dir):
         proc = subprocess.Popen([str(sim), "127.0.0.1", str(port)], stdout=log, stderr=subprocess.STDOUT,
                                 env=sim_env(runtime))
         time.sleep(scenario["boot_wait_s"])
-        require_stand_in(runtime / "plxnative-events.log")  # before a single key is sent
+        require_stand_in(runtime / "nuvionative-events.log")  # before a single key is sent
         fifo = runtime / "plxnative-remote"
         for _ in range(50):
             if fifo.exists():
@@ -178,7 +178,7 @@ def capture(sim, spec, scenario, out_dir):
         (out_dir / spec["file"]).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(shot, out_dir / spec["file"])
         want_log = spec.get("expect_log")
-        if want_log and want_log not in (runtime / "plxnative-events.log").read_text(errors="replace"):
+        if want_log and want_log not in (runtime / "nuvionative-events.log").read_text(errors="replace"):
             raise Failure(f"{spec['file']}: the event log has no `{want_log}`")
         want = spec.get("expect_write")
         if want:
@@ -192,7 +192,7 @@ def capture(sim, spec, scenario, out_dir):
             # The run's event log (a panic, a frame guard's catch) and console are kept beside the
             # capture as <file stem>.log / .out.
             stem = spec["file"][:-len(".png")]
-            for name, ext in (("plxnative-events.log", ".log"), ("sim.out", ".out")):
+            for name, ext in (("nuvionative-events.log", ".log"), ("sim.out", ".out")):
                 if (runtime / name).is_file():
                     shutil.copy(runtime / name, out_dir / (stem + ext))
         srv.shutdown()

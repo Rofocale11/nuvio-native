@@ -14,7 +14,7 @@ proof is an `.ipk` installed on a Cloud Test Lab set and one command/ack round t
 LG Cloud Test Lab rents us physical sets on webOS/SoC combinations nobody here owns. It gives a
 picture and a virtual remote, and **no console, no ssh, no stdout, no way to download a file**. We
 can reproduce a bug on a k8hpp webOS 10 set and watch it happen, and the agent fixing it cannot see
-one line of `plxnative-events.log`.
+one line of `nuvionative-events.log`.
 
 This is the bridge: a lab-only build presses its own log out through the internet to a receiver on
 the developer's Mac and optionally holds an outbound command poll. Commands come back only as the

@@ -14,6 +14,14 @@
 > could not act on and crowded the date/runtime runs it shared. The row now shows only the quiet
 > direct-play/direct-stream states and the soft conversion note; `detail::play_note` still
 > classifies the HDR case but draws no clause for it.
+>
+> **Superseded in part (2026-11-11): deliverable A's PLEX PASS capsule is gone.** The failure
+> read-out's one note now states the library's own limit — "This addon library can't convert
+> video" — because this fork has no plex.tv credential and its one server is the in-process
+> shim, whose universal-start endpoint answers "no transcoder: streams play direct". Naming a
+> Plex product there asserted a cause the audit's own row 1 rules out. The capsule's gold and
+> geometry are not used anywhere; `widgets.failure.no_pass` carries no placeholder and no
+> product name, in all eight catalogues.
 
 Paste this whole brief into the Claude Design project. Deliverables come back as preview cards
 (HTML mockups + a short spec each) so they can be pulled into the codebase via design-sync, the

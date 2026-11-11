@@ -108,9 +108,9 @@ def main():
     elif a.cmd == "close":
         print(run(["ares-launch", "--device", DEVICE, "--close", a.appid], check=False))
     elif a.cmd == "log":
-        print(sh(f"tail -n {int(a.n)} {rd}/plxnative-events.log"))
+        print(sh(f"tail -n {int(a.n)} {rd}/nuvionative-events.log"))
     elif a.cmd == "grep":
-        print(sh(f"grep -a -E {shlex.quote(a.pattern)} {rd}/plxnative-events.log | tail -n 80"))
+        print(sh(f"grep -a -E {shlex.quote(a.pattern)} {rd}/nuvionative-events.log | tail -n 80"))
     elif a.cmd == "keys":
         # Space checked writes on the host; this TV’s BusyBox sleep accepts only integers.
         for key in a.keys:

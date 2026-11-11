@@ -68,7 +68,7 @@
   "widgets.hint.return": "Drücke {key}, um zurückzukehren",
   "widgets.hint.scroll": "Blättern",
   "widgets.hint.hold_options": "Halte {key} für Optionen",
-  "widgets.failure.no_pass": "Dieser Server hat keinen {subscription}",
+  "widgets.failure.no_pass": "Diese Addon-Bibliothek kann keine Videos konvertieren",
   "widgets.tracks.playing": "läuft",
   "widgets.tracks.forced": "Erzwungen",
   "widgets.tracks.external": "Extern",

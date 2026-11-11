@@ -139,7 +139,7 @@ GROUND = re.compile(
 def readings(root: Path):
     """Every `track_ground` line in the instance's event log, in order, as dicts of its fields."""
     seen = []
-    for line in (root / "plxnative-events.log").read_text(errors="replace").splitlines():
+    for line in (root / "nuvionative-events.log").read_text(errors="replace").splitlines():
         m = GROUND.search(line)
         if m:
             d = m.groupdict()

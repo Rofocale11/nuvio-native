@@ -119,7 +119,7 @@ agent must drive the UI. The runtime root is the instance: session, triggers, FI
 - **Boot straight to a screen** with a trigger file, e.g. `printf '10066' > $D/plxnative-detail`
   (also `plxnative-library`, `plxnative-login`). Remove the trigger after the run: a stale one
   silently changes the next boot (and `plxnative-detail` also makes the first `detail:` read cold).
-- **The event log is truncated on every launch** (`$D/plxnative-events.log`); its first line is the
+- **The event log is truncated on every launch** (`$D/nuvionative-events.log`); its first line is the
   `sim:` banner. Grep it for route/`detail:` lines rather than relying on the terminal.
 - Timing read here is host network and host GPU. It is never a television number.
 

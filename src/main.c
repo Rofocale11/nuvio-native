@@ -33,8 +33,8 @@ extern int plx_sentry_spool_external(const char *path); /* Sentry daemon's spool
 extern void plx_crash_write_image_marker(int fd); /* identify this binary in the append-only log */
 extern void plx_launch_args(const char *json); /* SAM's launch payload — see rust-modules/platform/src/tv/launch.rs */
 
-/* Where this INSTALL's runtime files live — `/tmp/plxnative-events.log` for the app users get,
- * `/tmp/com.nuvionative.app.debug/plxnative-events.log` for a developer build installed beside it.
+/* Where this INSTALL's runtime files live — `/tmp/nuvionative-events.log` for the app users get,
+ * `/tmp/com.nuvionative.app.debug/nuvionative-events.log` for a developer build installed beside it.
  *
  * The answer comes from Rust (`plx_runtime_path`, rust-modules/base/src/paths.rs) rather than from a
  * literal here, and that is the whole point: this file opens three logs before a single line of
@@ -80,7 +80,7 @@ static int open_fd_log(const char *path, int flags);
  * LAN addresses, Plex GUIDs, search queries and household names this file once held in the clear
  * are rewritten before they reach the disk. */
 static FILE *open_event_log(void) {
-    int fd = open_fd_log(runtime_path("plxnative-events.log"), O_TRUNC | O_APPEND);
+    int fd = open_fd_log(runtime_path("nuvionative-events.log"), O_TRUNC | O_APPEND);
     return fd >= 0 ? fdopen(fd, "a") : NULL;
 }
 
@@ -94,7 +94,7 @@ static FILE *open_event_log(void) {
  * Why group read, when these were 0600. A Developer Mode television that is not rooted gives its
  * owner exactly one tool, webOS Dev Manager, and that reads files as an unprivileged user that is
  * in the app's group but is not the app's uid. At 0600 none of the app's logs could be fetched, so
- * a bug report was impossible without root. 0640 is what `plxnative-diag.log` has always shipped
+ * a bug report was impossible without root. 0640 is what `nuvionative-diag.log` has always shipped
  * (rust-modules/platform/src/storage/diagnostics.rs); "other" still gets nothing.
  *
  * Why that is acceptable now. The 0600 was the fix for a world-readable log, and the file's CONTENT
@@ -172,14 +172,14 @@ int main(int argc, char **argv) {
      * stream has already flushed and nothing is interleaved mid-line. (Every `elogf` writer in
      * `src/starfish.c` does `fflush` immediately today, so there is nothing pending in practice —
      * but a crash tracer must not depend on that continuing to be true.) */
-    int event_fd = open_fd_log(runtime_path("plxnative-events.log"), O_APPEND);
-    int crash_fd = open_fd_log(runtime_path("plxnative-crash.log"), O_APPEND); /* append: keep prior crashes across relaunches */
+    int event_fd = open_fd_log(runtime_path("nuvionative-events.log"), O_APPEND);
+    int crash_fd = open_fd_log(runtime_path("nuvionative-crash.log"), O_APPEND); /* append: keep prior crashes across relaunches */
     /* Written while allocation and ELF parsing are safe. The signal path then needs only numbers,
      * while the next launch can still pair a record with THIS executable after a deploy. */
     plx_crash_write_image_marker(crash_fd);
     /* stderr is redirected from the SAME verified descriptor. Re-opening by path with `freopen`
      * would reintroduce the symlink race that `open_fd_log` just closed. */
-    int stderr_fd = open_fd_log(runtime_path("plxnative-stderr.log"), O_TRUNC | O_APPEND);
+    int stderr_fd = open_fd_log(runtime_path("nuvionative-stderr.log"), O_TRUNC | O_APPEND);
     if (stderr_fd >= 0) {
         if (dup2(stderr_fd, STDERR_FILENO) >= 0)
             fcntl(STDERR_FILENO, F_SETFD, FD_CLOEXEC);

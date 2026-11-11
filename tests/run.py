@@ -126,7 +126,7 @@ FIXTURES_ROOT = serve_fixtures_default_root()
 FLAVOUR = None          # "stable" | "debug"
 APPID = None            # com.nuvionative.app[.<flavour>]
 RUNDIR = None           # the runtime root: /tmp for stable, /tmp/<app id> for a flavoured install
-EVENTLOG = None         # <RUNDIR>/plxnative-events.log
+EVENTLOG = None         # <RUNDIR>/nuvionative-events.log
 RUN_STREAM_MARK = None  # the remote command text — see _run_stream_pids()
 
 # reference list of the dev triggers the app reads (apply_triggers now GLOB-clears the runtime
@@ -1235,11 +1235,15 @@ def key_inject_for_case(case):
 
 
 def apply_triggers(tv, files, extra=None):
-    """Clear every plxnative-* trigger in THIS install's runtime root (sparing the *.log files),
-    then create the ones this case needs, in one ssh round-trip. GLOB-based, not an enumerated list,
+    """Clear every plxnative-* trigger in THIS install's runtime root (sparing `*.log` files, which
+    are evidence and, for a pre-rename install, are also spared as triggers by `dev::DIAG`), then
+    create the ones this case needs, in one ssh round-trip. GLOB-based, not an enumerated list,
     so a newly-added app trigger can never bleed between scenes — a stale plxnative-novsync would
     uncap vsync and false-PASS an FPS scene, a stale plxnative-press/-login would derail a home
     scene. ALL_TRIGGERS above is now just a human reference of the known triggers.
+
+    The runtime LOGS are `nuvionative-*` and therefore outside this glob: they are handled below,
+    by name, where a case must not inherit the previous one's file.
 
     The glob is scoped to RUNDIR, which is what keeps the two installs out of each other's way: the
     stable root is /tmp itself, and `/tmp/plxnative-*` cannot match the flavoured root beside it
@@ -1259,13 +1263,17 @@ def apply_triggers(tv, files, extra=None):
     # write stays 0 bytes, which every assertion in this file reports as "no line found", i.e.
     # exactly like a total regression. A no-op for the stable flavour, whose root is /tmp (1777).
     parts = [f"mkdir -p {RUNDIR} && chmod 1777 {RUNDIR}"]
-    # wipe every trigger, keeping only the append-only logs (events/stderr/crash)
+    # wipe every trigger; a `*.log` here is a pre-rename install's leftover (today's logs live
+    # outside the namespace) and is spared as evidence, exactly as the hash logs always were
     parts.append(f'for f in {RUNDIR}/plxnative-*; do case "$f" in *.log) ;; *) rm -f "$f";; esac; done')
+    # The two GPU profilers' outputs used to be caught by that glob. They are `nuvionative-*` now,
+    # so remove them by name: a case must never be graded against the previous case's file.
+    parts.append(f"rm -f {RUNDIR}/nuvionative-gputime.jsonl {RUNDIR}/nuvionative-hwcnt.jsonl")
     # GST_DEBUG_FILE_OVERWRITE is honoured only once libpf installs its logger. Remove the old
     # trace here as well, before launch, so an app that fails before that point cannot be graded
     # against the previous case's perfectly plausible per-frame log.
     if any(name == "plxnative-gstlog" for name, _ in files):
-        parts.append(f"rm -f {RUNDIR}/plxnative-gst.log")
+        parts.append(f"rm -f {RUNDIR}/nuvionative-gst.log")
     for name, content in files:
         if content is None:
             parts.append(f"touch {RUNDIR}/{name}")
@@ -5088,7 +5096,7 @@ def save_logs_file(cfg, filename, text):
 def save_case_log(cfg, name, lines):
     """Persist one case's event log, if --save-logs asked for it.
 
-    The app truncates `plxnative-events.log` at every launch and every case relaunches, so the
+    The app truncates `nuvionative-events.log` at every launch and every case relaunches, so the
     only copy of a trace is the one the harness holds in memory. Increment I2 needs those traces
     (transaction records, per-segment acquisition) and re-running a device case to recover a log
     costs a television lease.
@@ -5099,8 +5107,8 @@ def save_case_log(cfg, name, lines):
 # The counter file each profiler trigger leaves in the runtime root (`paths::profile`). One mode is
 # armed per run (`gfx/profile.rs`): `plxnative-hwcnt` writes the first file and the GL timer behind
 # `plxnative-profile` the second, so the file of a leg is the one its own trigger names.
-HWCNT_FILE = "plxnative-hwcnt.jsonl"
-GPU_TIME_FILE = "plxnative-gputime.jsonl"
+HWCNT_FILE = "nuvionative-hwcnt.jsonl"
+GPU_TIME_FILE = "nuvionative-gputime.jsonl"
 PROFILER_FILES = {"plxnative-hwcnt": HWCNT_FILE, "plxnative-profile": GPU_TIME_FILE}
 
 
@@ -5187,7 +5195,7 @@ def run_pipeline_case(case, cfg, srv, url_base, verbose):
     after = srv.stats()
     delta = tuple(a - b for a, b in zip(after, before))
 
-    gst_lines = pull_runtime_log(tv, "plxnative-gst.log") if case.get("gst_trace") else None
+    gst_lines = pull_runtime_log(tv, "nuvionative-gst.log") if case.get("gst_trace") else None
     if gst_lines is not None:
         print(f"    GST trace: {len(gst_lines)} line(s)")
     # The shaper's schedule, for the FINAL grade. `grade()` above also sets it, but only the

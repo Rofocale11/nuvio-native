@@ -160,7 +160,7 @@ def run_fixture(binary, assets, fixture, mode, output, timeout, window=DEFAULT_W
                                      timeout=timeout, check=False)
         except subprocess.TimeoutExpired as error:
             raise ValueError(f'{fixture.name}/{mode}: timeout; evidence {runtime}') from error
-    log = runtime / 'plxnative-events.log'
+    log = runtime / 'nuvionative-events.log'
     try:
         summary = verdict(log.read_text() if log.exists() else '', process.returncode,
                           expected_counts(fixture))

@@ -8,7 +8,7 @@ becomes an interleaved A/B/C/... — which is the only sound way to compare legs
 60 fps -> 50 fps over a session.
 
     tools/analyze-loadsweep.py run.log
-    tools/analyze-loadsweep.py run.log --hwcnt pkg/plxnative-hwcnt.jsonl --phase frame.ui
+    tools/analyze-loadsweep.py run.log --hwcnt pkg/nuvionative-hwcnt.jsonl --phase frame.ui
 
 Two samples are dropped at every step boundary by default (`--settle`): the heartbeat second that
 straddles a rollover mixes two configurations, and the first refresh after one lands in the
@@ -82,7 +82,7 @@ def summarize(name, groups, unit=""):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("log", type=Path, help="event log from the run")
-    ap.add_argument("--hwcnt", type=Path, help="the run's plxnative-hwcnt.jsonl, if it had one")
+    ap.add_argument("--hwcnt", type=Path, help="the run's nuvionative-hwcnt.jsonl, if it had one")
     ap.add_argument("--phase", default="frame.ui", help="which HWCNT phase to group (default frame.ui)")
     ap.add_argument("--settle", type=int, default=2,
                     help="samples to drop after each step boundary (default 2)")

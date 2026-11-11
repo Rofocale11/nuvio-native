@@ -385,7 +385,7 @@ def watch(args, session: Session) -> None:
     print(f"watching {session.appid}; no capture until loop= is silent for {args.stall_ms} ms")
     while True:
         pid = wait_for_pid(session)
-        eventlog = f"{session.rundir}/plxnative-events.log"
+        eventlog = f"{session.rundir}/nuvionative-events.log"
         tail = subprocess.Popen(
             session.ssh + [f"tail -n 0 -f {shlex.quote(eventlog)}"],
             text=True,

@@ -142,7 +142,7 @@ def boot(root, screen, host, port, settle):
     env = dict(os.environ, PLXNATIVE_RUNTIME_DIR=root, PLXNATIVE_APP_DIR=os.path.join(REPO, "pkg"))
     proc = subprocess.Popen([SIM, host, port], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log = os.path.join(root, "plxnative-events.log")
+    log = os.path.join(root, "nuvionative-events.log")
     for _ in range(int(settle * 10)):
         time.sleep(0.1)
         if os.path.exists(log) and FOCUS_RE.search(open(log, errors="replace").read()):

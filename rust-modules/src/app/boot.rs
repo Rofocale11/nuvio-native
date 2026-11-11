@@ -87,11 +87,11 @@ pub(crate) fn install_panic_logger() {
             &plx_base::paths::in_runtime_dir(plx_base::paths::runtime_file::CRASH),
             &line,
         );
-        default(info); // preserve default behaviour (stderr -> plxnative-stderr.log)
+        default(info); // preserve default behaviour (stderr -> nuvionative-stderr.log)
     }));
 }
 
-/// Append the panic's record to the crash log at `path` (`plxnative-crash.log`, which `src/main.c`
+/// Append the panic's record to the crash log at `path` (`nuvionative-crash.log`, which `src/main.c`
 /// opens and the signal tracer appends to).
 ///
 /// **Two disciplines, both the event log's** (the crash log is group-readable for the same Dev Mode
@@ -1163,7 +1163,7 @@ pub(crate) unsafe fn construct(
     // so the boot who's-watching picker is skipped. Pure diagnostics (the logs, the profiler,
     // the anim overlay) don't count as automation.
     // The scan itself, and the DIAG exemption list that decides what does NOT count as
-    // automation, live in `dev::any_trigger_present` — together with the `plxnative-anim.log`
+    // automation, live in `dev::any_trigger_present` — together with the `nuvionative-anim.log`
     // bug that list was rewritten for. It is the one dev-trigger surface that names no file,
     // so it is also the one a release build had to be taught about explicitly.
     let automated_boot = || controlled || crate::dev::any_trigger_present();
@@ -1368,7 +1368,7 @@ pub(crate) unsafe fn construct(
                        // public pin id + code length + that authToken is still null (never a token/secret).
     if !controlled { crate::dev::scenarios::arm_logintest(); }
     // dev: the animation-diagnostic overlay is OFF by default; /tmp/plxnative-anim enables it (its
-    // trace goes to /tmp/plxnative-anim.log, a separate stream from the main event log)
+    // trace goes to /tmp/nuvionative-anim.log, a separate stream from the main event log)
     if !controlled { crate::dev::scenarios::arm_anim(); }
     // dev: /tmp/plxnative-stillclock=<ms> holds every free-running animation clock (spinners)
     // still, so a screenshot of a waiting screen settles on one deterministic frame.

@@ -19,7 +19,7 @@
 //! r12p0 vinstr resets the hardware blocks on a dump and accumulates them per reader client. The
 //! second buffer is therefore already the phase interval; it must **not** be subtracted from the
 //! first as if both were absolute snapshots. Both raw buffers are retained in
-//! `/tmp/plxnative-hwcnt.jsonl` so that assumption can be audited against the device data.
+//! `/tmp/nuvionative-hwcnt.jsonl` so that assumption can be audited against the device data.
 //!
 //! The HWCNT run's serialized wall duration is calibration metadata only. It is not reported as
 //! GPU time. GPU phase time comes from timer-query runs, while production p50/p95/worst-frame runs

@@ -375,7 +375,7 @@ class SimRun:
         self.fifo = None
 
     def _tail(self):
-        log = self.dir / "plxnative-events.log"
+        log = self.dir / "nuvionative-events.log"
         while not log.exists() and not self.stop.is_set():
             time.sleep(0.01)
         buf = b""

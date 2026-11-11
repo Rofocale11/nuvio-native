@@ -58,24 +58,31 @@ pub(crate) mod framedump;
 
 /// Files that are pure diagnostics rather than automation — see [`any_trigger_present`].
 ///
-/// Every log this app writes belongs here, not just its trigger. `plxnative-anim` was listed and
-/// `plxnative-anim.log` was not, while arming the overlay creates exactly that file and nothing
-/// ever removes it (`make run` clears only the event log; `tests/run.py` spares every `*.log` by
-/// design) — so a single historical anim session skipped the who's-watching picker on every later
-/// boot, interactive ones included.
+/// **A runtime log must never be readable as a trigger**, or it permanently suppresses the
+/// who's-watching picker: the `plxnative-*.log`/`.jsonl` names at the top of the array are the
+/// pre-rename ones, and they are still listed because the stable install's root is `/tmp` itself,
+/// which an upgrade does not sweep — a file a previous install left behind would otherwise be an
+/// armed trigger on every later boot, interactive ones included. (That is the same failure that
+/// once shipped when `plxnative-anim` was listed and `plxnative-anim.log` was not.)
+///
+/// The logs this app writes TODAY are `nuvionative-*` and are deliberately absent: they are
+/// outside the trigger namespace, so the prefix match in [`is_armed_trigger`] cannot see them.
+/// `no_runtime_log_is_readable_as_a_trigger` below holds both halves of that invariant.
 // `test` as well as the feature: `any_trigger_present` is the only caller and it is cfg'd out of a
 // release build, but the test below asserts this list's contents and runs with default features.
 #[cfg(any(feature = "devtriggers", test))]
 const DIAG: [&str; 38] = [
+    // A pre-rename install's runtime logs — see the doc comment. Never written any more.
     "plxnative-diag.log",
     "plxnative-events.log",
     "plxnative-stderr.log",
     "plxnative-crash.log",
     "plxnative-anim.log",
-    "plxnative-profile",
     "plxnative-gputime.jsonl",
-    "plxnative-hwcnt",
     "plxnative-hwcnt.jsonl",
+    "plxnative-gst.log",
+    "plxnative-profile",
+    "plxnative-hwcnt",
     // The render thread's own per-phase clock ([`plx_ui::profile`]'s CPU mode). DIAG for the
     // reason the two GPU profilers are: it observes a screen, and must not move the boot away
     // from the screen it was armed to observe.
@@ -104,12 +111,12 @@ const DIAG: [&str; 38] = [
     // non-DIAG trigger would boot the two legs to DIFFERENT SCREENS, so what the numbers measured
     // would be the screen and not the admission rule.
     "plxnative-nobudget",
-    // LG's own GStreamer logging ([`arm_gst_logging`]) and the file it writes. Both are DIAG for
-    // the same reason `plxnative-profile` is: the whole point is to observe a playback that would
-    // otherwise be unobservable, and a non-DIAG trigger would silently move the boot screen out
-    // from under the very session being measured.
+    // LG's own GStreamer logging ([`arm_gst_logging`]). DIAG for the same reason
+    // `plxnative-profile` is: the whole point is to observe a playback that would otherwise be
+    // unobservable, and a non-DIAG trigger would silently move the boot screen out from under the
+    // very session being measured. The file it writes is `nuvionative-gst.log`, outside the
+    // trigger namespace; `plxnative-gst.log` above is only a pre-rename leftover.
     "plxnative-gstlog",
-    "plxnative-gst.log",
     // The forced Stats-for-nerds overlay. It only changes presentation, and grading a playback
     // case without the read-out risks a failure whose evidence was never put on screen.
     "plxnative-stats",
@@ -210,7 +217,7 @@ pub(crate) fn arm_gst_logging() {}
 /// **Turn on libwayland-client's protocol log** — `/tmp/plxnative-wldebug`.
 ///
 /// `WAYLAND_DEBUG` makes the client library print every request it sends and every event it
-/// dispatches, each with a microsecond wall-clock stamp, to stderr (`plxnative-stderr.log`). It is
+/// dispatches, each with a microsecond wall-clock stamp, to stderr (`nuvionative-stderr.log`). It is
 /// the one place the compositor's side of a present is visible from inside the app: when
 /// `wl_buffer.release` and `wl_callback.done` actually arrive, against when the driver's
 /// `attach`/`commit` went out. libwayland reads the variable in `wl_display_connect`, so this has
@@ -634,7 +641,7 @@ impl DevServer {
     /// Everything about this server except the token, for the event log.
     pub(crate) fn describe(&self) -> String {
         // A SHARED server is someone else's machine, and this line goes to
-        // `/tmp/plxnative-events.log` — the file that gets pasted into issues and PR bodies. Four
+        // `/tmp/nuvionative-events.log` — the file that gets pasted into issues and PR bodies. Four
         // PR bodies leaked exactly these fields on 2026-08-14 and had to be redacted after the
         // fact, which a public repository does not really allow. So a share names NOTHING that
         // identifies it or its owner: not the server's name, not the plex.tv handle, not the
@@ -803,7 +810,8 @@ fn armed_triggers_in(root: &std::path::Path) -> Vec<String> {
                 .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
                 .filter_map(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
-                    // Runtime logs share the prefix and are not triggers
+                    // A pre-rename install's `plxnative-*.log` may still be here; it is not a
+                    // trigger, and neither is anything else ending `.log`.
                     (n.starts_with("plxnative-") && !n.ends_with(".log")).then_some(n)
                 })
                 .collect()
@@ -866,16 +874,40 @@ mod tests {
         }
     }
 
-    /// The DIAG list must name every log the app writes, or that log permanently suppresses the
-    /// boot picker. This asserts the property against the paths the code actually opens rather
-    /// than against a copy of the list, so adding another log sink without listing it fails here.
+    /// A runtime log must not be readable as a trigger, or it permanently suppresses the
+    /// who's-watching picker — which is why the logs this app writes moved out of the `plxnative-`
+    /// namespace: `is_armed_trigger` matches that prefix and nothing else.
+    ///
+    /// Both halves are asserted against what the code actually opens, not against a copy of the
+    /// list. Today's sinks need no DIAG entry; the names a PRE-RENAME install wrote into the same
+    /// root do, because `/tmp` is not swept by an upgrade and a leftover file would arm itself on
+    /// every later boot.
     #[test]
-    fn diag_names_every_log_this_app_writes() {
+    fn no_runtime_log_is_readable_as_a_trigger() {
         for log in plx_base::paths::runtime_file::LOGS {
-            assert!(super::DIAG.contains(&log), "{log} is written by this app but absent from DIAG — it would suppress the boot picker forever");
+            assert!(
+                !log.starts_with("plxnative-"),
+                "{log} is written by this app INSIDE the trigger namespace — it would suppress \
+                 the boot picker forever unless DIAG names it"
+            );
+        }
+        for legacy in [
+            "plxnative-events.log",
+            "plxnative-crash.log",
+            "plxnative-stderr.log",
+            "plxnative-diag.log",
+            "plxnative-anim.log",
+            "plxnative-gst.log",
+            "plxnative-gputime.jsonl",
+            "plxnative-hwcnt.jsonl",
+        ] {
+            assert!(
+                super::DIAG.contains(&legacy),
+                "{legacy} is what a pre-rename install left in the shared root and it is no \
+                 longer in DIAG — that leftover would suppress the boot picker forever"
+            );
         }
     }
-
     #[cfg(feature = "devtriggers")]
     #[test]
     fn storage_diagnostics_is_never_an_armed_trigger() {

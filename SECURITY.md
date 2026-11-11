@@ -26,7 +26,7 @@ looking at:
   release build** by dropping the `devtriggers` cargo feature, and `ci/check-elf.sh` measures that
   on the shipped bytes rather than asserting it. A release binary that still carries any of it is a
   valid report, and a serious one.
-- **The event log.** `plxnative-events.log` — like `plxnative-crash.log` and `plxnative-stderr.log`
+- **The event log.** `nuvionative-events.log` — like `nuvionative-crash.log` and `nuvionative-stderr.log`
   beside it — is created 0640 (owner read/write, the app's own group read, never world-readable),
   so that a Developer Mode user can fetch it with webOS Dev Manager on a television that is not
   rooted. Every event-log line goes through `eventlog::scrub::scrub_local` before the write. A line

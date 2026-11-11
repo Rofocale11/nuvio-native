@@ -20,7 +20,7 @@ resolves on 4.4.2 through 11.2.0, and both were answering "would the dynamic loa
 binary". Something after the loader is what fails. §4 was explicit that starting is not playing —
 what it did not anticipate is that the app would not reach a UI at all.
 
-WHAT IS NEEDED NEXT is `/tmp/plxnative-events.log` and `/tmp/plxnative-crash.log` from one of those
+WHAT IS NEEDED NEXT is `/tmp/nuvionative-events.log` and `/tmp/nuvionative-crash.log` from one of those
 sets. The first says how far boot got and which video-plane path was chosen; the second is
 append-only and survives the relaunch, so it holds the faulting PC if the tracer ran. An empty or
 absent events log means the loader killed the process before `main`, which would contradict the
@@ -252,7 +252,7 @@ Ranked by how much damage a wrong assumption does. *(Item 1 settled — see abov
 1. **Does a picture appear on webOS 5?** The entire `VP_EXPORTED` path. Symbols proven present,
    call shapes taken from the two implementations that ship. Nothing else is known.
    *Settled by:* one person, one webOS 5+ TV, one play attempt, and
-   `/tmp/plxnative-events.log`. Look for `vplane: SDL exported window`, then
+   `/tmp/nuvionative-events.log`. Look for `vplane: SDL exported window`, then
    `vplane: exported windowId=_Window_Id_…`, then `vplane: exported window placed rv=1`.
 2. **Was LG's libavformat 58 built from pristine sources?** The ABI table rests on FFmpeg's
    public-header invariant — layout is a function of the version macros alone, there is not one
@@ -431,7 +431,7 @@ This is the single most useful contribution available to this project.
 1. Install the `.ipk` (Homebrew Channel, or dev-manager-desktop). It will start — that much is
    proven statically.
 2. Sign in, browse, press play on anything.
-3. Send `/tmp/plxnative-events.log`. The first 30 lines settle most of §4 on their own:
+3. Send `/tmp/nuvionative-events.log`. The first 30 lines settle most of §4 on their own:
    `vplane:` says which binding was chosen, `ff: bound …` says which FFmpeg SONAMEs resolved,
    `ff: ABI table …` says which offset table is in force, and `wm sdl=…` says whether the
    transparency handshake worked.

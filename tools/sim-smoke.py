@@ -150,7 +150,7 @@ def main() -> int:
         PLXNATIVE_SHOT_FRAME="3",
         PLXNATIVE_SHOT_EXIT="1",
     )
-    events = runtime / "plxnative-events.log"
+    events = runtime / "nuvionative-events.log"
     launched_at = time.time()
     try:
         result = subprocess.run(

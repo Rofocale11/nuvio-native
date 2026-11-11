@@ -32,7 +32,7 @@ static void expect(int yes, const char *what) {
 
 /* The three sinks main() opens, by their runtime names. */
 static const char *const sinks[] = {
-    "plxnative-events.log", "plxnative-crash.log", "plxnative-stderr.log",
+    "nuvionative-events.log", "nuvionative-crash.log", "nuvionative-stderr.log",
 };
 
 /* Run the REAL boot shim — `plx_boot_main`, i.e. `main()` — once, keeping the test's own stderr:

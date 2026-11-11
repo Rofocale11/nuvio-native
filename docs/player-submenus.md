@@ -252,7 +252,7 @@ tools below are the how-to; the findings follow.
    GPU interrupts and surface-manager's threads fell in the wait and commit windows.
    `tools/analyze-sched-trace.py --self-test` runs on the host.
 2. **Mali HWCNT.** Boot with `--arm hwcnt=frame.ui` and nothing else profiling; the `glFinish`
-   brackets serialize the pipeline, so no `fps=` from this leg. Pull `plxnative-hwcnt.jsonl` from
+   brackets serialize the pipeline, so no `fps=` from this leg. Pull `nuvionative-hwcnt.jsonl` from
    the app's runtime directory, then `tools/analyze-hwcnt.py FILE --phase frame.ui --discard 60`
    and `tools/analyze-hwcnt-wait.py FILE`. The latter buckets the phase's serialized wall time and
    prints the GPU's active cycles per bucket: cycles that grow with wall time mean GPU-bound,
@@ -260,7 +260,7 @@ tools below are the how-to; the findings follow.
 3. **Wayland protocol log.** Boot with `--arm wldebug`: it sets `WAYLAND_DEBUG=client` and the
    event log gets a `wldebug:` line carrying `offset_us` (realtime minus monotonic). Intended:
    libwayland-client prints every request and event with a `CLOCK_REALTIME` microsecond stamp to
-   `plxnative-stderr.log`. There is no analyzer for it.
+   `nuvionative-stderr.log`. There is no analyzer for it.
 
 Findings:
 
@@ -312,7 +312,7 @@ Findings:
    with the field already held. The menu-open frame measured 17.8 ms in one leg and 21.7 ms in the
    other (the difference is the prewarm drain above).
 7. **Leg 3 produced nothing.** `--arm wldebug` set `WAYLAND_DEBUG=client` (the `wldebug:` line is in
-   the event log) but libwayland-client printed no protocol lines to `plxnative-stderr.log` on this
+   the event log) but libwayland-client printed no protocol lines to `nuvionative-stderr.log` on this
    firmware (webOS 4.10.2). The trigger is unverified as an instrument on this set.
 
 The probe's run-queue field (`w=<wall>/<cpu>/<runq>`, from `/proc/thread-self/schedstat`) does

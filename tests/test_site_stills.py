@@ -29,14 +29,30 @@ def tracked(prefix):
     return set(out.split())
 
 
+# Captures of a signed-in Nuvio account on the desktop simulator, committed for the README.
+# `docs/screenshots/CREDITS.md` documents them as such: no scene in `tests/screenshots/scenes.json`
+# writes one, and `make screenshots` must never overwrite a household's own account screen. They
+# are named here rather than excused by a prefix so a still that is in NEITHER set still fails.
+ACCOUNT_CAPTURES = {
+    "docs/screenshots/real-account-menu.jpg",
+    "docs/screenshots/real-catalogs.jpg",
+    "docs/screenshots/real-detail.jpg",
+    "docs/screenshots/real-home.jpg",
+    "docs/screenshots/real-library.jpg",
+    "docs/screenshots/real-search.jpg",
+}
+
+
 class FileSet(unittest.TestCase):
     def test_automated_and_manual_are_disjoint_and_cover_every_simulator_made_still(self):
         auto, manual = set(ss.output_files()), set(ss.output_files(manual=True))
         self.assertFalse(auto & manual)
         committed = tracked("docs/screenshots") | tracked("site/media")
         film = {p for p in committed if p.startswith("site/media/feel")}
-        # what is committed and in neither set is the film and the photograph taken on the television, nothing else
-        self.assertEqual(committed - auto - manual - film, {"docs/screenshots/navblur-transition.jpg"})
+        # what is committed and in neither set is the film, the photograph taken on the television
+        # and the README's signed-in-account captures — nothing else
+        self.assertEqual(committed - auto - manual - film,
+                         {"docs/screenshots/navblur-transition.jpg"} | ACCOUNT_CAPTURES)
         self.assertLessEqual(auto | manual, committed)
 
     def test_the_film_and_the_television_photograph_are_never_in_a_set(self):

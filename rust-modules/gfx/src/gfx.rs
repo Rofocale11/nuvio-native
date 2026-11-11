@@ -959,13 +959,13 @@ fn try_compile(ty: c_uint, src: *const c_char) -> Option<c_uint> {
                 .to_string_lossy()
                 .into_owned();
             // The EVENT log is the only surface anyone reads over ssh, and neither of the two lines
-            // below reaches it: `eprintln!` goes to /tmp/plxnative-stderr.log (main.c replaces
+            // below reaches it: `eprintln!` goes to /tmp/nuvionative-stderr.log (main.c replaces
             // stderr), and `plx_base::process::exit_now` is a CLEAN exit, so the crash tracer never fires and
-            // /tmp/plxnative-crash.log stays empty. Without this the window flashes, the app is back
+            // /tmp/nuvionative-crash.log stays empty. Without this the window flashes, the app is back
             // at the launcher, the event log simply stops mid-boot, and triage correctly reports
             // "not a crash" with nothing pointing at the shader. `eprintln!` stays because it costs
             // nothing, NOT because it is the durable copy: `main.c` truncates both sinks at every
-            // launch, so neither survives the relaunch that `plxnative-crash.log` is append-only for.
+            // launch, so neither survives the relaunch that `nuvionative-crash.log` is append-only for.
             log(&format!("shader compile FAILED: {msg}"));
             eprintln!("shader error: {msg}");
             return None;

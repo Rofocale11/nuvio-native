@@ -175,7 +175,7 @@ const SDL_LOG_CATEGORY_INPUT: c_int = 3;
 const SDL_LOG_PRIORITY_DEBUG: c_int = 2;
 
 /// Ask LG's SDL to narrate its own keyboard lifecycle into stderr
-/// (`/tmp/plxnative-stderr.log`).
+/// (`/tmp/nuvionative-stderr.log`).
 ///
 /// The driver already logs `[WebOSShowScreenKeyboard] called`, `... called text_model_activate`,
 /// `[TextModelLeave] called`, `[TextModelInputPanelState] called - state: %d` and

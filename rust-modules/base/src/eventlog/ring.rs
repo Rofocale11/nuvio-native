@@ -2,7 +2,7 @@
 //!
 //! There is no second logging system here and no new call site anywhere: `crate::eventlog::log` is the ONE
 //! sink every diagnostic line in the app passes through, and this taps it one line below
-//! `redact_tokens`. So the ring is by construction a strict subset of `plxnative-events.log`, with
+//! `redact_tokens`. So the ring is by construction a strict subset of `nuvionative-events.log`, with
 //! the shipped credential backstop already applied, and a module that starts logging tomorrow is
 //! in the snapshot with no change here.
 //!

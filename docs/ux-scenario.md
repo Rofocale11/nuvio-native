@@ -249,6 +249,11 @@ code without leaving the screen.
 *The code in the figure, DEMO, and its QR are the mock server's stand-in for Nuvio's device-login
 service (§9); a real code is a one-time, short-lived claim code that names no account.*
 
+*The picture itself is still the upstream capture: it reads "Sign in to Plex" and `plex.tv/link`,
+which this fork replaced with Nuvio's own sign-in. The paragraph above is what the app draws;
+`make screenshots` rewrites the picture from the `signin` scene in `tests/screenshots/scenes.json`,
+and until it is re-run the figure is an upstream-era record, not this product's screen.*
+
 Account **creation** happens on nuvio.tv, not in the app.
 
 ### 5.3 Who's watching
