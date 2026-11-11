@@ -138,8 +138,8 @@ it makes a mis-set item a named setup error instead of a mystery failure.
 
 ## Which install it drives (`--flavor`)
 
-Three builds can sit on one television: **`com.beb.plxnative`**, the app users install,
-**`com.beb.plxnative.debug`**, the developer build beside it, and **`com.beb.plxnative.nightly`**,
+Three builds can sit on one television: **`com.nuvionative.app`**, the app users install,
+**`com.nuvionative.app.debug`**, the developer build beside it, and **`com.nuvionative.app.nightly`**,
 the nightly build — each with its own launcher tile, its own sign-in, its own runtime files. They
 are separate apps to SAM, and a run has to drive exactly one of them end to end.
 
@@ -152,7 +152,7 @@ resolved and the flavour it kills, launches, arms triggers in and greps for cann
 closing install A while launching install B reproduces SAM's stale-"running" no-op and then grades
 the other app's log, which is *plausible wrong data*, not a clean failure.
 
-- **The runtime root moved; the names did not.** Every `plxnative-*` trigger, the `plxnative-remote`
+- **The runtime root moved; the names did not.** Every `nuvionative-*` trigger, the `nuvionative-remote`
   FIFO and the three `*.log` files are named exactly as before — only the directory they sit in
   changed. Ask for it (`make -s print-rundir FLAVOR=debug`) rather than writing it out.
 - **The root is created `1777` — `mkdir` then an explicit `chmod`** (umask masks `mkdir`'s mode),
@@ -168,8 +168,8 @@ the other app's log, which is *plausible wrong data*, not a clean failure.
 The app's **first** log line names the install that wrote it, before anything can fail:
 
 ```
-install: id=com.beb.plxnative.debug flavour=debug runtime=/tmp/com.beb.plxnative.debug features=dev APPID_env=<value|unset>
-appdir: /media/developer/apps/usr/palm/applications/com.beb.plxnative.debug (from current_exe)
+install: id=com.nuvionative.app.debug flavour=debug runtime=/tmp/com.nuvionative.app.debug features=dev APPID_env=<value|unset>
+appdir: /media/developer/apps/usr/palm/applications/com.nuvionative.app.debug (from current_exe)
 ```
 
 `run.py` grades it as the log arrives and **aborts the whole run**, once and by name, if `id=` is
@@ -199,7 +199,7 @@ dev build on the stable id without `ALLOW_DEV_ON_STABLE=1`, so that install *is*
 alone — including its running app. **`pidof plxnative` is no longer a liveness test**: it returns
 two pids, in an order busybox does not promise. Use `fuser <appdir>/plxnative`, or resolve
 `readlink /proc/<pid>/exe` per pid. And any match on the app id must be **anchored on a delimiter**:
-`com.beb.plxnative` is a prefix of `com.beb.plxnative.debug`.
+`com.nuvionative.app` is a prefix of `com.nuvionative.app.debug`.
 
 ## Security
 

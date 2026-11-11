@@ -60,10 +60,10 @@ learn any of this, and they are real echo recipes:
 
 ```sh
 make -s print-flavor   FLAVOR=debug     # debug
-make -s print-appid    FLAVOR=debug     # com.beb.plxnative.debug
-make -s print-appdir   FLAVOR=debug     # /media/developer/apps/usr/palm/applications/com.beb.plxnative.debug
-make -s print-rundir   FLAVOR=debug     # /tmp/com.beb.plxnative.debug
-make -s print-eventlog FLAVOR=debug     # /tmp/com.beb.plxnative.debug/nuvionative-events.log
+make -s print-appid    FLAVOR=debug     # com.nuvionative.app.debug
+make -s print-appdir   FLAVOR=debug     # /media/developer/apps/usr/palm/applications/com.nuvionative.app.debug
+make -s print-rundir   FLAVOR=debug     # /tmp/com.nuvionative.app.debug
+make -s print-eventlog FLAVOR=debug     # /tmp/com.nuvionative.app.debug/nuvionative-events.log
 make -s print-appport  FLAVOR=debug     # 8911  (the capture listener's port — §3.1)
 make -s print-tv                        # the television's address, expanded
 ```
@@ -74,7 +74,7 @@ then fails, and the tool reports "TV unreachable" against a television that is a
 `tools/tv-session.sh`'s `tv_host()` documents that trap because it hit it.
 
 An unknown value is a parse-time `$(error)`, not a fallback. `make FLAVOR=stabel deploy` would
-otherwise mint a third registered app called `com.beb.plxnative.stabel` on the television — LG's id
+otherwise mint a third registered app called `com.nuvionative.app.stabel` on the television — LG's id
 charset accepts it and nothing downstream objects — and the symptom is a mystery tile on a TV
 rather than a message on a terminal.
 

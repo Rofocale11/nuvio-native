@@ -89,9 +89,9 @@ wrong one produces a clean bill of health for an app that is dying. Ask the Make
 typing a path:
 
 ```bash
-make -s print-appid    FLAVOR=debug     # com.beb.plxnative.debug
+make -s print-appid    FLAVOR=debug     # com.nuvionative.app.debug
 make -s print-appdir   FLAVOR=debug     # where the binary and the .so files are
-make -s print-rundir   FLAVOR=debug     # /tmp/com.beb.plxnative.debug   (stable: /tmp)
+make -s print-rundir   FLAVOR=debug     # /tmp/com.nuvionative.app.debug   (stable: /tmp)
 make -s print-eventlog FLAVOR=debug
 ```
 

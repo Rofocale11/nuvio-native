@@ -167,10 +167,10 @@ you want both the Movies and Shows shelves populated.
 
 ## Which install — and the one step `up` cannot do for you
 
-Three builds live on this television. **stable** is `com.beb.plxnative`, the app the household
-watches with; **debug** is `com.beb.plxnative.debug`, the developer build beside it, with its own
+Three builds live on this television. **stable** is `com.nuvionative.app`, the app the household
+watches with; **debug** is `com.nuvionative.app.debug`, the developer build beside it, with its own
 launcher tile (amber DEV bar), its own sign-in and its own runtime files; **nightly** is
-`com.beb.plxnative.nightly`, its own install beside the other two with its own launcher tile
+`com.nuvionative.app.nightly`, its own install beside the other two with its own launcher tile
 (grey NIGHTLY bar), runtime root and crash log. webOS keys the install directory, SAM's `launch`/`closeByAppId` and the LS2 role file on
 that id, so none of the three can touch each other. **`debug` is the default**, deliberately:
 deploying to `debug` when you meant `stable` costs you retyping one command, while the reverse
@@ -197,9 +197,9 @@ side-effect-free:
 
 ```bash
 make -s print-flavor   FLAVOR=debug     # debug
-make -s print-appid    FLAVOR=debug     # com.beb.plxnative.debug
+make -s print-appid    FLAVOR=debug     # com.nuvionative.app.debug
 make -s print-appdir   FLAVOR=debug     # /media/developer/apps/usr/palm/applications/<id>
-make -s print-rundir   FLAVOR=debug     # /tmp/com.beb.plxnative.debug   (stable: /tmp)
+make -s print-rundir   FLAVOR=debug     # /tmp/com.nuvionative.app.debug   (stable: /tmp)
 make -s print-eventlog FLAVOR=debug
 make -s print-tv                        # the TV address, expanded
 ```
@@ -211,11 +211,11 @@ and idle in front of you.
 
 ### The runtime root moved, and only for a flavoured install
 
-The stable install keeps `/tmp` byte for byte, so every recipe and every `/tmp/plxnative-…` line
+The stable install keeps `/tmp` byte for byte, so every recipe and every `/tmp/nuvionative-…` line
 below stays literally true for the app users get. A flavoured install puts its triggers, its
-`plxnative-remote` FIFO and its runtime logs in `/tmp/<app id>` instead. **Every name is
-unchanged — only the directory moved**, so read each `/tmp/plxnative-…` path here as
-`$(make -s print-rundir FLAVOR=…)/plxnative-…`.
+`nuvionative-remote` FIFO and its runtime logs in `/tmp/<app id>` instead. **Every name is
+unchanged — only the directory moved**, so read each `/tmp/nuvionative-…` path here as
+`$(make -s print-rundir FLAVOR=…)/nuvionative-…`.
 
 `nuvionative-diag.log` is the storage worker's allowlisted snapshot on every flavour (0640,
 at most 16 KiB). It records build/uid/gid, fixed-label write probes, activation and helper stages;
@@ -229,16 +229,16 @@ They moved into the runtime root with everything else — `$(make -s print-rundi
 not a shared `/tmp/sample.h264` — and they are read through `devtrig::read_sample`, which resolves via
 `paths::in_runtime_dir` like every other dev read. A second consequence follows from the same
 missing prefix and is easy to want the other way round: `dev::any_trigger_present` matches on
-`plxnative-`, so **a sample does NOT mark the boot as automated** and does not suppress the
+`nuvionative-`, so **a sample does NOT mark the boot as automated** and does not suppress the
 who's-watching picker. Arm one on a multi-user account and you land on the picker, not on Home.
 
 The separator is a DOT, and that is structural rather than cosmetic. The **stable** install's
-runtime root *is* `/tmp`, and it treats every entry there whose name begins `plxnative-` as an
+runtime root *is* `/tmp`, and it treats every entry there whose name begins `nuvionative-` as an
 armed trigger. So the flavour suffix has to stay outside that prefix namespace: a root named
-`/tmp/plxnative-debug` would sit in `/tmp` reading, to the *other* install, as a permanently armed
+`/tmp/nuvionative-debug` would sit in `/tmp` reading, to the *other* install, as a permanently armed
 trigger — silently suppressing the released app's who's-watching picker, with no line in any log.
-`com.beb.plxnative.debug` contains no `plxnative-`, so it cannot. The rule is the **prefix**, not
-avoiding a clash with some file that happens to exist: there is no `plxnative-debug` trigger, and
+`com.nuvionative.app.debug` contains no `nuvionative-`, so it cannot. The rule is the **prefix**, not
+avoiding a clash with some file that happens to exist: there is no `nuvionative-debug` trigger, and
 the dot is what makes it not matter if one is ever added. (`docs/two-installs.md` §4.1 has the
 second, independent guard.)
 
