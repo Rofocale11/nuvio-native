@@ -1949,8 +1949,9 @@ pub(crate) unsafe fn land_results(app: &mut App, fr: &mut Frame) {
                             Some(plx_screens::player::overlay::OverlayKind::Info)
                         ) =>
                     {
-                        commit_info_press(&mut app.player.session,
+                        commit_info_press(&mut app.player,
                             &mut app.adapters.player,
+                            &mut app.repause_at,
                             &mut app.refresh_hubs_at,
                             &mut app.pages,
                             &mut app.bridge,

@@ -47,8 +47,8 @@ constexpr std::size_t maximum_resume_state_size = 16 * 1024 * 1024;
 // below the 40 MiB RAM payload budget it must never be counted against.
 constexpr std::uint64_t resume_state_budget_bytes = 10ULL * 1024 * 1024;
 constexpr std::size_t maximum_pending_disk_reclaims = 256;
-constexpr int peer_connect_timeout_seconds = 3;
-constexpr int peer_handshake_timeout_seconds = 20;
+constexpr int peer_connect_timeout_seconds = 10;
+constexpr int peer_handshake_timeout_seconds = 30;
 constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
 constexpr int request_queue_seconds = 1;
@@ -135,7 +135,8 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_int(lt::settings_pack::request_timeout, piece_request_timeout_seconds);
     settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
     settings.set_int(lt::settings_pack::tick_interval, idle_session_tick_milliseconds);
-    settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
+    settings.set_bool(lt::settings_pack::enable_outgoing_utp, true);
+    settings.set_bool(lt::settings_pack::enable_incoming_utp, true);
     settings.set_int(
         lt::settings_pack::max_out_request_queue,
         maximum_outstanding_requests_per_peer

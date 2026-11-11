@@ -600,8 +600,9 @@ pub(crate) fn close_player_overlays(pages: &mut plx_ui::dispatch::Dispatcher<sup
 /// machine holds the frame, and this reads the decision back out of the panel that is still up.
 #[allow(unused_variables)]
 pub(crate) unsafe fn commit_info_press(
-    ps: &mut plx_media::route::PlaybackSession,
+    player: &mut plx_media::player::machine::Player,
     pa: &mut plx_media::player::adapter::PlayerAdapter,
+    repause_at: &mut i64,
     refresh_hubs_at: &mut u32,
     pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
     bridge: &mut super::bridge::Bridge,
@@ -612,6 +613,7 @@ pub(crate) unsafe fn commit_info_press(
         return;
     };
     close_player_overlays(pages);
+    apply_info_action(player, pa, repause_at, action, refresh_hubs_at, pages, bridge);
 }
 
 /// **Perform what a player overlay decided** (§14): the panel owns its own state and its own
@@ -971,9 +973,10 @@ pub(crate) fn play_up_next(
     // whole pre-roll, and fetch the new leaf off the loop.
     // Read BEFORE `retire_playing` drops the store: the successor is a row of the queue
     // the finished episode created, so it lives on that episode's server.
-    let sid = bridge.metadata_view().playing()
-        .map(|p| p.sid)
-        .unwrap_or_else(plx_plex::plex::current_server);
+    let sid = {
+        let s = plx_media::route::cur_sid(ps);
+        if s.is_set() { s } else { plx_plex::plex::current_server() }
+    };
     bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RetirePlaying);
     bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid: sid, rk: rk.to_string() });
     start_playback(

@@ -235,7 +235,7 @@ pub fn start_engine(state_dir: &str, cache_dir: &str) -> bool {
     let Some(a) = api() else { return false };
     let c_state = CString::new(state_dir).unwrap_or_else(|_| CString::new("").unwrap());
     let c_cache = CString::new(cache_dir).unwrap_or_else(|_| CString::new("").unwrap());
-    unsafe {
+    let ok = unsafe {
         (a.start)(
             c_state.as_ptr(),
             c_cache.as_ptr(),
@@ -244,7 +244,21 @@ pub fn start_engine(state_dir: &str, cache_dir: &str) -> bool {
             DEFAULT_MEM_CACHE_BYTES,
             DEFAULT_SEGMENT_BYTES,
         ) == 0
+    };
+    if ok {
+        // Raise the libtorrent connection budget so a swarm with hundreds of known peers
+        // actually dials more than the default handful on a TV. Applied at runtime (no .so rebuild).
+        let _ = setting("connections_limit", 500);
+        let _ = setting("allow_multiple_connections_per_ip", 1);
+        let _ = setting("connections_slack", 100);
+        let _ = setting("connection_speed", 200);
+        let _ = setting("enable_outgoing_utp", 1);
+        let _ = setting("enable_incoming_utp", 1);
+        let _ = setting("peer_connect_timeout", 10);
+        let _ = setting("handshake_timeout", 30);
+        let _ = setting("max_web_seed_connections", 10);
     }
+    ok
 }
 
 /// Stop the engine and join its threads. Idempotent; also runs at process exit

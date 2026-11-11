@@ -1442,7 +1442,7 @@ fn mark_skipped(state: &mut MetadataState, m: Marker) {
 /// that said "credits start at 41:03" must not be second-guessed at 30s-before-end), and only
 /// when the item is long enough that its tail is clearly an ending (> 3x the window, so a short
 /// clip does not spend a third of its runtime offering the next one).
-pub const TAIL_WINDOW_MS: i64 = 30_000;
+pub const TAIL_WINDOW_MS: i64 = 120_000;
 
 /// The pure half of [`MetadataView::synthesized_tail_marker`] — the window geometry alone, host-testable.
 pub fn tail_marker(pos_ms: i64, dur_ms: i64) -> Option<Marker> {

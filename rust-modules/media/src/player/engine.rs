@@ -227,6 +227,9 @@ pub struct Engine {
     // gap is what makes video "fast-forward" to catch the audio clock on resume). feed_stream
     // fires Play once max_fed_pts reaches PRIME_NS.
     pub prime_play: bool,
+    /// Fresh (non-seek) playback arms a longer initial prime so the player waits for a
+    /// buffer before starting. Seek/reload primes stay on [`PRIME_NS`].
+    pub fresh_prime: bool,
     // Two-lane feed (Kodi m_messageQueueVideo/Audio): the demuxer routes es=1 video to aq_video
     // and es=2 audio to aq_audio; each lane is fed independently so a video BufferFull can't stall
     // the audio lane (the audioSync master clock). Both are allocated for a stream. (None only
@@ -253,6 +256,14 @@ pub struct Engine {
 impl Engine {
     pub fn uses_stream_queues(&self) -> bool {
         matches!(self.source, Source::Stream)
+    }
+    /// Video prime depth for this session: a longer initial buffer for fresh playback.
+    pub fn prime_video_target(&self) -> i64 {
+        if self.fresh_prime { INITIAL_PRIME_NS } else { PRIME_NS }
+    }
+    /// Audio prime depth for this session.
+    pub fn prime_audio_target(&self) -> i64 {
+        if self.fresh_prime { INITIAL_PRIME_AUDIO_NS } else { PRIME_AUDIO_NS }
     }
 }
 
@@ -2272,7 +2283,8 @@ fn start_bufferfeed_inner(
         audio_start_fp: None,
         feed_pace: FeedPace::default(),
         seek_base_pts: 0,
-        prime_play: false,
+        prime_play: true,
+        fresh_prime: true,
         aq_video: aqv_box,
         aq_audio: aqa_box,
         hs,
@@ -2965,6 +2977,11 @@ const PRIME_NS: i64 = 700_000_000;
 // start anyway once video buffers PRIME_VIDEO_MAX_NS without audio (audioless / briefly starved),
 // so a genuinely audioless region can't hang.
 const PRIME_AUDIO_NS: i64 = 300_000_000;
+/// Initial (fresh, non-seek) playback waits for this much buffer before starting, so a slow
+/// torrent/HLS source does not stutter on the first seconds. Seek/reload primes stay on
+/// [`PRIME_NS`].
+pub(crate) const INITIAL_PRIME_NS: i64 = 5_000_000_000;
+pub(crate) const INITIAL_PRIME_AUDIO_NS: i64 = 5_000_000_000;
 pub(crate) const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
 // Feed-ahead throttle (Kodi-parity): keep the VIDEO lane at most this far ahead of the presented
 // position (SHARED.pres_fed) instead of feeding greedily to BufferFull. Bounding the buffer to
@@ -3364,7 +3381,7 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
     let video_sink_full =
         eng.pending_video.is_some() && SHARED.dg_feed_state.load(Ordering::Relaxed) == 2 && accepted_vbuf > 0;
     let decoder_ready = if audio_expected {
-        (accepted_vbuf >= PRIME_NS || video_sink_full) && accepted_abuf >= PRIME_AUDIO_NS
+        (accepted_vbuf >= eng.prime_video_target() || video_sink_full) && accepted_abuf >= eng.prime_audio_target()
     } else {
         accepted_vbuf >= PRIME_VIDEO_MAX_NS || video_sink_full
     };
@@ -3431,7 +3448,7 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
                         playable_vbuf / 1_000_000,
                         playable_abuf / 1_000_000,
                         observed_runway_ns / 1_000_000,
-                        if video_sink_full && accepted_vbuf < PRIME_NS {
+                        if video_sink_full && accepted_vbuf < eng.prime_video_target() {
                             " (native video sink full below PRIME_NS)"
                         } else {
                             ""
@@ -3675,7 +3692,7 @@ fn feed_stream(mt: &MainThread, eng: &mut Engine) {
             eng.prime_play,
             eng.max_fed_video_pts,
             eng.seek_base_pts,
-            PRIME_NS,
+            eng.prime_video_target(),
             pres,
         );
         if slice.spent(fed, starved) {
@@ -4900,6 +4917,7 @@ mod prime_livelock_tests {
             feed_pace: FeedPace::default(),
             seek_base_pts: 0,
             prime_play: true,
+            fresh_prime: false,
             aq_video: Some(crate::aq::aq_new(AQ_VIDEO_BYTES)),
             aq_audio: Some(crate::aq::aq_new(AQ_AUDIO_BYTES)),
             hs: plx_net::stream::http_stream_boxed(),
