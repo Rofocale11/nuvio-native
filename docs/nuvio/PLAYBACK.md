@@ -45,9 +45,16 @@ resolve also waited on the 300 ms decipher gate. `/library/metadata/{rk}/trailer
 the *resolved* first row. A title whose meta and TMDB `videos` name no YouTube id at all (and
 whose IMDb fallback finds none) answers empty `Metadata:[]`, never a 404.
 
-The hero autoplay Load bypasses the foreground player's five-second startup buffer gate: it starts
-as soon as advancing video data is accepted by Starfish. Later preview primes retain their existing
-behavior.
+**The hero autoplay Load does not wait on the foreground player's startup buffer.** A progressive
+Load plays the moment its own Load completes; if that Play is refused, fenced or goes stale, the
+session primes to the *preview* profile — its first accepted video AU and, when the stream carries
+audio, its audio lane's first AU too (the audioSync master clock must not start on an empty lane) —
+with a 500 ms-of-video escape for a stream whose audio never accepts, so a silent trailer still
+plays. That profile is decided once for the session (`PrimeProfile`), so a preview that reloads
+later in the trailer keeps it. A fresh foreground Load keeps its five seconds of buffer, bounded by
+eight seconds of wall time from the session's start: a P2P source can take three times that long to
+accept five seconds of media, and past the budget the session primes to the ordinary seek floors
+instead of holding a black screen. A seek, resume or reload never pays the startup buffer at all.
 
 **Where the ids come from.** TMDB `videos` is now part of `append_to_response` on both
 `/movie/{id}` and `/tv/{id}`, so a detail open pays no extra request and the shelf has the full

@@ -2015,6 +2015,12 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
                         if resume_acb {
                             super::acb_mirror_playstate_at(mt, eng.stage, true);
                         }
+                        // The prime is paid: this is the "prime_play cleared, the clock Running"
+                        // state the pause/preroll arm reads (`a_pause_after_the_prime_play_…`).
+                        // It was left true on this path since the initial prime was added, which
+                        // silently kept the feed-ahead throttle off, and kept `lane_starved`
+                        // treating a PLAYING lane as priming, for the whole first buffer.
+                        eng.prime_play = false;
                         super::log("SMP Play");
                     }
                     super::shared::HlsPlayCompletion::Refused => {
@@ -3779,6 +3785,40 @@ mod native_seek_pump_tests {
 
     fn reloads() -> Vec<i64> {
         super::super::engine::RELOAD_AT_LOG.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// **An accepted Play disarms the prime.** `prime_play` is what the feed-ahead throttle and
+    /// `lane_starved` read to mean "this lane is still filling for the clock"; left true after a
+    /// successful immediate Play it keeps both off — the video lane feeds greedily to BufferFull
+    /// through the first buffer of a fresh film — and the pause/preroll arm reads it as "a prime is
+    /// still owed" (`a_pause_after_the_prime_play_but_before_the_first_frame_…`). The priming
+    /// branch always cleared it through `try_prime`; the immediate branch never did.
+    #[test]
+    fn an_accepted_immediate_play_disarms_the_prime() {
+        let _serial = plx_base::testlock::serial();
+        let mut rig = Rig::new(None);
+        let epoch = rig.eng().native_epoch;
+        assert!(
+            SHARED.mark_native_load_returned(epoch).is_some(),
+            "PRECONDITION: the rig must own a live native session"
+        );
+        SHARED.ensure_initial_clock_hold_for_test();
+        SHARED.load_completed.store(true, Relaxed);
+        rig.eng().stage = Stage::Loading;
+        rig.eng().prime = crate::player::engine::PrimeProfile::Initial;
+        rig.eng().prime_play = true;
+        rig.frame();
+
+        let eng = rig.eng();
+        assert!(
+            eng.stage >= Stage::Streaming,
+            "the loadCompleted arm did not run (stage is still Loading)"
+        );
+        assert!(
+            !eng.prime_play,
+            "the immediate Play was accepted but the prime is still armed: the throttle and \
+             lane_starved now treat a playing lane as priming for the whole first buffer"
+        );
     }
 
     #[test]

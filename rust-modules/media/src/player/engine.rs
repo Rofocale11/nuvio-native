@@ -179,6 +179,49 @@ impl Drop for AuBox {
     }
 }
 
+/// **How deep this session's lanes must fill before its first Play** — the one place that decides
+/// what "enough buffer to start" means, so a session cannot end up answering it twice, in two
+/// fields, and taking the wrong answer (which is what a `preview_start` bool on top of a
+/// `fresh_prime` bool did: the two were decided independently and a reload fell through to the
+/// five-second one).
+///
+/// Fixed for the session at [`Engine`] construction. A preview keeps its profile across a reload:
+/// `route::preview_request` is resolved at landing and does not change under the session, and a
+/// trailer that re-loads at 30 s must not start waiting on a film's buffer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrimeProfile {
+    /// A seek, resume or reload: [`PRIME_NS`] video and [`PRIME_AUDIO_NS`] audio, measured from
+    /// the seek base. These are the floors that cover the demux reopen gap; they are not the
+    /// startup buffer, and a reload must never pay for it.
+    Seek,
+    /// A fresh foreground Load: [`INITIAL_PRIME_NS`] / [`INITIAL_PRIME_AUDIO_NS`], so a slow
+    /// source does not stutter in the film's first seconds — bounded by
+    /// [`INITIAL_PRIME_BUDGET_MS`] of wall time, because five seconds of media is not five
+    /// seconds of a viewer's patience.
+    Initial,
+    /// A hero preview: its first accepted video AU, and — when the stream has audio — one accepted
+    /// audio AU, so the audioSync master clock does not start on an empty lane. A trailer's
+    /// opening must not wait for a film's buffer (see [`PREVIEW_AUDIO_WAIT_NS`] for the escape
+    /// when the audio lane never accepts).
+    Preview,
+}
+
+impl PrimeProfile {
+    /// The profile a session starts with. `preview` wins over `rebase_pending`: a preview reload
+    /// is still a preview, and priming it to [`PrimeProfile::Initial`] was the 21-second stall the
+    /// device log of 2026-11-12 records (`loadCompleted (priming before Play)` → `primed: …
+    /// v=5087ms a=5213ms`).
+    pub fn for_session(preview: bool, rebase_pending: bool) -> Self {
+        if preview {
+            Self::Preview
+        } else if rebase_pending {
+            Self::Seek
+        } else {
+            Self::Initial
+        }
+    }
+}
+
 /// MAIN-THREAD-CONFINED. No worker thread ever names an Engine field.
 pub struct Engine {
     /// Exact reducer attempt which constructed this native object. A duplicate start for this
@@ -224,14 +267,18 @@ pub struct Engine {
     // depth as max_fed_video_pts - seek_base_pts, since the in-place seek feeds REAL pts, not 0-based)
     // prime-then-play: after a seek/resume the pipeline is PAUSED and data is buffered before
     // Play, so the clock doesn't free-run through the demux reopen / transcode-restart gap (that
-    // gap is what makes video "fast-forward" to catch the audio clock on resume). feed_stream
-    // fires Play once max_fed_pts reaches PRIME_NS.
+    // gap is what makes video "fast-forward" to catch the audio clock on resume). `try_prime`
+    // fires Play once the lanes reach [`Engine::prime_targets`], and clears this on success —
+    // including the immediate Play the pump issues for a fresh Load.
     pub prime_play: bool,
-    /// Fresh foreground playback arms a longer initial prime. Hero previews start on accepted
-    /// video data; later preview primes retain normal behavior.
-    pub fresh_prime: bool,
-    /// Hero autoplay's initial Load skips foreground buffering until its first accepted Play.
-    pub preview_start: bool,
+    /// Which lane depths this session primes to before its first Play. Decided once, at
+    /// construction, by [`PrimeProfile::for_session`]; see its doc for why one field owns it.
+    pub prime: PrimeProfile,
+    /// Process milliseconds (`player::vclock_ms`) when this session's prime began — its Engine
+    /// construction, the earliest moment the viewer could be waiting on it. Taken once so
+    /// [`Engine::prime_targets`] can bound [`PrimeProfile::Initial`] by wall time rather than by
+    /// media alone.
+    pub prime_since_ms: u32,
     // Two-lane feed (Kodi m_messageQueueVideo/Audio): the demuxer routes es=1 video to aq_video
     // and es=2 audio to aq_audio; each lane is fed independently so a video BufferFull can't stall
     // the audio lane (the audioSync master clock). Both are allocated for a stream. (None only
@@ -259,25 +306,50 @@ impl Engine {
     pub fn uses_stream_queues(&self) -> bool {
         matches!(self.source, Source::Stream)
     }
-    /// Video prime depth: zero for hero previews, longer for fresh foreground playback, otherwise
-    /// [`PRIME_NS`].
+    /// Video prime depth for this session, before any wall-clock budget is applied.
     pub fn prime_video_target(&self) -> i64 {
-        if self.preview_start {
-            0
-        } else if self.fresh_prime {
-            INITIAL_PRIME_NS
-        } else {
-            PRIME_NS
+        match self.prime {
+            PrimeProfile::Preview => 0,
+            PrimeProfile::Initial => INITIAL_PRIME_NS,
+            PrimeProfile::Seek => PRIME_NS,
         }
     }
-    /// Audio prime depth for this session.
+    /// Audio prime depth for this session, before any wall-clock budget is applied.
     pub fn prime_audio_target(&self) -> i64 {
-        if self.preview_start {
-            0
-        } else if self.fresh_prime {
-            INITIAL_PRIME_AUDIO_NS
+        match self.prime {
+            PrimeProfile::Preview => 0,
+            PrimeProfile::Initial => INITIAL_PRIME_AUDIO_NS,
+            PrimeProfile::Seek => PRIME_AUDIO_NS,
+        }
+    }
+    /// Wall milliseconds this session's prime has been holding.
+    pub fn prime_wall_ms(&self) -> u32 {
+        super::vclock_ms().wrapping_sub(self.prime_since_ms)
+    }
+    /// Whether [`PrimeProfile::Preview`]'s fast start applies at `kind`. Its own fresh Loads only:
+    /// a rebuffer mid-trailer is an ordinary rebuffer, and resuming that on one AU would restart
+    /// the picture on an empty pipe.
+    pub fn preview_fast_start(&self, kind: HlsPrimeKind) -> bool {
+        self.prime == PrimeProfile::Preview && kind != HlsPrimeKind::Rebuffer
+    }
+    /// The lane depths [`try_prime`] applies at a `kind` boundary — the profile's own, or:
+    /// - for a fresh foreground Load that has spent [`INITIAL_PRIME_BUDGET_MS`] of wall time
+    ///   without reaching them, the ordinary seek floors. On the 2026-11-12 device log five
+    ///   seconds of media took twenty-one seconds of wall to accept off a P2P source and the
+    ///   viewer watched a black screen throughout; a buffer floor must never outlast the patience
+    ///   it protects.
+    /// - for a preview's rebuffer, the seek floors ([`Engine::preview_fast_start`]).
+    ///
+    /// Zero means "one accepted AU", the floor [`try_prime`] applies for a preview.
+    pub fn prime_targets(&self, kind: HlsPrimeKind) -> (i64, i64) {
+        if self.preview_fast_start(kind) {
+            (0, 0)
+        } else if self.prime == PrimeProfile::Preview
+            || (self.prime == PrimeProfile::Initial && self.prime_wall_ms() >= INITIAL_PRIME_BUDGET_MS)
+        {
+            (PRIME_NS, PRIME_AUDIO_NS)
         } else {
-            PRIME_AUDIO_NS
+            (self.prime_video_target(), self.prime_audio_target())
         }
     }
 }
@@ -2275,6 +2347,10 @@ fn start_bufferfeed_inner(
         None
     };
 
+    // One read of the armed seek decides two things that must agree: the first-keyframe rebase
+    // below, and whether this session is a fresh Load or a reload — a reload must not pay the
+    // fresh Load's startup buffer (`PrimeProfile::for_session`).
+    let rebase_pending = SHARED.seek_to_ns.load(Ordering::Relaxed) >= 0;
     let eng = Engine {
         route_start: route_attempt,
         native_epoch,
@@ -2287,7 +2363,7 @@ fn start_bufferfeed_inner(
         // post-seek keyframe to fed-pts 0 so the pipeline sees a 0-based timeline identical
         // to fresh play (disp_base carries the content offset). Plain fresh play leaves this
         // false (first keyframe is already ~0).
-        rebase_pending: SHARED.seek_to_ns.load(Ordering::Relaxed) >= 0,
+        rebase_pending,
         rebase_drops: 0,
         seek_armed_at: 0,
         seek_retries: 0,
@@ -2299,9 +2375,8 @@ fn start_bufferfeed_inner(
         feed_pace: FeedPace::default(),
         seek_base_pts: 0,
         prime_play: true,
-        fresh_prime: true,
-        preview_start: crate::route::preview_request(ps)
-            && SHARED.seek_to_ns.load(Ordering::Relaxed) < 0,
+        prime: PrimeProfile::for_session(crate::route::preview_request(ps), rebase_pending),
+        prime_since_ms: super::vclock_ms(),
         aq_video: aqv_box,
         aq_audio: aqa_box,
         hs,
@@ -2995,10 +3070,23 @@ const PRIME_NS: i64 = 700_000_000;
 // so a genuinely audioless region can't hang.
 const PRIME_AUDIO_NS: i64 = 300_000_000;
 /// Initial foreground playback waits for this much buffer before starting, so a slow source does
-/// not stutter in its first seconds. Hero previews bypass this prime; seek/reload primes use
-/// [`PRIME_NS`].
+/// not stutter in its first seconds. Hero previews and seek/reload primes use their own profiles
+/// ([`PrimeProfile`]).
 pub(crate) const INITIAL_PRIME_NS: i64 = 5_000_000_000;
 pub(crate) const INITIAL_PRIME_AUDIO_NS: i64 = 5_000_000_000;
+/// How long a fresh foreground Load may hold before Play, in wall milliseconds. The 5 s above is
+/// MEDIA, and media arrives at the source's rate: the 2026-11-12 device log took 21 s of wall to
+/// accept it off a P2P source, and the viewer watched a black screen for all of it. Past this
+/// budget the session primes to [`PRIME_NS`]/[`PRIME_AUDIO_NS`] instead — still both lanes, still
+/// past the demux reopen gap, just not the startup buffer — so the floor can never outlast the
+/// patience it protects.
+pub(crate) const INITIAL_PRIME_BUDGET_MS: u32 = 8_000;
+/// A preview's escape from waiting on its audio lane. A preview primes to its first accepted AU,
+/// and requires an audio AU too when the stream has audio (the audioSync master clock must not
+/// start empty); but audio that is never accepted — a stream that is genuinely silent, or a lane
+/// the sink will not take — must not hold a trailer forever. After this much accepted VIDEO the
+/// picture starts anyway; under [`PRIME_NS`] and a handful of AUs, so it cannot become a buffer.
+pub(crate) const PREVIEW_AUDIO_WAIT_NS: i64 = 500_000_000;
 pub(crate) const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
 // Feed-ahead throttle (Kodi-parity): keep the VIDEO lane at most this far ahead of the presented
 // position (SHARED.pres_fed) instead of feeding greedily to BufferFull. Bounding the buffer to
@@ -3397,10 +3485,17 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
     // applies, so the audioSync master clock never starts on an empty audio lane.
     let video_sink_full =
         eng.pending_video.is_some() && SHARED.dg_feed_state.load(Ordering::Relaxed) == 2 && accepted_vbuf > 0;
-    let decoder_ready = if eng.preview_start {
+    let (video_target, audio_target) = eng.prime_targets(prime_kind);
+    let decoder_ready = if eng.preview_fast_start(prime_kind) {
+        // A trailer's whole startup floor: one accepted video AU. Audio joins it when the stream
+        // has audio, because the audioSync master clock starting on an empty lane is the
+        // silent-start defect `PRIME_AUDIO_NS` exists to prevent — but a preview loses its sound
+        // to that only until the lane fills, and a trailer has no 300 ms to spend on it, so the
+        // lane's FIRST AU is the floor and `PREVIEW_AUDIO_WAIT_NS` of video is the escape.
         accepted_vbuf > 0
+            && (accepted_abuf > 0 || !audio_expected || accepted_vbuf >= PREVIEW_AUDIO_WAIT_NS)
     } else if audio_expected {
-        (accepted_vbuf >= eng.prime_video_target() || video_sink_full) && accepted_abuf >= eng.prime_audio_target()
+        (accepted_vbuf >= video_target || video_sink_full) && accepted_abuf >= audio_target
     } else {
         accepted_vbuf >= PRIME_VIDEO_MAX_NS || video_sink_full
     };
@@ -3451,7 +3546,6 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
                     super::acb_mirror_playstate_at(mt, eng.stage, true);
                 }
                 eng.prime_play = false;
-                eng.preview_start = false;
                 SHARED.seeking.store(false, Ordering::Relaxed); // playback resumed at the new position → HUD spinner off
                 if prime_kind == HlsPrimeKind::Rebuffer {
                     log(&format!(
@@ -3468,7 +3562,7 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
                         playable_vbuf / 1_000_000,
                         playable_abuf / 1_000_000,
                         observed_runway_ns / 1_000_000,
-                        if video_sink_full && accepted_vbuf < eng.prime_video_target() {
+                        if video_sink_full && accepted_vbuf < video_target {
                             " (native video sink full below PRIME_NS)"
                         } else {
                             ""
@@ -4877,6 +4971,29 @@ mod stream_open_log_line_tests {
     }
 }
 
+/// The one rule that decides what "enough buffer" means for a session, graded without an Engine.
+///
+/// The 2026-11-12 defect was not a wrong predicate but a wrong PROFILE: two independent bools
+/// (`fresh_prime`, `preview_start`) answered the same question, and a reload fell through to the
+/// fresh Load's five-second floor — 21 s of black screen on the device.
+#[cfg(test)]
+mod prime_profile_tests {
+    use super::*;
+
+    #[test]
+    fn a_preview_reload_stays_a_preview() {
+        assert_eq!(PrimeProfile::for_session(false, false), PrimeProfile::Initial);
+        assert_eq!(PrimeProfile::for_session(false, true), PrimeProfile::Seek);
+        assert_eq!(PrimeProfile::for_session(true, false), PrimeProfile::Preview);
+        assert_eq!(
+            PrimeProfile::for_session(true, true),
+            PrimeProfile::Preview,
+            "a preview's reload is still a preview: priming it to the fresh Load's floor is the \
+             21-second stall the device log of 2026-11-12 records"
+        );
+    }
+}
+
 /// **The 94-second freeze of 2026-08-29, reduced to the mechanism that caused it.**
 ///
 /// A viewer on a remote 4K Dolby Vision stream was downshifted into HLS, and the picture then did
@@ -4937,8 +5054,9 @@ mod prime_livelock_tests {
             feed_pace: FeedPace::default(),
             seek_base_pts: 0,
             prime_play: true,
-            fresh_prime: false,
-            preview_start: false,
+            // The rig is a reload ("engine_after_reload"): the seek floors, as before.
+            prime: PrimeProfile::Seek,
+            prime_since_ms: crate::player::vclock_ms(),
             aq_video: Some(crate::aq::aq_new(AQ_VIDEO_BYTES)),
             aq_audio: Some(crate::aq::aq_new(AQ_AUDIO_BYTES)),
             hs: plx_net::stream::http_stream_boxed(),
@@ -5114,38 +5232,12 @@ mod prime_livelock_tests {
         );
     }
 
-    #[test]
-    fn a_preview_starts_on_its_first_accepted_video_data() {
-        let _serial = plx_base::testlock::serial();
-        struct Restore {
-            runway: i64,
-            audio_expected: bool,
-        }
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                SHARED
-                    .hls_prime_runway_ms
-                    .store(self.runway, Ordering::Relaxed);
-                SHARED
-                    .hls_audio_expected
-                    .store(self.audio_expected, Ordering::Relaxed);
-                crate::player::ffi_host::force_clocksink_for_test(false);
-            }
-        }
-        crate::player::ffi_host::force_clocksink_for_test(true);
-        let _restore = Restore {
-            runway: SHARED.hls_prime_runway_ms.swap(0, Ordering::Relaxed),
-            audio_expected: SHARED.hls_audio_expected.swap(false, Ordering::Relaxed),
-        };
-        SHARED.pres_fed.store(PRES_NONE, Ordering::Relaxed);
-        SHARED.seek_to_ns.store(-1, Ordering::Relaxed);
-
-        let mt = unsafe { plx_base::task::MainThread::assume() };
-        let mut eng = engine_after_reload();
-        eng.preview_start = true;
+    /// Push `video` AUs of 24 fps video and `audio` AAC AUs onto the rig's lanes — one lane or the
+    /// other when either is 0, which is how the preview's audio wait is staged.
+    fn push_aus(eng: &mut Engine, video: i64, audio: i64) {
         let au = [0u8; 64];
         let qv = &mut **eng.aq_video.as_mut().unwrap() as *mut crate::aq::AuQueue;
-        for i in 0..2 {
+        for i in 0..video {
             crate::aq::aq_push(
                 qv,
                 au.as_ptr(),
@@ -5155,6 +5247,58 @@ mod prime_livelock_tests {
                 1,
             );
         }
+        let qa = &mut **eng.aq_audio.as_mut().unwrap() as *mut crate::aq::AuQueue;
+        for i in 0..audio {
+            crate::aq::aq_push(qa, au.as_ptr(), au.len() as c_int, i * A_STEP_NS, 1, 2);
+        }
+    }
+
+    /// Arms the host clock sink and pins the two shared gates a preview prime reads, restoring both
+    /// on drop (they are process-globals; leaving them set would change every later test's prime).
+    struct PreviewShared {
+        runway: i64,
+        audio_expected: bool,
+    }
+
+    impl PreviewShared {
+        fn arm(audio_expected: bool) -> Self {
+            crate::player::ffi_host::force_clocksink_for_test(true);
+            let s = Self {
+                runway: SHARED.hls_prime_runway_ms.swap(0, Ordering::Relaxed),
+                audio_expected: SHARED
+                    .hls_audio_expected
+                    .swap(audio_expected, Ordering::Relaxed),
+            };
+            SHARED.pres_fed.store(PRES_NONE, Ordering::Relaxed);
+            SHARED.seek_to_ns.store(-1, Ordering::Relaxed);
+            s
+        }
+    }
+
+    impl Drop for PreviewShared {
+        fn drop(&mut self) {
+            SHARED
+                .hls_prime_runway_ms
+                .store(self.runway, Ordering::Relaxed);
+            SHARED
+                .hls_audio_expected
+                .store(self.audio_expected, Ordering::Relaxed);
+            crate::player::ffi_host::force_clocksink_for_test(false);
+        }
+    }
+
+    /// The hero autoplay starts on its first accepted AU of each lane — never on the foreground
+    /// player's five-second startup buffer. This is the preview profile's whole contract: the pump's
+    /// immediate Play was refused or fenced (`prime_play` still armed), and one accepted video AU
+    /// plus the audio lane's first is enough.
+    #[test]
+    fn a_preview_starts_on_its_first_accepted_media() {
+        let _serial = plx_base::testlock::serial();
+        let _shared = PreviewShared::arm(false);
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut eng = engine_after_reload();
+        eng.prime = PrimeProfile::Preview;
+        push_aus(&mut eng, 2, 2);
         tick(&mt, &mut eng);
 
         let vbuf = eng.max_fed_video_pts - eng.seek_base_pts;
@@ -5164,12 +5308,93 @@ mod prime_livelock_tests {
             "a trailer preview must not wait for the foreground playback buffer"
         );
         assert!(
-            !eng.preview_start,
-            "the preview fast-start applies only to its first successful Play"
-        );
-        assert!(
             vbuf <= 2 * V_STEP_NS,
             "preview waited for {vbuf}ns of video instead of starting on its first data"
+        );
+    }
+
+    /// A preview keeps its sound (`preview.rs`): when the stream has audio the audioSync master
+    /// clock must not start on an empty lane, so its first accepted audio AU is part of the floor —
+    /// and the moment that AU lands is the moment it plays. One AU, not `PRIME_AUDIO_NS`.
+    #[test]
+    fn a_preview_waits_for_its_audio_lane_but_only_one_au() {
+        let _serial = plx_base::testlock::serial();
+        let _shared = PreviewShared::arm(true);
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut eng = engine_after_reload();
+        eng.prime = PrimeProfile::Preview;
+        push_aus(&mut eng, 2, 0);
+        tick(&mt, &mut eng);
+        assert!(
+            eng.prime_play,
+            "PRECONDITION: video alone must not start a stream whose audio is expected"
+        );
+
+        push_aus(&mut eng, 0, 2);
+        tick(&mt, &mut eng);
+        assert!(
+            !eng.prime_play,
+            "the preview started once its audio lane accepted its first AU"
+        );
+    }
+
+    /// …and audio that never arrives must not hold a trailer: past `PREVIEW_AUDIO_WAIT_NS` of
+    /// accepted video the picture starts anyway. The escape is a handful of AUs — under
+    /// `PRIME_NS`, never the foreground player's depth.
+    #[test]
+    fn a_preview_starts_without_audio_past_its_video_escape() {
+        let _serial = plx_base::testlock::serial();
+        let _shared = PreviewShared::arm(true);
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut eng = engine_after_reload();
+        eng.prime = PrimeProfile::Preview;
+        push_aus(&mut eng, PREVIEW_AUDIO_WAIT_NS / V_STEP_NS + 2, 0);
+        tick(&mt, &mut eng);
+
+        assert!(
+            !eng.prime_play,
+            "a silent stream must still start after {}ms of video",
+            PREVIEW_AUDIO_WAIT_NS / 1_000_000
+        );
+        let vbuf = eng.max_fed_video_pts - eng.seek_base_pts;
+        assert!(
+            vbuf >= PREVIEW_AUDIO_WAIT_NS,
+            "started below the video escape ({vbuf}ns)"
+        );
+        assert!(
+            vbuf < PRIME_NS,
+            "the preview paid the foreground player's prime depth: {vbuf}ns"
+        );
+    }
+
+    /// A fresh foreground Load's five seconds is MEDIA, and media arrives at the source's rate: the
+    /// 2026-11-12 device log spent 21 s of wall accepting it, with the viewer on black throughout.
+    /// Past `INITIAL_PRIME_BUDGET_MS` the Load primes to the seek floors instead — both lanes
+    /// still, still past the demux reopen gap, just not the startup buffer.
+    #[test]
+    fn an_initial_prime_drops_to_the_seek_floor_after_its_wall_budget() {
+        let _serial = plx_base::testlock::serial();
+        let _shared = PreviewShared::arm(true);
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut eng = engine_after_reload();
+        eng.prime = PrimeProfile::Initial;
+        push_aus(&mut eng, 30, 30); // ~1.25 s of each lane
+        tick(&mt, &mut eng);
+        assert!(
+            eng.prime_play,
+            "PRECONDITION: 1.25 s is not the initial depth"
+        );
+
+        eng.prime_since_ms = crate::player::vclock_ms().wrapping_sub(INITIAL_PRIME_BUDGET_MS);
+        tick(&mt, &mut eng);
+        assert!(
+            !eng.prime_play,
+            "the initial prime outlived its wall budget"
+        );
+        let vbuf = eng.max_fed_video_pts - eng.seek_base_pts;
+        assert!(
+            vbuf < INITIAL_PRIME_NS,
+            "the buffered depth was not the point: {vbuf}ns"
         );
     }
 
