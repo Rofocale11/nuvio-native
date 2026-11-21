@@ -118,7 +118,11 @@ All adaptations carry `// Fork Rofocale11:` comments.
 
 ## Still to verify
 
-- `make check-nodef` (shipping feature set) and the ARM cross-build.
+- The ARM **storage helper** (`pkg/plxnative-storage`) fails to link on this host:
+  rustc 1.100 passes `-fuse-ld=lld`, and `ci/arm-cc.py`'s evidence checker expects
+  a GNU ld map. This reproduces unchanged on the original fork commit `97ed03c9`
+  in a clean worktree, so it is a pre-existing toolchain/environment issue, not a
+  merge regression. The main ARM binary `pkg/plxnative` **links successfully**.
 - UI capture / device playback. A host pass is not a device proof; `ff::probe`
   (the shim's probed-codec path) is compiled and unit-tested but has not been
   exercised against a real addon stream on the television.
