@@ -101,7 +101,7 @@ fn save_addons(set: &plx_stremio::AddonSet, path: &Path) -> bool {
     #[cfg(all(target_os = "linux", target_arch = "arm"))]
     {
         let _ = path;
-        set.to_json().ok().is_some_and(|payload| plx_platform::storage::client::save_nuvio(payload).is_ok())
+        set.to_json().ok().is_some_and(|payload| plx_os::storage::client::save_nuvio(payload).is_ok())
     }
     #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
     { set.save(path).is_ok() }
@@ -110,7 +110,7 @@ fn save_addons(set: &plx_stremio::AddonSet, path: &Path) -> bool {
 fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
     #[cfg(all(target_os = "linux", target_arch = "arm"))]
     {
-        match plx_platform::storage::client::load_nuvio() {
+        match plx_os::storage::client::load_nuvio() {
             Ok(Some(payload)) => {
                 log("nuvio: addon configuration restored from DB8");
                 return plx_stremio::AddonSet::from_json(&payload);
