@@ -566,6 +566,14 @@ class SubjectBearing(unittest.TestCase):
         exactly the controls with a subject: a control added to one side and not the other fails here."""
         hero = (ROOT / "rust-modules" / "screens" / "src" / "detail" / "hero.rs").read_text()
         names = dict(re.findall(r'HeroCtl::(\w+) => "(\w+)",', hero.split("pub const fn a11y_name", 1)[1].split("}", 1)[0]))
+        # Fork Rofocale11: My List has an a11y word (every hero control does) but NO ratingKey subject: it
+        # toggles the Nuvio account's own list on a `nuvio://` item, so `hero_control_subject` deliberately
+        # returns None for it (mod.rs), the screens subject table `acts` below does not place it, and
+        # `detail.hero.my_list` is not a guarded id in a11y.SUBJECT_BEARING. It is therefore outside this
+        # subject-placement census and must be dropped from the a11y-name map before counting, which keeps
+        # the ten-control census and the real invariant below intact. Reverting the fork makes this a no-op;
+        # a NEW control added to only one side still fails the guards that follow.
+        names.pop("MyList", None)
         self.assertEqual(len(names), 10, names)
         tests = (ROOT / "rust-modules" / "screens" / "src" / "detail" / "tests.rs").read_text()
         table = tests.split("fn the_hero_controls_that_play_or_write_have_a_subject_and_the_rest_have_none", 1)[1].split("\n}\n", 1)[0]

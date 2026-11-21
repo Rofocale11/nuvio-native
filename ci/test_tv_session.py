@@ -818,7 +818,12 @@ class LifecycleSubcommand(unittest.TestCase):
     foreground app (unless the stub is told the launch is ignored) and `fuser` answers the app pid.
     """
 
-    def _run(self, call, *, fg="com.beb.plxnative.debug", launch_takes=True, pid_after="4242"):
+    # Fork Rofocale11: `background` guards that OUR app is already in front before launching the parking
+    # app over it (tv-session.sh's `before != APPID` refusal). APPID is the fork's `com.nuvionative.app.debug`
+    # (from the stubbed `make print-appid` above), so the stubbed foreground app must be that same id, not
+    # upstream's `com.beb.plxnative.debug`: otherwise the guard fires and the contract under test (a launch
+    # that takes, or fails to) is never reached. The guard itself is left in place in tv-session.sh.
+    def _run(self, call, *, fg="com.nuvionative.app.debug", launch_takes=True, pid_after="4242"):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "tools").mkdir()
