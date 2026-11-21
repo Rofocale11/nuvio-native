@@ -95,7 +95,18 @@ pub fn request_status(
         hdrs.push("Content-Type: application/json".to_string());
     }
     hdrs.extend(headers.iter().cloned());
-    match net::request_result(url, &hdrs, verb, body, t, true, Some(MAX_BODY), None) {
+    // Fork Rofocale11: upstream's net guard refuses a redirect-following request that carries ANY
+    // caller header, because libcurl re-sends custom headers to the Location target (an
+    // `Authorization`/`apikey` line would reach that host). This door predates that guard and adds
+    // `Accept`/`Content-Type` to every addon GET. Benign addon calls therefore use the same
+    // no-header redirect path as upstream's public fetch; calls with a credential header keep their
+    // headers and do NOT follow redirects, so the token is never replayed to another host.
+    let credentialed = hdrs.iter().any(|h| {
+        let lower = h.to_ascii_lowercase();
+        !lower.starts_with("accept:") && !lower.starts_with("content-type:")
+    });
+    let (sent, follow) = if credentialed { (hdrs.as_slice(), false) } else { (&[][..], true) };
+    match net::request_result(url, sent, verb, body, t, follow, Some(MAX_BODY), None) {
         Ok(resp) => Ok((resp.status, resp.body)),
         Err(_) => Err(Error::Network),
     }
