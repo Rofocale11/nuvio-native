@@ -4,9 +4,6 @@
 //! `decision_track_memory_tests`.
 
 use super::*;
-// Fork Rofocale11: upstream's memory helpers moved into `plan::memory`; the fork's retained
-// plan.rs does not re-export them into this test module's `super::*` scope.
-use super::memory::{memory_log, show_memory};
 #[allow(unused_imports)]
 use super::test_support::*;
 use plx_data::metadata::{PlayingItem, Stream};
