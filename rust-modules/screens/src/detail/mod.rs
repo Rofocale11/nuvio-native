@@ -3386,7 +3386,7 @@ impl DetailScreen {
                 .draw(&Env::inert(), p),
                 hero::HeroCtl::MyList => {
                     Button::new(self.list_label().as_ptr(), theme::size::BODY, rect)
-                        .focused(focused).palette(palette).ground(ground).scale(scale).draw(&Env::inert(), p)
+                        .focus_mix(fill).palette(palette).ground(ground).scale(scale).draw(&Env::inert(), p)
                 }
                 hero::HeroCtl::Alt => {
                     Button::new(hero::alt_label().as_ptr(), theme::size::BODY, rect)
@@ -4651,7 +4651,7 @@ impl DetailScreen {
         if plx_base::task::spawn("nuvio-my-list", move || {
             let state = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_library(&rk, saved));
             *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
-            plx_machine::idle::invalidate();
+            plx_machine::present::wake_from_worker();
         }).is_none() { self.list_pending = false; self.list_error = true; }
     }
 
@@ -5096,7 +5096,9 @@ pub(crate) fn hero_control_subject<'a>(
         }),
         HeroCtl::MarkWatched | HeroCtl::MarkUnwatched => Some(hero::hero_episode(d).map_or(d.rk.as_str(), |ep| ep.rk.as_str())),
         HeroCtl::Watchlist | HeroCtl::Trailer => Some(d.rk.as_str()),
-        HeroCtl::GoToShow | HeroCtl::Alt | HeroCtl::Version | HeroCtl::More => None,
+        // Fork Rofocale11: My List acts on the Nuvio account's `nuvio://` item, not a Plex
+        // ratingKey, so upstream's subject helper has no identity to hand back for it.
+        HeroCtl::GoToShow | HeroCtl::Alt | HeroCtl::Version | HeroCtl::More | HeroCtl::MyList => None,
     }
 }
 

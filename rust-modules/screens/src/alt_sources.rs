@@ -386,7 +386,9 @@ impl AltSourcesScreen {
             if delay { std::thread::sleep(std::time::Duration::from_millis(500)); }
             let list = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_streams(&rk));
             *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamReply::List(list));
-            plx_machine::idle::invalidate();
+            // Fork Rofocale11: the Nuvio stream picker is fork code in this upstream-owned file;
+            // upstream replaced plx_machine::idle::invalidate() with the owned present gate.
+            plx_machine::present::wake_from_worker();
         });
         if job.is_none() { self.stream_pending = false; self.stream_error = true; }
     }
@@ -401,8 +403,8 @@ impl AltSourcesScreen {
                 Action::Open { sid: self.arg.sid, rk }, plx_appkit::source_list::stream_row(choice));
         }
         if self.stream_choices.is_empty() || self.stream_error {
-            section = section.note(if self.stream_error { plx_platform::i18n::msg::browse_streams_failed() }
-                else if self.stream_pending { plx_platform::i18n::msg::browse_streams_loading() } else { plx_platform::i18n::msg::browse_streams_empty() });
+            section = section.note(if self.stream_error { plx_os::i18n::msg::browse_streams_failed() }
+                else if self.stream_pending { plx_os::i18n::msg::browse_streams_loading() } else { plx_os::i18n::msg::browse_streams_empty() });
         }
         Form::new().section(section)
     }
@@ -480,7 +482,7 @@ impl AltSourcesScreen {
             if plx_base::task::spawn("nuvio-stream-select", move || {
                 let ok = plx_plex::plex::client_for(sid).is_some_and(|c| c.nuvio_select(&rk, elem as usize));
                 *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamReply::Selected(ok));
-                plx_machine::idle::invalidate();
+                plx_machine::present::wake_from_worker();
             }).is_none() { self.stream_pending = false; self.stream_error = true; }
             return;
         }

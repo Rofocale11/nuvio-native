@@ -44,10 +44,11 @@ pub const ELEM_MARK_WATCHED: u32 = 3;
 pub const ELEM_MARK_UNWATCHED: u32 = 4;
 pub const ELEM_TRAILER: u32 = 5;
 // Fork Rofocale11: the My List button is the Nuvio account-backed list toggle (Add/Remove from My
-// List), not upstream's plex.tv Watchlist. It keeps elem 6; the two controls are mutually exclusive
-// because a Nuvio `nuvio://` guid never passes `catalog_hex_of_guid` (which needs a `plex://` guid),
-// so upstream's ELEM_WATCHLIST=6 cannot collide with it on the same item.
-pub const ELEM_MY_LIST: u32 = 6;
+// List), not upstream's plex.tv Watchlist. The two controls are mutually exclusive on one item
+// because a Nuvio `nuvio://` guid never passes `catalog_hex_of_guid` (which needs `plex://`), but
+// element IDs must still be distinct: `HeroCtl::of_elem` matches them in one table and a shared
+// value makes the Watchlist arm unreachable. Use 10, the first free hero ID after upstream's 9.
+pub const ELEM_MY_LIST: u32 = 10;
 /// The bookmark disc — the Watchlist toggle. ONE identity for both faces (outline / filled): the
 /// face is membership, not a different control, so focus rides straight through a flip.
 pub const ELEM_WATCHLIST: u32 = 6;
