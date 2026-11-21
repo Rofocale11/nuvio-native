@@ -5,19 +5,13 @@ use plx_ui::rec::{Recording, CAP_BYTES};
 pub(super) const REFUSAL: &str = "incompatible owner-input/presentation state; requires V13 capture";
 const INVALID: &str = "invalid or incompatible recording";
 
-// Fork Rofocale11: the upstream merge re-recorded three of the four pre-V13 fixtures against a
-// live loopback server (their manifests now carry `origin` / `port` / `tier: local` / `token`,
-// and the segments were written by the merged build). Their raw bytes therefore no longer match
-// the digests in the upstream-reviewed `tests/replay-historical-profiles.json`. The schema (3)
-// and the state fingerprint are unchanged, so the typed "requires V13 capture" diagnostic is
-// still the correct one for these old-state recordings. Pin the exact new digests here, ADDITIVELY:
-// an unreviewed mutation (even whitespace, as the test below checks) still fails byte-exactly,
-// and the upstream-reviewed bytes stay accepted.
-const FORK_REVIEWED_PROFILES: &str = r#"[
-  {"schema":3,"state_fp":13512213413816145485,"sha256":{"manifest.json":"b09613b1c5dc8a7c515ef0a4e3580b383288b98fb8fff047c4078c2cb1e11d42","rec-0000.jsonl":"50b2bde5d96095a398f37ca188716d080fcde5cb5eab5f7fdf65d1e62931cb93"}},
-  {"schema":3,"state_fp":4239819007634745513,"sha256":{"manifest.json":"7e389e3acc7af5b3311216736ea1b933c41d376f533b0a92b3d6dcf3f1aceee7","rec-0000.jsonl":"63940fd573baf5b001c30d05d5b83ed5dfe2dde7a6a345befe301d66e2776506"}},
-  {"schema":3,"state_fp":4239819007634745513,"sha256":{"manifest.json":"0b695bff79f815d7977c38303ee824f2773ad8c1a211e95af12446ff1a1711b6","rec-0000.jsonl":"c1da0e5a9173db48c19abc95463307643d47d54cc087aa3c4186ecdd6e5097af"}}
-]"#;
+// Fork Rofocale11: `tests/replay-historical-profiles.json` is the single reviewed list. The
+// upstream merge re-recorded three of the four pre-V13 fixtures against a live loopback server
+// (their manifests now carry `origin` / `port` / `tier: local` / `token`, and the segments were
+// written by the merged build), so their exact digests in that file were updated and reviewed.
+// The schema (3) and the state fingerprint are unchanged, so "requires V13 capture" remains the
+// correct diagnostic. An unreviewed mutation (even whitespace, as the test below checks) still
+// fails byte-exactly.
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,10 +29,8 @@ pub(super) fn refusal(path: &Path, error: plx_ui::rec::RecError) -> &'static str
     let Ok(recording) = Recording::load(path, theirs) else { return INVALID };
     let profiles: Vec<Profile> = serde_json::from_str(include_str!("../../../../tests/replay-historical-profiles.json"))
         .expect("reviewed historical recording metadata");
-    let fork_profiles: Vec<Profile> = serde_json::from_str(FORK_REVIEWED_PROFILES)
-        .expect("fork-reviewed historical recording metadata");
     let Ok(hashes) = hashes(path) else { return INVALID };
-    if profiles.iter().chain(&fork_profiles).any(|profile| profile.schema == recording.header.schema
+    if profiles.iter().any(|profile| profile.schema == recording.header.schema
         && profile.state_fp == theirs && profile.sha256 == hashes) { REFUSAL } else { INVALID }
 }
 
