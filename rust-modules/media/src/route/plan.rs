@@ -1813,9 +1813,35 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         let forced = env.direct_play_mode == DirectPlayMode::Forced;
         let mut playback_quality = if forced { Quality::Original } else { env.quality };
         let session = new_sess(rk);
-        let nuvio_client = plx_plex::plex::client_for(env.sid)
-            .filter(|client| client.is_nuvio() && !rk.is_empty());
-        let nuvio_decision = if let Some(client) = nuvio_client {
+        // Upstream's disabled-mode refusal precedes every server lookup; keep it ahead of the
+        // client read below so an original-only URL with no PMS item still carries its verdict.
+        if env.direct_play_mode == DirectPlayMode::Disabled && rk.is_empty() {
+            return Plan {
+                sid: env.sid,
+                direct_play_mode: env.direct_play_mode,
+                verdict: Some(PlayVerdict::DirectPlayDisabled),
+                part_id: part_id_of(part),
+                src_vcodec: vcodec.to_string(),
+                src_acodec: acodec.to_string(),
+                source_decodable: true,
+                ..Default::default()
+            };
+        }
+        // Fork Rofocale11: reuse build_stream's ONE ledgered client_for read for the probe as well.
+        // A second call site would add a process-global registry read in this machine, which
+        // ci/check-deps.sh's `globals` rule rejects (the ledger only shrinks).
+        let Some(client) = plx_plex::plex::client_for(env.sid) else {
+            return Plan {
+                sid: env.sid,
+                direct_play_mode: env.direct_play_mode,
+                part_id: part_id_of(part),
+                src_vcodec: vcodec.to_string(),
+                src_acodec: acodec.to_string(),
+                source_decodable: true,
+                ..Default::default()
+            };
+        };
+        let nuvio_decision = if client.is_nuvio() && !rk.is_empty() {
             playback_quality = Quality::Original;
             match client.mde_decision(rk, 0, &session, env.audio_sid, env.sub_sid, &env.caps) {
                 Some(mc) => {
@@ -1878,10 +1904,6 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
             source_decodable: true,
             ..Default::default()
         };
-        if env.direct_play_mode == DirectPlayMode::Disabled && rk.is_empty() {
-            return Plan { verdict: Some(PlayVerdict::DirectPlayDisabled), ..base_plan() };
-        }
-        let Some(client) = plx_plex::plex::client_for(env.sid) else { return base_plan() };
         let new_plan = || Plan { sess: session.clone(), ..base_plan() };
         let queue = if !rk.is_empty() && !env.preview {
             // Both candidate passes share one PlayQueue and one playback session.
