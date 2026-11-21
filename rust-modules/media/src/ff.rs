@@ -1,7 +1,17 @@
 //! The codecs' FFmpeg bindings media's own code reaches (`plx_media_codecs`), and the integration
 //! fixtures that drive the physical Feed (`plx_play_feed`) through the player session.
+// Fork Rofocale11: the retained probe/core keeps its own copy of the low-level ABI table while
+// `plx_media_codecs::ffi::*` is still re-exported for callers. The two tables hold identical values
+// (both are asserted by ci/ffabi-assert.c); the private items deliberately shadow the glob.
+#![allow(hidden_glob_reexports)]
+// Fork Rofocale11: upstream moved the physical demuxer (and hence most callers of this retained
+// ABI/binding core, its subtitle helpers and the subside transport) into plx_play_feed. The
+// helpers stay for the probe, the retained encoder and the media tests, so dead_code is expected.
+#![allow(dead_code)]
 pub use plx_media_codecs::ffi::*;
-pub use plx_media_codecs::{SpeedDecoder, Venc};
+// Fork Rofocale11: upstream's `Venc` re-export is dropped — this module keeps the fork's own
+// encoder struct (defined below) for its retained capture path; importing both named `Venc` is E0255.
+pub use plx_media_codecs::SpeedDecoder;
 #[cfg(test)]
 use plx_play_feed::ff_test_support::*;
 #[cfg(test)]
@@ -26,18 +36,18 @@ use plx_play_feed::SendPtr;
 use plx_net::stream::HttpStream;
 #[cfg(test)]
 use plx_net::net::origin::Origin;
-#[cfg(test)]
-use std::ffi::CString;
-#[cfg(test)]
-use std::os::raw::{c_int, c_void};
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 // Fork Rofocale11: NuvioNative's `ff::probe` (ff_probe.rs) opens third-party addon/debrid streams
 // with the bundled libavformat and reports the real container, codecs, frame rate and audio/subtitle
 // tracks to the PMS shim, which the player consumes instead of guessed labels — an unsupported or
 // mislabelled stream must be refused, not loaded with guessed codecs. Upstream deleted this whole
 // low-level binding/demuxer/probe core when it moved the demuxer into plx_play_feed, so the probe
-// and the bindings/helpers its `super::*` relies on must be kept here.
+// and the bindings/helpers its `super::*` relies on must be kept here. These standard types were
+// `#[cfg(test)]` in upstream's facade because only its test fixtures used them; the fork's retained
+// non-test ABI/probe core needs them unconditionally.
+use plx_net::stream::HttpStream;
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
 
 /// Feed audio (es=2) to the pipeline. Cleared by the /tmp/plxnative-noaudio dev trigger to
@@ -1176,7 +1186,10 @@ impl Drop for Venc {
                 avformat_free_context(self.oc); // does not free the caller-set pb
             }
             if !self.avio.is_null() {
-                free_avio(self.avio);
+                // Fork Rofocale11: `free_avio` comes from plx_media_codecs::ffi and therefore takes
+                // that crate's opaque AVIOContext; this module's ABI table keeps its own identical
+                // opaque handle, so cross the type boundary explicitly at the FFI release point.
+                free_avio(self.avio as *mut plx_media_codecs::ffi::AVIOContext);
             }
             if !self.ctx.is_null() {
                 avcodec_free_context(&mut self.ctx);
@@ -1184,6 +1197,16 @@ impl Drop for Venc {
         }
     }
 }
+
+// Fork Rofocale11: upstream's `ass_source` deliberately dropped the header/font count and byte
+// caps ("what can be shown is never cut by a count"), but the fork's retained demux-side
+// registration still needs the old bounds so an oversize/overlong attachment cannot be copied into
+// the render store. They live here, beside the ABI table that reads them, rather than reintroducing
+// a budget into the shared `ass_source` store upstream intentionally made uncapped.
+const MAX_TRACKS: usize = 64;
+const MAX_HEADERS_BYTES: usize = 4 * 1024 * 1024;
+const MAX_FONTS: usize = 128;
+const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Copy the embedded ASS sources before FFmpeg can release them. The codec parameter and
 /// dictionary layouts are already compile-asserted against our bundled FFmpeg headers; the
@@ -1194,7 +1217,10 @@ unsafe fn begin_ass_sources(
     streams: *mut *mut AVStream,
     subs: &[(c_int, SubKind, *mut AVCodecContext)],
 ) -> u64 {
-    use crate::player::{ass::Font, ass_source};
+    use crate::player::{
+        ass::Font,
+        ass_source::{self, TrackHeader},
+    };
     let mut headers = Vec::new();
     let mut header_bytes = 0;
     for (track, (si, kind, _)) in subs.iter().enumerate() {
@@ -1202,11 +1228,17 @@ unsafe fn begin_ass_sources(
         let cp = stream_codecpar(*streams.add(*si as usize));
         let len = (*cp).extradata_size.max(0) as usize;
         if len > 0 && len <= ass_source::MAX_HEADER_BYTES
-            && headers.len() < ass_source::MAX_TRACKS
-            && header_bytes + len <= ass_source::MAX_HEADERS_BYTES
+            && headers.len() < MAX_TRACKS
+            && header_bytes + len <= MAX_HEADERS_BYTES
             && !(*cp).extradata.is_null() {
             header_bytes += len;
-            headers.push((track as i32, std::slice::from_raw_parts((*cp).extradata, len).to_vec()));
+            // Fork Rofocale11: upstream's `ass_source::begin` now takes a typed `TrackHeader`
+            // (Authored bytes vs a synthetic Text dialect) instead of raw header bytes. This is an
+            // authored ASS track, so its file bytes stay the identity exactly as before.
+            headers.push((
+                track as i32,
+                TrackHeader::Authored(std::slice::from_raw_parts((*cp).extradata, len).to_vec()),
+            ));
         }
     }
     let mut fonts = Vec::new();
@@ -1218,9 +1250,9 @@ unsafe fn begin_ass_sources(
             let st = *streams.add(i as usize);
             let cp = stream_codecpar(st);
             let len = (*cp).extradata_size.max(0) as usize;
-            if fonts.len() >= ass_source::MAX_FONTS { break; }
+            if fonts.len() >= MAX_FONTS { break; }
             if (*cp).codec_type != AVMEDIA_TYPE_ATTACHMENT || len < 4
-                || len > ass_source::MAX_FONT_BYTES - font_bytes || (*cp).extradata.is_null() { continue; }
+                || len > MAX_FONT_BYTES - font_bytes || (*cp).extradata.is_null() { continue; }
             let data = std::slice::from_raw_parts((*cp).extradata, len);
             // Accept sfnt/OpenType/TrueType collection signatures, not arbitrary attachments.
             if !matches!(&data[..4], b"\x00\x01\x00\x00" | b"OTTO" | b"ttcf" | b"true") { continue; }
@@ -1528,162 +1560,16 @@ struct HlsNet {
     curl: Option<Box<crate::curlio::CurlSource>>,
 }
 
-/// **The live-transfer terminal rule.** A partial response is right-censored evidence.  PMS may
-/// open a sized HLS response, deliver a prefix, wait for its JIT encoder (`segmentWait` in the
-/// server's own SessionReport), then burst the remainder.  Consequently neither
-/// `prefix_bytes / prefix_time` nor `Content-Length - prefix_bytes` identifies the unseen
-/// acquisition time.  The former attained-rate projection falsely abandoned sustainable 4K
-/// responses on the remote PMS.
-///
-/// There is one coefficient-free fact available before completion: the playable reserve has
-/// actually reached zero.  The main thread observes that physical boundary and holds Starfish's
-/// clock; this guard observes the same hold (or the equivalent playhead spend) on every blocking
-/// leg of the fetch — the open, the `NotReady` wait, the probe and body reads — through the
-/// acquisition runtime's checkpoint (`ff_acquisition.rs`), within one `CHECK_SLICE` of a wait
-/// already blocked.  Above the ladder floor it abandons the still-incomplete object so the
-/// controller can fetch a smaller one, even before any body byte exists.  At the floor it leaves
-/// the only useful response alive.  No prefix becomes a capacity sample in either direction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StallGuard {
-    /// The playable reserve when this fetch began, in ms of media. `None` is never stored — an
-    /// unknowable reserve (`BufferSnapshot::buffered_ms`'s `None`, the audio lane silent after an
-    /// open or a seek) arms no guard at all, because the comparison has no left-hand side.
-    reserve_ms_at_start: i64,
-    /// Playhead at the fetch boundary.  Wall time is deliberately absent: queued media is spent
-    /// by presentation, not by a blocked request, pause, seek or server wait.
-    playhead_at_start_ns: i64,
-    /// `SHARED.hls_internal_hold_epoch` when armed. A hold the main thread accepted AND already
-    /// released between two checks still moved it, so a short hold cannot slip between samples.
-    hold_epoch_at_arm: u64,
-    action: StallAction,
-}
+// Fork Rofocale11: the HLS terminal stall guard and its `SegmentAcquisition` policy were removed
+// from this crate by the upstream merge. The guard is NOT gone from the product: upstream moved the
+// identical rule (same reserve, hold-epoch and playhead-spend predicates) into
+// `plx_play_feed::ff::{StallGuard, arm_active_stall_guard}` and the process state it samples into
+// `plx_play_feed::shared::FEED_SHARED::{hls_internal_hold_epoch, hls_video_tail_ns,
+// hls_rebuffer_request_tail_ns, hls_rebuffer_requested}`. The shipped demuxer is plx_play_feed's, so
+// that is the live guard; this crate's copy had no caller left after the demuxer moved and could only
+// have read a stale duplicate of FEED_SHARED. The media tests already drive upstream's guard through
+// `plx_play_feed::ff_test_support`. Kept as a pointer to the real home for future merges.
 
-/// What happens after the same in-flight conservation inequality is crossed. Above the floor a
-/// smaller object exists, so abandoning the response releases the controller to fetch it. At the
-/// floor abandoning can only re-request the same bytes; keep that response alive and hold the A/V
-/// clock instead.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum StallAction {
-    AbortFetch,
-    HoldClock,
-}
-
-impl StallGuard {
-    /// **Arm the guard, or decline to.** A reserve of zero AT THE START of a fetch is not an
-    /// emergency — it is what every session looks like before its first segment has been
-    /// delivered, and the rule's premise is that continuing projects a stall the abort could
-    /// avoid. With no picture yet there is nothing to stall and the abort has nothing to buy: it
-    /// simply abandons the fetch, pushes the segment back, and abandons it again.
-    ///
-    /// **That is not hypothetical.** Armed without this gate, device-measured 2026-08-28:
-    /// `abr: stall abort seq=0 bytes=2896 of 0ms reserve` — playback never started at all, one
-    /// segment fetched, the video plane never bound. It is the same shape as the plan's I3
-    /// (the first-segment false downshift): a predicate keyed on the reserve, evaluated at the one
-    /// moment the reserve is empty for a reason that is not failure.
-    ///
-    /// Mid-playback a genuinely drained reserve declines the guard too, and that is the
-    /// conservative direction rather than a gap: by then the picture has already stopped, the
-    /// abort can no longer prevent anything, and `starving()` is the predicate that owns it.
-    fn arm(reserve_ms_at_start: i64) -> Option<Self> {
-        (reserve_ms_at_start > 0).then(|| Self {
-            reserve_ms_at_start,
-            playhead_at_start_ns: crate::player::playpos_ns(),
-            hold_epoch_at_arm: SHARED.hls_internal_hold_epoch.load(Ordering::Acquire),
-            action: StallAction::AbortFetch,
-        })
-    }
-
-    /// At the terminal actuator the same observed boundary may stop presentation, but it must not
-    /// discard the only response capable of producing more media.
-    fn arm_clock_hold(reserve_ms_at_start: i64) -> Option<Self> {
-        Self::arm(reserve_ms_at_start).map(|mut guard| {
-            guard.action = StallAction::HoldClock;
-            guard
-        })
-    }
-
-    fn aborts_fetch(self) -> bool {
-        self.action == StallAction::AbortFetch
-    }
-
-    /// Has an incomplete fetch crossed an OBSERVED terminal boundary? `body_complete` exempts a
-    /// response whose declared bytes all arrived (or whose unsized body reached a confirmed end);
-    /// before the body exists nothing is complete. `terminal_hold_started` is the main thread's
-    /// terminal observation — an exact arithmetic `B=0`, or a presentation clock that has
-    /// physically stopped (`pump::native_clock_stopped`) — and a hold epoch that moved since
-    /// arming is the same observation, already released.
-    /// The playhead form is the same arithmetic sampled by this worker, and on this pipeline it is
-    /// a bound rather than a trigger: `reserve_ms_at_start` is measured to the demuxed tail, and
-    /// the television parks the clock a few hundred ms short of that tail (the last fed access
-    /// units cannot present until the ones behind them arrive), so `spent_ms` stops accruing just
-    /// below the reserve and the hold has to come from the main thread. Device-measured
-    /// 2026-09-02 (`pipe_abr_down_collapse`): reserve 5668 ms, playhead spent 5410 ms, then 77 s
-    /// of `vtick=0` with neither branch firing. Neither branch predicts an unseen byte.
-    fn should_abort(&self, body_complete: bool, terminal_hold_started: bool) -> bool {
-        if body_complete {
-            return false;
-        }
-        terminal_hold_started
-            || SHARED.hls_internal_hold_epoch.load(Ordering::Acquire) != self.hold_epoch_at_arm
-            || self.spent_ms() >= self.reserve_ms_at_start
-    }
-
-    fn spent_ms(&self) -> i64 {
-        crate::player::playpos_ns()
-            .saturating_sub(self.playhead_at_start_ns)
-            .max(0)
-            / 1_000_000
-    }
-
-    /// The wall instant at which the playhead, at one speed, would spend what remains. A wake-up
-    /// only: a paused or stopped playhead makes it stale, and the next check simply re-projects.
-    fn projected_boundary(&self) -> std::time::Instant {
-        let left_ms = self
-            .reserve_ms_at_start
-            .saturating_sub(self.spent_ms())
-            .max(0);
-        let now = std::time::Instant::now();
-        now.checked_add(std::time::Duration::from_millis(left_ms as u64))
-            .unwrap_or(now)
-    }
-}
-
-/// **The one way a guard asks the main thread to hold Starfish's A/V clock** — from whichever
-/// blocking leg saw the boundary. The main thread may already have held it on its own exact B=0
-/// sample; asking again is harmless.
-fn request_terminal_hold() {
-    SHARED.hls_rebuffer_request_tail_ns.store(
-        SHARED.hls_video_tail_ns.load(Ordering::Acquire),
-        Ordering::Release,
-    );
-    SHARED.hls_rebuffer_requested.store(true, Ordering::Release);
-}
-
-/// An already-held clock is a recovery state: the active response is rebuilding reserve and may
-/// not be abandoned by the boundary that has already fired. Kept pure at the call boundary so a
-/// regression cannot silently turn B=0 into an abort loop again.
-fn arm_active_stall_guard(
-    reserve_ms: Option<i64>,
-    at_floor: bool,
-    already_held: bool,
-) -> Option<StallGuard> {
-    if already_held {
-        return None;
-    }
-    reserve_ms.and_then(|reserve_ms| {
-        if at_floor {
-            StallGuard::arm_clock_hold(reserve_ms)
-        } else {
-            StallGuard::arm(reserve_ms)
-        }
-    })
-}
-
-// `SegmentAcquisition` lives in its own module so its payload is not nameable from `ff` — see
-// `ff_acquisition.rs` for why (the bypass a review round found: everything in `ff` could build
-// `Active { stall: None, .. }` by hand even with the role-typed enum in place).
-#[path = "ff_acquisition.rs"]
-mod acquisition;
 #[path = "ff_subs.rs"]
 mod subs;
 #[path = "ff_subside.rs"]
@@ -1691,7 +1577,7 @@ pub(crate) mod subside;
 // NuvioNative: open a third-party stream and report what it really holds (the PMS shim's input).
 #[path = "ff_probe.rs"]
 pub mod probe;
-use subs::{SubKind, SubTracks};
+use subs::SubKind;
 #[cfg(test)]
 use std::sync::Arc;
 

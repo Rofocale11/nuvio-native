@@ -9,6 +9,12 @@
 //! `Instant::now`/`SystemTime::now`/`.elapsed()`; `decision.rs` is not scanned by that gate (a
 //! network/adapter effect is allowed to read wall time) but as of this split carries none either.
 
+// Fork Rofocale11: the fork keeps its own probe-first `build_stream`, which predates several of
+// upstream's resolve helpers (version picking, track memory, URI preflight). Those helpers stay in
+// the shared layer and are exercised by the tests, so dead_code here is the expected consequence of
+// keeping the fork's route rather than a signal to delete them.
+#![allow(dead_code)]
+
 pub mod backend_policy;
 pub mod uri_preflight;
 mod uri_offer;

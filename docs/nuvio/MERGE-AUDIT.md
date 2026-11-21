@@ -81,11 +81,30 @@ each is a place to watch on the next upstream merge.
   English key in every locale; no new wording or branding was introduced. These are the
   keys to re-check on every upstream locale change.
 
+## Post-merge port to upstream APIs (plx_media)
+
+The fork's retained FFmpeg core needed adapting to the APIs upstream moved:
+- `media/src/ff.rs`: unconditional std/FFI imports (upstream had them `#[cfg(test)]`
+  because its `ff.rs` is now a facade), `Venc` re-export aliased away from the fork's
+  local struct, header/font caps restored locally, `ass_source::begin` adapted.
+  `#![allow(dead_code)]` / `#![allow(hidden_glob_reexports)]` are required because the
+  fork's ABI table shadows the codecs re-export and most callers moved to `plx_play_feed`.
+- `media/src/ff_probe.rs`: ABI bring-up restored — the probe now loads and version-checks
+  the fork's own dynlib table on first use, otherwise it would refuse every stream.
+- `media/src/ff_subs.rs`: local `pts_ns` and subtitle cue submission mapped to the new
+  typed `ass_source` / `CaptionRetention` API.
+- `media/src/route/plan.rs`: `plx_platform` → `plx_os`, playqueue/metadata/decision
+  signatures, `audio_direct_plays_with`, caps plumbing. Probe-first `build_stream`
+  behavior is unchanged.
+- The fork's duplicate HLS terminal stall guard was **not** kept in-crate: upstream has
+  the identical rule in `plx_play_feed::ff::{StallGuard, arm_active_stall_guard}`, which
+  is the live guard for the shipped demuxer. `ff_acquisition.rs` was removed as dead.
+
+All adaptations carry `// Fork Rofocale11:` comments.
+
 ## Still to verify
 
 - `SCREEN_SHAPES_PIN` in `registry.rs` is upstream's value; the merged tree needs a
   re-pin and replay re-record.
-- Compiler diagnostics from the fork code retained in `media/src/ff.rs` and
-  `media/src/route/plan.rs`.
-- `make check`, `make check-nodef`, ARM build and UI capture. A host pass is not a
-  device proof.
+- Full workspace `cargo check`, `make check`, `make check-nodef`, ARM build and UI
+  capture. A host pass is not a device proof.

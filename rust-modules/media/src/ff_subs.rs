@@ -11,6 +11,21 @@
 //! this context's clock and the playhead.
 
 use super::*;
+// Fork Rofocale11: upstream's `pts_ns` moved to plx_media_codecs::subtitle_extract, whose ABI types
+// are a distinct copy of the table this retained fork core keeps. Compute the same rebasing from
+// this module's own table instead of casting opaque packet/stream pointers across the two copies.
+unsafe fn pts_ns(pkt: *const AVPacket, st: *mut AVStream) -> i64 {
+    let t = if (*pkt).pts != AV_NOPTS_VALUE {
+        (*pkt).pts
+    } else {
+        (*pkt).dts
+    };
+    if t == AV_NOPTS_VALUE {
+        return 0;
+    }
+    av_rescale_q(t, stream_time_base(st), NS_TB)
+}
+
 /// How a subtitle stream's payload turns into displayable text — classified by the codec's
 /// name (avcodec_get_name is already linked, so we avoid hardcoding the n3.3 subtitle codec-id
 /// block, which the ABI probe never verified). Bitmap subs (PGS/VobSub/DVB/teletext) carry no
@@ -256,12 +271,29 @@ impl SubCue<'_> {
     /// Hand the cue to the render store. `ass_generation` is the `ass_source::begin` token an
     /// `Ass` cue is pushed under; the other kinds ignore it.
     pub(super) fn push(self, ass_generation: u64) {
+        // Fork Rofocale11: upstream folded the old `player::push_subtitle_cue` into the typed
+        // `ass_source::push_text`/`push` and added a retention record plus a packet identity to
+        // both. The fork's own cue enum has no identity field, so derive it from the packet bytes
+        // exactly as `subtitle_cue::SubCue::Text` does; an unknown playhead means no cue may be
+        // retired by time, which is the conservative value here (the caller owns the clock).
+        let retention = plx_playback_contract::subtitle::CaptionRetention {
+            playhead_ns: None,
+            seek_target_ns: None,
+        };
         match self {
             SubCue::Text { track, start, end, payload } => {
-                crate::player::push_subtitle_cue(track, start, end, payload);
+                crate::player::ass_source::push_text(
+                    ass_generation,
+                    track,
+                    start,
+                    end,
+                    &String::from_utf8_lossy(payload),
+                    crate::player::ass_source::packet_identity(payload),
+                    retention,
+                );
             }
             SubCue::Ass { track, start, end, payload } => {
-                crate::player::ass_source::push(ass_generation, track, start, end, payload);
+                crate::player::ass_source::push(ass_generation, track, start, end, payload, retention);
             }
             SubCue::BitmapClear { track, pts } => crate::player::close_subtitle_bitmap(track, pts),
             SubCue::BitmapSet { track, pts, cw, ch, rects, total_rects } => {
@@ -277,7 +309,7 @@ impl SubCue<'_> {
                         rects.len()
                     ));
                 }
-                crate::player::push_subtitle_bitmap(track, pts, cw, ch, rects);
+                crate::player::push_subtitle_bitmap(track, pts, cw, ch, rects, retention);
                 if total_rects > MAX_RECTS {
                     crate::player::log(&format!(
                         "ff: image-sub track#{track} {total_rects} rects (capped at {MAX_RECTS})"

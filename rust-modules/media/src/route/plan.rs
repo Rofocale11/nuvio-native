@@ -16,14 +16,14 @@
 use plx_data::metadata::lang_matches;
 use plx_data::metadata::sub_layout::{sub_traits, SubTraits};
 use plx_plex::plex::session::prefs::{SubtitleMemo, TrackMemoryEntry};
-use super::track_memory::{blank_lang, match_audio, memory_subtitle, Miss, SubMode, TrackContext};
+use super::track_memory::{blank_lang, memory_subtitle, Miss, SubMode, TrackContext};
 
 // The track memory's pure helpers (the show's entry, the write-back a landing owes, the resolve's
 // `track-memory:` line), a child module so this file keeps the route plan and the ladder.
 #[path = "plan_memory.rs"]
 mod memory;
 pub(super) use memory::external_on_part;
-use memory::{consulted_memory, landed_sub_mode, memory_log, memory_subtitle_id, show_memory, write_back_of};
+use memory::consulted_memory;
 use plx_plex::plex::ServerId;
 use std::sync::atomic::Ordering;
 
@@ -1800,6 +1800,10 @@ pub enum SubWrite {
 /// client here is `client_for` of it.
 // Fork Rofocale11: NuvioNative asks the PMS shim's /decision FIRST for an addon stream (client.is_nuvio()) and refuses anything unprobed/unsupported, then replaces the caller's part/codecs with the probed Media and forces Quality::Original (the shim has no transcoder). Loading a label-guessed codec would declare the wrong decoder and stall the Starfish pipeline. Upstream's build_stream refactor plans from the detail item and cannot express this, so the fork's whole function is kept here.
 pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str, vcodec: &str, acodec: &str, env: &ResolveEnv) -> Plan {
+    // Fork Rofocale11: upstream threaded the picked version's `mediaIndex` through every server
+    // decision and Load that can address one Media[] entry. The fork's probe-first path has no
+    // version picker — the shim's probed Media replaces the caller's Part/codecs wholesale — so the
+    // index stays at its default 0, but the value is named here so all the migrated calls agree.
     // The part id is derived from THIS call's `part`, before anything else runs, and published
     // here rather than by the caller after we return. It used to be written by play_movie /
     // play_episode *after* build_stream finished, so `put_selection` — which runs inside this
@@ -1824,6 +1828,11 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         source_decodable: true,
         ..Default::default()
     };
+
+    // Fork Rofocale11: the fork's probe-first path has no version picker (the shim's probed Media
+    // replaces the caller's Part/codecs wholesale), so the Media[] index stays at its default 0.
+    // Named here so every migrated server decision/spec uses the same value.
+    let media_index = plan.media_index;
     if env.direct_play_mode == DirectPlayMode::Disabled && rk.is_empty() {
         plan.verdict = Some(PlayVerdict::DirectPlayDisabled);
         return plan;
@@ -1842,7 +1851,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // shim to probe first, then derive every playback field from that one response.
     let nuvio_decision = if client.is_nuvio() && !rk.is_empty() {
         playback_quality = Quality::Original;
-        match client.mde_decision(rk, &session, env.audio_sid, env.sub_sid) {
+        match client.mde_decision(rk, plan.media_index, &session, env.audio_sid, env.sub_sid, &env.caps) {
             Some(mc) => {
                 if let Some(why) = refusal(&mc) {
                     plan.verdict = Some(PlayVerdict::Server(why, DecisionCodes::of(&mc)));
@@ -1853,7 +1862,11 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
             None => return plan,
         }
     } else { None };
-    let nuvio_media = nuvio_decision.as_ref().and_then(|mc| mc.metadata.first()).and_then(|m| m.primary_media());
+    let nuvio_media = nuvio_decision
+        .as_ref()
+        .and_then(|mc| mc.metadata.first())
+        .and_then(|m| m.media_version(None))
+        .map(|(_, m)| m);
     let vcodec = nuvio_media.map_or(vcodec, |m| m.video_codec.as_str());
     let acodec = nuvio_media.map_or(acodec, |m| m.audio_codec.as_str());
     let part = nuvio_media.and_then(|m| m.part.first()).map_or(part, |p| p.key.as_str());
@@ -1864,6 +1877,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         let q = resolve_playqueue(
             client,
             rk,
+            &env.queue_show_rk,
             &session,
             &env.machine_id,
             !env.omit_queue_continuous,
@@ -1878,11 +1892,11 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // loaded detail can be a different item (show page / straight-from-Home play)
     // detail already had this item's streams — no GET
     plan.playing = if let Some(mc) = &nuvio_decision {
-        plx_data::metadata::playing_item_from_metadata(env.sid, rk, mc.metadata.first())
+        Some(plx_data::metadata::playing_version_from(env.sid, rk, mc.metadata.first(), None).0)
     } else { env
         .cached_item
         .clone()
-        .or_else(|| plx_data::metadata::fetch_playing_item(env.sid, rk)) };
+        .or_else(|| plx_data::metadata::fetch_playing_item(client, env.sid, rk, None).map(|(item, _)| item)) };
     if let (Some(id), Some(item)) = (env.subtitle_override, plan.playing.as_mut()) {
         // The retry's explicit selection owns both embedded and sidecar restoration; a stale
         // server-side selection must not turn subtitles back on after the viewer chose Off.
@@ -1924,23 +1938,14 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     let dovi = plan.playing.as_ref().map(|p| p.dovi).unwrap_or_default();
     // Freeze the capability and derived presentation together. A late configd answer affects the
     // next route only; it cannot change this candidate between the gate and Starfish Load.
-    #[cfg(any(test, feature = "test-support"))]
-    let dv_decision = match env.dv_capability {
-        Some(capability) => plx_data::metadata::DvDecision {
-            capability,
-            presentation: dovi.presentation(
-                !plx_data::metadata::dv_withheld(),
-                capability,
-                vcodec == "hevc",
-            ),
-        },
-        None => dovi.decision_now(vcodec == "hevc"),
-    };
-    #[cfg(not(any(test, feature = "test-support")))]
-    let dv_decision = dovi.decision_now(vcodec == "hevc");
+    // Fork Rofocale11: upstream removed `DvDecision::decision_now`; `frozen_dv_decision` is its
+    // replacement and applies the viewer's Dolby Vision mode via `mode.gate(probed)` before the
+    // presentation is derived. The fork's old test-only branch hand-constructed the decision from
+    // the raw capability, which is exactly the drift the shared helper now prevents.
+    let dv_decision = frozen_dv_decision(env.dolby_vision_mode, env.dv_capability, dovi, vcodec);
     let dv = dv_decision.presentation;
-    let video_dp = if forced { video_feed_supported(vcodec, dv, plx_platform::devcaps::caps()) } else {
-        video_direct_plays(vcodec, src_w, src_h, dv, plx_platform::devcaps::caps())
+    let video_dp = if forced { video_feed_supported(vcodec, dv, &*env.caps) } else {
+        video_direct_plays(vcodec, src_w, src_h, dv, &*env.caps)
     };
     // Carried to the session so the quality menu can say whether "Original" means anything for
     // this item without evaluating the gate a second time against a different set of facts.
@@ -2053,8 +2058,10 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         None => AccountAudioLanguage::NoCredential,
     };
     // every audio pick below (direct play, remux, re-encode) ranks against these same prefs
-    let audio_prefs = AudioLangPrefs { show: show_prefs.audio.as_deref(),
-        account: account_audio.language() };
+    // Fork Rofocale11: upstream added `remembered` to AudioLangPrefs (a remembered track pick from
+    // the live session). This resolve path has no such pick, so `new` is the exact two-field form
+    // the fork used before the field existed.
+    let audio_prefs = AudioLangPrefs::new(show_prefs.audio.as_deref(), account_audio.language());
     // The audio the TV will DECODE, decided in two steps so the subtitle pick (which reads the
     // audio's language) sits between them:
     //   1. here: the intended track. Unless the copy is blocked (forced direct play, or a video
@@ -2065,11 +2072,11 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     //      through a remux) may still direct-play a non-commentary stand-in, provisionally — it is
     //      kept only if a direct play results — or, with only a commentary to stand in, burn it
     //      once the route is known to be the remux (see `burn_for_audio` below).
-    let eligible = |codec: &str, channels: i64| audio_direct_plays(env.direct_play_mode, codec, channels);
+    let eligible = |codec: &str, channels: i64, rate: i64| audio_direct_plays_with(&env.caps, env.direct_play_mode, codec, channels, rate);
     let copy_blocked = forced || no_video_copy;
     let pick_audio = |stand_in: StandIn| {
         let exact = (env.audio_sid > 0).then(|| {
-            tracks.iter().enumerate().find(|(_, t)| t.id == env.audio_sid && eligible(&t.codec, t.channels))
+            tracks.iter().enumerate().find(|(_, t)| t.id == env.audio_sid && eligible(&t.codec, t.channels, t.sampling_rate))
                 .map(|(i, t)| (i as i32, t.codec.to_lowercase(), t.id))
         }).flatten();
         // A forced direct play has no server to convert an unplayable SESSION pick, and naming
@@ -2107,7 +2114,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         ));
     }
     if !rk.is_empty() {
-        crate::player::log(&account_audio_language_log(&account_audio, tracks, audio_sel.as_ref()));
+        crate::player::log(&account_audio_language_log(&env.caps, &account_audio, tracks, audio_sel.as_ref()));
     }
     // the language of the audio that will play — what "shown with foreign audio" is judged by.
     let audio_lang = playing_audio_language(tracks, audio_sel.as_ref(), env.audio_sid, audio_prefs);
@@ -2244,22 +2251,22 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         // which the server converts. The play-path PUT and start.mkv use `encode_audio_id`: remux
         // names the same; a re-encode walks the `audio_intents` ranking (the PMS selection, then
         // show/account language, then the direct-play pick), so 720p does not copy a foreign AC3.
-        if forced { forced_server_decision(client, rk, &session, carry_audio_id, subtitle_id) }
-        else { server_decision(client, rk, &session, carry_audio_id, subtitle_id) }
+        if forced { forced_server_decision(client, &env.caps, rk, media_index, &session, carry_audio_id, subtitle_id) }
+        else { server_decision(client, &env.caps, rk, media_index, &session, carry_audio_id, subtitle_id) }
     };
     // A direct play needs a track to play: with none the server converts the intended one, which
     // is not Original whatever MDE said about the (omitted) audio. With no track list yet, the
     // Media-level audio codec stands in: one the TV cannot decode (DTS-HD MA on a set with no DTS
     // row, #584) is the same case, since MDE judged the profile and not what the pipeline feeds.
     let mut directplay = (audio_sel.is_some()
-        || (tracks.is_empty() && (acodec.is_empty() || audio_direct_plays(env.direct_play_mode, acodec, 0))))
+        || (tracks.is_empty() && (acodec.is_empty() || audio_direct_plays_with(&env.caps, env.direct_play_mode, acodec, 0, 0))))
         && mde.as_ref().is_some_and(|v| v.original && (!forced || !v.video_forbids_copy));
     if forced {
         let failure = if part.is_empty() { Some(ForcedFailure::NoOriginal) }
             else if !streamable { Some(ForcedFailure::Container) }
             else if !video_dp { Some(ForcedFailure::Video) }
-            else if audio_sel.is_none() && (!tracks.is_empty() || !audio_direct_plays(env.direct_play_mode, acodec, 0)) {
-                Some(ForcedFailure::Audio)
+            else if audio_sel.is_none() && (!tracks.is_empty() || !audio_direct_plays_with(&env.caps, env.direct_play_mode, acodec, 0, 0)) {
+                Some(ForcedFailure::Audio { codec: refused_audio_codec(tracks, acodec, audio_prefs, env.audio_sid) })
             } else if !rk.is_empty() && !directplay { Some(ForcedFailure::Unauthorized) }
             else { None };
         if let Some(failure) = failure {
@@ -2351,6 +2358,8 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
                 carried: $candidate.and_then(|c| c.audio.as_ref()),
                 subtitle_effect,
                 refused: false,
+                quality: env.quality,
+                declined: plan.original_declined,
             }
         };
     }
@@ -2373,8 +2382,8 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // `abr::bootstrap` owns the policy; this site owns only the facts it needs.
     let bootstrap_catalog = crate::abr::HlsActuatorCatalog::measured().limited_to(
         (
-            u16::try_from(plx_platform::devcaps::caps().hevc_max.0).unwrap_or(u16::MAX),
-            u16::try_from(plx_platform::devcaps::caps().hevc_max.1).unwrap_or(u16::MAX),
+            u16::try_from(env.caps.hevc_max.0).unwrap_or(u16::MAX),
+            u16::try_from(env.caps.hevc_max.1).unwrap_or(u16::MAX),
         ),
         (
             u16::try_from(src_w).unwrap_or(u16::MAX),
@@ -2416,7 +2425,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
                         measure_remote_original(
                             &client.direct_play_url(part, &session).to_url(),
                             source_transport_kbps,
-                        )
+                        ).sample()
                     } else {
                         // Part GET 503s after a transcode MDE. Sample the remux we would actually play.
                         remux_probed = true;
@@ -2432,7 +2441,9 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
                         let probe = measure_remote_remux(
                             off,
                             client,
+                            &env.caps,
                             rk,
+                            media_index,
                             &session,
                             probe_audio,
                             if drawn { 0 } else { env.sub_sid },
@@ -2665,7 +2676,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         plan.vcodec = "h264".into();
         plan.acodec = "aac".into();
     } else {
-        plan.vcodec = plx_platform::devcaps::caps().encode_vcodec().into();
+        plan.vcodec = env.caps.encode_vcodec().into();
         plan.acodec = "ac3".into();
     }
     // Carry the SOURCE track this path will PUT and name on start.mkv. The demuxer is NOT
@@ -2703,7 +2714,9 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         let _ = client.transcode_stop_physical(&session);
     }
     let mut sp = transcode_spec_carrying_burn(
+        &env.caps,
         rk,
+        media_index,
         &session,
         &session,
         plx_plex::plex::TranscodeOffset::Fresh,
@@ -2728,7 +2741,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
             // Back to the direct play the enhancement decorated. The MDE is re-asked first so the
             // Part GET follows a decision that is the direct play's own — M5 found PMS serving the
             // Part regardless, so this is belt-and-braces, not a 503 workaround.
-            let _ = server_decision(client, rk, &session, carry_audio_id, subtitle_id);
+            let _ = server_decision(client, &env.caps, rk, media_index, &session, carry_audio_id, subtitle_id);
             plan.contract.remux = false;
             plan.contract.no_video_copy = false;
             fill_direct_plan(&mut plan, client, part, &session, vcodec, acodec, audio_sel.as_ref(), dovi, dv_decision, sub_pick);
@@ -2740,7 +2753,9 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
             plan.acodec = acodec.to_string();
         }
         sp = transcode_spec_carrying_burn(
+            &env.caps,
             rk,
+            media_index,
             &session,
             &session,
             plx_plex::plex::TranscodeOffset::Fresh,
@@ -2756,7 +2771,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         // measure_remote_remux already logged and recorded the diag event at the refusal point.
         plan.enhancement = super::decision::EnhancementOutcome::Refused;
     } else {
-        plan.enhancement = classify_outcome(decision.as_ref(), plan.audio.as_ref(), audio);
+        plan.enhancement = classify_outcome(&env.caps, decision.as_ref(), plan.audio.as_ref(), audio);
         // The cold-start twin of `install_retranscode_outcome`'s live-reconcile logging (issue #266/M7): this
         // branch can ALSO land an enhanced remux (or, forced by an embedded subtitle, a Burn)
         // before the first frame, with no live pick in the picture, and the harness case had no

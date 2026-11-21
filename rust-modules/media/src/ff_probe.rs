@@ -195,8 +195,24 @@ unsafe fn codec_name(id: c_int) -> String {
 /// Open `url` and report what it holds. `Err` carries a short reason for the log (never the URL,
 /// whose query may be a signature).
 pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe, String> {
+    // Fork Rofocale11: after the upstream merge the app boots `plx_media_codecs::ffi`, NOT this
+    // module's own dynlib table. `ABI_OK` and the avformat/avcodec pointers this probe calls are
+    // published only by this module's `load_libraries`/`boot`; without the fork's old
+    // `plx_media::ff::boot()` call in app boot, every probe would be refused (and any call that
+    // slipped past would dereference a null symbol). Bring the fork's table up once here, with
+    // the same major check `boot` applies, so the probe keeps reporting the real stream on a
+    // merged build. A missing or foreign lib still refuses — no guessed codecs at unverified ABI.
     if !ABI_OK.load(Ordering::Relaxed) {
-        return Err("bundled FFmpeg unavailable".into());
+        if !load_libraries() {
+            return Err("bundled FFmpeg unavailable".into());
+        }
+        unsafe {
+            let (fmt, cod, utl) = (avformat_version(), avcodec_version(), avutil_version());
+            if (fmt >> 16, cod >> 16, utl >> 16) != (63, 63, 61) {
+                return Err("bundled FFmpeg ABI mismatch".into());
+            }
+        }
+        ABI_OK.store(true, Ordering::Relaxed);
     }
     ensure_registered();
     let until = std::time::Instant::now() + deadline;
@@ -226,18 +242,18 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
         }
         let mut fmt = avformat_alloc_context();
         if fmt.is_null() {
-            free_avio(avio);
+            free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
             return Err("avformat_alloc_context failed".into());
         }
         (*fmt).pb = avio;
         let r = avformat_open_input(&mut fmt, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut());
         if r < 0 || fmt.is_null() {
-            free_avio(avio);
+            free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
             return Err(format!("not a recognised container (r={r})"));
         }
         if avformat_find_stream_info(fmt, std::ptr::null_mut()) < 0 {
             avformat_close_input(&mut fmt);
-            free_avio(avio);
+            free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
             return Err("find_stream_info failed".into());
         }
         let mut out = MediaProbe {
@@ -307,7 +323,7 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
             }
         }
         avformat_close_input(&mut fmt);
-        free_avio(avio);
+        free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
         drop(io);
         Ok(out)
     }
