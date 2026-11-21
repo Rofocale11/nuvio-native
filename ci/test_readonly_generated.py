@@ -21,7 +21,9 @@ class GeneratedProofTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'rust-modules'
         certificate = json.loads(generated.CERTIFICATE_PATH.read_text(encoding='utf-8'))
-        paths = set(certificate['manifests']) | set(certificate['sources']) | {'Cargo.lock'}
+        # Mirror the REAL workspace member list; a stale certificate must fail the proof closed
+        # (manifest-set mismatch) rather than produce a missing-file error in the fixture.
+        paths = set(dependency._manifest_paths(ROOT / 'rust-modules')) | set(certificate['sources']) | {'Cargo.lock'}
         paths |= {p for p, value in certificate['configs'].items() if value is not None}
         paths.add('../locales/languages.json')
         for relative in paths:

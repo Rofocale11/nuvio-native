@@ -24,7 +24,11 @@ class LockedJsonProofTests(unittest.TestCase):
         self.root = Path(self.temp.name) / 'rust-modules'
         self.certificate = proof._load_certificate()
         workspace = self.certificate['workspace']
-        for relative in list(workspace['manifests']) + ['Cargo.lock']:
+        # Discover the members from the REAL workspace manifest, not from the pinned certificate:
+        # a new member must be present in the fixture so a stale pin fails closed with a verdict
+        # (a manifest set mismatch) instead of an incidental FileNotFoundError. Never copy a path
+        # the certificate claims but the workspace no longer has — that would mask a stale pin.
+        for relative in proof._manifest_paths(ROOT / 'rust-modules') + ['Cargo.lock']:
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / 'rust-modules' / relative, destination)
