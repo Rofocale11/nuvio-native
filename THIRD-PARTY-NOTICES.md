@@ -329,6 +329,7 @@ stated; election does not alter your rights under the other arms.
 | gimli | 0.34.0 | MIT OR Apache-2.0 | The `gimli` authors |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | Amanieu d'Antras |
 | image | 0.25.10 | MIT OR Apache-2.0 | The image-rs Developers |
+| image-webp | 0.2.4 | MIT OR Apache-2.0 | The image-rs Developers |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | 2016–2017 The indexmap authors |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | David Tolnay |
 | libc | 0.2.191 and 0.2.189 | MIT OR Apache-2.0 | The Rust Project Developers |
@@ -338,6 +339,7 @@ stated; election does not alter your rights under the other arms.
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | 2014 The Rust Project Developers |
 | object | 0.39.1 | Apache-2.0 OR MIT | The `object` authors |
 | png | 0.18.1 | MIT OR Apache-2.0 | 2015 nwin |
+| quick-error | 2.0.1 | MIT/Apache-2.0 | 2015 The quick-error Developers |
 | rustc-demangle | 0.1.28 | MIT/Apache-2.0 | Alex Crichton |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers |
 | serde | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay |

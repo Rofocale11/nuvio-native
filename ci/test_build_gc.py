@@ -1511,7 +1511,14 @@ def copy_tree(src, dst):
         spec = importlib.util.spec_from_file_location("oguard", ROOT / ".claude/hooks/outbound-guard.py")
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
-        kept_patterns = {"src/config.local.h", "local.env", "tests/manifest.local.json", ".claude/worktrees/",
+        # Fork Rofocale11: NuvioNative's Stremio addon keeps its real PMS host + X-Plex-Token in
+        # rust-modules/stremio/nuvio.local.env, a gitignored PRIVATE file (README/ARCHITECTURE in
+        # docs/nuvio/). It is a sibling of the generic `local.env` below but a distinct .gitignore
+        # pattern; without naming it here the test misclassifies it as rebuildable build output,
+        # builds a lane around it, and build-gc.sh rightly reports it as "not rebuildable" — a false
+        # failure. Classify it as kept/private so it is never deleted by a lane teardown.
+        kept_patterns = {"src/config.local.h", "local.env", "rust-modules/stremio/nuvio.local.env",
+                         "tests/manifest.local.json", ".claude/worktrees/",
                          "sysroot/", "rust-poc/", ".abi-cache/", ".webos-ndk/", ".tv-mac", ".tv-host",
                          ".tv-dpad-pass", ".tv-remote-url", "pkg/diagnostics/", "pkg/auth.json", "pkg/lab.json",
                          "pkg/telemetry.local.json", "tests/fixtures/softfloat/arm.tbl", "**/plxnative-recordings/",

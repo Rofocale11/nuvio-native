@@ -140,11 +140,16 @@ class PlatformVariable(unittest.TestCase):
 
     def test_the_existing_queries_do_not_move(self):
         """`make -s print-flavor print-appid` is what every tool asks, and PLATFORM changes neither."""
+        # Fork Rofocale11: the fork's app identity is com.nuvionative.app(.debug/.nightly), not
+        # com.beb.plxnative.*. The point of this assertion is that PLATFORM does not change the
+        # query result, not which id the fork ships; update the expected debug id to the fork's
+        # real one (as confirmed by the tv-lock selftest and ci/flavor.py --selftest) and leave the
+        # app's identity itself untouched.
         for platform in PLATFORMS:
             with self.subTest(platform=platform):
                 proc = make("print-flavor", "print-appid", "print-appport", f"PLATFORM={platform}")
                 self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(proc.stdout.split(), ["debug", "com.beb.plxnative.debug", "8911"])
+                self.assertEqual(proc.stdout.split(), ["debug", "com.nuvionative.app.debug", "8911"])
 
 
 class ScratchTree(unittest.TestCase):

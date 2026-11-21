@@ -1,5 +1,5 @@
 {
- "_comment": "Inputs of ci/gen-third-party-notices.py (THIRD-PARTY-NOTICES.md section 2.4). Versions are NOT here: they come from rust-modules/Cargo.lock and the std snapshot below.",
+ "_comment": "Inputs of ci/gen-third-party-notices.py (THIRD-PARTY-NOTICES.md section 2.4). Versions are NOT here: they come from rust-modules/Cargo.lock and the std snapshot below. Fork Rofocale11: added rows for quick-error and image-webp — both are dual MIT/Apache-2.0 crates proven by --verify-graph to reach the ARM runtime binary (image-webp via the image stack, quick-error via a transitive dependency), so they need a licence/copyright row rather than a not_shipped entry. quick-error's copyright is from its LICENSE-MIT (2015 The quick-error Developers); image-webp is an image-rs crate and is attributed like the existing image/fdeflate rows.",
  "toolchain": {
   "pin": "1.100.0",
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
@@ -238,6 +238,11 @@
      "copyright": "The image-rs Developers"
     },
     {
+     "name": "image-webp",
+     "licence": "MIT OR Apache-2.0",
+     "copyright": "The image-rs Developers"
+    },
+    {
      "name": "indexmap",
      "licence": "Apache-2.0 OR MIT",
      "copyright": "2016–2017 The indexmap authors"
@@ -281,6 +286,11 @@
      "name": "png",
      "licence": "MIT OR Apache-2.0",
      "copyright": "2015 nwin"
+    },
+    {
+     "name": "quick-error",
+     "licence": "MIT/Apache-2.0",
+     "copyright": "2015 The quick-error Developers"
     },
     {
      "name": "rustc-demangle",
