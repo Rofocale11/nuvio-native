@@ -297,5 +297,37 @@
   "browse.clock.key_changed": "Ключ сервера изменился. Подключите телевизор к интернету, чтобы приложение могло проверить его заново.",
   "browse.detail.mark_episode_watched": "Отметить серию просмотренной",
   "browse.detail.mark_episode_unwatched": "Отметить серию непросмотренной",
-  "browse.detail.minutes_left": "Осталось {minutes} мин"
+  "browse.detail.minutes_left": "Осталось {minutes} мин",
+  "browse.streams.loading": {
+    "value": "Finding streams…",
+    "description": "Addon stream picker status"
+  },
+  "browse.streams.empty": {
+    "value": "No playable streams found.",
+    "description": "Addon stream picker status"
+  },
+  "browse.streams.failed": {
+    "value": "Couldn’t load streams. Close and try again.",
+    "description": "Addon stream picker status"
+  },
+  "browse.list.add": {
+    "value": "Add to My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.remove": {
+    "value": "Remove from My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.saving": {
+    "value": "Syncing My List…",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.retry": {
+    "value": "Retry My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.signin": {
+    "value": "Sign in for My List",
+    "description": "Nuvio account My List action/status."
+  }
 }

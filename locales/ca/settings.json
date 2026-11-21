@@ -405,5 +405,21 @@
   "settings.audio.group_subtitles": "Subtítols",
   "settings.audio.group_look": "Aspecte",
   "settings.playback.overridden_value": "Substituïda",
-  "settings.audio.page_copy": "Les preferències d'idioma de l'àudio i dels subtítols se sincronitzen amb el teu compte de Plex. Els paràmetres de reproducció pertanyen a cada perfil."
+  "settings.audio.page_copy": "Les preferències d'idioma de l'àudio i dels subtítols se sincronitzen amb el teu compte de Plex. Els paràmetres de reproducció pertanyen a cada perfil.",
+  "settings.ratings.title": {
+    "value": "Rating source",
+    "description": "Nuvio rating provider preference."
+  },
+  "settings.ratings.copy": {
+    "value": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
+    "description": "Nuvio rating provider preference."
+  },
+  "settings.ratings.imdb": {
+    "value": "IMDb",
+    "description": "Rating provider brand."
+  },
+  "settings.ratings.tomatoes": {
+    "value": "Rotten Tomatoes",
+    "description": "Rating provider brand."
+  }
 }

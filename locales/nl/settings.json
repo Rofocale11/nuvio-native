@@ -402,5 +402,21 @@
   "settings.audio.group_subtitles": "Ondertitels",
   "settings.audio.group_look": "Uiterlijk",
   "settings.playback.overridden_value": "Overschreven",
-  "settings.audio.page_copy": "Taalvoorkeuren voor audio en ondertitels worden gesynchroniseerd met je Plex-account. Afspeelinstellingen horen bij elk profiel."
+  "settings.audio.page_copy": "Taalvoorkeuren voor audio en ondertitels worden gesynchroniseerd met je Plex-account. Afspeelinstellingen horen bij elk profiel.",
+  "settings.ratings.title": {
+    "value": "Rating source",
+    "description": "Nuvio rating provider preference."
+  },
+  "settings.ratings.copy": {
+    "value": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
+    "description": "Nuvio rating provider preference."
+  },
+  "settings.ratings.imdb": {
+    "value": "IMDb",
+    "description": "Rating provider brand."
+  },
+  "settings.ratings.tomatoes": {
+    "value": "Rotten Tomatoes",
+    "description": "Rating provider brand."
+  }
 }

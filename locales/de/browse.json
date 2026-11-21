@@ -273,5 +273,37 @@
   "browse.clock.key_changed": "Der Schlüssel deines Servers hat sich geändert. Verbinde den Fernseher einmal mit dem Internet, damit die App ihn neu prüfen kann.",
   "browse.detail.mark_episode_watched": "Episode als gesehen markieren",
   "browse.detail.mark_episode_unwatched": "Episode als ungesehen markieren",
-  "browse.detail.minutes_left": "Noch {minutes} Min."
+  "browse.detail.minutes_left": "Noch {minutes} Min.",
+  "browse.streams.loading": {
+    "value": "Finding streams…",
+    "description": "Addon stream picker status"
+  },
+  "browse.streams.empty": {
+    "value": "No playable streams found.",
+    "description": "Addon stream picker status"
+  },
+  "browse.streams.failed": {
+    "value": "Couldn’t load streams. Close and try again.",
+    "description": "Addon stream picker status"
+  },
+  "browse.list.add": {
+    "value": "Add to My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.remove": {
+    "value": "Remove from My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.saving": {
+    "value": "Syncing My List…",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.retry": {
+    "value": "Retry My List",
+    "description": "Nuvio account My List action/status."
+  },
+  "browse.list.signin": {
+    "value": "Sign in for My List",
+    "description": "Nuvio account My List action/status."
+  }
 }
