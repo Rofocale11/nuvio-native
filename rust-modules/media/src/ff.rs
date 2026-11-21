@@ -1,8 +1,9 @@
 //! The codecs' FFmpeg bindings media's own code reaches (`plx_media_codecs`), and the integration
 //! fixtures that drive the physical Feed (`plx_play_feed`) through the player session.
-// Fork Rofocale11: the retained probe/core keeps its own copy of the low-level ABI table while
-// `plx_media_codecs::ffi::*` is still re-exported for callers. The two tables hold identical values
-// (both are asserted by ci/ffabi-assert.c); the private items deliberately shadow the glob.
+// Fork Rofocale11: the ABI STRUCTS previously modelled here were proven byte-identical to
+// plx_media_codecs::ffi's (ci/ffabi-assert.c pins both), so they were removed and the glob below is
+// now the single source of truth. The fork's local offset constants and small helpers remain and
+// deliberately shadow the glob; `hidden_glob_reexports` is allowed for that reason.
 #![allow(hidden_glob_reexports)]
 // Fork Rofocale11: upstream moved the physical demuxer (and hence most callers of this retained
 // ABI/binding core, its subtitle helpers and the subside transport) into plx_play_feed. The
@@ -12,6 +13,14 @@ pub use plx_media_codecs::ffi::*;
 // Fork Rofocale11: upstream's `Venc` re-export is dropped — this module keeps the fork's own
 // encoder struct (defined below) for its retained capture path; importing both named `Venc` is E0255.
 pub use plx_media_codecs::SpeedDecoder;
+// Fork Rofocale11: the upstream test files in this module use `use super::*` and expect these two
+// standard types from the facade header, where upstream kept them under cfg(test). The fork's
+// non-test ABI/probe core no longer needs them (the probe spells out std::ffi::CString::new), so
+// the cfg(test) gate keeps `cargo check` free of unused-import errors while the tests compile.
+#[cfg(test)]
+use plx_net::stream::HttpStream;
+#[cfg(test)]
+use std::ffi::CString;
 #[cfg(test)]
 use plx_play_feed::ff_test_support::*;
 #[cfg(test)]
@@ -37,11 +46,9 @@ use plx_net::net::origin::Origin;
 // tracks to the PMS shim, which the player consumes instead of guessed labels — an unsupported or
 // mislabelled stream must be refused, not loaded with guessed codecs. Upstream deleted this whole
 // low-level binding/demuxer/probe core when it moved the demuxer into plx_play_feed, so the probe
-// and the bindings/helpers its `super::*` relies on must be kept here. These standard types were
-// `#[cfg(test)]` in upstream's facade because only its test fixtures used them; the fork's retained
-// non-test ABI/probe core needs them unconditionally.
-use plx_net::stream::HttpStream;
-use std::ffi::CString;
+// and the bindings/helpers its `super::*` relies on must be kept here. The raw C types below are
+// needed unconditionally by that retained ABI/probe core; `CString`/`HttpStream` are only needed by
+// the tests (see the cfg(test) imports above).
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
@@ -69,18 +76,18 @@ pub fn set_feed_audio(on: bool) {
 }
 
 // ---- opaque handles (pointer-only, never dereferenced) ----
-pub enum AVClass {}
-pub enum AVInputFormat {}
-pub enum AVIOContext {}
-pub enum AVDictionary {}
-pub enum AVCodec {}
-pub enum AVCodecContext {} // opaque: we only pass the lib-allocated pointer to decode/free
-pub enum AVBitStreamFilter {}
-pub enum AVBufferRef {}
+
+
+
+
+
+ // opaque: we only pass the lib-allocated pointer to decode/free
+
+
 // AVStream is opaque here: it is 712 bytes with a large "internal but ABI" block, so
 // rather than transcribe every field we read only the three we need at their verified
 // n3.3 offsets (index +0, time_base +40, codecpar +708). Phase A confirms the offsets.
-pub enum AVStream {}
+
 // ---- The FFmpeg 9.0 ABI, on 32-bit ARM. ----
 //
 // These were a RUNTIME TABLE selected per libavformat major, because the app read the
@@ -137,13 +144,7 @@ const OFF_FMT_DURATION: usize = 64;
 #[cfg(target_pointer_width = "64")]
 const OFF_FMT_DURATION: usize = 104;
 
-/// `AVDictionaryEntry` — two `char *`. Modelled rather than opaque because the whole point of the
-/// call is to read both halves; `ci/ffabi-assert.c` holds the layout.
-#[repr(C)]
-pub struct AVDictionaryEntry {
-    key: *const c_char,
-    value: *const c_char,
-}
+
 
 /// The only field this app reads past `AVFormatContext.streams`.
 #[inline]
@@ -152,126 +153,19 @@ unsafe fn fmt_duration(fmt: *const AVFormatContext) -> i64 {
 }
 
 // ---- structs (exact n3.3 field order; 32-bit ARM/AAPCS sizes) ----
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct AVRational {
-    pub num: c_int,
-    pub den: c_int,
-}
+
 
 // sizeof = 72
-#[repr(C)]
-pub struct AVPacket {
-    pub buf: *mut AVBufferRef,            // +0
-    pub pts: i64,                         // +8
-    pub dts: i64,                         // +16
-    pub data: *mut u8,                    // +24
-    pub size: c_int,                      // +28
-    pub stream_index: c_int,              // +32
-    pub flags: c_int,                     // +36
-    pub side_data: *mut AVPacketSideData, // +40
-    pub side_data_elems: c_int,           // +44
-    pub duration: i64,                    // +48
-    pub pos: i64,                         // +56
-    // The tail changed at FFmpeg 5.0: `convergence_duration` went with
-    // FF_API_CONVERGENCE_DURATION, and these three arrived. sizeof 72 -> 80. The app never
-    // allocates an AVPacket (av_packet_alloc does), so only the offsets above matter — but the
-    // size is asserted anyway, because a short model here would be a silent overread.
-    pub opaque: *mut c_void,          // +64
-    pub opaque_ref: *mut AVBufferRef, // +68
-    pub time_base: AVRational,        // +72
-}
 
-/// `AVPacketSideData` — one entry of `AVCodecParameters::coded_side_data`. It was an opaque
-/// `enum` here for as long as nothing read it; the Dolby Vision configuration record is the first
-/// thing that does.
-///
-/// sizeof = 12 on 32-bit ARM, proven with `ci/ffabi-assert.c`. `size` is a `size_t`, so `usize`
-/// is the field's type on both the target and the host rather than a number that happens to match
-/// — the one place in this table where the Rust type carries the ABI instead of a comment.
-#[repr(C)]
-pub struct AVPacketSideData {
-    pub data: *mut u8, // +0
-    pub size: usize,   // +4
-    pub type_: c_int,  // +8  (enum AVPacketSideDataType)
-}
 
-/// `AVDOVIDecoderConfigurationRecord` (libavutil/dovi_meta.h), the payload of an
-/// `AV_PKT_DATA_DOVI_CONF` side-data entry — what the mp4 `dvcC`/`dvvC` box and the Matroska
-/// `DolbyVisionConfiguration` block carry, handed over by BOTH bundled demuxers.
-///
-/// **Nine plain `uint8_t`, so this is the rare zero-risk read in this file**: no integers wider
-/// than a byte, no pointers, nothing to align and nothing to pad, on any target. Field order and
-/// count verified against the vendored FFmpeg 9.0 header, and each offset proven for 32-bit ARM
-/// in `ci/ffabi-assert.c` — which is cheap insurance rather than doubt, since the assertions cost
-/// nothing and the struct is public ABI that could gain a field at any major.
-///
-/// The upstream spelling is `AVDOVI…`, not `AVDovi…`, and the difference matters only to anyone
-/// grepping the header for it.
-#[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub struct AVDOVIDecoderConfigurationRecord {
-    pub dv_version_major: u8,              // +0
-    pub dv_version_minor: u8,              // +1
-    pub dv_profile: u8,                    // +2
-    pub dv_level: u8,                      // +3
-    pub rpu_present_flag: u8,              // +4
-    pub el_present_flag: u8,               // +5
-    pub bl_present_flag: u8,               // +6
-    pub dv_bl_signal_compatibility_id: u8, // +7
-    pub dv_md_compression: u8,             // +8
-}
+
+
+
 
 // sizeof = 136
-#[repr(C)]
-pub struct AVCodecParameters {
-    pub codec_type: c_int,                      // +0
-    pub codec_id: c_int,                        // +4
-    pub codec_tag: u32,                         // +8
-    pub extradata: *mut u8,                     // +12
-    pub extradata_size: c_int,                  // +16
-    pub coded_side_data: *mut AVPacketSideData, // +20
-    pub nb_coded_side_data: c_int,              // +24
-    pub format: c_int,                          // +28
-    pub bit_rate: i64,                          // +32
-    pub bits_per_coded_sample: c_int,           // +40
-    pub bits_per_raw_sample: c_int,             // +44
-    pub profile: c_int,                         // +48
-    pub level: c_int,                           // +52
-    pub width: c_int,                           // +56
-    pub height: c_int,                          // +60
-    pub sample_aspect_ratio: AVRational,        // +64
-    pub framerate: AVRational,                  // +72
-    pub field_order: c_int,                     // +80
-    pub color_range: c_int,                     // +84
-    pub color_primaries: c_int,                 // +88
-    pub color_trc: c_int,                       // +92
-    pub color_space: c_int,                     // +96
-    pub chroma_location: c_int,                 // +100
-    pub video_delay: c_int,                     // +104
-    // FFmpeg 7 DELETED the deprecated `channel_layout`/`channels` pair that lived here and left
-    // only this struct. `nb_channels` is the replacement for the `channels` int, and reading the
-    // old field is not a compile error on a hand-written model — it is a silent read of whatever
-    // now occupies +104. Which is the argument for shipping a known FFmpeg in one sentence.
-    pub ch_layout: AVChannelLayout, // +112
-    pub sample_rate: c_int,         // +136
-    pub block_align: c_int,         // +140
-    pub frame_size: c_int,          // +144
-    pub initial_padding: c_int,     // +148
-    pub trailing_padding: c_int,    // +152
-    pub seek_preroll: c_int,        // +156
-    pub alpha_mode: c_int,          // +160
-}
 
-/// `AVChannelLayout`, modelled only as far as `nb_channels` — the one field this app reads.
-/// The union that follows is 8-aligned, so a 4-byte pad sits after `nb_channels` on ARM.
-#[repr(C)]
-pub struct AVChannelLayout {
-    pub order: c_int,        // +0
-    pub nb_channels: c_int,  // +4
-    pub u_mask: u64,         // +8  (union { mask, map })
-    pub opaque: *mut c_void, // +16
-}
+
+
 
 // AVFormatContext truncated after `filename` — we only ever hold a library-returned pointer and
 // read leading fields. NEVER stack-allocate this.
@@ -281,22 +175,7 @@ pub struct AVChannelLayout {
 // identical on 3.3 and 4.x. `duration` — the only field past that point this app reads — is
 // reached through [`fmt_duration`] at the offset the runtime ABI table gives, rather than by
 // declaring it here at an offset that is right on exactly one of the two.
-#[repr(C)]
-pub struct AVFormatContext {
-    pub av_class: *const AVClass,    // +0
-    pub iformat: *mut AVInputFormat, // +4
-    pub oformat: *mut c_void,        // +8
-    pub priv_data: *mut c_void,      // +12
-    pub pb: *mut AVIOContext,        // +16
-    pub ctx_flags: c_int,            // +20
-    pub nb_streams: c_uint,          // +24
-    pub streams: *mut *mut AVStream, // +28
-                                     // STOPS HERE. Everything past `streams` shifts between majors — `duration` is at +48 on
-                                     // FFmpeg 6, +64 on 9, and +1064 on the n3.3 the televisions ship, because 5.0 deleted
-                                     // `filename[1024]` and later releases kept rearranging what replaced it. It is the only field
-                                     // beyond this point the app reads, so it is read at OFF_FMT_DURATION rather than declared at
-                                     // a position that would be quietly wrong after a version bump.
-}
+
 
 // AVBSFContext is NOT modelled. The app does its own AVCC->Annex-B conversion in Rust, so the
 // bitstream-filter API is never driven — only `av_bsf_get_by_name` survives, and only to log
@@ -306,45 +185,14 @@ pub struct AVFormatContext {
 // AVSubtitle (avcodec.h) — one decoded subtitle "display set". sizeof 32 on 32-bit ARM
 // (u16 format @0; u32 start/end_display_time @4/@8, ms relative to `pts`; num_rects @12;
 // rects ptr @16; i64 pts @24 in AV_TIME_BASE µs). repr(C) inserts the +20 pad before pts.
-#[repr(C)]
-pub struct AVSubtitle {
-    pub format: u16,                     // +0  (0 = graphics/bitmap)
-    pub start_display_time: u32,         // +4
-    pub end_display_time: u32,           // +8
-    pub num_rects: c_uint,               // +12
-    pub rects: *mut *mut AVSubtitleRect, // +16
-    pub pts: i64,                        // +24
-}
+
 
 // AVSubtitleRect (avcodec.h, libavcodec 57 / FFmpeg 3.x). CRUCIAL ABI detail: with
 // FF_API_AVPICTURE (major < 58, i.e. this build) a DEPRECATED `AVPicture pict` is embedded
 // after nb_colors — 8 data ptrs + 8 linesizes (64 bytes) — which shifts the live `data[4]`
 // /`linesize[4]` down by 64. The Pass-A probe logs both the `data[]` and the `pict_data[]`
 // slots to confirm which the decoder populates before Pass B reads pixels. sizeof = 132.
-#[repr(C)]
-pub struct AVSubtitleRect {
-    pub x: c_int,         // +0
-    pub y: c_int,         // +4
-    pub w: c_int,         // +8
-    pub h: c_int,         // +12
-    pub nb_colors: c_int, // +16
-    // +20 — was +84 on the TV's FFmpeg 3.3, because an entire deprecated AVPicture sat ahead of
-    // it under FF_API_AVPICTURE. FFmpeg 5.0 deleted that, taking sizeof from 132 to 68.
-    pub data: [*mut u8; 4], // +20  data[0]=PAL8 indices, data[1]=palette (256×BGRA)
-    pub linesize: [c_int; 4], // +36
-    // **`flags` comes BEFORE `type`, and this model had them the other way round until
-    // 2026-08-28.** The consequence was latent rather than live — `rect_to_indexed` reads only
-    // x/y/w/h/linesize[0]/data[0..2], all of which are ahead of the swap — but it was wrong in
-    // the way this whole apparatus exists to prevent: `type_` read `flags`, `text` read `type`,
-    // and on the 64-bit host `flags` landed at offset 96 of a 96-byte struct, i.e. one word past
-    // the end. Found by porting the table to the simulator's pointer width, which is a second
-    // independent reading of the same header and is exactly what caught it. `ci/ffabi-assert.c`
-    // now pins all four on both widths.
-    pub flags: c_int,      // +52 arm / +72 host
-    pub type_: c_int,      // +56 / +76 (enum AVSubtitleType: 0=NONE, 1=BITMAP, 2=TEXT, 3=ASS)
-    pub text: *mut c_char, // +60 / +80
-    pub ass: *mut c_char,  // +64 / +88
-}
+
 
 // ---- externs, bound at RUNTIME by SONAME candidate list (see `dynlib`) ----
 //
@@ -1182,10 +1030,9 @@ impl Drop for Venc {
                 avformat_free_context(self.oc); // does not free the caller-set pb
             }
             if !self.avio.is_null() {
-                // Fork Rofocale11: `free_avio` comes from plx_media_codecs::ffi and therefore takes
-                // that crate's opaque AVIOContext; this module's ABI table keeps its own identical
-                // opaque handle, so cross the type boundary explicitly at the FFI release point.
-                free_avio(self.avio as *mut plx_media_codecs::ffi::AVIOContext);
+                // Fork Rofocale11: `free_avio` is plx_media_codecs' and this module now aliases that
+                // crate's AVIOContext instead of modelling a second opaque handle, so no cast.
+                free_avio(self.avio);
             }
             if !self.ctx.is_null() {
                 avcodec_free_context(&mut self.ctx);
@@ -1492,69 +1339,12 @@ const SEEK_CUR: c_int = 1;
 const SEEK_END: c_int = 2;
 const AVSEEK_SIZE: c_int = 0x10000;
 
-/// **Which transport is under the AVIO.** The two are not interchangeable and the choice is made
-/// from the SCHEME of the URL actually served — the part URL's, unless a plaintext open was
-/// redirected to https (`stream::redirect`), in which case the socket open hands over to curl.
-/// Never guessed per call.
-///
-/// * [`Src::Socket`] is the original and the default: `stream.rs`'s raw TCP socket wrapping the
-///   ENGINE-owned `HttpStream` — cleartext, numeric address, seeking by closing and re-opening
-///   with a byte `Range`. Its behaviour here is byte for byte what it was before this enum
-///   existed.
-/// * [`Src::Curl`] is the https path ([`crate::curlio`]), which the demux thread owns outright.
-///   `ff.rs` never learns curl-multi mechanics: all it can ask is `read`/`seek`/`size`/`status`/
-///   `abort`, deliberately the same five questions the socket answers.
-/// * [`Src::Idle`] is the placeholder after HLS HTTPS recycles the `CurlSource` into [`HlsNet`].
-///   `avformat_close_input` may still invoke AVIO; this arm refuses I/O instead of dialing a
-///   dummy socket.
-enum Src {
-    Socket {
-        /// The Engine's stream — NOT owned here. `player::engine` allocates it, publishes it in
-        /// `SHARED.hs_ptr`, `http_shutdown`s it at teardown and closes it after the join.
-        hs: *mut HttpStream,
-        host: CString,
-        port: c_int,
-        path: CString,
-    },
-    /// Owned by this state, and so by the demux thread — which is why teardown reaches it through
-    /// `curlio`'s registry instead of a pointer the engine holds. `curlio`'s module doc says why
-    /// that is not the accident it looks like.
-    Curl(Box<crate::curlio::CurlSource>),
-    Idle,
-}
-
-impl Src {
-    /// What the transport has RECEIVED of the current body beyond what FFmpeg has read — the
-    /// one completion question both sources answer (`stream::BodyReceipt`).
-    fn body_receipt(&mut self) -> plx_net::stream::BodyReceipt {
-        match self {
-            Src::Socket { hs, .. } => plx_net::stream::http_body_receipt(*hs),
-            Src::Curl(cs) => cs.body_receipt(),
-            Src::Idle => plx_net::stream::BodyReceipt {
-                ahead: 0,
-                finished: false,
-                stepped: false,
-            },
-        }
-    }
-
-    fn take_curl(&mut self) -> Option<Box<crate::curlio::CurlSource>> {
-        match std::mem::replace(self, Src::Idle) {
-            Src::Curl(cs) => Some(cs),
-            other => {
-                *self = other;
-                None
-            }
-        }
-    }
-}
-
-/// One transport slot for the HLS session: the engine's plaintext socket plus at most one curl
-/// multi handle reused across playlist and segment URLs.
-struct HlsNet {
-    hs: *mut HttpStream,
-    curl: Option<Box<crate::curlio::CurlSource>>,
-}
+// Fork Rofocale11: the fork's local `Src`, `impl Src` and `HlsNet` were the demuxer's transport
+// slots; upstream moved the demuxer (and these types, with their wider `RangeReader` /
+// `RangeFactory` / credential-gate / observer fields) into plx_play_feed. The media tests import
+// those upstream types through the cfg(test) `plx_play_feed::ff_test_support::*` glob above, so the
+// local copies are removed rather than kept as a second, incompatible set. The fork's probe never
+// touched them.
 
 // Fork Rofocale11: the HLS terminal stall guard and its `SegmentAcquisition` policy were removed
 // from this crate by the upstream merge. The guard is NOT gone from the product: upstream moved the

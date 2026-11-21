@@ -242,18 +242,18 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
         }
         let mut fmt = avformat_alloc_context();
         if fmt.is_null() {
-            free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
+            free_avio(avio);
             return Err("avformat_alloc_context failed".into());
         }
         (*fmt).pb = avio;
         let r = avformat_open_input(&mut fmt, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut());
         if r < 0 || fmt.is_null() {
-            free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
+            free_avio(avio);
             return Err(format!("not a recognised container (r={r})"));
         }
         if avformat_find_stream_info(fmt, std::ptr::null_mut()) < 0 {
             avformat_close_input(&mut fmt);
-            free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
+            free_avio(avio);
             return Err("find_stream_info failed".into());
         }
         let mut out = MediaProbe {
@@ -323,7 +323,7 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
             }
         }
         avformat_close_input(&mut fmt);
-        free_avio(avio as *mut plx_media_codecs::ffi::AVIOContext);
+        free_avio(avio);
         drop(io);
         Ok(out)
     }
