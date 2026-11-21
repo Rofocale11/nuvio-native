@@ -1509,8 +1509,16 @@ mod tests {
         // worker sometimes finished before `try_recv`, so a correct write failed the test. The
         // regression this test owns is that the write happens at all, asserted below after drain.
         assert_eq!(adapter.commits.len(), 1, "the new sign-in is queued");
-        plx_base::storage_worker::drain_for_test();
-        let completed = adapter.take_committed().expect("the new sign-in's commit runs");
+        // Fork Rofocale11: make check runs six test binaries at once; the process-global storage
+        // worker can briefly refuse a thread start there, leaving this commit unsubmitted. Retry
+        // the drain/admit a few times like the frame pump does, then require the real result.
+        let mut completed = None;
+        for _ in 0..4 {
+            plx_base::storage_worker::drain_for_test();
+            completed = adapter.take_committed();
+            if completed.is_some() { break; }
+        }
+        let completed = completed.expect("the new sign-in's commit runs");
         assert!(matches!(completed.disk, Ok(Some(_))), "the new credential is written");
         assert_eq!(plx_plex::plex::session::load().account_token, "new-credential");
     }
